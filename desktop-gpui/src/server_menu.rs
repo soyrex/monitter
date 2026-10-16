@@ -6,14 +6,14 @@
 #[cfg(target_os = "macos")]
 mod macos {
     use objc2::rc::{Allocated, Retained};
-    use objc2::runtime::AnyObject;
-    use objc2::{ClassType, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
+    use objc2::runtime::{AnyObject, ProtocolObject};
+    use objc2::{ClassType, MainThreadMarker, MainThreadOnly, class, define_class, msg_send, sel};
     use objc2_app_kit::{
-        NSMenu, NSMenuItem, NSStatusBar, NSStatusItem, NSVariableStatusItemLength,
+        NSMenu, NSMenuDelegate, NSMenuItem, NSStatusBar, NSStatusItem, NSVariableStatusItemLength,
     };
-    use objc2_foundation::{NSObject, NSString};
+    use objc2_foundation::{NSObject, NSObjectProtocol, NSString};
     use std::sync::{
-        Mutex, OnceLock,
+        Arc, Mutex, OnceLock,
         mpsc::{self, Receiver, Sender},
     };
 
@@ -21,9 +21,14 @@ mod macos {
     pub enum ServerMenuEvent {
         OpenMonitter,
         QuitServer,
+        RestartWhenIdle,
+        RestartNow,
+        CancelRestart,
     }
 
-    static ACTION_SENDER: OnceLock<Mutex<Option<(u64, Sender<ServerMenuEvent>)>>> = OnceLock::new();
+    type ActiveReader = Arc<dyn Fn() -> Result<Vec<String>, String> + Send + Sync>;
+    static ACTION_SENDER: OnceLock<Mutex<Option<(u64, Sender<ServerMenuEvent>, ActiveReader)>>> =
+        OnceLock::new();
     static NEXT_MENU_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
     fn safe_label(label: &str) -> String {
@@ -47,7 +52,7 @@ mod macos {
         if let Some(sender) = ACTION_SENDER
             .get()
             .and_then(|state| state.lock().ok())
-            .and_then(|sender| sender.as_ref().map(|(_, sender)| sender.clone()))
+            .and_then(|sender| sender.as_ref().map(|(_, sender, _)| sender.clone()))
         {
             let _ = sender.send(event);
         }
@@ -71,9 +76,56 @@ mod macos {
                 emit(ServerMenuEvent::OpenMonitter);
             }
 
+            #[unsafe(method(restartServer:))]
+            fn restart_server(&self, _sender: &AnyObject) {
+                let alert: Retained<AnyObject> = unsafe { msg_send![class!(NSAlert), new] };
+                unsafe {
+                    let _: () = msg_send![&*alert, setMessageText: &*NSString::from_str("Restart Monitter Server?")];
+                    let _: () = msg_send![&*alert, setInformativeText: &*NSString::from_str("Wait lets active agents finish and pauses new turns until the restart. Force interrupts the running agents and asks them to resume after the server reloads. Unconfirmed actions may need review.")];
+                    for title in ["Wait for Agents", "Force Restart Now", "Cancel"] {
+                        let _: *mut AnyObject = msg_send![&*alert, addButtonWithTitle: &*NSString::from_str(title)];
+                    }
+                    let choice: isize = msg_send![&*alert, runModal];
+                    match choice {
+                        1000 => emit(ServerMenuEvent::RestartWhenIdle),
+                        1001 => emit(ServerMenuEvent::RestartNow),
+                        _ => {},
+                    }
+                }
+            }
+            #[unsafe(method(cancelRestart:))]
+            fn cancel_restart(&self, _sender: &AnyObject) {
+                emit(ServerMenuEvent::CancelRestart);
+            }
+
             #[unsafe(method(quitServer:))]
             fn quit_server(&self, _sender: &AnyObject) {
                 emit(ServerMenuEvent::QuitServer);
+            }
+        }
+        unsafe impl NSObjectProtocol for ServerMenuActionTarget {}
+        unsafe impl NSMenuDelegate for ServerMenuActionTarget {
+            #[unsafe(method(menuWillOpen:))]
+            fn menu_will_open(&self, menu: &NSMenu) {
+                // This delegate belongs only to Active Agents, never the main
+                // status menu. Query the compact owner projection on demand.
+                let reader = ACTION_SENDER.get().and_then(|state| state.lock().ok())
+                    .and_then(|state| state.as_ref().map(|(_, _, reader)| reader.clone()));
+                let labels = match reader.map(|reader| reader()) {
+                    Some(Ok(labels)) if !labels.is_empty() => labels,
+                    Some(Ok(_)) => vec!["No agents are running".into()],
+                    Some(Err(error)) => vec![format!("Could not load agents: {error}")],
+                    None => vec!["Server is not available".into()],
+                };
+                menu.removeAllItems();
+                let mtm = MainThreadMarker::new().expect("menu main thread");
+                for label in labels {
+                    let item = unsafe { NSMenuItem::initWithTitle_action_keyEquivalent(
+                        NSMenuItem::alloc(mtm), &NSString::from_str(&safe_label(&label)), None,
+                        &NSString::from_str("")) };
+                    item.setEnabled(false);
+                    menu.addItem(&item);
+                }
             }
         }
     );
@@ -95,6 +147,9 @@ mod macos {
         status_line: Option<Retained<NSMenuItem>>,
         _target: Retained<ServerMenuActionTarget>,
         menu_id: u64,
+        active_menu: Retained<NSMenu>,
+        cancel_restart_item: Retained<NSMenuItem>,
+        restart_item: Retained<NSMenuItem>,
     }
 
     impl ServerMenu {
@@ -103,18 +158,21 @@ mod macos {
         pub fn install(
             mtm: MainThreadMarker,
             status_label: Option<&str>,
+            active_reader: ActiveReader,
+            button_label: &str,
         ) -> (Self, Receiver<ServerMenuEvent>) {
             let (sender, receiver) = mpsc::channel();
             let menu_id = NEXT_MENU_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let action_sender = ACTION_SENDER.get_or_init(|| Mutex::new(None));
             if let Ok(mut current) = action_sender.lock() {
-                *current = Some((menu_id, sender));
+                *current = Some((menu_id, sender, active_reader));
             }
 
             let status_bar = NSStatusBar::systemStatusBar();
             let status_item = status_bar.statusItemWithLength(NSVariableStatusItemLength);
             let menu_title = NSString::from_str("Monitter Backend");
             let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &menu_title);
+            menu.setAutoenablesItems(false);
             let target = ServerMenuActionTarget::new(mtm);
             let target_object: &AnyObject = target.as_super().as_super();
 
@@ -156,6 +214,58 @@ mod macos {
             });
 
             menu.addItem(&NSMenuItem::separatorItem(mtm));
+            let active_menu =
+                NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Active Agents"));
+            active_menu.setAutoenablesItems(false);
+            active_menu.setDelegate(Some(ProtocolObject::from_ref(&*target)));
+            let active_item = unsafe {
+                NSMenuItem::initWithTitle_action_keyEquivalent(
+                    NSMenuItem::alloc(mtm),
+                    &NSString::from_str("Active Agents"),
+                    None,
+                    &empty_key,
+                )
+            };
+            active_item.setSubmenu(Some(&active_menu));
+            active_item.setEnabled(true);
+            menu.addItem(&active_item);
+            // Keep a placeholder until AppKit actually opens this submenu.
+            let placeholder = unsafe {
+                NSMenuItem::initWithTitle_action_keyEquivalent(
+                    NSMenuItem::alloc(mtm),
+                    &NSString::from_str("Open to load running agents"),
+                    None,
+                    &empty_key,
+                )
+            };
+            placeholder.setEnabled(false);
+            active_menu.addItem(&placeholder);
+            let restart_item = unsafe {
+                NSMenuItem::initWithTitle_action_keyEquivalent(
+                    NSMenuItem::alloc(mtm),
+                    &NSString::from_str("Restart Server…"),
+                    Some(sel!(restartServer:)),
+                    &empty_key,
+                )
+            };
+            unsafe {
+                restart_item.setTarget(Some(target_object));
+            }
+            menu.addItem(&restart_item);
+            let cancel_restart_item = unsafe {
+                NSMenuItem::initWithTitle_action_keyEquivalent(
+                    NSMenuItem::alloc(mtm),
+                    &NSString::from_str("Cancel Pending Restart"),
+                    Some(sel!(cancelRestart:)),
+                    &empty_key,
+                )
+            };
+            unsafe {
+                cancel_restart_item.setTarget(Some(target_object));
+            }
+            cancel_restart_item.setEnabled(false);
+            menu.addItem(&cancel_restart_item);
+            menu.addItem(&NSMenuItem::separatorItem(mtm));
             let quit_title = NSString::from_str("Quit Server");
             // SAFETY: selector is implemented by the retained action target.
             let quit_item = unsafe {
@@ -175,7 +285,7 @@ mod macos {
 
             status_item.setMenu(Some(&menu));
             if let Some(button) = status_item.button(mtm) {
-                button.setTitle(&NSString::from_str("Monitter"));
+                button.setTitle(&NSString::from_str(&safe_label(button_label)));
                 button.setToolTip(Some(&NSString::from_str("Monitter backend server")));
             }
             status_item.setVisible(true);
@@ -188,9 +298,34 @@ mod macos {
                     status_line,
                     _target: target,
                     menu_id,
+                    active_menu,
+                    cancel_restart_item,
+                    restart_item,
                 },
                 receiver,
             )
+        }
+
+        pub fn set_restart_available(&self, available: bool) {
+            self.restart_item.setEnabled(available);
+        }
+        pub fn set_restart_pending(&self, pending: bool) {
+            self.cancel_restart_item.setEnabled(pending);
+        }
+        pub fn set_active_agents(&self, mtm: MainThreadMarker, labels: &[String]) {
+            self.active_menu.removeAllItems();
+            for label in labels {
+                let item = unsafe {
+                    NSMenuItem::initWithTitle_action_keyEquivalent(
+                        NSMenuItem::alloc(mtm),
+                        &NSString::from_str(&safe_label(label)),
+                        None,
+                        &NSString::from_str(""),
+                    )
+                };
+                item.setEnabled(false);
+                self.active_menu.addItem(&item);
+            }
         }
 
         /// Update the informational menu row with state supplied by the server
@@ -236,7 +371,7 @@ mod macos {
                 && let Ok(mut current) = state.lock()
                 && current
                     .as_ref()
-                    .is_some_and(|(menu_id, _)| *menu_id == self.menu_id)
+                    .is_some_and(|(menu_id, _, _)| *menu_id == self.menu_id)
             {
                 *current = None;
             }

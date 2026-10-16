@@ -44,6 +44,24 @@ impl TextSelectionScopeId {
     }
 }
 
+/// An independent document within a modal text-selection scope.
+/// Keep this identity stable for the lifetime of a transcript or pane.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct TextSelectionGroupId(u64);
+
+impl TextSelectionGroupId {
+    /// Allocates a process-unique document identifier.
+    pub fn new() -> Self {
+        static NEXT_GROUP_ID: AtomicU64 = AtomicU64::new(1);
+        let value = NEXT_GROUP_ID
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                value.checked_add(1)
+            })
+            .expect("text selection group identifiers exhausted");
+        Self(value)
+    }
+}
+
 /// Stable participant-defined identity for virtualized participant content.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TextSelectionContentKey(u64);
@@ -218,6 +236,7 @@ pub struct TextSelectionRegistration {
     bounds: Bounds<Pixels>,
     scroll_offset: Point<Pixels>,
     scope: TextSelectionScopeId,
+    group: TextSelectionGroupId,
     document_order: u64,
     text_bounds: Vec<Bounds<Pixels>>,
     self_scroll: bool,
@@ -233,6 +252,7 @@ impl TextSelectionRegistration {
             bounds,
             scroll_offset: Point::default(),
             scope: TextSelectionScopeId::default(),
+            group: TextSelectionGroupId::default(),
             document_order: 0,
             text_bounds: Vec::new(),
             self_scroll: false,
@@ -295,6 +315,17 @@ impl TextSelectionRegistration {
     pub fn with_scope(mut self, scope: TextSelectionScopeId) -> Self {
         self.scope = scope;
         self
+    }
+
+    /// Sets the independent document this participant belongs to.
+    pub fn with_group(mut self, group: TextSelectionGroupId) -> Self {
+        self.group = group;
+        self
+    }
+
+    /// Returns this participant's independent document.
+    pub const fn group(&self) -> TextSelectionGroupId {
+        self.group
     }
 
     /// Sets the stable logical document order.
@@ -645,6 +676,7 @@ struct SelectableTextState {
     projected_copy_text: Option<String>,
     runs: Vec<TextSelectionRun>,
     local_selection: bool,
+    window_selection: Option<WeakEntity<WindowSelectionState>>,
     snapshot: Option<TextSelectionSnapshot>,
     on_focus: Option<FocusCallback>,
     clear: Option<ClearHandler>,
@@ -661,6 +693,7 @@ impl SelectableTextState {
             projected_copy_text: None,
             runs: Vec::new(),
             local_selection: false,
+            window_selection: None,
             snapshot: None,
             on_focus: None,
             clear: None,
@@ -812,6 +845,37 @@ impl TextSelectionHandle {
 
     /// Marks participant-local selection, such as select-all, as active.
     pub fn set_local_selection(&self, active: bool, cx: &mut App) {
+        if active {
+            let owner = self
+                .0
+                .read(cx)
+                .window_selection
+                .clone()
+                .and_then(|owner| owner.upgrade());
+            if let Some(owner) = owner {
+                let handlers = owner.update(cx, |state, cx| {
+                    let Some(registration) = state.participants.get(&self.entity_id()) else {
+                        return Vec::new();
+                    };
+                    // A participant hidden under an inactive modal cannot take ownership.
+                    if registration.registration.scope != state.active_scope {
+                        return Vec::new();
+                    }
+                    let group = registration.registration.group;
+                    if group == TextSelectionGroupId::default()
+                        && state.active_group == TextSelectionGroupId::default()
+                    {
+                        // Preserve existing ungrouped participant-local behavior.
+                        return Vec::new();
+                    }
+                    state.active_group = group;
+                    state.clear_state_except(Some(self.entity_id()), cx)
+                });
+                // Exclude the caller's clear callback: select-all can be called
+                // while its owning TextView is already being updated.
+                dispatch_clear_handlers(handlers, cx);
+            }
+        }
         self.0
             .update(cx, |state, _| state.set_local_selection(active));
     }
@@ -831,9 +895,15 @@ impl TextSelectionHandle {
         if let Some(scope) = current_text_selection_scope(window.window_handle().window_id(), cx) {
             registration.scope = scope;
         }
+        if let Some(group) = current_text_selection_group(window.window_handle().window_id(), cx) {
+            registration.group = group;
+        }
         let Some(state) = WindowSelectionState::existing(window, cx) else {
             return;
         };
+        self.0.update(cx, |participant, _| {
+            participant.window_selection = Some(state.downgrade());
+        });
         state.update(cx, |state, cx| {
             state.register_participant(self.clone(), registration, cx)
         });
@@ -1099,6 +1169,7 @@ impl TouchSelection {
 struct WindowSelectionState {
     participants: HashMap<EntityId, ParticipantRegistration>,
     active_scope: TextSelectionScopeId,
+    active_group: TextSelectionGroupId,
     anchor: Option<SelectionEndpoint>,
     cursor: Option<SelectionEndpoint>,
     pending_extension_anchor: Option<SelectionEndpoint>,
@@ -1359,6 +1430,10 @@ impl WindowSelectionState {
     }
 
     fn clear_state(&mut self, cx: &mut App) -> Vec<ClearHandler> {
+        self.clear_state_except(None, cx)
+    }
+
+    fn clear_state_except(&mut self, except: Option<EntityId>, cx: &mut App) -> Vec<ClearHandler> {
         self.stop_anchor_auto_scroll(cx);
         self.anchor = None;
         self.cursor = None;
@@ -1372,7 +1447,14 @@ impl WindowSelectionState {
         self.participants
             .values()
             .filter_map(|registration| registration.participant.upgrade())
-            .filter_map(|participant| participant.update(cx, |state, cx| state.clear_state(cx)))
+            .filter_map(|participant| {
+                if except == Some(participant.entity_id()) {
+                    participant.update(cx, |state, cx| state.set_snapshot(None, cx));
+                    None
+                } else {
+                    participant.update(cx, |state, cx| state.clear_state(cx))
+                }
+            })
             .collect()
     }
 
@@ -1411,6 +1493,10 @@ impl WindowSelectionState {
     fn copy_items(&self, cx: &App) -> Vec<CopyItem> {
         self.participants
             .values()
+            .filter(|registration| {
+                registration.registration.scope == self.active_scope
+                    && registration.registration.group == self.active_group
+            })
             .filter_map(|registration| {
                 let participant = registration.participant.upgrade()?;
                 participant
@@ -1448,10 +1534,12 @@ impl WindowSelectionState {
     pub fn has_selection(&self, cx: &App) -> bool {
         self.snapshot().is_some()
             || self.participants.values().any(|registration| {
-                registration
-                    .participant
-                    .upgrade()
-                    .is_some_and(|participant| participant.read(cx).local_selection)
+                registration.registration.scope == self.active_scope
+                    && registration.registration.group == self.active_group
+                    && registration
+                        .participant
+                        .upgrade()
+                        .is_some_and(|participant| participant.read(cx).local_selection)
             })
     }
 
@@ -1515,7 +1603,10 @@ impl WindowSelectionState {
         let mut end: Option<(u64, Bounds<Pixels>, bool)> = None;
         for registration in self.participants.values() {
             let geometry = &registration.registration;
-            if geometry.scope != self.active_scope || registration.participant.upgrade().is_none() {
+            if geometry.scope != self.active_scope
+                || geometry.group != self.active_group
+                || registration.participant.upgrade().is_none()
+            {
                 continue;
             }
             let Some((edge_start, edge_end)) = geometry.selection_edges else {
@@ -1560,6 +1651,11 @@ impl WindowSelectionState {
         let Some(own) = self.participants.get(&participant) else {
             return Vec::new();
         };
+        if own.registration.scope != self.active_scope
+            || own.registration.group != self.active_group
+        {
+            return Vec::new();
+        }
         let Some((start, end)) = own.registration.selection_edges else {
             return Vec::new();
         };
@@ -1570,6 +1666,7 @@ impl WindowSelectionState {
         let others = self.participants.iter().filter(|(id, registration)| {
             **id != participant
                 && registration.registration.scope == self.active_scope
+                && registration.registration.group == self.active_group
                 && registration.registration.selection_edges.is_some()
                 && registration.participant.upgrade().is_some()
         });
@@ -1804,7 +1901,7 @@ impl WindowSelectionState {
         if GlobalState::is_text_selection_suppressed(cx) {
             return;
         }
-        let hit = self.endpoint(position, Some(window), cx);
+        let hit = self.endpoint_in_group(position, Some(window), None, cx);
         if !hit.inside_text {
             return;
         }
@@ -1837,6 +1934,7 @@ impl WindowSelectionState {
                     .map(|resolver| (resolver, content_point)),
             }
         };
+        self.active_group = registration.registration.group;
         self.anchor = Some(to_endpoint(anchor));
         self.cursor = Some(to_endpoint(cursor));
         self.did_hit_text = true;
@@ -1882,7 +1980,23 @@ impl WindowSelectionState {
         if !extend && !already_prepared {
             self.clear(cx);
         }
-        let endpoint = self.endpoint(position, window.as_deref(), cx);
+        let endpoint = self.endpoint_in_group(position, window.as_deref(), None, cx);
+        let group = endpoint
+            .entity_id()
+            .and_then(|id| self.participants.get(&id))
+            .map_or(TextSelectionGroupId::default(), |entry| {
+                entry.registration.group
+            });
+        let previous_anchor = previous_anchor.filter(|anchor| {
+            anchor
+                .entity_id()
+                .and_then(|id| self.participants.get(&id))
+                .is_some_and(|entry| {
+                    entry.registration.group == group
+                        && entry.registration.scope == self.active_scope
+                })
+        });
+        self.active_group = group;
         let focus_participant = endpoint
             .inside
             .then(|| endpoint.participant.clone())
@@ -1919,6 +2033,16 @@ impl WindowSelectionState {
         window: Option<&Window>,
         cx: &App,
     ) -> SelectionEndpoint {
+        self.endpoint_in_group(position, window, Some(self.active_group), cx)
+    }
+
+    fn endpoint_in_group(
+        &mut self,
+        position: Point<Pixels>,
+        window: Option<&Window>,
+        group: Option<TextSelectionGroupId>,
+        cx: &App,
+    ) -> SelectionEndpoint {
         self.prune_dead_participants();
         let mut hit: Option<(
             WeakEntity<SelectableTextState>,
@@ -1936,6 +2060,7 @@ impl WindowSelectionState {
 
         for registration in self.participants.values() {
             if registration.registration.scope != self.active_scope
+                || group.is_some_and(|group| registration.registration.group != group)
                 || registration.participant.upgrade().is_none()
             {
                 continue;
@@ -2034,6 +2159,7 @@ impl WindowSelectionState {
                 continue;
             };
             let participant_snapshot = (registration.registration.scope == self.active_scope
+                && registration.registration.group == self.active_group
                 && self.participates(*id, registration)
                 && single_participant.is_none_or(|single| single == *id))
             .then_some(snapshot)
@@ -2304,6 +2430,62 @@ fn with_text_selection_scope<T>(
     }
 }
 
+#[derive(Default)]
+struct TextSelectionGroupStacks(HashMap<gpui::WindowId, Vec<TextSelectionGroupId>>);
+
+impl Global for TextSelectionGroupStacks {}
+
+fn push_text_selection_group(window_id: gpui::WindowId, group: TextSelectionGroupId, cx: &mut App) {
+    if !cx.has_global::<TextSelectionGroupStacks>() {
+        cx.set_global(TextSelectionGroupStacks::default());
+    }
+    cx.global_mut::<TextSelectionGroupStacks>()
+        .0
+        .entry(window_id)
+        .or_default()
+        .push(group);
+}
+
+fn pop_text_selection_group(window_id: gpui::WindowId, cx: &mut App) {
+    let stacks = &mut cx.global_mut::<TextSelectionGroupStacks>().0;
+    let remove_stack = stacks.get_mut(&window_id).is_some_and(|stack| {
+        stack.pop();
+        stack.is_empty()
+    });
+    if remove_stack {
+        stacks.remove(&window_id);
+    }
+}
+
+fn current_text_selection_group(
+    window_id: gpui::WindowId,
+    cx: &App,
+) -> Option<TextSelectionGroupId> {
+    cx.has_global::<TextSelectionGroupStacks>()
+        .then(|| {
+            cx.global::<TextSelectionGroupStacks>()
+                .0
+                .get(&window_id)
+                .and_then(|stack| stack.last().copied())
+        })
+        .flatten()
+}
+
+fn with_text_selection_group<T>(
+    window_id: gpui::WindowId,
+    group: TextSelectionGroupId,
+    cx: &mut App,
+    callback: impl FnOnce(&mut App) -> T,
+) -> T {
+    push_text_selection_group(window_id, group, cx);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(cx)));
+    pop_text_selection_group(window_id, cx);
+    match result {
+        Ok(result) => result,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
 /// Window-level operations for text selection.
 pub struct TextSelection;
 
@@ -2519,6 +2701,95 @@ impl<E: Element> Element for TextSelectionScopeMarker<E> {
     ) {
         let window_id = window.window_handle().window_id();
         with_text_selection_scope(window_id, self.scope, cx, |cx| {
+            self.element.paint(
+                id,
+                inspector_id,
+                bounds,
+                request_layout,
+                prepaint,
+                window,
+                cx,
+            );
+        });
+    }
+}
+
+pub(crate) fn text_selection_group(
+    group: TextSelectionGroupId,
+    element: impl IntoElement,
+) -> impl IntoElement {
+    TextSelectionGroupMarker {
+        group,
+        element: element.into_element(),
+    }
+}
+
+struct TextSelectionGroupMarker<E> {
+    group: TextSelectionGroupId,
+    element: E,
+}
+
+impl<E: Element> IntoElement for TextSelectionGroupMarker<E> {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl<E: Element> Element for TextSelectionGroupMarker<E> {
+    type RequestLayoutState = E::RequestLayoutState;
+    type PrepaintState = E::PrepaintState;
+
+    fn id(&self) -> Option<ElementId> {
+        self.element.id()
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        self.element.source_location()
+    }
+
+    fn request_layout(
+        &mut self,
+        id: Option<&GlobalElementId>,
+        inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let window_id = window.window_handle().window_id();
+        with_text_selection_group(window_id, self.group, cx, |cx| {
+            self.element.request_layout(id, inspector_id, window, cx)
+        })
+    }
+
+    fn prepaint(
+        &mut self,
+        id: Option<&GlobalElementId>,
+        inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        request_layout: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        let window_id = window.window_handle().window_id();
+        with_text_selection_group(window_id, self.group, cx, |cx| {
+            self.element
+                .prepaint(id, inspector_id, bounds, request_layout, window, cx)
+        })
+    }
+
+    fn paint(
+        &mut self,
+        id: Option<&GlobalElementId>,
+        inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        request_layout: &mut Self::RequestLayoutState,
+        prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let window_id = window.window_handle().window_id();
+        with_text_selection_group(window_id, self.group, cx, |cx| {
             self.element.paint(
                 id,
                 inspector_id,
@@ -2932,6 +3203,39 @@ mod tests {
 
     struct FirstFrameScopedSelectionView {
         selection: TextSelectionHandle,
+    }
+
+    struct GroupedSelectionView {
+        participants: Vec<(TextSelectionHandle, TextSelectionGroupId)>,
+    }
+
+    impl Render for GroupedSelectionView {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(TextSelectionLayer).children(
+                self.participants
+                    .iter()
+                    .enumerate()
+                    .map(|(index, (selection, group))| {
+                        let selection = selection.clone();
+                        div()
+                            .id(index)
+                            .w(px(100.))
+                            .h(px(20.))
+                            .on_prepaint(move |bounds, window, cx| {
+                                let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
+                                selection.register(
+                                    TextSelectionRegistration::new(hitbox, bounds)
+                                        .with_document_order(index as u64)
+                                        .with_text_bounds(vec![bounds]),
+                                    window,
+                                    cx,
+                                );
+                            })
+                            .text_selection_group(*group)
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        }
     }
 
     struct PlainRunLayoutView {
@@ -3694,6 +3998,114 @@ mod tests {
             selection_state.end(cx);
 
             assert_eq!(selection_state.selected_text(cx), "second");
+        });
+    }
+
+    #[gpui::test]
+    fn selection_groups_local_select_all_takes_ownership_without_clearing_its_caller(
+        cx: &mut TestAppContext,
+    ) {
+        let (view, cx) = cx.add_window_view(|_, cx| GroupedSelectionView {
+            participants: vec![
+                (
+                    TextSelectionHandle::new("first", cx),
+                    TextSelectionGroupId::new(),
+                ),
+                (
+                    TextSelectionHandle::new("second", cx),
+                    TextSelectionGroupId::new(),
+                ),
+            ],
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+            let participants = view.read(cx).participants.clone();
+            let first = &participants[0].0;
+            let second = &participants[1].0;
+            let first_clears = Rc::new(Cell::new(0));
+            let observed = first_clears.clone();
+            first.clear_with(move |_| observed.set(observed.get() + 1), cx);
+            // The active caller must never receive its own clear callback.
+            first.set_local_selection(true, cx);
+            assert_eq!(TextSelection::selected_text(window, cx), "first");
+            second.clear_with(|_| panic!("select-all cleared its active caller"), cx);
+            second.set_local_selection(true, cx);
+            assert_eq!(first_clears.get(), 1);
+            assert!(!first.has_local_selection(cx));
+            assert!(second.has_local_selection(cx));
+            assert_eq!(TextSelection::selected_text(window, cx), "second");
+            second.clear_with(|_| {}, cx);
+            let state = WindowSelectionState::existing(window, cx).unwrap();
+            assert_eq!(state.read(cx).active_group, participants[1].1);
+            for (selection, group) in participants {
+                assert_eq!(
+                    state.read(cx).participants[&selection.entity_id()]
+                        .registration
+                        .group,
+                    group
+                );
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn selection_groups_isolate_drag_shift_and_copy_but_keep_document_participants(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let mut state = WindowSelectionState::default();
+            let group = TextSelectionGroupId::new();
+            let other_group = TextSelectionGroupId::new();
+            let first = FakeParticipant::new("first", cx);
+            let second = FakeParticipant::new("second", cx);
+            let other = FakeParticipant::new("other", cx);
+            for (participant, y, order, group) in [
+                (&first, 0., 0, group),
+                (&other, 20., 1, other_group),
+                (&second, 40., 2, group),
+            ] {
+                participant.register(&mut state, y, TextSelectionScopeId::default(), order, cx);
+                let registration = state
+                    .participants
+                    .get_mut(&participant.selection.entity_id())
+                    .unwrap();
+                Rc::get_mut(&mut registration.registration).unwrap().group = group;
+            }
+            state.begin(point(px(1.), px(1.)), false, cx);
+            state.update(point(px(8.), px(41.)), cx);
+            state.end(cx);
+            assert_eq!(state.selected_text(cx), "first\nsecond");
+            assert!(first.selection.snapshot(cx).is_some());
+            assert!(second.selection.snapshot(cx).is_some());
+            assert!(other.selection.snapshot(cx).is_none());
+
+            // Dragging onto the other document still resolves within the first.
+            state.begin(point(px(1.), px(1.)), false, cx);
+            state.update(point(px(8.), px(21.)), cx);
+            assert_eq!(
+                state.snapshot().unwrap().cursor().entity_id(),
+                Some(first.selection.entity_id())
+            );
+            assert!(other.selection.snapshot(cx).is_none());
+            state.end(cx);
+
+            // Shift cannot join an existing anchor to another document.
+            state.begin(point(px(1.), px(21.)), true, cx);
+            assert_eq!(
+                state.anchor.as_ref().unwrap().entity_id(),
+                Some(other.selection.entity_id())
+            );
+            state.update(point(px(8.), px(21.)), cx);
+            state.end(cx);
+            assert_eq!(state.selected_text(cx), "other");
+            assert!(first.selection.snapshot(cx).is_none());
+            assert!(second.selection.snapshot(cx).is_none());
+
+            // Reapplying the root modal scope each frame preserves a document selection.
+            state.set_active_scope(TextSelectionScopeId::default(), cx);
+            assert_eq!(state.selected_text(cx), "other");
+            state.set_active_scope(TextSelectionScopeId::new(), cx);
+            assert_eq!(state.selected_text(cx), "");
         });
     }
 

@@ -1,4 +1,6 @@
 #[cfg(test)]
+mod tool_call_lifecycle_tests;
+#[cfg(test)]
 mod accepted_dispatch_tests;
 #[cfg(test)]
 mod acp_boundary_tests;
@@ -22,9 +24,14 @@ mod acp_session_config;
 mod acp_stream_tests;
 mod acp_transport;
 mod adapters;
+mod agent_worktree;
 #[cfg(test)]
 mod admin_idle_runtime_tests;
 mod admin_turn_broker;
+mod admin_activity;
+mod notification_summary;
+mod archive_summary;
+mod rename_all;
 #[cfg(test)]
 mod admin_turn_integration_tests;
 #[cfg(test)]
@@ -41,6 +48,9 @@ mod attachments;
 mod claude_idle_runtime_tests;
 mod codex_app_server;
 mod codex_accounts;
+pub mod browser_links;
+mod browser_open;
+pub mod report_styles;
 mod collaboration;
 mod delegation_models;
 mod delegation_catalog;
@@ -71,7 +81,7 @@ mod internal_agent_tests;
 mod lan;
 mod lan_sync;
 mod ui_sync;
-mod history;
+pub mod history;
 mod resident_history;
 mod image_file;
 mod local_file_link;
@@ -95,11 +105,21 @@ mod native_browser_extensions_macos;
 #[cfg(target_os = "macos")]
 mod native_browser_auth_macos;
 mod process_metrics;
+mod work_log;
+mod work_log_runtime;
+mod work_log_api;
+#[cfg(test)]
+mod work_log_integration_tests;
+#[cfg(test)]
+#[path="work_log/pause_tests.rs"]
+mod work_log_pause_tests;
 mod project_board;
+mod build_queue;
 pub mod profile_init;
 mod runner;
 mod runtime_gc;
 mod auto_archive;
+pub mod server_restart;
 mod scheduler;
 pub(crate) mod scheduler_impl;
 #[cfg(test)]
@@ -199,6 +219,9 @@ struct ServiceData {
     // prevents a delayed retirement wait from attaching an old prompt to a
     // later owner after cancellation or another state transition.
     accepted_turns: HashMap<String, AcceptedTurn>,
+    // Each entry tracks the current Monitter run, not the resident process.
+    // Runtime-only: backend recovery interrupts active turns before reuse.
+    collaboration_turn_budgets: HashMap<String, collaboration::TurnBudget>,
     // Runtime-only revision counter. It advances only after a durable store
     // write succeeds, before publishing the new immutable state.
     revision: u64,
@@ -380,6 +403,13 @@ pub(crate) struct Service {
     native_subscribers: Mutex<Vec<async_channel::Sender<()>>>,
     app: Option<AppHandle>,
     store: store::Store,
+    work_log_dir: PathBuf,
+    work_log_lifecycle: Mutex<work_log::lifecycle::Lifecycle>,
+    work_log_health: Mutex<work_log::CollectorHealth>,
+    work_log_commands: Mutex<std::collections::VecDeque<work_log_runtime::Control>>,
+    work_log_worker: Mutex<Option<std::thread::JoinHandle<()>>>,
+    work_log_stop: std::sync::atomic::AtomicBool,
+    work_log_exports: Mutex<HashMap<String,work_log_api::ExportJob>>,
     extensions: extensions::ExtensionStore,
     extension_writes: Mutex<()>,
     environment_secrets: environment_secrets::EnvironmentSecretsStore,
@@ -392,6 +422,9 @@ pub(crate) struct Service {
     // Serialize mutations independently from readers. Readers see the last
     // durable state while a new candidate is being encoded and synced.
     state_writes: Mutex<()>,
+    restart_mode: Mutex<Option<server_restart::RestartMode>>,
+    replacement_preparing: std::sync::atomic::AtomicBool,
+    restart_intent_path: PathBuf,
     data: Mutex<Arc<ServiceData>>,
     runs: Mutex<RunRegistry>,
     // Serializes only the admin accept/reserve/register/dispatch window.
@@ -419,8 +452,11 @@ pub(crate) struct Service {
     native_shortcut_mode: std::sync::atomic::AtomicU8,
     #[cfg(test)]
     runtime_dir: PathBuf,
+    model_settings_save_lock: Mutex<()>,
     model_catalogs: Mutex<HashMap<String, (Instant, ModelCatalog)>>,
     quota_cache: Mutex<Option<(Instant, Vec<SubscriptionUsageSource>)>>,
+    browser_open_requests: Mutex<browser_open::BrowserOpenQueue>,
+    report_theme: Mutex<Option<report_styles::CapturedTheme>>,
     terminals: Mutex<HashMap<String, Arc<terminal::Session>>>,
     lan: Mutex<Option<lan::Server>>,
     lan_error: Mutex<Option<String>>,
@@ -444,6 +480,7 @@ pub(crate) struct Service {
     /// never persists prompts or replies into the snapshot.
     #[allow(dead_code)]
     admin_turn_broker: AdminTurnBroker,
+    admin_activity: admin_activity::AdminActivityLog,
 }
 
 /// Outcome of the one-shot `ensure_internal_admin` migration. The bootstrap
@@ -783,6 +820,13 @@ impl Service {
         let service = Arc::new(Self {
             app,
             store,
+            work_log_dir: dir.clone(),
+            work_log_lifecycle: Mutex::new(Default::default()),
+            work_log_commands: Mutex::new(Default::default()),
+            work_log_worker: Mutex::new(None),
+            work_log_stop: std::sync::atomic::AtomicBool::new(false),
+            work_log_exports: Mutex::new(HashMap::new()),
+            work_log_health: Mutex::new(work_log::CollectorHealth {state:"paused".into(),..Default::default()}),
             extensions,
             extension_writes: Mutex::new(()),
             environment_secrets: environment_secrets::EnvironmentSecretsStore::new(),
@@ -794,12 +838,16 @@ impl Service {
             mail_grants: Mutex::new(HashMap::new()),
             router_trace_dir: dir.join("router-traces"),
             state_writes: Mutex::new(()),
+            restart_mode: Mutex::new(None),
+            replacement_preparing: std::sync::atomic::AtomicBool::new(false),
+            restart_intent_path: dir.join("server-restart.json"),
             data: Mutex::new(Arc::new(ServiceData {
                 snapshot,
                 task_hosts,
                 attachments,
                 blocked_channel_deliveries: HashSet::new(),
                 accepted_turns: HashMap::new(),
+                collaboration_turn_budgets: HashMap::new(),
                 revision: 0,
             })),
             runs: Mutex::new(RunRegistry::default()),
@@ -822,8 +870,11 @@ impl Service {
             native_subscribers: Mutex::new(Vec::new()),
             #[cfg(test)]
             runtime_dir: dir.join("runtime"),
+            model_settings_save_lock: Mutex::new(()),
             model_catalogs: Mutex::new(HashMap::new()),
             quota_cache: Mutex::new(None),
+            browser_open_requests: Mutex::new(browser_open::BrowserOpenQueue::default()),
+            report_theme: Mutex::new(None),
             terminals: Mutex::new(HashMap::new()),
             lan: Mutex::new(None),
             lan_error: Mutex::new(None),
@@ -835,7 +886,11 @@ impl Service {
             input_waiters: Mutex::new(HashMap::new()),
             internal_admin_state,
             admin_turn_broker: AdminTurnBroker::new(),
+            admin_activity: Default::default(),
         });
+        service.work_log_recover();
+        #[cfg(not(test))]
+        service.start_work_log_collector();
         Ok(service)
     }
 
@@ -952,7 +1007,7 @@ impl Service {
                 acp: (admin.provider == "acp")
                     .then(|| admin.acp.clone())
                     .flatten(),
-                archived_agent_name: None,
+                archived_agent_name: None, agent_worktree: None,
                 codex_home: admin.codex_home.clone(),
             };
             data.task_hosts.insert(task.id.clone(), host);
@@ -1314,6 +1369,7 @@ impl Service {
                 for task_id in &affected_task_ids {
                     let _ = self.store.remove_task_usage(task_id);
                     data.task_hosts.remove(task_id);
+                    data.collaboration_turn_budgets.remove(task_id);
                 }
                 Ok(())
             })?;
@@ -2061,21 +2117,19 @@ impl Service {
             }
             "get_task_git_status" => {
                 let (task, host) = self.task_and_host(&arg::<String>(&args, "taskId")?)?;
-                value(git::detect_status(
-                    &host,
-                    &task.cwd,
-                    args.get("detectorSession")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or(""),
-                ))
+                if args["includeStats"].as_bool().unwrap_or(false) {
+                    value(git::status_with_stats(&host, &task.cwd)?)
+                } else {
+                    value(git::detect_status(&host, &task.cwd,
+                        args.get("detectorSession").and_then(|v| v.as_str()).unwrap_or("")))
+                }
             }
             "get_task_git_diff" => {
                 let (task, host) = self.task_and_host(&arg::<String>(&args, "taskId")?)?;
-                value(git::diff(
-                    &host,
-                    &task.cwd,
-                    &arg::<String>(&args, "path")?,
+                value(git::diff_with_context(
+                    &host, &task.cwd, &arg::<String>(&args, "path")?,
                     &arg::<String>(&args, "scope")?,
+                    args.get("contextLines").and_then(|v|v.as_u64()).map(|n|u32::try_from(n).unwrap_or(u32::MAX)).unwrap_or(3),
                 )?)
             }
             "wait_for_task_git_marker" => {
@@ -2807,10 +2861,9 @@ impl Service {
         task_id: &str,
         settings: ModelSettings,
     ) -> Result<Snapshot, String> {
+        let _selection = self.model_settings_save_lock.lock()
+            .map_err(|_| "Model settings save lock failed.".to_string())?;
         let (task, host) = self.task_and_host(task_id)?;
-        if task.status == "running" && !supports_live_model_change(&task.provider) {
-            return Err("This task already has an active turn.".into());
-        }
         if task.archived {
             return Err("Restore this archived task before changing its model.".into());
         }
@@ -2820,8 +2873,25 @@ impl Service {
         if settings.model.trim().is_empty() && !reset {
             return Err("Choose a model before setting reasoning effort or Fast mode.".into());
         }
+        let desired = if reset { None } else { Some(settings.clone()) };
+        let desired_model = if reset { "" } else { settings.model.as_str() };
+        // A lost response can safely retry the same desired choice without
+        // probing a harness, changing timestamps, or adding another divider.
+        if task.model == desired_model && task.model_settings == desired {
+            return self.snapshot();
+        }
         if !reset {
-            let catalog = if task.provider == "acp" {
+            let key = model_catalog_key(&host, &task.provider, &task.cwd,
+                if task.provider == "acp" { None } else { task.codex_home.as_deref() },
+                if task.provider == "acp" { task.acp.as_ref() } else { None });
+            // Selection uses an advertisement already shown by the picker.
+            // Its refresh TTL governs discovery, not acceptance of that choice.
+            let advertised = self.model_catalogs.lock()
+                .map_err(|_| "Monitter model catalog lock failed.".to_string())?
+                .get(&key).map(|(_, catalog)| catalog.clone());
+            let catalog = if let Some(catalog) = advertised {
+                catalog
+            } else if task.provider == "acp" {
                 if let Some(catalog) = self.acp_task_model_catalog(task_id)? {
                     catalog
                 } else {
@@ -2865,11 +2935,11 @@ impl Service {
                 .iter_mut()
                 .find(|task| task.id == task_id)
                 .ok_or("Task was not found.")?;
-            if task.status == "running" && !supports_live_model_change(&task.provider) {
-                return Err("This task already has an active turn.".into());
-            }
             if task.archived {
                 return Err("Restore this archived task before changing its model.".into());
+            }
+            if task.model == desired_model && task.model_settings == desired {
+                return Ok(snapshot.clone());
             }
             let previous_model = task.model.clone();
             let previous_effort = task.model_settings.as_ref().and_then(|value| value.reasoning_effort.clone());
@@ -2878,7 +2948,7 @@ impl Service {
             } else {
                 settings.model.clone()
             };
-            task.model_settings = if reset { None } else { Some(settings) };
+            task.model_settings = desired.clone();
             let changed_at = now();
             task.updated_at = changed_at;
             let mut changes = Vec::new();
@@ -2980,14 +3050,33 @@ impl Service {
         let previous = self.committed_data()?;
         let mut candidate = previous.as_ref().clone();
         let output = f(&mut candidate)?;
+        // Persist derived-chat lineage with the task itself, even when logging
+        // is paused. Descendants keep their immutable root after ancestor deletion.
+        let derived:Vec<_>=candidate.snapshot.tasks.iter().filter(|t|t.parent_task_id.is_some() && !previous.snapshot.tasks.iter().any(|p|p.id==t.id)).cloned().collect();
+        for task in derived {
+            let parent=task.parent_task_id.as_deref().unwrap();
+            let root=self.store.work_log_lineage(parent).ok().and_then(|l|l.3).unwrap_or_else(||parent.into());
+            candidate.snapshot.events.push(Arc::new(RunEvent{id:id(),task_id:task.id,kind:"contextLineage".into(),title:"Derived chat lineage".into(),detail:serde_json::json!({"kind":"derived","sourceTaskId":parent,"lineageRootTaskId":root}).to_string().into(),created_at:now()}));
+        }
+
+        if self.restart_mode.lock().map_err(|_| "Restart lock failed.")?.is_some()
+            && server_restart::admits_turn(&previous, &candidate) {
+            return Err("Server restart is pending; new agent turns are paused.".into());
+        }
         // Arc<RunEvent>'s Eq fast path recognizes shared allocations. Keep
         // the derived comparison so newly added state fields cannot be missed.
         let changed = candidate != *previous;
         if changed {
-            self.store.save_update(
+            let mut lifecycle=self.work_log_lifecycle.lock().map_err(|_| "Work log lifecycle unavailable.")?;
+            let mut next_lifecycle=lifecycle.clone();
+            let records=next_lifecycle.changes(&previous.snapshot,&candidate.snapshot);
+            self.store.save_update_work_log(
                 (&previous.snapshot, &previous.task_hosts, &previous.attachments),
                 (&candidate.snapshot, &candidate.task_hosts, &candidate.attachments),
+                &records,
             )?;
+            *lifecycle=next_lifecycle;
+            drop(lifecycle);
             resident_history::evict(&mut candidate.snapshot);
             candidate.revision = previous.revision.saturating_add(1);
             // Record only durable changes. A poisoned projection cache is not
@@ -3228,6 +3317,9 @@ impl Service {
     fn reserve_run(&self, task_id: &str) -> Result<Arc<runner::RunControl>, String> {
         let _writer = self.state_writes.lock()
             .map_err(|_| "Monitter state writer lock failed.".to_string())?;
+        if self.replacement_preparing.load(std::sync::atomic::Ordering::Acquire) || self.restart_mode.lock().map_err(|_| "Restart lock failed.")?.as_ref() == Some(&server_restart::RestartMode::Force) {
+            return Err("Server restart is pending; new agent turns are paused.".into());
+        }
         let data = self
             .data
             .lock()
@@ -3311,11 +3403,50 @@ impl Service {
         }
     }
 
+    /// Launch-bound settings are applied only at the next explicit turn. An
+    /// idle saved-session owner is reaped before the normal resume launch;
+    /// active turns, pending approvals and unknown descendants stay untouched.
+    fn runtime_for_model(&self, task_id: &str) -> Result<Option<Arc<runner::RunControl>>, String> {
+        let Some(control) = self.available_runtime(task_id)? else { return Ok(None); };
+        let (task, host) = self.task_and_host(task_id)?;
+        if !control.needs_model_relaunch(&task)? { return Ok(Some(control)); }
+        let pending = "The selected model is saved. Its previous agent session must become safely idle before the next turn can use it.";
+        if host.kind != "local" || task.native_session_id.as_deref().is_none_or(|id| id.trim().is_empty()) {
+            return Err(pending.into());
+        }
+        let _ = control.refresh_runtime_process_baseline_while_idle();
+        if !control.retirement_process_tree_is_safe() { return Err(pending.into()); }
+        {
+            let _writer = self.state_writes.lock().map_err(|_| "State writer lock failed.")?;
+            let data = self.data.lock().map_err(|_| "Monitter state lock failed.")?;
+            let runs = self.runs.lock().map_err(|_| "Run registry unavailable.")?;
+            if !runs.tasks.get(task_id).is_some_and(|current| Arc::ptr_eq(current, &control)) {
+                return Err("The agent session changed before applying its saved model. Try the next turn again.".into());
+            }
+            if self.stopping.load(std::sync::atomic::Ordering::Acquire)
+                || self.replacement_preparing.load(std::sync::atomic::Ordering::Acquire)
+                || self.restart_mode.lock().map_err(|_| "Restart lock failed.")?.is_some()
+                || self.admin_turn_broker.is_active_task(task_id) {
+                return Err(pending.into());
+            }
+            if data.snapshot.approval_requests.iter().any(|request| request.task_id == task_id && request.status == "pending")
+                || data.snapshot.subagent_sessions.iter().any(|session| session.parent_task_id == task_id
+                    && !matches!(session.status.as_str(), "completed" | "error" | "interrupted"))
+                || !control.try_retire_idle(Instant::now(), Duration::ZERO) {
+                return Err(pending.into());
+            }
+        }
+        control.retire_owned().map_err(|error| format!("The selected model is saved, but its idle session could not finish stopping: {error}"))?;
+        self.release_retired_run(task_id, &control);
+        self.available_runtime(task_id)
+    }
+
     /// Deliver a turn to a live provider process. `false` means this
     /// task has no resident transport and should take the ordinary launch path;
     /// it never means "start a one-shot --resume process".
     fn send_to_resident(&self, task_id: &str, prompt: &str) -> Result<bool, String> {
-        let control = self.available_runtime(task_id)?;
+        let selection = self.model_settings_save_lock.lock().map_err(|_| "Model settings save lock failed.")?;
+        let control = self.runtime_for_model(task_id)?;
         let Some(control) = control else {
             return Ok(false);
         };
@@ -3323,14 +3454,19 @@ impl Service {
             return Ok(false);
         }
         let (task, _) = self.task_and_host(task_id)?;
+        let writer = self.state_writes.lock().map_err(|_| "State writer lock failed.")?;
+        if self.replacement_preparing.load(std::sync::atomic::Ordering::Acquire) || self.restart_mode.lock().map_err(|_| "Restart lock failed.")?.is_some() {
+            return Err("Server restart is pending; new agent turns are paused.".into());
+        }
+        control.begin_run()?;
+        drop(writer);
+        drop(selection);
+        self.work_log_register_run(task_id,&control);
         if task.provider == "codex" {
-            control.begin_run()?;
             control.send_user_turn_with_task(prompt, Some(&task))?;
         } else if task.provider == "acp" {
-            control.begin_run()?;
             acp_runtime::send_turn(&control, prompt, &task)?;
         } else {
-            control.begin_run()?;
             control.send_user_turn(prompt)?;
         }
         Ok(true)
@@ -3651,6 +3787,40 @@ impl Service {
         Ok(snapshot)
     }
 
+    fn merge_task_worktree(&self, task_id: &str) -> Result<Snapshot, String> {
+        // Hold the service lock through the merge so another pane cannot start
+        // writing either working directory between validation and Git commit.
+        self.mutate(Some(task_id.into()), |snapshot| {
+            let task = snapshot.tasks.iter().find(|t| t.id == task_id).ok_or("Task was not found.")?;
+            let worktree = task.agent_worktree.as_ref().ok_or("This pane has no managed worktree.")?;
+            agent_worktree::validate(task_id, &task.cwd, worktree)?;
+            let project = snapshot.projects.iter().find(|p| Some(p.id.as_str()) == task.project_id.as_deref())
+                .ok_or("This pane's project changed; inspect and merge its worktree manually.")?;
+            let workspace = project.workspaces.iter().find(|w| w.host_id == task.host_id).map(|w| w.cwd.as_str())
+                .or_else(|| snapshot.agents.iter().find(|a| a.id == task.agent_id).map(|a| a.cwd.as_str()))
+                .filter(|cwd| !cwd.trim().is_empty())
+                .or_else(|| snapshot.hosts.iter().find(|h| h.id == task.host_id).map(|h| h.default_cwd.as_str()))
+                .ok_or("This pane's project workspace is unavailable.")?;
+            if !agent_worktree::project_root_matches(workspace, &worktree.root) {
+                return Err("The project's workspace changed since this pane was created; inspect and merge its worktree manually.".into());
+            }
+
+            let runs = self.runs.lock().map_err(|_| "Monitter run registry lock failed.".to_string())?;
+            if snapshot.tasks.iter().any(|t|
+                (t.status == "running" || runs.tasks.get(&t.id).is_some_and(|c| !c.is_idle() || c.is_cancelled())) &&
+                snapshot.hosts.iter().any(|h| h.id == t.host_id && h.kind == "local") &&
+                (t.id == task_id || agent_worktree::same_repository(&t.cwd, &worktree.root))) {
+                return Err("Stop agents using this repository and wait for their runtime to finish stopping before merging.".into());
+            }
+            drop(runs);
+            if snapshot.queued_messages.iter().any(|m| m.task_id == task_id && matches!(m.status.as_str(), "queued" | "sending")) {
+                return Err("Send or remove queued messages before merging this pane.".into());
+            }
+            agent_worktree::merge(worktree)?;
+            Ok(snapshot.clone())
+        })
+    }
+
     fn save_project(&self, mut project: Project) -> Result<Snapshot, String> {
         self.mutate(None, |snapshot| {
             if project.id.trim().is_empty() {
@@ -3800,6 +3970,22 @@ impl Service {
     /// transcript path.
     #[allow(dead_code)] // Consumed by the resident-worker lane that follows this one.
     pub(crate) fn send_admin_turn(self: &Arc<Self>, prompt: String) -> Result<String, String> {
+        self.send_admin_turn_with_origin(prompt, admin_activity::AdminActivityOrigin::default())
+    }
+
+    pub(crate) fn send_admin_turn_with_origin(self: &Arc<Self>, prompt: String, origin: admin_activity::AdminActivityOrigin) -> Result<String, String> {
+        let activity_id = self.admin_activity.begin(origin, self.admin_activity_model(None))?;
+        let sensitive_prompt = admin_activity::sensitive(&prompt);
+        let result = self.send_admin_turn_inner(prompt, &activity_id);
+        let (status, detail) = match &result {
+            Ok(output) => ("succeeded", if sensitive_prompt { "Generated response omitted because the source may contain sensitive data.".into() } else { format!("Generated response (not an applied change): {output}") }),
+            Err(error) => (if error.contains("45-second interface deadline") { "timeout" } else { "failed" }, admin_activity::failure_detail(error).to_owned()),
+        };
+        self.admin_activity.finish(&activity_id, status, &detail);
+        result
+    }
+
+    fn send_admin_turn_inner(self: &Arc<Self>, prompt: String, activity_id: &str) -> Result<String, String> {
         if prompt.trim().is_empty() {
             return Err("Monitter Admin prompt cannot be empty.".into());
         }
@@ -3820,6 +4006,9 @@ impl Service {
             let current = {
                 let _writer = self.state_writes.lock()
                     .map_err(|_| "Monitter state writer lock failed.".to_string())?;
+                if self.replacement_preparing.load(std::sync::atomic::Ordering::Acquire) || self.restart_mode.lock().map_err(|_| "Restart lock failed.")?.is_some() {
+                    return Err("Server restart is pending; new agent turns are paused.".into());
+                }
                 let data = self
                     .data
                     .lock()
@@ -3869,6 +4058,7 @@ impl Service {
             };
             (control, true)
         };
+        self.work_log_register_run(&task_id,&control);
         let request_id = id();
         let deadline = Instant::now() + ADMIN_TURN_TIMEOUT;
         let receiver = match self.admin_turn_broker.try_register(
@@ -3911,6 +4101,7 @@ impl Service {
             // thread id.
             let _ = timeout_task_id;
         });
+        self.admin_activity.running(activity_id, self.admin_activity_model(Some(&task_id)));
         // Send the prompt. The first turn must use the resident-capable
         // adapter; subsequent turns reuse the live resident control.
         let send_result = if is_first_turn {
@@ -3998,6 +4189,10 @@ impl Service {
     }
 
     pub(crate) fn apply_event(&self, task_id: &str, parsed: Parsed) -> Result<(), String> {
+        let work_log_control=self.runs.lock().ok().and_then(|r|r.tasks.get(task_id).cloned());
+        let tool_run_id = work_log_control.as_ref()
+            .map(|control| control.current_run_id()).transpose()?;
+        if let Some(control)=work_log_control{self.work_log_register_run(task_id,&control);}
         let Parsed {
             native_session_id,
             assistant,
@@ -4095,14 +4290,71 @@ impl Service {
                 );
             }
             if let Some((kind, title, detail)) = event {
-                state.events.push(Arc::new(RunEvent {
-                    id: id(),
-                    task_id: task_id.into(),
-                    kind,
-                    title,
-                    detail: detail.into(),
-                    created_at: now(),
-                }));
+                // Only a provider's real lifecycle identity may replace activity.
+                // Length-prefixed hashing keeps the opaque UUID scoped to this
+                // task and send, without changing the provider's full detail.
+                let lifecycle = tool_run_id.as_deref().and_then(|run_id| {
+                    if kind != "tool" || state.tasks[ix].provider != "codex" {
+                        return None;
+                    }
+                    let item: serde_json::Value = serde_json::from_str(&detail).ok()?;
+                    let item_type = item["type"].as_str()?;
+                    if !matches!(item_type, "mcpToolCall" | "commandExecution" | "fileChange") { return None; }
+                    let item_id = item["id"].as_str().filter(|id| !id.is_empty())?;
+                    let status = item["status"].as_str()?;
+                    if !matches!(status, "inProgress" | "completed" | "failed") {
+                        return None;
+                    }
+                    use sha2::{Digest, Sha256};
+                    let mut digest = Sha256::new();
+                    for part in ["monitter/codex/toolItem/v1", task_id, run_id, item_type, item_id] {
+                        digest.update((part.len() as u64).to_be_bytes());
+                        digest.update(part.as_bytes());
+                    }
+                    let hash = digest.finalize();
+                    let mut bytes = [0u8; 16];
+                    bytes.copy_from_slice(&hash[..16]);
+                    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+                    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+                    Some((uuid::Uuid::from_bytes(bytes).to_string(), status != "inProgress"))
+                });
+                let event_id = lifecycle.as_ref().map(|(id, _)| id.clone()).unwrap_or_else(id);
+                let existing_index = if lifecycle.is_some() {
+                    state.events.index_of_id(&event_id).map_err(|error| error.to_string())?
+                } else {
+                    None
+                };
+                if let Some(index) = existing_index {
+                    let existing = &state.events[index];
+                    let existing = if state.events.payload_is_cold(&event_id) {
+                        Arc::new(self.store.task_event(task_id, &event_id)?)
+                    } else {
+                        existing.clone()
+                    };
+                    let terminal = serde_json::from_str::<serde_json::Value>(&existing.detail)
+                        .ok().is_some_and(|item| matches!(item["status"].as_str(), Some("completed" | "failed")));
+                    // Late started/replayed notifications cannot erase a result.
+                    if !terminal || lifecycle.as_ref().is_some_and(|(_, terminal)| *terminal) {
+                        let updated = Arc::new(RunEvent {
+                            id: event_id,
+                            task_id: task_id.into(),
+                            kind,
+                            title,
+                            detail: detail.into(),
+                            created_at: existing.created_at,
+                        });
+                        state.events.replace_full_at(index, updated);
+                    }
+                } else {
+                    state.events.push(Arc::new(RunEvent {
+                        id: event_id,
+                        task_id: task_id.into(),
+                        kind,
+                        title,
+                        detail: detail.into(),
+                        created_at: now(),
+                    }));
+                }
             }
             if let Some(text) = assistant.filter(|text| !text.trim().is_empty()) {
                 state.messages.push(Message {
@@ -4144,9 +4396,11 @@ impl Service {
     /// Ingest normalized usage separately from diagnostic activity. Malformed
     /// payloads remain visible but never fail an otherwise valid agent turn.
     fn capture_usage(&self, task_id: &str, detail: &str) -> Result<(), String> {
+        let _writer=self.state_writes.lock().map_err(|_|"State writer unavailable.")?;
         let value: serde_json::Value = match serde_json::from_str(detail) {
             Ok(value) => value,
             Err(_) => {
+                drop(_writer);
                 self.record(
                     task_id,
                     "error",
@@ -4192,6 +4446,7 @@ impl Service {
         let Some(normalized) =
             runner::normalize_usage(&value, classification, provider_turn_id.clone())
         else {
+            drop(_writer);
             self.record(task_id, "error", "Usage capture warning", "The provider usage payload did not contain supported numeric fields; the run continued.".into());
             return Ok(());
         };
@@ -4218,6 +4473,7 @@ impl Service {
             observed_at: now(),
             final_sample: matches!(task.provider.as_str(), "claude" | "hermes" | "codex"),
             classification: normalized.classification,
+            counter_epoch: None,
             provider_turn_id: normalized.provider_turn_id,
             tokens: normalized.tokens,
             cost_usd: normalized.cost_usd,
@@ -4318,6 +4574,7 @@ impl Service {
 
     fn mark_usage_final(&self, task_id: &str) {
         let result = (|| -> Result<(), String> {
+            let _writer=self.state_writes.lock().map_err(|_|"State writer unavailable.")?;
             let (task, control) = {
                 let data = self
                     .data
@@ -4351,6 +4608,7 @@ impl Service {
                 observed_at: now(),
                 final_sample: true,
                 classification: "cumulative".into(),
+                counter_epoch: None,
                 provider_turn_id: None,
                 tokens: UsageTokens::default(),
                 cost_usd: None,
@@ -4385,6 +4643,9 @@ impl Service {
             }
             if task.cwd == directory {
                 return Ok(task.clone());
+            }
+            if task.agent_worktree.is_some() {
+                return Err("The resumed OpenCode session points outside this pane's saved worktree. Start a new session instead.".into());
             }
             task.cwd = directory.into();
             task.updated_at = now();
@@ -4974,6 +5235,11 @@ impl Service {
 
     /// A handoff starts a new task; provider-native state stays with its source.
     fn handoff_task(self: &Arc<Self>, input: HandoffTaskInput) -> Result<Task, String> {
+        let (target,brief)=self.prepare_handoff(input)?;
+        self.send(target.id.clone(),brief,vec![])?;
+        Ok(target)
+    }
+    fn prepare_handoff(&self, input: HandoffTaskInput) -> Result<(Task,String), String> {
         let (source, messages) = {
             let data = self.data.lock().map_err(|_| "Monitter state lock failed.".to_string())?;
             let source = data.snapshot.tasks.iter().find(|task| task.id == input.source_task_id)
@@ -4997,8 +5263,10 @@ impl Service {
             parent_task_id: Some(source.id.clone()), channel_id: None, project_id: source.project_id.clone(),
             cwd: Some(source.cwd.clone()), model_settings: None, sandbox: None,
         })?;
+        let lineage_root=self.store.work_log_lineage(&source.id)?.3.unwrap_or_else(||source.id.clone());
         let brief = Self::handoff_brief(&source, &messages, input.note.as_deref());
         self.mutate_data(Some(source.id.clone()), |data| {
+            data.snapshot.events.push(Arc::new(RunEvent { id:id(),task_id:target.id.clone(),kind:"contextLineage".into(),title:"Handoff context lineage".into(),detail:serde_json::json!({"kind":"handoff","lineageRootTaskId":lineage_root,"sourceTaskId":source.id,"sourceThroughMessageId":messages.last().map(|m|&m.id)}).to_string().into(),created_at:now() }));
             data.snapshot.messages.push(Message {
                 id: id(), task_id: source.id.clone(), role: "system".into(),
                 text: format!("Handed off to a new {} chat.", target.provider), created_at: now(),
@@ -5006,8 +5274,7 @@ impl Service {
             });
             Ok(())
         })?;
-        self.send(target.id.clone(), brief, vec![])?;
-        Ok(target)
+        Ok((target,brief))
     }
 
     fn handoff_brief(source: &Task, messages: &[Message], note: Option<&str>) -> String {
@@ -5062,7 +5329,9 @@ impl Service {
             model_settings: input.model_settings,
             sandbox: same_agent.then_some(source.sandbox.clone()),
         })?;
+        let lineage_root=self.store.work_log_lineage(&source.id)?.3.unwrap_or_else(||source.id.clone());
         self.mutate_data(Some(target.id.clone()), |data| {
+            data.snapshot.events.push(Arc::new(RunEvent {id:id(),task_id:target.id.clone(),kind:"contextLineage".into(),title:"Fork context lineage".into(),detail:serde_json::json!({"kind":"fork","lineageRootTaskId":lineage_root,"sourceTaskId":source.id,"sourceThroughMessageId":input.through_message_id}).to_string().into(),created_at:now()}));
             for message in &copied {
                 data.snapshot.messages.push(Message {
                     id: id(), task_id: target.id.clone(), role: message.role.clone(),
@@ -5223,13 +5492,20 @@ impl Service {
     }
 
     fn deliver_accepted(self: &Arc<Self>, task_id: String, accepted: AcceptedTurn) {
-        let existing = match self.available_runtime(&task_id) {
+        let selection = match self.model_settings_save_lock.lock() {
+            Ok(lock) => lock,
+            Err(_) => return self.fail_accepted(&task_id, &accepted.receipt, "Model settings save lock failed.".into()),
+        };
+        let existing = match self.runtime_for_model(&task_id) {
             Ok(value) => value,
             Err(error) => return self.fail_accepted(&task_id, &accepted.receipt, error),
         };
         let claimed = (|| -> Result<(Arc<runner::RunControl>, Task, bool), String> {
             let _writer = self.state_writes.lock()
                 .map_err(|_| "Monitter state writer lock failed.".to_string())?;
+            if self.replacement_preparing.load(std::sync::atomic::Ordering::Acquire) || self.restart_mode.lock().map_err(|_| "Restart lock failed.")?.as_ref() == Some(&server_restart::RestartMode::Force) {
+                return Err("Server restart is pending; new agent turns are paused.".into());
+            }
             let data = self
                 .data
                 .lock()
@@ -5302,6 +5578,8 @@ impl Service {
             Ok(value) => value,
             Err(error) => return self.fail_accepted(&task_id, &accepted.receipt, error),
         };
+        drop(selection);
+        self.work_log_register_run(&task_id,&control);
         if first {
             if self.take_accepted(&task_id, &accepted.receipt) {
                 runner::start(Arc::clone(self), task_id, accepted.prompt, control);
@@ -6475,6 +6753,8 @@ impl Service {
     }
 
     fn cleanup(&self) {
+        self.stopping.store(true,std::sync::atomic::Ordering::Release);
+        self.stop_work_log_exports();
         if let Ok(mut server) = self.lan.lock() {
             server.take();
         }
@@ -6516,6 +6796,7 @@ impl Service {
         for session in terminals {
             let _ = session.close();
         }
+        self.stop_work_log_collector();
     }
 
     fn run_is_active(&self, task_id: &str) -> bool {
@@ -6841,6 +7122,7 @@ fn initial_task_instructions(snapshot: &Snapshot, task_id: &str) -> Option<Strin
 }
 
 fn with_project_board_context(snapshot: &Snapshot, task_id: &str, prompt: String) -> String {
+    let prompt = match build_queue::turn_context(snapshot, task_id) { Some(context) => format!("{context}\n\n{prompt}"), None => prompt };
     match project_board::turn_context(snapshot, task_id) {
         Some(context) => format!("{context}\n\n{prompt}"),
         None => prompt,
@@ -6940,7 +7222,18 @@ fn create_task_in_data(data: &mut ServiceData, input: CreateTaskInput) -> Result
         return Err("Agent or host must specify a task folder.".into());
     }
     prepare_task_codex_home(&mut task, &agent, &host)?;
+    if project.as_ref().is_some_and(|p| p.agent_worktrees_enabled) {
+        if host.kind != "local" { return Err("Agent worktrees currently require a local host.".into()); }
+        if task.native_session_id.is_some() { return Err("Create a new chat to use an isolated worktree; existing sessions retain their folder.".into()); }
+        let worktree = agent_worktree::create(&task.cwd, &task.id)?;
+        task.cwd = worktree.path.clone();
+        task.agent_worktree = Some(worktree);
+    }
     let mut instructions = agent_instructions(&agent, &state.settings.user_name);
+    if let Some(worktree) = &task.agent_worktree {
+        instructions.push_str(&format!("\n\nThis pane owns an isolated Git worktree at {} on branch {}. Work and commit here. The project checkout is {}; do not edit or merge into it automatically. The owner can use Merge into project after you stop. Worktrees do not isolate shared build caches: continue using the project's build queue and shared target key.", worktree.path, worktree.branch, worktree.root));
+    }
+
     if let Some(board_instructions) = project_board::system_instructions(state, task.project_id.as_deref(), agent.collaboration_enabled) {
         instructions.push_str("\n\n");
         instructions.push_str(&board_instructions);
@@ -7985,6 +8278,13 @@ fn validate_project(project: &Project, snapshot: &Snapshot) -> Result<(), String
 }
 
 #[tauri::command]
+async fn merge_task_worktree(state: State<'_, AppState>, task_id: String) -> Result<Snapshot, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.merge_task_worktree(&task_id))
+        .await.map_err(|error| format!("Worktree merge worker failed: {error}"))?
+}
+
+#[tauri::command]
 async fn save_project(state: State<'_, AppState>, project: Project) -> Result<Snapshot, String> {
     let service = state.0.clone();
     tauri::async_runtime::spawn_blocking(move || service.save_project(project))
@@ -8000,6 +8300,14 @@ async fn delete_project(state: State<'_, AppState>, id: String) -> Result<Snapsh
         .map_err(|error| format!("Project deletion worker failed: {error}"))?
 }
 
+#[tauri::command]
+async fn read_project_build_queue(state: State<'_, AppState>, project_id: String) -> Result<serde_json::Value, String> {
+    state.0.read_project_build_queue(&project_id)
+}
+#[tauri::command]
+async fn recover_project_build(state: State<'_, AppState>, build_run_id: String, process_stopped: bool, summary: String) -> Result<serde_json::Value, String> {
+    state.0.recover_project_build(&build_run_id, process_stopped, &summary)
+}
 #[tauri::command]
 async fn post_project_board_note(state: State<'_, AppState>, project_id: String, text: String, request_id: String) -> Result<Snapshot, String> {
     let service = state.0.clone();
@@ -8074,7 +8382,13 @@ impl Service {
         // The resident Monitter Admin lane owns naming. Surface its
         // configuration errors before any target mutation so callers see the
         // same readable error as every other admin entry point.
-        self.internal_admin()?;
+        if let Err(error) = self.internal_admin() {
+            let origin = self.admin_activity_origin("autoname", target.task_id.as_deref(), None);
+            if let Ok(activity_id) = self.admin_activity.begin(origin, None) {
+                self.admin_activity.finish(&activity_id, "failed", admin_activity::failure_detail(&error));
+            }
+            return Err(error);
+        }
         let (task_id, terminal_id, channel_id) = (
             target.task_id.as_deref(),
             target.terminal_id.as_deref(),
@@ -8140,7 +8454,10 @@ impl Service {
             .chars()
             .rev()
             .collect();
-        let title = clean_generated_title(&self.send_admin_turn(title_prompt(&content))?)?;
+        let pane_title = channel_id.and_then(|id| self.data.lock().ok().and_then(|data| data.snapshot.channels.iter().find(|channel| channel.id == id).map(|channel| channel.name.clone())))
+            .or_else(|| terminal_id.map(|_| "Terminal".to_owned()));
+        let origin = self.admin_activity_origin("autoname", task_id, pane_title);
+        let title = clean_generated_title(&self.send_admin_turn_with_origin(title_prompt(&content), origin)?)?;
         if let Some(task_id) = task_id {
             return self.mutate(Some(task_id.into()), |snapshot| {
                 let task = snapshot
@@ -8508,9 +8825,9 @@ fn validate_settings(settings: &Settings) -> Result<(), String> {
     }
     if !matches!(
         settings.activity_animation.as_str(),
-        "sparkles" | "grid" | "matrix"
+        "sparkles" | "liquid" | "grid" | "matrix"
     ) {
-        return Err("Activity animation must be sparkles, grid, or matrix.".into());
+        return Err("Activity animation must be sparkles, liquid, grid, or matrix.".into());
     }
     if !matches!(settings.voice_transcription_engine.as_str(), "whisper" | "apple") {
         return Err("Voice transcription engine must be Whisper or Apple on-device.".into());
@@ -8844,6 +9161,7 @@ fn send_channel_message_accepted(
                     return Err("Agent or host must specify a task folder.".into());
                 }
                 prepare_task_codex_home(&mut task, &agent, &host)?;
+
                 task.status = "running".into();
                 let mut instructions = agent_instructions(&agent, &state.settings.user_name);
                 if let Some(board_instructions) = project_board::system_instructions(state, task.project_id.as_deref(), agent.collaboration_enabled) {
@@ -9507,11 +9825,13 @@ async fn get_task_git_status(
     state: State<'_, AppState>,
     task_id: String,
     detector_session: String,
+    include_stats: Option<bool>,
 ) -> Result<git::GitStatus, String> {
     let service = state.0.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let (task, host) = service.task_and_host(&task_id)?;
-        Ok::<_, String>(git::detect_status(&host, &task.cwd, &detector_session))
+        if include_stats.unwrap_or(false) { git::status_with_stats(&host, &task.cwd) }
+        else { Ok::<_, String>(git::detect_status(&host, &task.cwd, &detector_session)) }
     })
     .await
     .map_err(|error| format!("Git status worker failed: {error}"))?
@@ -9538,11 +9858,12 @@ async fn get_task_git_diff(
     task_id: String,
     path: String,
     scope: String,
+    context_lines: Option<u32>,
 ) -> Result<git::GitDiff, String> {
     let service = state.0.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let (task, host) = service.task_and_host(&task_id)?;
-        git::diff(&host, &task.cwd, &path, &scope)
+        git::diff_with_context(&host, &task.cwd, &path, &scope, context_lines.unwrap_or(3))
     })
         .await
         .map_err(|error| format!("Git diff worker failed: {error}"))?
@@ -9828,8 +10149,11 @@ pub fn run() {
             fork_task,
             choose_local_folder,
             save_project,
+            merge_task_worktree,
             delete_project,
             post_project_board_note,
+            read_project_build_queue,
+            recover_project_build,
             set_task_project,
             rename_task,
             autoname,
@@ -10445,14 +10769,14 @@ name@rafa.test",
     #[test]
     fn settings_validation_limits_activity_animation() {
         let mut settings = default_snapshot().settings;
-        for animation in ["sparkles", "grid", "matrix"] {
+        for animation in ["sparkles", "liquid", "grid", "matrix"] {
             settings.activity_animation = animation.into();
             assert!(validate_settings(&settings).is_ok());
         }
         settings.activity_animation = "aurora".into();
         assert_eq!(
             validate_settings(&settings),
-            Err("Activity animation must be sparkles, grid, or matrix.".into())
+            Err("Activity animation must be sparkles, liquid, grid, or matrix.".into())
         );
     }
 
@@ -11004,10 +11328,9 @@ readline.createInterface({input: process.stdin}).on('line', line => {
     }
 
     #[test]
-    fn model_settings_reset_rejects_running_or_archived_tasks() {
-        // Codex running tasks now accept live changes that land on the next turn;
-        // the archived-task guard must still hold. A non-Codex running task
-        // (e.g. Claude's launch-flag sandbox) keeps the old reject.
+    fn model_settings_reset_accepts_running_tasks_but_rejects_archives() {
+        // Desired model changes never interrupt the active turn, for any harness.
+        // Archived tasks still require restoration before accepting settings.
         for (status, archived, provider, expect_err) in [
             (
                 "running",
@@ -11019,7 +11342,7 @@ readline.createInterface({input: process.stdin}).on('line', line => {
                 "running",
                 false,
                 "claude",
-                Some("This task already has an active turn."),
+                None,
             ),
             // completed + not archived + codex is the happy path; reset succeeds.
             ("completed", false, "codex", None),
@@ -11070,10 +11393,9 @@ readline.createInterface({input: process.stdin}).on('line', line => {
     }
 
     #[test]
-    fn model_settings_accept_live_change_for_running_codex_task() {
-        // Codex carries model + effort + serviceTier on every turn/start, so a
-        // running Codex task accepts the new ModelSettings; the change is
-        // applied to the next turn rather than the in-flight one.
+    fn model_settings_accept_running_harness_changes_and_idempotent_retries() {
+        for provider in ["codex", "claude", "opencode", "acp"] {
+        // Exercise the durable desired setting without launching a real harness.
         let dir = temp_dir("model-live-codex");
         let service = Service::open(None, dir.clone()).unwrap();
         let agent_id = service.snapshot().unwrap().agents[0].id.clone();
@@ -11098,7 +11420,7 @@ readline.createInterface({input: process.stdin}).on('line', line => {
                     .find(|item| item.id == task.id)
                     .unwrap();
                 task.status = "running".into();
-                task.provider = "codex".into();
+                task.provider = provider.into();
                 Ok(())
             })
             .unwrap();
@@ -11108,13 +11430,13 @@ readline.createInterface({input: process.stdin}).on('line', line => {
             &host,
             &task_snapshot.provider,
             &task_snapshot.cwd,
-            task_snapshot.codex_home.as_deref(),
-            None,
+            if provider == "acp" { None } else { task_snapshot.codex_home.as_deref() },
+            if provider == "acp" { task_snapshot.acp.as_ref() } else { None },
         );
         service.model_catalogs.lock().unwrap().insert(
             key,
             (
-                Instant::now(),
+                Instant::now() - MODEL_CATALOG_CACHE_TTL - std::time::Duration::from_secs(1),
                 ModelCatalog {
                     models: vec![CatalogModel {
                         id: "gpt-test".into(),
@@ -11138,6 +11460,14 @@ readline.createInterface({input: process.stdin}).on('line', line => {
                 },
             ),
         );
+        let before_invalid = service.snapshot().unwrap();
+        assert_eq!(service.set_task_model_settings(&task.id, ModelSettings {
+            model: "unadvertised".into(), reasoning_effort: None, fast_mode: None,
+        }), Err("Selected model is not available on this host.".into()));
+        assert_eq!(service.set_task_model_settings(&task.id, ModelSettings {
+            model: "gpt-test".into(), reasoning_effort: Some("unsupported".into()), fast_mode: None,
+        }), Err("Selected reasoning effort is not supported by this model.".into()));
+        assert_eq!(service.snapshot().unwrap().messages.len(), before_invalid.messages.len());
         service
             .set_task_model_settings(
                 &task.id,
@@ -11147,7 +11477,7 @@ readline.createInterface({input: process.stdin}).on('line', line => {
                     fast_mode: None,
                 },
             )
-            .expect("Codex running tasks accept live model changes");
+            .expect("running tasks accept desired model changes");
         let updated = service
             .snapshot()
             .unwrap()
@@ -11173,7 +11503,23 @@ readline.createInterface({input: process.stdin}).on('line', line => {
         let thinking_change = service.snapshot().unwrap().messages.last().unwrap().clone();
         assert_eq!(thinking_change.text, "[Monitter settings change] Thinking level → low (next turn)");
         assert!(is_model_settings_change_message(&thinking_change));
+        let before_retry = service.snapshot().unwrap();
+        let desired_task = before_retry.tasks.iter().find(|item| item.id == task.id).unwrap();
+        assert_eq!(desired_task.model_settings.as_ref().unwrap().reasoning_effort.as_deref(), Some("low"));
+        assert_eq!(desired_task.status, "running");
+        service.model_catalogs.lock().unwrap().clear();
+        service.set_task_model_settings(&task.id, ModelSettings {
+            model: "gpt-test".into(), reasoning_effort: Some("low".into()), fast_mode: None,
+        }).expect("same-value retry does not require a catalog probe");
+        let after_retry = service.snapshot().unwrap();
+        assert_eq!(after_retry.messages.len(), before_retry.messages.len());
+        assert_eq!(after_retry.tasks.iter().find(|item| item.id == task.id).unwrap().updated_at, desired_task.updated_at);
+        drop(service);
+        let reopened = Service::open(None, dir.clone()).unwrap();
+        assert_eq!(reopened.snapshot().unwrap().tasks.iter().find(|item| item.id == task.id).unwrap().model_settings, desired_task.model_settings);
+        drop(reopened);
         let _ = std::fs::remove_dir_all(dir);
+        }
     }
 
     #[test]
@@ -11573,7 +11919,7 @@ readline.createInterface({input: process.stdin}).on('line', line => {
     }
 
     fn project(id: &str, host_id: &str, cwd: &str) -> Project {
-        Project {
+        Project { build_management_enabled: false, agent_worktrees_enabled: false,
             id: id.into(),
             name: "  Product work  ".into(),
             description: "Shared work area".into(),
@@ -13004,9 +13350,9 @@ readline.createInterface({input: process.stdin}).on('line', line => {
                     sandbox: "read-only".into(),
                     project_id: None,
                     acp: None,
-                    archived_agent_name: None,
+                    archived_agent_name: None, agent_worktree: None,
                 });
-                data.snapshot.projects.push(Project {
+                data.snapshot.projects.push(Project { build_management_enabled: false, agent_worktrees_enabled: false,
                     id: "project".into(),
                     name: "project".into(),
                     description: String::new(),

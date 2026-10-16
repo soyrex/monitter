@@ -16,7 +16,7 @@ use gpui_kit::{
 };
 use monitter_lib::experimental_desktop::DesktopService;
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::{collections::HashMap, rc::Rc};
 
 #[derive(Clone)]
 pub enum PaneDetailsEvent {
@@ -119,11 +119,11 @@ fn text(value: &Value, key: &str) -> String {
         .to_owned()
 }
 
-fn rows(value: &Value, key: &str) -> Vec<Value> {
+fn rows<'a>(value: &'a Value, key: &str) -> &'a [Value] {
     value
         .get(key)
         .and_then(Value::as_array)
-        .cloned()
+        .map(Vec::as_slice)
         .unwrap_or_default()
 }
 
@@ -347,19 +347,19 @@ mod tests {
 
 // Detail pages never render the conversation body. Do not retain its JSON
 // payload in every closed or background inspector.
-fn details_snapshot(snapshot: &Value) -> Value {
+fn details_snapshot(snapshot: &Value) -> Rc<Value> {
     let mut value = serde_json::Map::new();
     for key in ["settings", "tasks", "workPlans", "agents", "hosts", "projects", "collaborations"] {
         if let Some(row) = snapshot.get(key) {
             value.insert(key.to_owned(), row.clone());
         }
     }
-    Value::Object(value)
+    Rc::new(Value::Object(value))
 }
 
 pub struct PaneDetails {
     service: DesktopService,
-    snapshot: Value,
+    snapshot: Rc<Value>,
     task_id: String,
     revision: Option<String>,
     generation: u64,
@@ -633,7 +633,7 @@ impl PaneDetails {
         let tasks = scope
             .as_ref()
             .map(|(host, cwd)| {
-                tracked_task_labels(&rows(&self.snapshot, "tasks"), &self.task_id, host, cwd)
+                tracked_task_labels(rows(&self.snapshot, "tasks"), &self.task_id, host, cwd)
             })
             .unwrap_or_default();
         let has_tasks = !tasks.is_empty();
@@ -769,8 +769,9 @@ impl PaneDetails {
     }
 
     fn render_work_plans(&mut self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
-        let mut plans: Vec<Value> = rows(&self.snapshot, "workPlans")
-            .into_iter()
+        let snapshot = self.snapshot.clone();
+        let mut plans: Vec<&Value> = rows(&snapshot, "workPlans")
+            .iter()
             .filter(|plan| text(plan, "taskId") == self.task_id)
             .collect();
         plans.sort_by(|a, b| {
@@ -1076,7 +1077,10 @@ impl PaneDetails {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let tasks = rows(&self.snapshot, "tasks");
+        // Share the already-filtered inspector snapshot while constructing its
+        // controls. No task, agent or plan arrays are copied on parent redraw.
+        let snapshot = self.snapshot.clone();
+        let tasks = rows(&snapshot, "tasks");
         let task = tasks.iter().find(|task| text(task, "id") == self.task_id);
         let Some(task) = task else {
             return div()
@@ -1086,8 +1090,8 @@ impl PaneDetails {
                 .child("Task details are unavailable.")
                 .into_any_element();
         };
-        let agent = rows(&self.snapshot, "agents")
-            .into_iter()
+        let agent = rows(&snapshot, "agents")
+            .iter()
             .find(|agent| text(&agent, "id") == text(task, "agentId"));
         let agent_name = agent
             .as_ref()
@@ -1101,15 +1105,15 @@ impl PaneDetails {
         let provider = text(task, "provider");
         let model = text(task, "model");
         let host_id = text(task, "hostId");
-        let host_name = rows(&self.snapshot, "hosts")
-            .into_iter()
+        let host_name = rows(&snapshot, "hosts")
+            .iter()
             .find(|host| text(host, "id") == host_id)
             .map(|host| text(&host, "name"))
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| "Unknown host".into());
         let project_id = text(task, "projectId");
-        let project_name = rows(&self.snapshot, "projects")
-            .into_iter()
+        let project_name = rows(&snapshot, "projects")
+            .iter()
             .find(|project| text(project, "id") == project_id)
             .map(|project| text(&project, "name"))
             .filter(|name| !name.is_empty())
@@ -1136,7 +1140,7 @@ impl PaneDetails {
         let native_session = text(task, "nativeSessionId");
         let identity_image = agent
             .as_ref()
-            .and_then(crate::chat::agent_avatar)
+            .and_then(|agent| crate::chat::agent_avatar(agent))
             .or_else(|| crate::branding::provider_for_ink(&provider, &model, palette.ink));
         let provider_icon = crate::branding::provider_for_ink(&provider, &model, palette.ink);
         let provider_summary = format!(
@@ -1305,17 +1309,17 @@ impl PaneDetails {
             .child(self.render_work_plans(palette, cx))
             .child(self.render_tracked_processes(palette, cx));
 
-        let collaborations: Vec<Value> = rows(&self.snapshot, "collaborations")
-            .into_iter()
+        let collaborations: Vec<&Value> = rows(&snapshot, "collaborations")
+            .iter()
             .filter(|item| {
                 text(item, "fromTaskId") == self.task_id || text(item, "toTaskId") == self.task_id
             })
             .collect();
-        let related_tasks: Vec<Value> = tasks
-            .into_iter()
+        let related_tasks: Vec<&Value> = tasks
+            .iter()
             .filter(|item| text(item, "parentTaskId") == self.task_id)
             .collect();
-        let agents = rows(&self.snapshot, "agents");
+        let agents = rows(&snapshot, "agents");
         let mut collaboration_section = div()
             .w_full()
             .mt(px(21.))

@@ -837,9 +837,9 @@ impl NeovimModel {
             None => return,
         };
         let hl = Highlight {
-            fg: attr.get("fg").and_then(Value::as_i64).filter(|v| *v >= 0),
-            bg: attr.get("bg").and_then(Value::as_i64).filter(|v| *v >= 0),
-            sp: attr.get("sp").and_then(Value::as_i64).filter(|v| *v >= 0),
+            fg: attr.get("foreground").and_then(Value::as_i64).filter(|v| *v >= 0),
+            bg: attr.get("background").and_then(Value::as_i64).filter(|v| *v >= 0),
+            sp: attr.get("special").and_then(Value::as_i64).filter(|v| *v >= 0),
             bold: attr.get("bold").and_then(Value::as_bool).unwrap_or(false),
             italic: attr.get("italic").and_then(Value::as_bool).unwrap_or(false),
             underline: attr
@@ -1337,11 +1337,11 @@ mod tests {
             ev("default_colors_set", vec![json!([-1, -1, -1, 0, 0])]),
             ev(
                 "hl_attr_define",
-                vec![json!([7, {"fg": 0xffffff, "bg": 0, "bold": true, "italic": false}])],
+                vec![json!([7, {"foreground": 0xffffff, "background": 0, "special": 0xff0000, "bold": true, "italic": false}])],
             ),
             ev(
                 "hl_attr_define",
-                vec![json!([9, {"fg": -1, "bg": -1, "underline": true, "reverse": true}])],
+                vec![json!([9, {"foreground": -1, "background": -1, "underline": true, "reverse": true}])],
             ),
             ev("flush", vec![]),
         ]));
@@ -1351,6 +1351,7 @@ mod tests {
         let h7 = m.highlights.get(&7).unwrap();
         assert_eq!(h7.fg, Some(0xffffff));
         assert_eq!(h7.bg, Some(0));
+        assert_eq!(h7.sp, Some(0xff0000));
         assert!(h7.bold);
         assert!(!h7.italic);
         let h9 = m.highlights.get(&9).unwrap();
@@ -1458,7 +1459,7 @@ mod tests {
             ev("win_pos", vec![json!([1, -1])]),
             ev(
                 "hl_attr_define",
-                vec![json!([u64::MAX, {"fg": "not-a-number"}])],
+                vec![json!([u64::MAX, {"foreground": "not-a-number"}])],
             ),
             // Real protocol passes a single string here; the dispatcher must
             // reject non-array trailing values silently per-typed

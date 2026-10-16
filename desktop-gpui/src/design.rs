@@ -26,8 +26,10 @@ pub mod space {
 }
 
 pub mod radius {
-    pub const CONTROL: f32 = 5.;
-    pub const CARD: f32 = 10.;
+    pub const CONTROL: f32 = 8.;
+    pub const CARD: f32 = 12.;
+    /// Floating settings/edit surfaces; ordinary cards retain their own radius.
+    pub const MODAL: f32 = 14.;
 }
 
 // Geometry — mirrors `AppSurface.svelte` sidebar and reference.html layout.
@@ -40,6 +42,27 @@ pub fn compact_sidebar_width_design(interface_scale: u16) -> f32 {
     COMPACT_SIDEBAR_WIDTH_POINTS / (normalize_interface_scale(interface_scale) as f32 / 100.)
 }
 pub const HEADER_HEIGHT: f32 = 58.;
+/// Named workspace pills and Tern's three sidebar controls share these metrics.
+/// The theme font is already interface-scaled; scale only the extra insets.
+pub struct WorkspaceTabMetrics {
+    pub height: Pixels,
+    pub icon_size: Pixels,
+    pub editor_size: Pixels,
+    pub text_size: Pixels,
+    pub row_height: Pixels,
+}
+pub fn workspace_tab_metrics(font_size: Pixels) -> WorkspaceTabMetrics {
+    let height = font_size + ui_scaled_px(18.);
+    WorkspaceTabMetrics {
+        height,
+        icon_size: font_size + ui_scaled_px(2.),
+        editor_size: font_size + ui_scaled_px(8.),
+        text_size: (font_size - ui_scaled_px(4.)).max(ui_scaled_px(8.)),
+        // Retain the native titlebar centre at normal sizes, but allow larger
+        // accessibility fonts/scales to fit without clipping either row.
+        row_height: px(HEADER_HEIGHT).max(height + ui_scaled_px(8.)),
+    }
+}
 pub const SIDEBAR_TABS_ROW_MIN_HEIGHT: f32 = 32.;
 /// Classic TabBar's native component owns a fixed 32pt strip; Modern accepts
 /// scaled geometry. Sidebar/header alignment must use the actual strip.
@@ -360,6 +383,58 @@ impl Palette {
     /// Read the panel slot under its current canonical name.
     pub fn panel(&self) -> u32 {
         self.card
+    }
+}
+
+/// Selected text shares the resolved theme accent, including custom and
+/// wallpaper accents. Keep the text's own foreground visible through the fill.
+/// This opacity is independent of window surface transparency.
+pub fn text_selection_color(palette: Palette) -> Rgba {
+    gpui_kit::rgb(palette.accent).opacity(if palette.dark { 0.24 } else { 0.20 })
+}
+
+#[cfg(test)]
+mod text_selection_tests {
+    use super::*;
+    fn luminance(color: Rgba) -> f32 {
+        fn linear(channel: f32) -> f32 {
+            if channel <= 0.04045 { channel / 12.92 }
+            else { ((channel + 0.055) / 1.055).powf(2.4) }
+        }
+        0.2126 * linear(color.r) + 0.7152 * linear(color.g) + 0.0722 * linear(color.b)
+    }
+    fn contrast(ink: Rgba, fill: Rgba, surface: Rgba) -> f32 {
+        let selected = Rgba {
+            r: fill.r * fill.a + surface.r * (1. - fill.a),
+            g: fill.g * fill.a + surface.g * (1. - fill.a),
+            b: fill.b * fill.a + surface.b * (1. - fill.a), a: 1.,
+        };
+        let a = luminance(ink); let b = luminance(selected);
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+    #[test]
+    fn selection_preserves_readable_theme_ink_across_preset_surfaces() {
+        for (name, light, dark) in PRESETS {
+            for palette in [*light, *dark] {
+                let fill = text_selection_color(palette);
+                for surface in [palette.paper, palette.card, palette.code] {
+                    assert!(contrast(gpui_kit::rgb(palette.ink), fill, gpui_kit::rgb(surface)) >= 3.,
+                        "{name} selected text must remain readable (dark={})", palette.dark);
+                }
+            }
+        }
+    }
+    #[test]
+    fn selection_tracks_custom_accent_in_both_appearances_without_changing_ink() {
+        for theme in ["light", "dark"] {
+            let blue = palette(&serde_json::json!({"theme":theme,"accent":"#6594db"}), WindowAppearance::Light);
+            let purple = palette(&serde_json::json!({"theme":theme,"accent":"#a78bfa"}), WindowAppearance::Light);
+            let blue_fill = text_selection_color(blue); let purple_fill = text_selection_color(purple);
+            assert_ne!(blue_fill, purple_fill);
+            assert_eq!(blue.ink, purple.ink);
+            assert!((0.20..=0.30).contains(&purple_fill.a));
+            assert!(contrast(gpui_kit::rgb(purple.ink), purple_fill, gpui_kit::rgb(purple.card)) >= 4.5);
+        }
     }
 }
 

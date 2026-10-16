@@ -94,6 +94,46 @@ pub struct MoveFocusedTab {
 }
 #[derive(gpui_kit::Action, Clone, PartialEq, Eq, Debug)]
 #[action(namespace = monitter_desktop, no_json)]
+pub struct SwitchNamedWorkspace {
+    pub direction: i8,
+}
+
+#[derive(gpui_kit::Action, Clone, PartialEq, Eq, Debug)]
+#[action(namespace = monitter_desktop, no_json)]
+pub struct SelectNamedWorkspace {
+    pub index: usize,
+}
+
+/// Installed after gpui-kit so these global actions win over input selection.
+pub(super) fn pane_and_workspace_bindings() -> Vec<KeyBinding> {
+    let mut bindings = Vec::new();
+    for direction in ["left", "right", "up", "down"] {
+        bindings.push(KeyBinding::new(
+            &format!("cmd-ctrl-{direction}"),
+            MoveFocusedTab { direction: direction.into() },
+            None,
+        ));
+    }
+    for (key, direction) in [
+        ("cmd-shift-left", -1), ("cmd-shift-up", -1), ("cmd-[", -1),
+        ("cmd-shift-right", 1), ("cmd-shift-down", 1), ("cmd-]", 1),
+    ] {
+        bindings.push(KeyBinding::new(key, SwitchNamedWorkspace { direction }, None));
+    }
+    for index in 1..=9 {
+        bindings.push(KeyBinding::new(
+            &format!("cmd-{index}"), SelectNamedWorkspace { index }, None,
+        ));
+    }
+    bindings.extend([
+        KeyBinding::new("cmd-ctrl-f", crate::native_menu::Fullscreen, None),
+        KeyBinding::new("cmd-enter", crate::native_menu::Fullscreen, None),
+    ]);
+    bindings
+}
+
+#[derive(gpui_kit::Action, Clone, PartialEq, Eq, Debug)]
+#[action(namespace = monitter_desktop, no_json)]
 pub struct FocusRelativeTab {
     pub direction: i8,
 }
@@ -141,6 +181,9 @@ impl DesktopShortcuts {
         cx.defer(move |cx| {
             let _ = handle.update(cx, |_root, window, cx| {
                 let _ = weak.update(cx, |desktop, cx| {
+                    // Global actions can dispatch without an interactive root.
+                    // Wait for authoritative workspace reconciliation first.
+                    if desktop.startup_pending { return; }
                     // A sheet/preferences dialog owns its keyboard. In particular,
                     // don't let workspace shortcuts mutate the hidden dock below it.
                     if workspace_shortcuts_blocked(
@@ -183,14 +226,7 @@ pub fn install(window_handle: AnyWindowHandle, shortcuts: DesktopShortcuts, cx: 
                 // through Cmd+T's browser-aware new-tab policy.
                 let result = desktop
                     .dock
-                    .update(cx, |dock, cx| {
-                        let Some(group) = dock.focused_group_node(window, cx) else {
-                            return Err(
-                                "Focus a workspace tab before opening a terminal.".to_string()
-                            );
-                        };
-                        dock.add_empty_tab(group, window, cx)
-                    })
+                    .update(cx, |dock, cx| dock.add_focused_empty_tab(window, cx))
                     .and_then(|id| {
                         desktop.empty_pane_action(
                             &id,
@@ -324,6 +360,24 @@ pub fn install(window_handle: AnyWindowHandle, shortcuts: DesktopShortcuts, cx: 
     });
     cx.on_action({
         let shortcuts = shortcuts.clone();
+        move |action: &SelectNamedWorkspace, cx| {
+            let index = action.index;
+            shortcuts.dispatch(&window_handle, cx, move |desktop, window, cx| {
+                desktop.select_named_workspace(index, window, cx);
+            });
+        }
+    });
+    cx.on_action({
+        let shortcuts = shortcuts.clone();
+        move |action: &SwitchNamedWorkspace, cx| {
+            let direction = action.direction;
+            shortcuts.dispatch(&window_handle, cx, move |desktop, window, cx| {
+                desktop.cycle_named_workspace(direction, window, cx);
+            });
+        }
+    });
+    cx.on_action({
+        let shortcuts = shortcuts.clone();
         move |action: &FocusRelativeTab, cx| {
             let direction = action.direction;
             shortcuts.dispatch(&window_handle, cx, move |desktop, window, cx| {
@@ -446,6 +500,7 @@ pub fn install(window_handle: AnyWindowHandle, shortcuts: DesktopShortcuts, cx: 
         });
     }
 
+    cx.bind_keys(pane_and_workspace_bindings());
     cx.bind_keys([
         KeyBinding::new("cmd-shift-c", OpenTaskDraft, None),
         KeyBinding::new("cmd-shift-t", OpenFocusedTerminal, None),
@@ -458,34 +513,6 @@ pub fn install(window_handle: AnyWindowHandle, shortcuts: DesktopShortcuts, cx: 
         KeyBinding::new("cmd-p", OpenCommands, None),
         KeyBinding::new("ctrl-shift-k", TerminalOpenSwitcher, None),
         KeyBinding::new("ctrl-shift-p", TerminalOpenCommands, None),
-        KeyBinding::new(
-            "cmd-shift-left",
-            MoveFocusedTab {
-                direction: "left".into(),
-            },
-            None,
-        ),
-        KeyBinding::new(
-            "cmd-shift-right",
-            MoveFocusedTab {
-                direction: "right".into(),
-            },
-            None,
-        ),
-        KeyBinding::new(
-            "cmd-shift-up",
-            MoveFocusedTab {
-                direction: "up".into(),
-            },
-            None,
-        ),
-        KeyBinding::new(
-            "cmd-shift-down",
-            MoveFocusedTab {
-                direction: "down".into(),
-            },
-            None,
-        ),
         KeyBinding::new("cmd-alt-left", FocusRelativeTab { direction: -1 }, None),
         KeyBinding::new("cmd-alt-right", FocusRelativeTab { direction: 1 }, None),
         KeyBinding::new(
@@ -762,24 +789,8 @@ impl crate::Desktop {
             V::Split { direction, size } => self.dock.update(cx, |dock, cx| {
                 dock.split_focused_group(&direction, size, window, cx)
             }),
-            V::Terminal => {
-                let group = self.dock.read(cx).focused_group_node(window, cx);
-                match group {
-                    Some(group) => self
-                        .dock
-                        .update(cx, |dock, cx| dock.add_empty_tab(group, window, cx))
-                        .and_then(|id| {
-                            self.empty_pane_action(
-                                &id,
-                                crate::empty_pane::EmptyPaneAction::Terminal,
-                                window,
-                                cx,
-                            )
-                            .map(|_| true)
-                        }),
-                    None => Ok(false),
-                }
-            }
+            V::Terminal => self.dock.update(cx, |dock, cx| dock.add_focused_empty_tab(window, cx))
+                .and_then(|id| self.empty_pane_action(&id, crate::empty_pane::EmptyPaneAction::Terminal, window, cx).map(|_| true)),
             V::ClosePane(target) => Ok(self
                 .dock
                 .update(cx, |dock, cx| dock.close_focused_group(target, window, cx))),

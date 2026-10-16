@@ -15,7 +15,7 @@ struct TreeClickHarness {
 impl Render for TreeClickHarness {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let clicks = self.clicks.clone();
-        let rows: StableRowRenderer = Rc::new(RefCell::new(move |_, _: &mut Window, _: &mut App| {
+        let rows: StableRowRenderer = Rc::new(RefCell::new(move |_, _: &mut Window, _: &mut App, _: f32| {
             let clicks = clicks.clone();
             Button::new("completed-turn")
                 .label("Show completed turn")
@@ -23,7 +23,7 @@ impl Render for TreeClickHarness {
                 .on_click(move |_, _, _| clicks.set(clicks.get() + 1))
                 .into_any_element()
         }));
-        retain_transcript_list(&mut self.retained, self.state.clone(), rows, cx);
+        retain_transcript_list(&mut self.retained, self.state.clone(), rows, Rc::new(Vec::new()), cx);
         div().size_full().child(self.retained.as_ref().unwrap().clone()
             .cached(StyleRefinement::default().size_full()))
     }

@@ -6,19 +6,26 @@ rust-version = "1.95"
 publish = false
 
 [features]
-visual-export = ["gpui-kit/test-support"]
+visual-export = ["gpui-kit/test-support", "monitter/gpui-ui-fixtures"]
 performance-profiling = ["gpui-pre/profiler", "monitter/gpui-ui-fixtures", "gpui-wry/performance-profiling"]
 
 [dependencies]
 rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled"] }
 argon2 = "=0.5.3"
 rand_core = { version = "0.6", features = ["getrandom"] }
-gpui-kit = "=0.7.0"
+gpui-kit = { version = "=0.7.0", features = [
+    "tree-sitter-rust", "tree-sitter-javascript", "tree-sitter-typescript",
+    "tree-sitter-tsx", "tree-sitter-python", "tree-sitter-bash",
+    "tree-sitter-css", "tree-sitter-html", "tree-sitter-yaml",
+    "tree-sitter-toml", "tree-sitter-go", "tree-sitter-diff",
+] }
 gpui-wry = { path = "vendor/gpui-wry" }
 wry = "=0.55.1"
 url = "2"
 monitter = { path = "../src-tauri", features = ["experimental-gpui"] }
 serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+im = "=15.1.0"
 unicode-segmentation = "=1.13.3"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 futures = { version = "0.3", default-features = false, features = ["std"] }
@@ -32,6 +39,8 @@ vt100 = "=0.16.2"
 gpui-pre = { path = "vendor/gpui-pre" }
 gpui-pre-macos = { path = "vendor/gpui-pre-macos" }
 gpui-pre-apple = { path = "vendor/gpui-pre-apple" }
+gpui-pre-wgpu = { path = "vendor/gpui-pre-wgpu" }
+gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
 gpui-base = { path = "vendor/gpui-base" }
 gpui-component = { path = "vendor/gpui-component" }
 

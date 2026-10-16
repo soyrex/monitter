@@ -169,7 +169,10 @@ pub(super) fn render_behavior(
             let command = if cfg!(target_os = "macos") { "⌘" } else { "Ctrl" };
             let option = if cfg!(target_os = "macos") { "⌥" } else { "Alt" };
             let mut rows = vec![
-                (format!("{command}+Shift+arrow"), "Move tab to a pane; create a pane if needed"),
+                (if cfg!(target_os = "macos") { "⌘+Ctrl+arrow".to_owned() } else { "Super+Ctrl+arrow".to_owned() }, "Move the focused pane"),
+                (format!("{command}+Ctrl+F / {command}+Enter"), "Toggle fullscreen"),
+                (format!("{command}+1–9"), "Select workspace by tab position"),
+                (format!("{command}+Shift+arrow / {command}+[ / {command}+]"), "Previous / next workspace"),
                 (format!("{command}+{option}+Up / Down"), "Focus the pane above or below"),
             ];
             if shortcut == "vim" {
@@ -255,7 +258,7 @@ pub(super) fn render_conversation(
         if send {
             "Enter sends. Shift+Enter adds a new line."
         } else {
-            "Cmd/Ctrl+Enter sends. Enter adds a new line."
+            "Enter adds a new line. Use the Send button to send."
         },
         "sendWithEnter",
         send,
@@ -317,7 +320,26 @@ pub(super) fn render_boards(
                         }
                         view.patch_settings(json!({"boardGuidanceText":if text.trim().is_empty() {Value::Null} else {json!(text)}}), cx);
                     }))));
-        return stack().child(boards).into_any_element();
+        let mcp_approval_supported = settings.get("autoApproveMonitterMcp").and_then(Value::as_bool);
+        let mcp_approval = settings_card("Monitter MCP approvals", "Choose whether built-in Monitter tools can run without a harness approval prompt.", palette)
+            .child(settings_toggle(
+                "Automatically approve Monitter tools",
+                "Let Codex and Claude use built-in Monitter tools without asking each time. Host terminal commands and skill installation still need approval. Changes apply when the agent process next starts; running agents keep their current setting.",
+                mcp_approval_supported == Some(true),
+                palette,
+            ).child(Switch::new("settings-auto-approve-monitter-mcp")
+                .checked(mcp_approval_supported == Some(true))
+                .disabled(desktop.busy || mcp_approval_supported.is_none())
+                .accessibility_label("Automatically approve Monitter tools")
+                .on_change(cx.listener(|view, enabled, _, cx| {
+                    view.patch_settings(json!({"autoApproveMonitterMcp":*enabled}), cx);
+                }))))
+            .child(if mcp_approval_supported.is_none() {
+                settings_hint("This setting requires a Monitter backend update.", palette)
+            } else {
+                settings_hint("This setting affects future harness launches and resumes after the current process retires.", palette)
+            });
+        return stack().child(boards).child(mcp_approval).into_any_element();
     }
     stack()
         .child(settings_hint("Preferences are loading…", palette))

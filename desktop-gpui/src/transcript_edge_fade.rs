@@ -7,6 +7,7 @@ pub(crate) struct TranscriptEdgeFade {
     top_height: Pixels,
     bottom_height: Pixels,
     list: Option<ListState>,
+    scroll: Option<ScrollHandle>,
 }
 impl TranscriptEdgeFade {
     pub(crate) fn new(child: impl IntoElement, top_height: Pixels, bottom_height: Pixels) -> Self {
@@ -15,14 +16,35 @@ impl TranscriptEdgeFade {
             top_height,
             bottom_height,
             list: None,
+            scroll: None,
         }
     }
     /// Virtual lists expose their measured offset after prepaint, so fades
     /// follow scrolling without another parent render or layout pass.
     pub(crate) fn for_list(child: impl IntoElement, list: ListState, distance: Pixels) -> Self {
-        Self { child: child.into_any_element(), top_height: distance, bottom_height: distance, list: Some(list) }
+        Self {
+            child: child.into_any_element(),
+            top_height: distance,
+            bottom_height: distance,
+            list: Some(list),
+            scroll: None,
+        }
     }
-
+    /// Track a standard overflow container while anchoring its alpha ramp to
+    /// the currently visible region when an ancestor clips or slides it.
+    pub(crate) fn for_scroll(
+        child: impl IntoElement,
+        scroll: ScrollHandle,
+        distance: Pixels,
+    ) -> Self {
+        Self {
+            child: child.into_any_element(),
+            top_height: distance,
+            bottom_height: distance,
+            list: None,
+            scroll: Some(scroll),
+        }
+    }
 }
 impl IntoElement for TranscriptEdgeFade {
     type Element = Self;
@@ -74,14 +96,48 @@ impl Element for TranscriptEdgeFade {
         #[cfg(target_os = "macos")]
         let (top_height, bottom_height) = if let Some(list) = &self.list {
             let maximum = list.max_offset_for_scrollbar().y.max(Pixels::ZERO);
-            let traveled = (-list.scroll_px_offset_for_scrollbar().y).max(Pixels::ZERO).min(maximum);
-            (if traveled > px(0.5) { self.top_height } else { Pixels::ZERO },
-             if maximum - traveled > px(0.5) { self.bottom_height } else { Pixels::ZERO })
-        } else { (self.top_height, self.bottom_height) };
+            let traveled = (-list.scroll_px_offset_for_scrollbar().y)
+                .max(Pixels::ZERO)
+                .min(maximum);
+            (
+                if traveled > px(0.5) {
+                    self.top_height
+                } else {
+                    Pixels::ZERO
+                },
+                if maximum - traveled > px(0.5) {
+                    self.bottom_height
+                } else {
+                    Pixels::ZERO
+                },
+            )
+        } else if let Some(scroll) = &self.scroll {
+            let maximum = scroll.max_offset().y.max(Pixels::ZERO);
+            let traveled = (-scroll.offset().y).max(Pixels::ZERO).min(maximum);
+            (
+                if traveled > px(0.5) {
+                    self.top_height
+                } else {
+                    Pixels::ZERO
+                },
+                if maximum - traveled > px(0.5) {
+                    self.bottom_height
+                } else {
+                    Pixels::ZERO
+                },
+            )
+        } else {
+            (self.top_height, self.bottom_height)
+        };
+        // A composer can slide below a small pane while the transcript keeps
+        // larger layout bounds. Nested clipping preserves fade endpoints, so
+        // anchor this ramp to the visible paint region before nesting masks.
+        #[cfg(target_os = "macos")]
+        let visible_bounds = bounds.intersect(&window.content_mask().bounds);
         #[cfg(target_os = "macos")]
         window.with_content_mask(
             Some(ContentMask::vertical_fade_edges(
-                bounds,
+                visible_bounds,
                 top_height,
                 bottom_height,
             )),
@@ -94,7 +150,77 @@ impl Element for TranscriptEdgeFade {
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
-    use super::*;
+    use super::TranscriptEdgeFade;
+    use ::gpui::{
+        Bounds, ContentMask, Pixels, ScaledPixels, TestAppContext, Window, canvas, div, point, px,
+        size,
+    };
+    #[::gpui::test]
+    fn clipped_transcript_fades_at_visible_pane_edge(cx: &mut TestAppContext) {
+        use ::gpui::{
+            AppContext as _, Context, InteractiveElement as _, IntoElement, ParentElement as _,
+            Render, Styled as _,
+        };
+        use std::{cell::RefCell, rc::Rc};
+        struct ClippedPane {
+            painted: Rc<RefCell<Option<(Bounds<Pixels>, ContentMask<Pixels>)>>>,
+        }
+        impl Render for ClippedPane {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let painted = self.painted.clone();
+                // The lower composer is outside this short pane. The transcript
+                // retains its full layout height, but paint must end at the clip.
+                div()
+                    .w(px(200.))
+                    .h(px(100.))
+                    .overflow_hidden()
+                    .debug_selector(|| "clipped-chat-pane".into())
+                    .child(TranscriptEdgeFade::new(
+                        div()
+                            .relative()
+                            .w(px(200.))
+                            .h(px(200.))
+                            .flex_shrink_0()
+                            .child(
+                                canvas(
+                                    |_, _, _| (),
+                                    move |bounds, _, window, _| {
+                                        *painted.borrow_mut() =
+                                            Some((bounds, window.content_mask()));
+                                    },
+                                )
+                                .absolute()
+                                .inset_0(),
+                            ),
+                        px(10.),
+                        px(24.),
+                    ))
+            }
+        }
+        let painted = Rc::new(RefCell::new(None));
+        let (_, visual) = cx.add_window_view({
+            let painted = painted.clone();
+            move |_, _| ClippedPane { painted }
+        });
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        let pane = visual
+            .debug_bounds("clipped-chat-pane")
+            .expect("pane rendered");
+        let (transcript, mask) = painted.borrow().clone().expect("transcript painted");
+        assert!(
+            transcript.bottom() > pane.bottom(),
+            "composer-side layout extends below pane"
+        );
+        assert_eq!(mask.bounds.bottom(), pane.bottom());
+        assert_eq!(
+            mask.fade_bottom,
+            pane.bottom(),
+            "alpha reaches zero at the visible bottom edge"
+        );
+        assert_eq!(mask.fade_bottom_height, px(24.));
+        assert_eq!(mask.scale(2.).fade_bottom, pane.bottom().scale(2.));
+    }
+
     #[::core::prelude::v1::test]
     fn independent_edge_heights_survive_nested_clips_and_scale() {
         let viewport = Bounds::new(point(px(0.), px(0.)), size(px(400.), px(500.)));

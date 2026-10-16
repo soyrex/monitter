@@ -1,0 +1,97 @@
+/* Monitter report styles v1. Tokens are supplied by the active desktop theme. */
+.monitter-report {
+  margin: 0;
+  min-width: 0;
+  background: var(--report-paper);
+  color: var(--report-ink);
+  font-family: var(--report-font-family);
+  font-size: var(--report-font-size);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+  -webkit-text-size-adjust: 100%;
+}
+.monitter-report *, .monitter-report *::before, .monitter-report *::after { box-sizing: border-box; }
+.monitter-report .report-container { width: min(100%, 76rem); margin-inline: auto; padding: clamp(1rem, 4vw, 3rem); }
+.monitter-report .report-header { padding-block-end: 1.5rem; margin-block-end: 1.5rem; border-block-end: 1px solid var(--report-line); }
+.monitter-report h1, .monitter-report h2, .monitter-report h3, .monitter-report h4 { line-height: 1.2; font-weight: 600; text-wrap: balance; margin: 1.5em 0 .6em; }
+.monitter-report h1 { font-size: clamp(1.8em, 5vw, 2.8em); letter-spacing: -.035em; margin-block-start: 0; }
+.monitter-report h2 { font-size: 1.5em; letter-spacing: -.02em; }
+.monitter-report h3 { font-size: 1.15em; }
+.monitter-report p, .monitter-report ul, .monitter-report ol, .monitter-report dl { margin-block: 0 1em; }
+.monitter-report li + li { margin-block-start: .35em; }
+.monitter-report a { color: var(--report-accent); text-decoration-thickness: .08em; text-underline-offset: .2em; }
+.monitter-report a:hover { text-decoration-thickness: .15em; }
+.monitter-report :focus-visible { outline: 3px solid var(--report-accent); outline-offset: 3px; }
+.monitter-report .report-lead { font-size: 1.15em; max-width: 65ch; }
+.monitter-report .report-muted, .monitter-report .report-meta, .monitter-report figcaption { color: var(--report-muted); }
+.monitter-report .report-meta { display: flex; flex-wrap: wrap; gap: .4em 1.2em; font-size: .85em; }
+.monitter-report .report-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr)); gap: 1rem; margin-block: 1.5rem; }
+.monitter-report .report-grid > * { min-width: 0; }
+.monitter-report .report-card { background: var(--report-panel); border: 1px solid var(--report-line); border-radius: .75rem; padding: clamp(1rem, 2.5vw, 1.5rem); }
+.monitter-report .report-card > :first-child { margin-block-start: 0; }
+.monitter-report .report-card > :last-child { margin-block-end: 0; }
+.monitter-report .report-metric { display: block; font-size: clamp(1.8em, 4vw, 2.5em); font-weight: 600; line-height: 1.2; font-variant-numeric: tabular-nums; }
+.monitter-report .report-eyebrow { color: var(--report-muted); font-size: .75em; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; }
+.monitter-report .report-badge { display: inline-flex; align-items: center; max-width: 100%; padding: .15em .65em; border: 1px solid var(--report-line); border-radius: 999px; background: var(--report-soft); font-size: .8em; font-weight: 600; }
+.monitter-report .report-callout, .monitter-report blockquote { margin: 1.5rem 0; padding: 1rem 1.25rem; background: var(--report-soft); border-inline-start: 3px solid var(--report-accent); border-radius: 0 .5rem .5rem 0; }
+.monitter-report .report-callout > :last-child, .monitter-report blockquote > :last-child { margin-block-end: 0; }
+.monitter-report hr { border: 0; border-block-start: 1px solid var(--report-line); margin-block: 2rem; }
+.monitter-report figure { margin: 1.5rem 0; }
+.monitter-report img, .monitter-report svg, .monitter-report video, .monitter-report canvas { max-width: 100%; height: auto; }
+.monitter-report figcaption { margin-block-start: .5em; font-size: .85em; }
+.monitter-report code, .monitter-report pre, .monitter-report kbd, .monitter-report samp { font-family: var(--report-mono-font-family); font-size: .9em; }
+.monitter-report :not(pre) > code, .monitter-report kbd { background: var(--report-code); padding: .1em .35em; border-radius: .25em; }
+.monitter-report pre { max-width: 100%; overflow-x: auto; white-space: pre; padding: 1rem; border: 1px solid var(--report-line); border-radius: .5rem; background: var(--report-code); }
+.monitter-report pre code { font-size: 1em; }
+.monitter-report .report-table-wrap { max-width: 100%; overflow-x: auto; margin-block: 1.5rem; border: 1px solid var(--report-line); border-radius: .5rem; }
+.monitter-report table { width: 100%; border-collapse: collapse; font-size: .9em; font-variant-numeric: tabular-nums; }
+.monitter-report caption { padding: .75em 1em; text-align: start; font-weight: 600; }
+.monitter-report th, .monitter-report td { padding: .75em 1em; text-align: start; vertical-align: top; border-block-end: 1px solid var(--report-line); }
+.monitter-report th { background: var(--report-soft); font-weight: 600; }
+.monitter-report tbody tr:last-child td { border-block-end: 0; }
+.monitter-report .report-numeric { text-align: end; white-space: nowrap; }
+.monitter-report details { margin-block: 1rem; padding: 1rem; border: 1px solid var(--report-line); border-radius: .5rem; }
+.monitter-report summary { cursor: pointer; font-weight: 600; }
+.monitter-report details[open] summary { margin-block-end: .75rem; }
+.monitter-report button, .monitter-report input, .monitter-report select, .monitter-report textarea { max-width: 100%; color: inherit; background: var(--report-panel); font: inherit; padding: .5em .75em; border: 1px solid var(--report-line); border-radius: .4rem; }
+.monitter-report button { cursor: pointer; }
+.monitter-report .report-footer { margin-block-start: 2rem; padding-block-start: 1rem; border-block-start: 1px solid var(--report-line); font-size: .8em; color: var(--report-muted); }
+.monitter-report .report-sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+/* Optional contents navigation for standalone reports:
+   .report-layout > .report-sidebar + main.report-container
+   Put a labelled nav.report-toc with ordinary fragment links in the sidebar.
+   Below 64rem the sidebar flows above the report and links wrap as pills.
+   .report-toc can also be used by itself as a wrapping pill navigation. */
+.monitter-report .report-layout { --report-sidebar-width: 16rem; min-width: 0; }
+.monitter-report .report-layout > .report-sidebar { padding: 1.5rem; background: var(--report-sidebar); border-block-end: 1px solid var(--report-line); }
+.monitter-report .report-toc { display: flex; flex-wrap: wrap; align-items: flex-start; gap: .5rem; font-size: .85em; }
+.monitter-report .report-toc a { display: inline-flex; align-items: center; min-height: 2.75rem; max-width: 100%; padding: .5em .85em; border: 1px solid var(--report-line); border-radius: 999px; background: var(--report-panel); color: var(--report-ink); text-decoration: none; }
+.monitter-report .report-toc a:hover, .monitter-report .report-toc a[aria-current="location"] { background: var(--report-soft); border-color: var(--report-accent); color: var(--report-accent); }
+.monitter-report .report-layout [id] { scroll-margin-block-start: 1.5rem; }
+.monitter-report .report-skip-link { position: fixed; z-index: 10; inset-block-start: 1rem; inset-inline-start: 1rem; max-width: calc(100% - 2rem); padding: .5em 1em; border-radius: .4rem; background: var(--report-panel); transform: translateY(calc(-100% - 2rem)); }
+.monitter-report .report-skip-link:focus { transform: none; }
+@media screen and (min-width: 64rem) {
+  .monitter-report .report-layout { padding-inline-start: var(--report-sidebar-width); }
+  .monitter-report .report-layout > .report-sidebar { position: fixed; inset-block: 0; inset-inline-start: 0; width: var(--report-sidebar-width); overflow-y: auto; overscroll-behavior-y: contain; border-block-end: 0; border-inline-end: 1px solid var(--report-line); }
+  .monitter-report .report-layout > .report-sidebar .report-toc { flex-direction: column; flex-wrap: nowrap; align-items: stretch; }
+  .monitter-report .report-layout > .report-sidebar .report-toc a { border-radius: .5rem; }
+}
+@media (max-width: 36rem) {
+  .monitter-report .report-grid { grid-template-columns: minmax(0, 1fr); }
+  .monitter-report th, .monitter-report td { padding: .6em; }
+  .monitter-report .report-container { padding: 1rem; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .monitter-report *, .monitter-report *::before, .monitter-report *::after { scroll-behavior: auto !important; animation: none !important; transition: none !important; }
+}
+@media print {
+  .monitter-report { --report-paper: #fff; --report-panel: #fff; --report-sidebar: #fff; --report-ink: #111; --report-muted: #444; --report-line: #bbb; --report-soft: #f3f3f3; --report-code: #f3f3f3; --report-accent: #174b79; color-scheme: light; font-size: 11pt; }
+  .monitter-report .report-layout { padding: 0; }
+  .monitter-report .report-layout > .report-sidebar, .monitter-report .report-skip-link { display: none !important; }
+  .monitter-report .report-container { width: 100%; max-width: none; padding: 0; }
+  .monitter-report .report-card, .monitter-report figure, .monitter-report tr { break-inside: avoid; }
+  .monitter-report h1, .monitter-report h2, .monitter-report h3 { break-after: avoid; }
+  .monitter-report .report-table-wrap, .monitter-report pre { overflow: visible; }
+  .monitter-report pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .monitter-report .report-no-print { display: none !important; }
+}

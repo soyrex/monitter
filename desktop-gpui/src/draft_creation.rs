@@ -6,6 +6,7 @@
 //! `set_error` so the user's selections and message remain in place.
 use crate::design::ui_scaled_px as px;
 use gpui_kit::{
+    component::popover::Popover,
     component::{Disableable, Sizable},
     component::{
         button::*,
@@ -176,7 +177,7 @@ pub struct DraftModelSelection {
 
 pub struct DraftCreationPane {
     service: DesktopService,
-    snapshot: Value,
+    snapshot: Rc<Value>,
     agent_id: String,
     project_id: String,
     parent_task_id: Option<String>,
@@ -193,6 +194,11 @@ pub struct DraftCreationPane {
     selected_effort: Option<String>,
     selected_fast_mode: Option<bool>,
     model_drafts: HashMap<String, (String, Option<String>, Option<bool>)>,
+    agent_search: Entity<InputState>,
+    project_search: Entity<InputState>,
+    picker_open: Option<&'static str>,
+    options_open: bool,
+    native_session: Entity<InputState>,
     title: Entity<InputState>,
     cwd: Entity<InputState>,
     message: Entity<TextareaState>,
@@ -361,6 +367,15 @@ impl DraftCreationPane {
         cwd.update(cx, |input, cx| {
             input.set_value(suggested_cwd(&snapshot, &agent_id, ""), window, cx)
         });
+        let agent_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search agents…"));
+        let project_search =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search projects…"));
+        let native_session =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Resume an idle native session"));
+        let agent_search_changes =
+            cx.subscribe(&agent_search, |_, _, _: &InputEvent, cx| cx.notify());
+        let project_search_changes =
+            cx.subscribe(&project_search, |_, _, _: &InputEvent, cx| cx.notify());
         let title = cx.new(|cx| InputState::new(window, cx).placeholder("Optional task title"));
         let message = cx.new(|cx| {
             TextareaState::new(window, cx).placeholder("Describe what you want to work on…")
@@ -379,10 +394,19 @@ impl DraftCreationPane {
             if matches!(event, InputEvent::Change) {
                 pane.emit_changed(cx);
             }
+            if matches!(
+                event,
+                InputEvent::PressEnter {
+                    secondary: true,
+                    shift: false
+                }
+            ) {
+                pane.send(cx);
+            }
         });
         Self {
             service,
-            snapshot,
+            snapshot: Rc::new(snapshot),
             agent_id,
             project_id: String::new(),
             parent_task_id: None,
@@ -399,10 +423,21 @@ impl DraftCreationPane {
             selected_effort: None,
             selected_fast_mode: None,
             model_drafts: HashMap::new(),
+            agent_search,
+            project_search,
+            native_session,
+            picker_open: None,
+            options_open: false,
             title,
             cwd,
             message,
-            _input_subscriptions: vec![title_changes, cwd_changes, message_changes],
+            _input_subscriptions: vec![
+                title_changes,
+                cwd_changes,
+                message_changes,
+                agent_search_changes,
+                project_search_changes,
+            ],
         }
     }
 
@@ -592,7 +627,15 @@ impl DraftCreationPane {
     /// Replace available agents and projects after a service snapshot update.
     /// Existing selections are retained while still present.
     pub fn set_snapshot(&mut self, snapshot: Rc<Value>, cx: &mut Context<Self>) {
-        self.snapshot = snapshot.as_ref().clone();
+        let changed = ["agents", "projects", "hosts", "settings", "nativeSessions"]
+            .iter().any(|key| self.snapshot[*key] != snapshot[*key])
+            || [self.created_task_id.as_ref(), self.parent_task_id.as_ref()].into_iter().flatten().any(|id| {
+                let task = |value: &Value| value["tasks"].as_array().into_iter().flatten()
+                    .find(|task| task["id"].as_str() == Some(id)).cloned();
+                task(&self.snapshot) != task(&snapshot)
+            });
+        self.snapshot = snapshot;
+        if !changed { return; }
         if let Some(created_id) = self.created_task_id.clone() {
             if let Some(task) = rows(&self.snapshot, "tasks")
                 .into_iter()
@@ -861,7 +904,7 @@ impl DraftCreationPane {
             "cwd": working_directory,
             "sandbox": sandbox,
             "modelSettings": model_settings,
-            "nativeSessionId": Value::Null,
+            "nativeSessionId": if self.native_session.read(cx).value().trim().is_empty() { Value::Null } else { json!(self.native_session.read(cx).value().trim()) },
             "parentTaskId": self.parent_task_id,
             "channelId": Value::Null
         });
@@ -930,26 +973,32 @@ impl DraftCreationPane {
     }
 
     fn request_catalog(&mut self, cx: &mut Context<Self>) {
+        self.request_catalog_refresh(false, cx);
+    }
+
+    fn request_catalog_refresh(&mut self, force: bool, cx: &mut Context<Self>) {
         let Some(agent) = self.selected_agent() else {
             return;
         };
         let key = self.catalog_identity();
-        if self.catalog_key.as_deref() == Some(&key)
+        if (!force && self.catalog_key.as_deref() == Some(&key))
             || self.catalog_loading_key.as_deref() == Some(&key)
         {
             return;
         }
-        let had_draft = self.model_drafts.contains_key(&key);
-        if let Some((model, effort, fast)) = self.model_drafts.get(&key).cloned() {
-            self.selected_model = model;
-            self.selected_effort = effort;
-            self.selected_fast_mode = fast;
+        let had_draft = force || self.model_drafts.contains_key(&key);
+        if !force {
+            if let Some((model, effort, fast)) = self.model_drafts.get(&key).cloned() {
+                self.selected_model = model;
+                self.selected_effort = effort;
+                self.selected_fast_mode = fast;
+            }
         }
-        let target = json!({"agentId":self.agent_id,"projectId":if self.project_id.is_empty(){Value::Null}else{json!(self.project_id)},"codexHome":agent.get("codexHome").cloned().unwrap_or(Value::Null)});
+        let target = json!({"agentId":self.agent_id,"projectId":if self.project_id.is_empty(){Value::Null}else{json!(self.project_id)},"codexHome":agent.get("codexHome").cloned().unwrap_or(Value::Null),"refresh":force});
         let service = self.service.clone();
         self.catalog_loading_key = Some(key.clone());
         self.catalog_error = None;
-        self.catalog = None;
+        if !force { self.catalog = None; }
         let task = cx
             .background_executor()
             .spawn(async move { service.invoke("get_model_catalog", json!({"target":target})) });
@@ -1000,288 +1049,179 @@ impl DraftCreationPane {
     }
 }
 
-impl Render for DraftCreationPane {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.request_catalog(cx);
-        let agents = rows(&self.snapshot, "agents");
-        let projects = rows(&self.snapshot, "projects");
-        let selected_agent = self.selected_agent();
-        let mut agent_choices = div().flex().flex_wrap().gap(px(5.));
-        for agent in agents {
-            let id = field(&agent, "id");
-            let name = field(&agent, "name");
-            agent_choices = agent_choices.child(
-                compact_choice_button(
-                    SharedString::from(format!("draft-agent-{id}")),
-                    if id == self.agent_id {
-                        format!("✓ {name}")
-                    } else {
-                        name
-                    },
-                )
-                .disabled(self.busy || self.created_task_id.is_some())
-                .on_click(cx.listener(move |pane, _, window, cx| {
-                    pane.select_agent(id.clone(), window, cx);
-                })),
-            );
-        }
-        let mut project_choices = div().flex().flex_wrap().gap(px(5.)).child(
-            compact_choice_button(
-                "draft-project-none",
-                if self.project_id.is_empty() {
-                    "✓ No project"
-                } else {
-                    "No project"
-                },
-            )
-            .disabled(self.busy || self.created_task_id.is_some())
-            .on_click(cx.listener(|pane, _, window, cx| {
-                let changed = !pane.project_id.is_empty();
-                if !changed {
-                    return;
+impl DraftCreationPane {
+    fn browse_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let prompt = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Choose working folder".into()),
+        });
+        cx.spawn_in(window, async move |view, cx| {
+            if let Ok(Ok(Some(paths))) = prompt.await {
+                if let Some(path) = paths.first() {
+                    let path = path.to_string_lossy().to_string();
+                    let _ = view.update_in(cx, |pane, window, cx| {
+                        if !pane.busy && pane.created_task_id.is_none() {
+                            pane.cwd
+                                .update(cx, |input, cx| input.set_value(path, window, cx));
+                        }
+                    });
                 }
-                pane.save_model_draft();
-                pane.project_id.clear();
-                let cwd = suggested_cwd(&pane.snapshot, &pane.agent_id, "");
-                pane.cwd
-                    .update(cx, |input, cx| input.set_value(cwd, window, cx));
-                pane.error = None;
-                pane.emit_changed(cx);
-                cx.notify();
-            })),
-        );
-        for project in projects {
-            let id = field(&project, "id");
-            let name = field(&project, "name");
-            project_choices = project_choices.child(
-                compact_choice_button(
-                    SharedString::from(format!("draft-project-{id}")),
-                    if id == self.project_id {
-                        format!("✓ {name}")
-                    } else {
-                        name
-                    },
-                )
-                .disabled(self.busy || self.created_task_id.is_some())
-                .on_click(cx.listener(move |pane, _, window, cx| {
-                    if pane.project_id == id {
-                        return;
+            }
+        })
+        .detach();
+    }
+    fn picker_trigger(
+        &self,
+        kind: &'static str,
+        label: String,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let owner = cx.entity();
+        let opener = owner.clone();
+        Popover::new(SharedString::from(format!("draft-{kind}-picker")))
+            .anchor(Anchor::TopLeft)
+            .overlay_closable(true)
+            .open(self.picker_open == Some(kind))
+            .on_open_change(move |open, window, cx| {
+                opener.update(cx, |pane, cx| {
+                    pane.picker_open = if *open { Some(kind) } else { None };
+                    if *open {
+                        let input = if kind == "agent" {
+                            &pane.agent_search
+                        } else {
+                            &pane.project_search
+                        };
+                        input.read(cx).focus_handle(cx).focus(window, cx);
                     }
-                    pane.save_model_draft();
-                    pane.project_id = id.clone();
-                    let cwd = suggested_cwd(&pane.snapshot, &pane.agent_id, &pane.project_id);
-                    pane.cwd
-                        .update(cx, |input, cx| input.set_value(cwd, window, cx));
-                    pane.error = None;
-                    pane.emit_changed(cx);
                     cx.notify();
-                })),
-            );
-        }
-        let provider = selected_agent
-            .as_ref()
-            .map(|agent| field(agent, "provider"))
-            .unwrap_or_default();
-        let sandbox = self.sandbox.clone();
-        let auto_value = if provider == "codex" {
-            "workspace-write"
-        } else {
-            "harness-configured"
-        };
-        let (supports_read_only, supports_auto_edits, supports_full_access) = selected_agent
-            .as_ref()
-            .map(permission_capabilities)
-            .unwrap_or((false, false, false));
-        let selected_access = if sandbox == "read-only" && supports_read_only {
-            "read-only"
-        } else if sandbox == "yolo" && supports_full_access {
-            "yolo"
-        } else {
-            auto_value
-        };
-        let access = div()
-            .flex()
-            .flex_wrap()
-            .gap(px(5.))
-            .child(
+                })
+            })
+            .trigger(
                 compact_choice_button(
-                    "draft-access-read-only",
-                    if selected_access == "read-only" {
-                        "✓ Read only"
-                    } else {
-                        "Read only"
-                    },
+                    SharedString::from(format!("draft-{kind}-trigger")),
+                    format!("{label} ▾"),
                 )
-                .disabled(self.busy || self.created_task_id.is_some() || !supports_read_only)
-                .on_click(cx.listener(|pane, _, _, cx| {
-                    if pane.sandbox == "read-only" {
-                        return;
-                    }
-                    pane.sandbox = "read-only".into();
-                    pane.emit_changed(cx);
-                    cx.notify();
-                })),
+                .disabled(self.busy || self.created_task_id.is_some()),
             )
-            .child(
-                compact_choice_button(
-                    "draft-access-auto-edits",
-                    if selected_access == auto_value {
-                        "✓ Auto-approve edits"
-                    } else {
-                        "Auto-approve edits"
-                    },
-                )
-                .disabled(self.busy || self.created_task_id.is_some() || !supports_auto_edits)
-                .on_click(cx.listener(move |pane, _, _, cx| {
-                    if pane.sandbox == auto_value {
-                        return;
-                    }
-                    pane.sandbox = auto_value.into();
-                    pane.emit_changed(cx);
-                    cx.notify();
-                })),
-            )
-            .child(
-                compact_choice_button(
-                    "draft-access-full",
-                    if selected_access == "yolo" {
-                        "✓ Full access"
-                    } else {
-                        "Full access"
-                    },
-                )
-                .disabled(self.busy || self.created_task_id.is_some() || !supports_full_access)
-                .on_click(cx.listener(|pane, _, _, cx| {
-                    if pane.sandbox == "yolo" {
-                        return;
-                    }
-                    pane.sandbox = "yolo".into();
-                    pane.emit_changed(cx);
-                    cx.notify();
-                })),
-            );
-        let mut root = div()
-            .id("native-chat-draft")
-            .size_full()
-            .min_h_0()
+            .content(move |_, _, cx| owner.update(cx, |pane, cx| pane.render_picker(kind, cx)))
+            .into_any_element()
+    }
+    fn render_picker(&mut self, kind: &str, cx: &mut Context<Self>) -> AnyElement {
+        let search = if kind == "agent" {
+            self.agent_search.clone()
+        } else {
+            self.project_search.clone()
+        };
+        let query = search.read(cx).value().to_lowercase();
+        let mut menu = div()
+            .id("draft-picker-options")
+            .w(px(300.))
+            .max_h(px(360.))
             .overflow_y_scroll()
-            .flex_col()
-            .items_center()
-            .px(px(32.))
-            .py(px(36.))
-            .font_family("Montserrat");
-        let mut content = div()
-            .w_full()
-            .max_w(px(920.))
             .flex()
-            .flex_shrink_0()
             .flex_col()
-            .gap(px(12.))
-            .child(
-                compact_choice_button("draft-back-to-workspace", "Back to workspace")
-                    .text()
-                    .disabled(self.busy)
-                    .on_click(cx.listener(|_, _, _, cx| cx.emit(DraftCreationEvent::Close))),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(6.))
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(rgb(0x3f9d6a))
-                            .child("NEW CHAT"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(26.))
-                            .font_weight(FontWeight::MEDIUM)
-                            .child("What would you like to work on?"),
-                    )
-                    .child(
-                        div()
-                            .text_color(rgb(0x9aa39d))
-                            .child("Your agent starts when you send."),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(5.))
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(rgb(0x8c9690))
-                            .child("Agent"),
-                    )
-                    .child(agent_choices),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(rgb(0x8c9690))
-                            .child("Project"),
-                    )
-                    .child(project_choices),
-            );
-        if let Some(parent_id) = self.parent_task_id.clone() {
-            let title = rows(&self.snapshot, "tasks")
-                .iter()
-                .find(|task| field(task, "id") == parent_id)
-                .map(|task| field(task, "title"))
-                .unwrap_or_else(|| "Unavailable parent chat".into());
-            content = content.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(format!("Delegated from: {title}")),
-                    )
-                    .child(
-                        compact_choice_button("draft-remove-parent", "Remove parent link")
-                            .disabled(self.busy || self.created_task_id.is_some())
-                            .on_click(cx.listener(|pane, _, _, cx| {
-                                pane.parent_task_id = None;
-                                pane.emit_changed(cx);
-                                cx.notify();
-                            })),
-                    ),
+            .gap(px(4.))
+            .p(px(8.))
+            .child(Input::new(&search).small());
+        if kind == "project" {
+            menu = menu.child(
+                compact_choice_button("draft-no-project", "No project").on_click(cx.listener(
+                    |pane, _, window, cx| {
+                        pane.save_model_draft();
+                        pane.project_id.clear();
+                        pane.picker_open = None;
+                        pane.message.read(cx).focus_handle(cx).focus(window, cx);
+                        let cwd = suggested_cwd(&pane.snapshot, &pane.agent_id, "");
+                        pane.cwd
+                            .update(cx, |input, cx| input.set_value(cwd, window, cx));
+                        pane.emit_changed(cx);
+                        cx.notify();
+                    },
+                )),
             );
         }
-        if self.project_id.is_empty() {
-            content = content.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(5.))
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(rgb(0x8c9690))
-                            .child("Working folder"),
-                    )
-                    .child(
-                        Input::new(&self.cwd)
-                            .small()
-                            .text_size(px(12.5))
-                            .px(px(9.))
-                            .py(px(7.))
-                            .disabled(self.busy || self.created_task_id.is_some()),
-                    ),
+        for row in rows(
+            &self.snapshot,
+            if kind == "agent" {
+                "agents"
+            } else {
+                "projects"
+            },
+        ) {
+            let id = field(&row, "id");
+            let label = field(&row, "name");
+            if !label.to_lowercase().contains(&query) {
+                continue;
+            }
+            let agent = kind == "agent";
+            menu = menu.child(
+                compact_choice_button(
+                    SharedString::from(format!("draft-picker-{kind}-{id}")),
+                    label,
+                )
+                .on_click(cx.listener(move |pane, _, window, cx| {
+                    if agent {
+                        pane.select_agent(id.clone(), window, cx);
+                        pane.picker_open = Some("project");
+                        pane.project_search
+                            .read(cx)
+                            .focus_handle(cx)
+                            .focus(window, cx);
+                    } else {
+                        pane.save_model_draft();
+                        pane.project_id = id.clone();
+                        pane.picker_open = None;
+                        pane.message.read(cx).focus_handle(cx).focus(window, cx);
+                        let cwd = suggested_cwd(&pane.snapshot, &pane.agent_id, &pane.project_id);
+                        pane.cwd
+                            .update(cx, |input, cx| input.set_value(cwd, window, cx));
+                        pane.emit_changed(cx);
+                        cx.notify();
+                    }
+                })),
             );
         }
+        menu.into_any_element()
+    }
+    fn menu_trigger(
+        &self,
+        kind: &'static str,
+        label: String,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let owner = cx.entity();
+        Popover::new(SharedString::from(format!("draft-{kind}-menu")))
+            .anchor(Anchor::BottomLeft)
+            .overlay_closable(true)
+            .trigger(
+                compact_choice_button(
+                    SharedString::from(format!("draft-{kind}-trigger")),
+                    format!("{label} ▾"),
+                )
+                .disabled(self.busy),
+            )
+            .on_open_change({
+                let owner = owner.clone();
+                move |open, _, cx| {
+                    if *open && kind == "model" {
+                        owner.update(cx, |pane, cx| pane.request_catalog_refresh(true, cx));
+                    }
+                }
+            })
+            .content(move |_, _, cx| {
+                owner.update(cx, |pane, cx| {
+                    if kind == "model" {
+                        pane.render_model_menu(cx)
+                    } else {
+                        pane.render_access_menu(cx)
+                    }
+                })
+            })
+            .into_any_element()
+    }
+    fn render_model_menu(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let mut model_choices = div().flex().flex_wrap().gap(px(5.)).child(
             compact_choice_button(
                 "draft-model-default",
@@ -1410,9 +1350,195 @@ impl Render for DraftCreationPane {
                 }
             }
         }
-        content = content
+        div()
+            .id("draft-model-options")
+            .w(px(350.))
+            .max_h(px(400.))
+            .overflow_y_scroll()
+            .p(px(10.))
             .child(model_panel)
+            .into_any_element()
+    }
+    fn render_access_menu(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let provider = self
+            .selected_agent()
+            .as_ref()
+            .map(|agent| field(agent, "provider"))
+            .unwrap_or_default();
+        let sandbox = self.sandbox.clone();
+        let auto_value = if provider == "codex" {
+            "workspace-write"
+        } else {
+            "harness-configured"
+        };
+        let (supports_read_only, supports_auto_edits, supports_full_access) = self
+            .selected_agent()
+            .as_ref()
+            .map(permission_capabilities)
+            .unwrap_or((false, false, false));
+        let selected_access = if sandbox == "read-only" && supports_read_only {
+            "read-only"
+        } else if sandbox == "yolo" && supports_full_access {
+            "yolo"
+        } else {
+            auto_value
+        };
+        let access = div()
+            .flex()
+            .flex_wrap()
+            .gap(px(5.))
             .child(
+                compact_choice_button(
+                    "draft-access-read-only",
+                    if selected_access == "read-only" {
+                        "✓ Read only"
+                    } else {
+                        "Read only"
+                    },
+                )
+                .disabled(self.busy || self.created_task_id.is_some() || !supports_read_only)
+                .on_click(cx.listener(|pane, _, _, cx| {
+                    if pane.sandbox == "read-only" {
+                        return;
+                    }
+                    pane.sandbox = "read-only".into();
+                    pane.emit_changed(cx);
+                    cx.notify();
+                })),
+            )
+            .child(
+                compact_choice_button(
+                    "draft-access-auto-edits",
+                    if selected_access == auto_value {
+                        "✓ Auto-approve edits"
+                    } else {
+                        "Auto-approve edits"
+                    },
+                )
+                .disabled(self.busy || self.created_task_id.is_some() || !supports_auto_edits)
+                .on_click(cx.listener(move |pane, _, _, cx| {
+                    if pane.sandbox == auto_value {
+                        return;
+                    }
+                    pane.sandbox = auto_value.into();
+                    pane.emit_changed(cx);
+                    cx.notify();
+                })),
+            )
+            .child(
+                compact_choice_button(
+                    "draft-access-full",
+                    if selected_access == "yolo" {
+                        "✓ Full access"
+                    } else {
+                        "Full access"
+                    },
+                )
+                .disabled(self.busy || self.created_task_id.is_some() || !supports_full_access)
+                .on_click(cx.listener(|pane, _, _, cx| {
+                    if pane.sandbox == "yolo" {
+                        return;
+                    }
+                    pane.sandbox = "yolo".into();
+                    pane.emit_changed(cx);
+                    cx.notify();
+                })),
+            );
+        div()
+            .w(px(300.))
+            .p(px(10.))
+            .child(access)
+            .into_any_element()
+    }
+}
+
+impl Render for DraftCreationPane {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.request_catalog(cx);
+        let agent_name = self
+            .selected_agent()
+            .map(|a| field(&a, "name"))
+            .unwrap_or_else(|| "Choose an agent".into());
+        let project_name = rows(&self.snapshot, "projects")
+            .iter()
+            .find(|p| field(p, "id") == self.project_id)
+            .map(|p| field(p, "name"))
+            .unwrap_or_else(|| "No project".into());
+        let agent_choices = self.picker_trigger("agent", agent_name, cx);
+        let project_choices = self.picker_trigger("project", project_name, cx);
+        let root = div()
+            .id("native-chat-draft")
+            .flex()
+            .key_context("MonitterChat")
+            .size_full()
+            .min_h_0()
+            .overflow_y_scroll()
+            .flex_col()
+            .items_center()
+            .px(px(32.))
+            .py(px(36.))
+            .font_family("Montserrat");
+        let mut content = div()
+            .w_full()
+            .max_w(px(700.))
+            .flex()
+            .flex_shrink_0()
+            .flex_col()
+            .gap(px(12.))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(rgb(0x3f9d6a))
+                            .child("NEW CHAT"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(26.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .child("What would you like to work on?"),
+                    )
+                    .child(
+                        div()
+                            .text_color(rgb(0x9aa39d))
+                            .child("Ask a question, explore a project, or describe a change. Your agent starts when you send."),
+                    ),
+            )
+            .child(div().flex().gap(px(12.)).child(div().flex_1().min_w_0().flex().flex_col().gap(px(5.)).child(div().text_size(px(11.)).text_color(rgb(0x8c9690)).child("Agent")).child(agent_choices)).child(div().flex_1().min_w_0().flex().flex_col().gap(px(5.)).child(div().text_size(px(11.)).text_color(rgb(0x8c9690)).child("Project")).child(project_choices)));
+        if let Some(parent_id) = self.parent_task_id.clone() {
+            let title = rows(&self.snapshot, "tasks")
+                .iter()
+                .find(|task| field(task, "id") == parent_id)
+                .map(|task| field(task, "title"))
+                .unwrap_or_else(|| "Unavailable parent chat".into());
+            content = content.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(format!("Delegated from: {title}")),
+                    )
+                    .child(
+                        compact_choice_button("draft-remove-parent", "Remove parent link")
+                            .disabled(self.busy || self.created_task_id.is_some())
+                            .on_click(cx.listener(|pane, _, _, cx| {
+                                pane.parent_task_id = None;
+                                pane.emit_changed(cx);
+                                cx.notify();
+                            })),
+                    ),
+            );
+        }
+        if self.project_id.is_empty() {
+            content = content.child(
                 div()
                     .flex()
                     .flex_col()
@@ -1421,51 +1547,143 @@ impl Render for DraftCreationPane {
                         div()
                             .text_size(px(11.))
                             .text_color(rgb(0x8c9690))
-                            .child("Task title · optional"),
+                            .child("Working folder"),
                     )
                     .child(
-                        Input::new(&self.title)
+                        Input::new(&self.cwd)
                             .small()
                             .text_size(px(12.5))
                             .px(px(9.))
                             .py(px(7.))
                             .disabled(self.busy || self.created_task_id.is_some()),
                     ),
+            );
+            if self.selected_agent().is_some_and(|agent| {
+                rows(&self.snapshot, "hosts").iter().any(|host| {
+                    field(host, "id") == field(&agent, "hostId") && field(host, "kind") == "local"
+                })
+            }) {
+                content = content.child(
+                    compact_choice_button("draft-browse-folder", "Browse working folder…")
+                        .disabled(self.busy || self.created_task_id.is_some())
+                        .on_click(
+                            cx.listener(|pane, _, window, cx| pane.browse_folder(window, cx)),
+                        ),
+                );
+            }
+        }
+        let access = self.menu_trigger("access", format!("Access · {}", self.sandbox), cx);
+        let model = self.menu_trigger(
+            "model",
+            if self.selected_model.is_empty() {
+                "Harness default".into()
+            } else {
+                self.selected_model.clone()
+            },
+            cx,
+        );
+        content = content.child(
+            div()
+                .flex()
+                .flex_col()
+                .border_1()
+                .rounded_lg()
+                .border_color(rgb(0x465049))
+                .child(
+                    Textarea::new(&self.message)
+                        .small()
+                        .text_size(px(13.))
+                        .line_height(relative(1.55))
+                        .px(px(9.))
+                        .py(px(7.))
+                        .h(px(96.))
+                        .disabled(self.busy),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .p(px(7.))
+                        .child(access)
+                        .child(model)
+                        .child(
+                            compact_choice_button(
+                                "draft-send",
+                                if self.busy { "Sending…" } else { "Send" },
+                            )
+                            .with_variant(ButtonVariant::Primary)
+                            .disabled(self.busy)
+                            .on_click(cx.listener(|pane, _, _, cx| pane.send(cx))),
+                        ),
+                ),
+        );
+        let mut suggestions = div().flex().flex_wrap().gap(px(5.));
+        for (id, label, message) in [
+            (
+                "review",
+                "Review this project",
+                "Review this project and suggest the next concrete step.",
+            ),
+            (
+                "investigate",
+                "Investigate an issue",
+                "Investigate the current issue and report what you find.",
+            ),
+            (
+                "plan",
+                "Plan work",
+                "Plan the implementation before making changes.",
+            ),
+        ] {
+            suggestions = suggestions.child(
+                compact_choice_button(SharedString::from(format!("draft-suggestion-{id}")), label)
+                    .disabled(self.busy)
+                    .on_click(cx.listener(move |pane, _, window, cx| {
+                        pane.message
+                            .update(cx, |input, cx| input.set_value(message, window, cx));
+                        pane.message.read(cx).focus_handle(cx).focus(window, cx);
+                    })),
+            );
+        }
+        content = content.child(suggestions).child(
+            compact_choice_button(
+                "draft-options",
+                if self.options_open {
+                    "▾ Chat options"
+                } else {
+                    "▸ Chat options"
+                },
             )
-            .child(
+            .text()
+            .on_click(cx.listener(|pane, _, _, cx| {
+                pane.options_open = !pane.options_open;
+                cx.notify();
+            })),
+        );
+        if self.options_open {
+            content = content.child(
                 div()
                     .flex()
                     .flex_col()
                     .gap(px(5.))
+                    .child("Task title · optional")
                     .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(rgb(0x8c9690))
-                            .child(format!("Access · {provider}")),
+                        Input::new(&self.title)
+                            .small()
+                            .disabled(self.busy || self.created_task_id.is_some()),
                     )
-                    .child(access),
-            )
-            .child(
-                Textarea::new(&self.message)
-                    .small()
-                    .text_size(px(13.))
-                    .line_height(relative(1.55))
-                    .px(px(9.))
-                    .py(px(7.))
-                    .h(px(96.))
-                    .disabled(self.busy),
+                    .child("Existing native session ID · optional")
+                    .child(
+                        Input::new(&self.native_session)
+                            .small()
+                            .disabled(self.busy || self.created_task_id.is_some()),
+                    ),
             );
+        }
         if let Some(error) = &self.error {
             content = content.child(div().text_color(rgb(0xe06b69)).child(error.clone()));
         }
-        content = content.child(
-            div().flex().justify_end().child(
-                compact_choice_button("draft-send", if self.busy { "Sending…" } else { "Send" })
-                    .with_variant(ButtonVariant::Primary)
-                    .disabled(self.busy)
-                    .on_click(cx.listener(|pane, _, _, cx| pane.send(cx))),
-            ),
-        );
         root.child(content)
     }
 }

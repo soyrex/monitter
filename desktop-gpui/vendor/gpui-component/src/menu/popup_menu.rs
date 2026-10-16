@@ -1,9 +1,10 @@
-use crate::surface_backdrop;
 use crate::ThemeStyled as _;
 use crate::actions::{Cancel, Confirm, SelectDown, SelectUp};
 use crate::actions::{SelectLeft, SelectRight};
 use crate::menu::menu_item::MenuItemElement;
+use crate::popup_header;
 use crate::scroll::ScrollableElement;
+use crate::surface_backdrop;
 use crate::{ActiveTheme, ElementExt, Icon, IconName, Sizable as _, h_flex, v_flex};
 use crate::{Side, Size, kbd::Kbd};
 use gpui::{
@@ -312,6 +313,7 @@ pub struct PopupMenu {
     /// the very frame the menu opens. GPUI looks a handle up in the previously
     /// rendered frame, and the trigger was in it when the menu was not yet.
     pub(crate) trigger_focus_handle: Option<FocusHandle>,
+    header: Option<(SharedString, SharedString)>,
     selected_index: Option<usize>,
     min_width: Option<Pixels>,
     max_width: Option<Pixels>,
@@ -358,6 +360,7 @@ impl PopupMenu {
             trigger_focus_handle: None,
             parent_menu: None,
             menu_items: Vec::new(),
+            header: None,
             selected_index: None,
             min_width: None,
             max_width: None,
@@ -380,6 +383,16 @@ impl PopupMenu {
         f: impl FnOnce(Self, &mut Window, &mut Context<PopupMenu>) -> Self,
     ) -> Entity<Self> {
         cx.new(|cx| f(Self::new(cx), window, cx))
+    }
+
+    /// Add a title and supporting text above the menu's scrollable items.
+    pub fn header(
+        mut self,
+        title: impl Into<SharedString>,
+        subtitle: impl Into<SharedString>,
+    ) -> Self {
+        self.header = Some((title.into(), subtitle.into()));
+        self
     }
 
     /// Set the focus handle of Entity to handle actions.
@@ -1293,6 +1306,7 @@ impl PopupMenu {
                 .disabled(*disabled)
                 .child(
                     h_flex()
+                        .debug_selector(move || format!("popup-menu-element-row-{ix}"))
                         .flex_1()
                         .min_h(item_height)
                         .items_center()
@@ -1493,10 +1507,14 @@ impl Render for PopupMenu {
             .on_action(cx.listener(Self::dismiss))
             .on_mouse_down_out(cx.listener(Self::on_mouse_down_out))
             .popover_style(cx)
+            .max_w(max_width)
             .text_color(cx.theme().popover_foreground)
             .relative()
             .occlude()
             .child(surface_backdrop::popup_backdrop_layer(options.radius))
+            .when_some(self.header.clone(), |this, (title, subtitle)| {
+                this.child(popup_header(title, subtitle, cx))
+            })
             .child(
                 v_flex()
                     .id("items")

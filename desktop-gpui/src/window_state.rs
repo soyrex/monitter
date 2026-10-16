@@ -200,3 +200,48 @@ pub fn save(window: &Window, cx: &App) {
     }
     enqueue(value, false);
 }
+
+/// Resize the outer window on its current screen, using AppKit coordinates
+/// throughout so secondary screens and the menu bar/Dock need no conversion.
+#[cfg(target_os = "macos")]
+pub fn center_at_percent(window: &mut Window, width_percent: u8, height_percent: u8, cx: &mut App) -> Result<(), String> {
+    use objc2::{msg_send, rc::Retained, runtime::AnyObject};
+    use objc2_foundation::{NSPoint, NSRect, NSSize};
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    if window.is_fullscreen() || window.is_simple_fullscreen() {
+        return Err("Exit full screen before centering the window.".into());
+    }
+    let handle = HasWindowHandle::window_handle(window).map_err(|error| error.to_string())?;
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        return Err("This command requires a macOS window.".into());
+    };
+    // Read geometry on the main thread, but defer mutation until the command
+    // releases its Desktop/App/Window borrows (as GPUI's macOS resize does).
+    unsafe {
+        let view = handle.ns_view.as_ptr().cast::<AnyObject>();
+        let native: *mut AnyObject = msg_send![view, window];
+        if native.is_null() { return Err("The native window is unavailable.".into()); }
+        let screen: *mut AnyObject = msg_send![native, screen];
+        if screen.is_null() { return Err("The current screen is unavailable.".into()); }
+        let usable: NSRect = msg_send![screen, visibleFrame];
+        let minimum: NSSize = msg_send![native, minSize];
+        let width = (usable.size.width * f64::from(width_percent) / 100.).max(minimum.width).min(usable.size.width);
+        let height = (usable.size.height * f64::from(height_percent) / 100.).max(minimum.height).min(usable.size.height);
+        let frame = NSRect::new(NSPoint::new(
+            usable.origin.x + (usable.size.width - width) / 2.,
+            usable.origin.y + (usable.size.height - height) / 2.,
+        ), NSSize::new(width, height));
+        let native = Retained::retain(native).ok_or("The native window is unavailable.")?;
+        cx.foreground_executor().spawn(async move {
+            // Retaining prevents use-after-free if the user closes the window
+            // before this turn. Do not resize a closed or hidden native window.
+            let visible: bool = msg_send![&*native, isVisible];
+            if visible {
+                let _: () = msg_send![&*native, setFrame: frame, display: true, animate: false];
+            }
+            // AppKit now delivers its normal GPUI resize/move callbacks with no
+            // active command borrow. Those update the viewport and pane layout.
+        }).detach();
+    }
+    Ok(())
+}

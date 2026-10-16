@@ -17,7 +17,7 @@ struct Presentation {
     running: HashSet<String>,
     titles: HashMap<String, String>,
     palette: Palette,
-    sparkles: bool,
+    animation: native_motion::ActivityAnimation,
     motion: bool,
 }
 impl Presentation {
@@ -34,9 +34,9 @@ impl Presentation {
                 .filter_map(|task| Some((task["id"].as_str()?.to_owned(), task["title"].as_str()?.to_owned())))
                 .collect(),
             palette,
-            sparkles: native_motion::ActivityAnimation::from_snapshot(
+            animation: native_motion::ActivityAnimation::from_snapshot(
                 snapshot["settings"]["activityAnimation"].as_str(),
-            ) == native_motion::ActivityAnimation::Sparkles,
+            ),
             motion: native_motion::motion_allowed(),
         }
     }
@@ -52,6 +52,8 @@ struct Entry {
 }
 #[derive(Default)]
 struct Effects {
+    source: std::rc::Weak<Value>,
+    obscured: HashSet<String>,
     presentation: Option<Presentation>,
     naming: HashSet<String>,
     pending_titles: HashMap<String, String>,
@@ -64,6 +66,7 @@ pub fn sync(snapshot: &Value, palette: Palette, cx: &mut App) -> bool {
     if cx.try_global::<Effects>().is_none() {
         cx.set_global(Effects::default());
     }
+    cx.global_mut::<Effects>().source = std::rc::Weak::new();
     let next = Presentation::from_snapshot(snapshot, palette);
     let completed: Vec<_> = cx.global::<Effects>().pending_titles.iter()
         .filter(|(task, title)| next.titles.get(*task) == Some(*title))
@@ -80,6 +83,43 @@ pub fn sync(snapshot: &Value, palette: Palette, cx: &mut App) -> bool {
     update_existing_fields(&next, cx);
     if !completed.is_empty() { cx.refresh_windows(); }
     true
+}
+
+/// Immutable snapshots let ordinary redraws skip task-map construction. Local
+/// motion and palette changes remain independent invalidation inputs.
+pub fn sync_cached(snapshot: &std::rc::Rc<Value>, palette: Palette, cx: &mut App) -> bool {
+    let unchanged = cx.try_global::<Effects>().is_some_and(|effects| {
+        effects.presentation.as_ref().is_some_and(|presentation| {
+            if presentation.palette != palette || presentation.motion != native_motion::motion_allowed() {
+                return false;
+            }
+            if effects.source.ptr_eq(&std::rc::Rc::downgrade(snapshot)) { return true; }
+            if presentation.animation != native_motion::ActivityAnimation::from_snapshot(
+                snapshot["settings"]["activityAnimation"].as_str()) {
+                return false;
+            }
+            let mut titles = 0;
+            let mut running = 0;
+            for task in snapshot["tasks"].as_array().into_iter().flatten() {
+                let Some(id) = task["id"].as_str() else { continue; };
+                if let Some(title) = task["title"].as_str() {
+                    titles += 1;
+                    if presentation.titles.get(id).map(String::as_str) != Some(title) { return false; }
+                }
+                let active = task["status"] == "running";
+                running += usize::from(active);
+                if presentation.running.contains(id) != active { return false; }
+            }
+            titles == presentation.titles.len() && running == presentation.running.len()
+        })
+    });
+    if unchanged {
+        cx.global_mut::<Effects>().source = std::rc::Rc::downgrade(snapshot);
+        return false;
+    }
+    let changed = sync(snapshot, palette, cx);
+    cx.global_mut::<Effects>().source = std::rc::Rc::downgrade(snapshot);
+    changed
 }
 
 /// Local motion settings can change without a new backend snapshot.
@@ -153,7 +193,8 @@ fn effect_is_desired(
 ) -> bool {
     (naming.contains(task) && matches!(layout, SparkleLayout::Tab | SparkleLayout::Header))
         || (presentation.running.contains(task)
-            && (layout == SparkleLayout::Compact || presentation.sparkles))
+            && (layout == SparkleLayout::Pane
+                || presentation.animation == native_motion::ActivityAnimation::Sparkles))
 }
 
 fn update_existing_fields(presentation: &Presentation, cx: &mut App) {
@@ -178,8 +219,9 @@ fn update_existing_fields(presentation: &Presentation, cx: &mut App) {
         let (change, generation, target_visible) = field.update(cx, |field, cx| {
             let changed =
                 field.set_config(layout, mirror, presentation.palette, presentation.motion && surface_visible);
+            let animation_changed = field.set_animation(presentation.animation);
             let transition = field.set_visible(desired);
-            if changed || transition.is_some() {
+            if changed || animation_changed || transition.is_some() {
                 cx.notify();
             }
             (
@@ -254,6 +296,18 @@ fn remove_entry_if_current(key: &str, generation: u64, cx: &mut App) {
     }
 }
 
+/// Modal content must paint above retained pane decorations, including their deferred layer.
+pub(crate) fn set_pane_obscured(task: &str, obscured: bool, cx: &mut App) {
+    let Some(effects) = cx.try_global::<Effects>() else { return; };
+    if effects.obscured.contains(task) == obscured { return; }
+    if obscured { cx.global_mut::<Effects>().obscured.insert(task.to_owned()); }
+    else { cx.global_mut::<Effects>().obscured.remove(task); }
+    let fields: Vec<_> = cx.global::<Effects>().fields.values()
+        .filter(|entry| entry.task == task && !matches!(entry.layout, SparkleLayout::Tab | SparkleLayout::Compact))
+        .map(|entry| entry.field.clone()).collect();
+    for field in fields { field.update(cx, |field, cx| { if field.set_obscured(obscured) { cx.notify(); } }); }
+}
+
 /// Park pane clocks while the dock omits the pane. Tab/sidebar markers keep
 /// their own visibility; hiding a conversation must not stop a visible marker.
 pub fn set_pane_visible(task: &str, visible: bool, cx: &mut App) {
@@ -274,9 +328,8 @@ pub fn set_pane_visible(task: &str, visible: bool, cx: &mut App) {
     }
 }
 
-/// Running status creates activity effects; local naming adds title stars only. Compact sidebar rows
-/// use Sparkles like Tauri; panes/tabs respect the selected effect without
-/// pretending unimplemented Grid/Matrix are Sparkles.
+/// Running status creates the selected pane effect; local naming adds title stars.
+/// Compact sidebar rows retain their small activity marker.
 pub fn for_task(
     task: &str,
     surface: &str,
@@ -333,6 +386,8 @@ fn for_task_scoped(
         None
     };
     let id = SharedString::from(format!("activity-{key}"));
+    let obscured = cx.global::<Effects>().obscured.contains(task)
+        && !matches!(layout, SparkleLayout::Tab | SparkleLayout::Compact);
     let field = cx.new(|_| {
         let mut field = SparkleField::new(
             id,
@@ -342,6 +397,8 @@ fn for_task_scoped(
             presentation.motion,
         );
         field.set_anchor(anchor);
+        field.set_obscured(obscured);
+        field.set_animation(presentation.animation);
         field
     });
     let change = field.update(cx, |field, cx| {
@@ -377,6 +434,33 @@ fn for_task_scoped(
 mod tests {
     use super::*;
     #[gpui_kit::test]
+    fn cached_activity_preserves_maps_until_title_status_palette_or_motion_changes(cx: &mut gpui_kit::TestAppContext) {
+        let palette = crate::design::palette(&serde_json::json!({}), gpui_kit::WindowAppearance::Dark);
+        cx.update(|cx| {
+            let source = std::rc::Rc::new(serde_json::json!({"tasks":[{"id":"task","title":"Old","status":"running","updatedAt":1}],"settings":{"activityAnimation":"sparkles"}}));
+            assert!(sync_cached(&source, palette, cx));
+            let title = cx.global::<Effects>().presentation.as_ref().unwrap().titles["task"].as_ptr();
+            assert!(!sync_cached(&source, palette, cx));
+            let mut next = source.as_ref().clone();
+            next["tasks"][0]["updatedAt"] = serde_json::json!(2);
+            assert!(!sync_cached(&std::rc::Rc::new(next.clone()), palette, cx));
+            assert_eq!(title, cx.global::<Effects>().presentation.as_ref().unwrap().titles["task"].as_ptr());
+            begin_naming("task", cx);
+            complete_naming("task", "New", cx);
+            next["tasks"][0]["title"] = serde_json::json!("New");
+            assert!(sync_cached(&std::rc::Rc::new(next.clone()), palette, cx));
+            assert!(!is_naming("task", cx));
+            next["tasks"][0]["status"] = serde_json::json!("completed");
+            let next = std::rc::Rc::new(next);
+            assert!(sync_cached(&next, palette, cx));
+            let mut changed_palette = palette;
+            changed_palette.accent ^= 1;
+            assert!(sync_cached(&next, changed_palette, cx));
+            sync_motion_value(!native_motion::motion_allowed(), cx);
+            assert!(sync_cached(&next, changed_palette, cx));
+        });
+    }
+    #[gpui_kit::test]
     fn retained_fields_fade_out_reverse_and_cleanup_only_after_current_exit(
         cx: &mut gpui_kit::TestAppContext,
     ) {
@@ -388,6 +472,9 @@ mod tests {
             let field = for_task("actual", "pane", SparkleLayout::Pane, false, cx).unwrap();
             let retained = for_task("actual", "pane", SparkleLayout::Pane, false, cx).unwrap();
             assert_eq!(field.entity_id(), retained.entity_id());
+            snapshot["settings"]["activityAnimation"] = serde_json::json!("liquid");
+            sync(&snapshot, palette, cx);
+            assert_eq!(for_task("actual", "pane", SparkleLayout::Pane, false, cx).unwrap().entity_id(), field.entity_id());
             sync_motion_value(false, cx);
             assert!(!cx.global::<Effects>().presentation.as_ref().unwrap().motion);
             assert!(!field.update(cx, |field, _| field.set_config(SparkleLayout::Pane, false, palette, false)));
@@ -444,7 +531,12 @@ mod tests {
             palette,
         );
         assert_eq!(state.running, HashSet::from(["running".to_owned()]));
-        assert!(!state.sparkles);
+        assert_eq!(state.animation, native_motion::ActivityAnimation::Matrix);
+        let naming = HashSet::new();
+        assert!(effect_is_desired(&state, &naming, "running", SparkleLayout::Pane));
+        assert!(!effect_is_desired(&state, &naming, "running", SparkleLayout::Tab));
+        assert!(!effect_is_desired(&state, &naming, "running", SparkleLayout::Compact));
+        assert!(!effect_is_desired(&state, &naming, "queued", SparkleLayout::Pane));
     }
 
     #[gpui_kit::test]

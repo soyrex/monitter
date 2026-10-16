@@ -32,10 +32,13 @@
         "desktop-gpui/src/workspace.rs",
         "desktop-gpui/src/plans.rs",
         "desktop-gpui/src/docking.rs",
-        "desktop-gpui/src/chat.rs"
+        "desktop-gpui/src/chat.rs",
+        "desktop-gpui/src/split_allocation.rs",
+        "desktop-gpui/src/split_allocation_tests.rs",
+        "desktop-gpui/src/empty_session_tests.rs"
       ],
       "status": "implemented_unverified",
-      "evidence": "Partial native docking: retained task-specific ChatPane entities, native tabs/splits and auxiliary panels including archives, shared revision-accepted snapshot data, synchronized auxiliary panes, native child visibility/removal hooks, and custom header with integrated traffic lights. Saved layout restoration and debounced revision-guarded layout saves are in source. Task text drafts and last-route preferences are persisted in source; sidebar/workspace selection persistence, settings docking, forced/platform-quit persistence, and interactive lifecycle validation remain pending. The latest visual-cohort tests passed 14 library and 53 binary tests, but the renderer frame only shows GPUI-rendered content, excludes OS chrome/WKWebView, and is not visual acceptance. Package PID 62670 was used for capture; compact sidebar/toolbar changes came later. Saved-layout/lifecycle and full visual behavior remain unverified. Latest package adds native modern flat tabs. Five existing chat IDs were preflighted against the authoritative snapshot and restored as one group with index 3 selected; renderer export gpui-frame-1790975304763251000.png confirms this layout. A native preference conflict banner and right companion rail remain under investigation/integration. Complete pixel and lifecycle acceptance is not established."
+      "evidence": "Partial native docking: retained task-specific ChatPane entities, native tabs/splits and auxiliary panels including archives, shared revision-accepted snapshot data, synchronized auxiliary panes, native child visibility/removal hooks, and custom header with integrated traffic lights. Saved layout restoration and debounced revision-guarded layout saves are in source. Task text drafts and last-route preferences are persisted in source; sidebar/workspace selection persistence, settings docking, forced/platform-quit persistence, and interactive lifecycle validation remain pending. The latest visual-cohort tests passed 14 library and 53 binary tests, but the renderer frame only shows GPUI-rendered content, excludes OS chrome/WKWebView, and is not visual acceptance. Package PID 62670 was used for capture; compact sidebar/toolbar changes came later. Saved-layout/lifecycle and full visual behavior remain unverified. Latest package adds native modern flat tabs. Five existing chat IDs were preflighted against the authoritative snapshot and restored as one group with index 3 selected; renderer export gpui-frame-1790975304763251000.png confirms this layout. A native preference conflict banner and right companion rail remain under investigation/integration. Complete pixel and lifecycle acceptance is not established. 2026-10-13: New landing panes have an always-visible close button, including the final pane with hidden tab headers. New tabs can be created again after the final group is removed. Tern new panes allocate 1/(N+1) of the dock region, shrinking existing leaf areas proportionally; equal and nested layouts balance while custom relative areas and retained entities remain intact. Ordinary tab stacking does not resize splits; explicit requested split sizes remain intentional overrides. Six native/pure allocation tests plus close/reopen and landing-layout tests passed. Installed package build-1791852731937 was checked live: three equal panes became four, its new-pane close control removed the fourth, and original chats were retained. Proof: artifacts/gpui/debug/pane-lifecycle-layout-install-latest.json."
     },
     {
       "id": "task_transcripts_history_and_sync",
@@ -150,7 +153,7 @@
         "desktop-gpui/src/interactions.rs"
       ],
       "status": "implemented_unverified",
-      "evidence": "Partial native implementation: pending/resolved approval cards; approve once, conditional file-changes session approval, conditional rememberable exact-action approval, deny, scoped saved-rule revocation, masked question inputs and choices, and explicit validated answer submission. All commands call existing Service validation. Generic form/URL inputs and Jev cards remain pending. Source formatted only; compiler/runtime verification is not claimed."
+      "evidence": "Partial native implementation: pending/resolved approval cards; approve once, conditional file-changes session approval, conditional rememberable exact-action approval, deny, scoped saved-rule revocation, masked question inputs and choices, and explicit validated answer submission. All commands call existing Service validation. Generic form/URL inputs and Jev cards remain pending. Source formatted only; compiler/runtime verification is not claimed. Notification bell beside usage rings with vertical divider, retained current requests and session-local reply/status alerts. Native dropdown inline approve_once/deny validates current request then uses existing authoritative ordinary/MCP/input resolver. Questions/forms review exact prompt. Fifteen focused checks passed; installed GPUI bell/dropdown and real pending controls observed without executing real decisions. Rollback and unchanged persistent backend verified in artifacts/gpui/debug/notification-bell-install-latest.json."
     },
     {
       "id": "channels_and_membership",
@@ -221,10 +224,11 @@
         "src/lib/terminal-theme.ts",
         "src-tauri/src/terminal.rs",
         "desktop-gpui/src/terminal.rs",
-        "desktop-gpui/src/main.rs"
+        "desktop-gpui/src/main.rs",
+        "desktop-gpui/src/terminal_exit_tests.rs"
       ],
       "status": "implemented_unverified",
-      "evidence": "Partial source: native terminal session selection, PTY open/read/write/resize/close, retained terminal model, keyboard/paste/mouse handling, selection, and rendering are implemented. Terminal appearance/configuration parity and current-build/runtime verification remain pending."
+      "evidence": "Partial source: native terminal session selection, PTY open/read/write/resize/close, retained terminal model, keyboard/paste/mouse handling, selection, and rendering are implemented. Terminal appearance/configuration parity and current-build/runtime verification remain pending. 2026-10-13: Matching pinned terminal panes close on positive backend exit status or successful manager-close acknowledgement; saved named layouts are pruned by exact terminal pane identity. Hidden/paused terminals check metadata once per second; missing rows and RPC failures do not trigger closure. Four exit regressions, seventeen existing terminal tests and five saved-layout tests passed. In installed package build-1791852731937 a newly created local terminal was exited through its shell and its pane disappeared automatically, preserving all three existing chat panes and backend identity. Proof: artifacts/gpui/debug/pane-lifecycle-layout-install-latest.json."
     },
     {
       "id": "browser_tabs_and_extensions",
@@ -240,7 +244,7 @@
         "desktop-gpui/src/main.rs"
       ],
       "status": "implemented_unverified",
-      "evidence": "Native Wry isolated browser now hosts each retained BrowserTab as a main Modern dock pane. Package3382108 native explicit public load/title, two-tab same-group creation, focused-group browser/chat cycling, GUI-only restart preserving metadata/order with saved URL unloaded, and last-tab Cmd+W without placeholder replacement passed. 147 GUI tests include six bounded legacy browser-layout migration regressions. Split-browser visibility, extension loading, agent browser control, full history and unload workflows remain open."
+      "evidence": "Native Wry isolated browser now hosts each retained BrowserTab as a main Modern dock pane. Package3382108 native explicit public load/title, two-tab same-group creation, focused-group browser/chat cycling, GUI-only restart preserving metadata/order with saved URL unloaded, and last-tab Cmd+W without placeholder replacement passed. 147 GUI tests include six bounded legacy browser-layout migration regressions. Split-browser visibility, extension loading, agent browser control, full history and unload workflows remain open. 2026-10-14: Native browser Cmd-C/V plus Cmd-A/X route through the focused WebKit responder. A native modifier-triggered floating toolbar implements Back/Refresh/Stop/Forward with an 80-percent opacity multiply surface, a 180ms slide, bottom-center 20px inset, Escape/scroll dismissal, pane hide/close cleanup and no page IPC. An isolated real WKWebView preview verified clipboard round trip, Command/Control reveal, Escape/scroll dismissal, back/forward, reload of changed local HTML and cancellation of a pending local HTTP response. Full GPUI integration check and installed-app verification are recorded separately in artifacts/browser-controls-20261014/verification.json."
     },
     {
       "id": "attachments_images_audio_and_voice",

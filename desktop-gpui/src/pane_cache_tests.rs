@@ -71,7 +71,7 @@ fn native_panel_caches_content_but_repaints_visibility_each_frame(cx: &mut TestA
             retaining_layout: Rc::new(Cell::new(false)),
             appearance: Rc::new(Cell::new(None)),
             auto_hide_tabs: Rc::new(Cell::new(false)),
-            background: None,
+            background: None, working: false, _activity_subscription: None, dock_group: None,
         });
         NativePanelCacheHarness {
             panel,
@@ -165,7 +165,7 @@ fn cached_native_panel_scrolls_repeatedly_after_parent_replay(cx: &mut TestAppCo
             retaining_layout: Rc::new(Cell::new(false)),
             appearance: Rc::new(Cell::new(None)),
             auto_hide_tabs: Rc::new(Cell::new(false)),
-            background: None,
+            background: None, working: false, _activity_subscription: None, dock_group: None,
         });
         NativePanelCacheHarness {
             panel,
@@ -281,7 +281,7 @@ fn pane_background_hover_keeps_focus_cache_and_settles_without_callbacks(cx: &mu
             paint: Rc::new(RefCell::new(PaintState { shown: true, ..Default::default() })),
             removed: false, retaining_layout: Rc::new(Cell::new(false)),
             appearance: Rc::new(Cell::new(Some(appearance))), auto_hide_tabs: Rc::new(Cell::new(false)),
-            background: None,
+            background: None, working: false, _activity_subscription: None, dock_group: None,
         });
         NativePanelCacheHarness { panel, renders: Rc::new(Cell::new(0)) }
     });

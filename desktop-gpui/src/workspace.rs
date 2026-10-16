@@ -4,6 +4,7 @@ use gpui_kit::{
     component::{
         Disableable,
         button::*,
+        checkbox::Checkbox,
         input::{Input, InputState, Textarea, TextareaState},
     },
     prelude::*,
@@ -21,6 +22,26 @@ fn items(v: &Value, k: &str) -> Vec<Value> {
     v[k].as_array().cloned().unwrap_or_default()
 }
 
+fn worktree_task_metadata(snapshot: &Value) -> Vec<Value> {
+    items(snapshot, "tasks")
+        .into_iter()
+        .filter(|task| task["agentWorktree"].is_object())
+        .map(|task| json!({
+            "id": task["id"], "projectId": task["projectId"],
+            "title": task["title"], "status": task["status"],
+            "agentWorktree": task["agentWorktree"]
+        }))
+        .collect()
+}
+
+fn workspace_metadata_changed(previous: &Value, snapshot: &Value) -> bool {
+    previous["projects"] != snapshot["projects"]
+        || worktree_task_metadata(previous) != worktree_task_metadata(snapshot)
+        || previous["hosts"] != snapshot["hosts"]
+        || previous["projectBoardMessages"] != snapshot["projectBoardMessages"]
+        || previous["settings"]["projectBoardEnabled"] != snapshot["settings"]["projectBoardEnabled"]
+}
+
 pub struct WorkspacePane {
     service: DesktopService,
     snapshot: Rc<Value>,
@@ -30,6 +51,8 @@ pub struct WorkspacePane {
     guidance: Entity<TextareaState>,
     note: Entity<TextareaState>,
     folders: Vec<(String, String, Entity<InputState>)>,
+    build_management_enabled: bool,
+    agent_worktrees_enabled: bool,
     busy: bool,
     error: Option<String>,
     pending_note: Option<(String, String, String)>,
@@ -66,6 +89,8 @@ impl WorkspacePane {
             note: cx
                 .new(|cx| TextareaState::new(window, cx).placeholder("Post a coordination note…")),
             folders,
+            build_management_enabled: false,
+            agent_worktrees_enabled: false,
             busy: false,
             error: None,
             pending_note: None,
@@ -73,12 +98,15 @@ impl WorkspacePane {
         }
     }
     pub fn sync(&mut self, snapshot: Rc<Value>, cx: &mut Context<Self>) {
+        let changed = workspace_metadata_changed(&self.snapshot, &snapshot);
         self.snapshot = snapshot;
-        cx.notify();
+        if changed { cx.notify(); }
     }
     pub(super) fn select(&mut self, project: Value, window: &mut Window, cx: &mut Context<Self>) {
         let id = text(&project, "id");
         self.selected = (!id.is_empty()).then_some(id);
+        self.agent_worktrees_enabled = project["agentWorktreesEnabled"].as_bool().unwrap_or(false);
+        self.build_management_enabled = project["buildManagementEnabled"].as_bool().unwrap_or(false);
         self.name
             .update(cx, |s, cx| s.set_value(text(&project, "name"), window, cx));
         self.description.update(cx, |s, cx| {
@@ -137,6 +165,8 @@ impl WorkspacePane {
             .unwrap_or(json!({"id":"","icon":"folder","color":"#7c8aff"}));
         project["name"] = json!(self.name.read(cx).value().to_string());
         project["description"] = json!(self.description.read(cx).value().to_string());
+        project["buildManagementEnabled"] = json!(self.build_management_enabled);
+        project["agentWorktreesEnabled"] = json!(self.agent_worktrees_enabled);
         let guidance = self.guidance.read(cx).value().to_string();
         project["boardGuidanceText"] = if guidance.trim().is_empty() {
             Value::Null
@@ -219,6 +249,28 @@ impl Render for WorkspacePane {
                 .child(Input::new(input).disabled(self.busy));
         }
         detail = detail
+            .child(
+                Checkbox::new("project-agent-worktrees")
+                    .label("Use a separate worktree for each agent pane")
+                    .checked(self.agent_worktrees_enabled)
+                    .disabled(self.busy)
+                    .on_change(cx.listener(|pane, checked, _, cx| {
+                        pane.agent_worktrees_enabled = *checked;
+                        cx.notify();
+                    })),
+            )
+            .child(div().text_sm().child("Applies to new local chats after saving. Each agent pane works on its own branch and worktree; existing chats keep their current folder."))
+            .child(
+                Checkbox::new("project-build-management")
+                    .label("Enable build management")
+                    .checked(self.build_management_enabled)
+                    .disabled(self.busy)
+                    .on_change(cx.listener(|pane, checked, _, cx| {
+                        pane.build_management_enabled = *checked;
+                        cx.notify();
+                    })),
+            )
+            .child(div().text_sm().child("Agents coordinate build requests, combine compatible ready changes and take turns using the build queue. They reuse useful artifacts and prune old builds and caches when disk space is low."))
             .child("Board guidance")
             .child(Textarea::new(&self.guidance))
             .child(
@@ -228,6 +280,33 @@ impl Render for WorkspacePane {
                     .on_click(cx.listener(|v, _, _, cx| v.save(cx))),
             );
         if let Some(id) = &self.selected {
+            let worktree_tasks: Vec<_> = items(&self.snapshot, "tasks")
+                .into_iter()
+                .filter(|task| text(task, "projectId") == *id && task["agentWorktree"].is_object())
+                .collect();
+            if !worktree_tasks.is_empty() {
+                detail = detail
+                    .child(div().mt_4().text_xl().child("Agent worktrees"))
+                    .child(div().text_sm().child("Commit changes first, then stop the agent before merging. Both worktrees must be clean. Merge brings committed changes into the project; conflicts are rejected without changing the project."));
+                for task in worktree_tasks {
+                    let task_id = text(&task, "id");
+                    let running = matches!(text(&task, "status").as_str(), "running" | "queued");
+                    detail = detail.child(
+                        div().flex().flex_col().gap_2().p_3().rounded_md()
+                            .bg(crate::design::surface_color(0x202737))
+                            .child(text(&task, "title"))
+                            .child(div().text_sm().child(format!("{} → {}", text(&task["agentWorktree"], "branch"), text(&task["agentWorktree"], "targetBranch"))))
+                            .child(
+                                Button::new(SharedString::from(format!("merge-worktree-{task_id}")))
+                                    .label("Merge into project")
+                                    .disabled(self.busy || running)
+                                    .on_click(cx.listener(move |pane, _, _, cx| {
+                                        pane.invoke("merge_task_worktree", json!({"taskId": task_id}), cx);
+                                    })),
+                            ),
+                    );
+                }
+            }
             detail = detail.child(div().mt_4().text_xl().child("Coordination board"));
             if self.snapshot["settings"]["projectBoardEnabled"] == true {
                 for note in items(&self.snapshot, "projectBoardMessages")
@@ -264,5 +343,39 @@ impl Render for WorkspacePane {
             .gap_4()
             .child(list)
             .child(detail)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[::core::prelude::v1::test]
+    fn worktree_notifications_follow_merge_controls_but_ignore_messages() {
+        let previous = json!({"tasks":[{
+            "id":"t", "projectId":"p", "title":"Agent", "status":"running",
+            "agentWorktree":{"branch":"agent/t", "targetBranch":"main"}
+        }]});
+        let mut next = previous.clone();
+        next["tasks"][0]["messages"] = json!([{"text":"streamed token"}]);
+        assert!(!workspace_metadata_changed(&previous, &next));
+        next["tasks"][0]["status"] = json!("completed");
+        assert!(workspace_metadata_changed(&previous, &next));
+        next = previous.clone();
+        next["tasks"][0]["agentWorktree"] = Value::Null;
+        assert!(workspace_metadata_changed(&previous, &next));
+    }
+    #[::core::prelude::v1::test]
+    fn workspace_notifications_follow_project_board_and_host_metadata() {
+        let previous = json!({"projects":[],"hosts":[],"projectBoardMessages":[],"settings":{"projectBoardEnabled":true},"tasks":[]});
+        let mut next = previous.clone();
+        next["tasks"] = json!([{"messages":[{"text":"token"}]}]);
+        assert!(!workspace_metadata_changed(&previous, &next));
+        for (key, value) in [("projects", json!([{"id":"p","name":"Updated"}])), ("hosts", json!([{"id":"h","name":"Host"}])), ("projectBoardMessages", json!([{"projectId":"p","text":"Note"}]))] {
+            let mut changed = next.clone();
+            changed[key] = value;
+            assert!(workspace_metadata_changed(&previous, &changed));
+        }
+        next["settings"]["projectBoardEnabled"] = json!(false);
+        assert!(workspace_metadata_changed(&previous, &next));
     }
 }

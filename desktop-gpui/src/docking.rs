@@ -3,7 +3,10 @@
 use crate::design::ui_scaled_px as px;
 use crate::empty_pane::{EmptyPane, EmptyPaneAction, EmptyPaneEvent};
 use gpui_kit::assets::IconName;
-use gpui_kit::component::{ActiveTheme as _, Icon, Sizable, WindowExt as _};
+use gpui_kit::component::{
+    ActiveTheme as _, Icon, Sizable, WindowExt as _,
+    button::{Button, ButtonVariants as _}, menu::DropdownMenu as _,
+};
 use gpui_kit::{component::dock::*, prelude::*, *};
 use monitter_lib::experimental_desktop::NativeTileTheme;
 use serde_json::{Value, json};
@@ -35,6 +38,17 @@ pub(crate) fn visibility_performance_counts() -> VisibilityPerformanceCounts {
     }
 }
 
+#[path = "split_allocation.rs"]
+mod split_allocation;
+#[cfg(all(test, feature = "visual-export"))]
+#[path = "split_allocation_tests.rs"]
+mod split_allocation_tests;
+#[cfg(all(test, feature = "visual-export"))]
+#[path = "pane_movement_tests.rs"]
+mod pane_movement_tests;
+#[cfg(all(test, feature = "visual-export"))]
+#[path = "auto_size_panes_tests.rs"]
+mod auto_size_panes_tests;
 const PANEL_NAME: &str = "MonitterNativePane";
 const VERSION: usize = 1;
 #[cfg(all(test, feature = "visual-export"))]
@@ -82,6 +96,7 @@ const EMPTY_TAB_PREFIX: &str = "empty:";
 #[derive(Clone, Debug)]
 pub enum WorkspaceEvent {
     LayoutChanged,
+    AutoSizePanesChanged(bool),
     VisibilityChanged {
         id: String,
         visible: bool,
@@ -93,7 +108,9 @@ pub enum WorkspaceEvent {
         pane_id: String,
         action: EmptyPaneAction,
     },
+    EmptyWorkspaceAction(EmptyPaneAction),
     EmptySession { pane_id: String, task_id: String },
+    EmptyClose { pane_id: String },
 }
 #[derive(Default)]
 struct PaintState {
@@ -111,6 +128,71 @@ struct NativePanel {
     appearance: Rc<Cell<Option<crate::pane_appearance::PaneAppearance>>>,
     auto_hide_tabs: Rc<Cell<bool>>,
     background: Option<Entity<crate::pane_appearance::PaneBackground>>,
+    working: bool,
+    _activity_subscription: Option<Subscription>,
+    dock_group: Option<WeakEntity<TabGroup>>,
+}
+impl NativePanel {
+    fn is_git_pane(&self) -> bool {
+        self.spec.id.starts_with("git:") || self.spec.id == "route:repository"
+    }
+    fn git_header_visible(&self) -> bool {
+        self.is_git_pane() && (self.auto_hide_tabs.get()
+            || self.appearance.get().is_some_and(|appearance| appearance.tile_theme == NativeTileTheme::Tern))
+    }
+    fn git_header(&self) -> Option<AnyElement> {
+        self.git_header_visible().then(|| self.dock_group.clone()).flatten()
+            .map(|group| GitPaneHeader { group }.into_any_element())
+    }
+    fn set_working(&mut self, working: bool, cx: &mut Context<Self>) {
+        if self.working == working { return; }
+        self.working = working;
+        if let Some(group) = self.dock_group.as_ref().and_then(|group| group.upgrade()) {
+            group.update(cx, |_, cx| cx.notify());
+        }
+        cx.notify();
+    }
+}
+/// Resolve the owning group only after NativePanel::render has returned.
+/// Dock helpers read the active panel's policy, so doing this while that same
+/// panel is mutably borrowed would re-enter its entity during render.
+#[derive(IntoElement)]
+struct GitPaneHeader {
+    group: WeakEntity<TabGroup>,
+}
+impl RenderOnce for GitPaneHeader {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let Some(group) = self.group.upgrade() else { return div().into_any_element(); };
+        let context = group.read(cx).context(cx);
+        let menu_group = group.downgrade();
+        let identity = pane_drag_region(
+            div().flex_1().min_w_0().h_full().flex().items_center().gap(px(6.))
+                .child(Icon::new(IconName::GitBranch).with_size(px(13.)).flex_shrink_0())
+                .child(div().min_w_0().truncate().child("Git Changes")),
+            &context, cx,
+        );
+        div().id("git-pane-header").debug_selector(|| "git-pane-header".into())
+            .w_full().h(px(36.)).flex_shrink_0().min_w_0().flex().items_center()
+            .px(px(8.)).gap(px(4.)).text_size(px(11.)).text_color(cx.theme().foreground)
+            .border_b_1().border_color(cx.theme().border)
+            .border_blend_mode(crate::surface_blend::separator_mode())
+            .child(identity)
+            .child(div().flex_shrink_0().debug_selector(|| "git-pane-move".into())
+                .child(pane_move_control(&context, cx)))
+            .children(pane_zoom_control(&context, cx).map(|button| button
+                .w(px(24.)).h(px(24.)).p_0().debug_selector(|| "git-pane-zoom".into())))
+            .child(Button::new("git-pane-menu").compact().small().ghost()
+                .w(px(24.)).h(px(24.)).p_0().icon(IconName::Ellipsis)
+                .tooltip("Pane menu").accessibility_label("Git changes pane menu")
+                .debug_selector(|| "git-pane-menu".into())
+                .dropdown_menu(move |menu, window, cx| {
+                    let Some(group) = menu_group.upgrade() else { return menu; };
+                    pane_menu(menu, &group.read(cx).context(cx), window, cx)
+                }).anchor(Anchor::TopRight))
+            .child(pane_close_control(&context, cx).w(px(24.)).h(px(24.)).p_0()
+                .debug_selector(|| "git-pane-close".into()))
+            .into_any_element()
+    }
 }
 impl EventEmitter<PanelEvent> for NativePanel {}
 impl Focusable for NativePanel {
@@ -130,7 +212,13 @@ impl BasePanel for NativePanel {
             hook(PaneLifecycle::Active(active), window, cx);
         }
     }
+    fn set_zoomed(&mut self, _: bool, _: &mut Window, cx: &mut Context<Self>) {
+        // Re-read the owning group's zoom state for the retained content header.
+        if self.git_header_visible() { cx.notify(); }
+    }
     fn on_removed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.dock_group = None;
+        crate::native_pane_highlight::observe_candidate(&self.spec.id, false, window);
         if let Some(background) = &self.background { background.update(cx, |background, cx| background.set_visible(false, cx)); }
         if self.retaining_layout.get() {
             if let Ok(chat) = self.spec.content.clone().downcast::<crate::chat::ChatPane>() {
@@ -161,6 +249,7 @@ impl BasePanel for NativePanel {
     }
     fn on_added_to(&mut self, group: WeakEntity<TabGroup>, _: &mut Window, cx: &mut Context<Self>) {
         self.removed = false;
+        self.dock_group = Some(group.clone());
         if let Ok(chat) = self.spec.content.clone().downcast::<crate::chat::ChatPane>() {
             chat.update(cx, |chat, cx| chat.set_dock_group(Some(group.clone()), cx));
         }
@@ -198,29 +287,40 @@ impl Panel for NativePanel {
     }
     fn tab_surface_blend_mode(&self, _: &App) -> u32 {
         if self.spec.id.starts_with("chat:") || self.spec.id.starts_with("draft:") {
-            crate::surface_blend::current(crate::surface_blend::Area::Pane).shader()
+            crate::surface_blend::effective_shader(crate::surface_blend::Area::Pane)
         } else { 0 }
     }
     fn inner_padding(&self, _: &App) -> bool { false }
     fn toolbar_in_content(&self, _: &App) -> bool {
-        self.spec.id.starts_with("chat:") || self.spec.id.starts_with("draft:")
+        self.spec.id.starts_with("chat:") || self.spec.id.starts_with("draft:") || self.spec.id.starts_with(EMPTY_TAB_PREFIX)
+            || self.git_header_visible()
+    }
+    fn close_button_visible(&self, cx: &App) -> bool {
+        self.spec.content.clone().downcast::<crate::browser::BrowserTab>()
+            .map_or(true, |browser| !browser.read(cx).has_native_close_control())
     }
     fn pane_overlay(&mut self, tab: Rc<Cell<Option<gpui::Bounds<Pixels>>>>, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let appearance = self.appearance.get();
-        let candidate = appearance.as_ref().is_some_and(|appearance| appearance.show_active_border)
-            && pane_visual_active(&self.spec.focus, window, cx)
-            && !crate::preferences_modal::workspace_blocked(cx);
-        crate::native_pane_highlight::observe_candidate(candidate, window);
+        let focused = appearance.as_ref().is_some_and(|appearance| appearance.show_active_border)
+            && pane_visual_active(&self.spec.focus, window, cx);
+        let working = self.working;
+        let candidate = (focused || working) && !crate::preferences_modal::workspace_blocked(cx);
+        crate::native_pane_highlight::observe_candidate(&self.spec.id, candidate, window);
         let appearance = appearance.filter(|_| candidate)?;
-        let color = appearance.active_border_color;
+        let pane_id = self.spec.id.clone();
+        let mut color = rgb(appearance.active_border_color);
+        if !focused { color.a = 0.; }
+        let mut glow_color: Rgba = cx.theme().primary.into();
+        if !working { glow_color.a = 0.; }
         if appearance.tile_theme == NativeTileTheme::Tern {
             let mut color = rgb(appearance.resolved_active_border_color());
-            color.a = appearance.border_opacity as f32 / 100.;
+            color.a = if focused { appearance.resolved_active_border_opacity() } else { 0. };
             return Some(canvas(|_, _, _| (), move |bounds, _, window, cx| {
                 if crate::preferences_modal::workspace_blocked(cx) { return; }
                 let contour = crate::pane_appearance::rounded_contour(bounds, px(8.));
                 // Native and GPUI strokes must not stack their alpha.
-                if !crate::native_pane_highlight::paint(bounds, color, &contour, window) {
+                if !crate::native_pane_highlight::paint(&pane_id, bounds, color, glow_color, &contour, window) {
+                    if working { crate::pane_highlight_geometry::paint_outward_glow(&contour, glow_color, window); }
                     window.paint_quad(gpui::outline(bounds, color, gpui::BorderStyle::Solid)
                         .corner_radii(px(8.)));
                 }
@@ -229,13 +329,15 @@ impl Panel for NativePanel {
         Some(canvas(|_, _, _| (), move |bounds, _, window, cx| {
             if crate::preferences_modal::workspace_blocked(cx) { return; }
             let contour = crate::pane_highlight_geometry::contour(bounds, tab.get());
-            crate::native_pane_highlight::paint(bounds, rgb(color), &contour, window);
+            if !crate::native_pane_highlight::paint(&pane_id, bounds, color, glow_color, &contour, window) {
+                if working { crate::pane_highlight_geometry::paint_outward_glow(&contour, glow_color, window); }
+            }
             let mut path = gpui::PathBuilder::stroke(gpui::px(1.));
             if let Some(first) = contour.first() {
                 path.move_to(*first);
                 for point in &contour[1..] { path.line_to(*point); }
                 path.close();
-                if let Ok(path) = path.build() { window.paint_path(path, rgb(color)); }
+                if let Ok(path) = path.build() { window.paint_path(path, color); }
             }
         }).absolute().inset_0().into_any_element())
     }
@@ -277,6 +379,7 @@ impl Panel for NativePanel {
             .map(|effect| effect.into_any_element())
     }
     fn title(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let icon = Icon::new(pane_type_icon(&self.spec.id)).with_size(px(13.)).flex_shrink_0();
         let title = if let Some(task) = self.spec.id.strip_prefix("chat:").filter(|task| crate::activity_effects::is_naming(task, cx)) {
             crate::naming_title::render(task, "tab", self.spec.title.clone(), self.appearance.get().map(|appearance| appearance.active_border_color).unwrap_or(0x559fff), window, cx)
         } else {
@@ -288,11 +391,7 @@ impl Panel for NativePanel {
             .items_center()
             .min_w_0()
             .gap(px(6.))
-            .child(
-                Icon::new(pane_type_icon(&self.spec.id))
-                    .with_size(px(13.))
-                    .flex_shrink_0(),
-            )
+            .child(icon)
             .child(div().flex_1().min_w_0().truncate().child(title))
     }
 }
@@ -348,6 +447,11 @@ impl Render for NativePanel {
                 }
             }
         }
+        let content = self.spec.content.clone().cached(StyleRefinement::default().size_full()).into_any_element();
+        let content = if let Some(header) = self.git_header() {
+            div().size_full().min_h_0().flex().flex_col().child(header)
+                .child(div().flex_1().min_h_0().w_full().relative().child(content)).into_any_element()
+        } else { content };
         // Only paint proves effective visibility. Active slots can be hidden,
         // collapsed, displaced by zoom, or outside the host's current route.
         div()
@@ -386,9 +490,7 @@ impl Render for NativePanel {
                 .child(
                 // Cached prepaint/paint now replay AccessKit nodes and actions.
                 // Keep the visibility canvas outside the cached content.
-                self.spec.content.clone()
-                    .cached(StyleRefinement::default().size_full())
-                    .into_any_element()
+                content
             )
             .children(decorations)
             .when_some(working_bubble, |this, bubble| this.child(bubble)))
@@ -416,6 +518,13 @@ pub struct DockWorkspace {
     _subscriptions: Vec<Subscription>,
     equalize_motion: Option<(std::time::Instant, Vec<DockSplitSnapshot>)>,
     equalize_frame_pending: bool,
+    auto_size_panes: bool,
+    auto_size_pending: bool,
+    auto_size_generation: u64,
+    restoring_layout: bool,
+    restore_generation: u64,
+    live_group_count: usize,
+    live_panel_count: usize,
 }
 impl EventEmitter<WorkspaceEvent> for DockWorkspace {}
 impl DockWorkspace {
@@ -456,10 +565,20 @@ impl DockWorkspace {
                 .expect("native restore preflight registered pane");
             panel_handle(panel)
         });
-        let changed = cx.subscribe(&area, |_, _, event, cx| {
-            if matches!(event, DockEvent::LayoutChanged) {
-                cx.emit(WorkspaceEvent::LayoutChanged);
-                cx.notify();
+        let changed = cx.subscribe_in(&area, window, |workspace, _, event, window, cx| {
+            match event {
+                DockEvent::ManuallyResized => workspace.set_auto_size_panes(false, window, cx),
+                DockEvent::LayoutChanged => {
+                    let count = workspace.visible_group_count(cx);
+                    let panels = workspace.visible_panel_count(cx);
+                    let panes_changed = count != workspace.live_group_count || panels != workspace.live_panel_count;
+                    workspace.live_group_count = count;
+                    workspace.live_panel_count = panels;
+                    if panes_changed && !workspace.restoring_layout { workspace.schedule_auto_size(window, cx); }
+                    cx.emit(WorkspaceEvent::LayoutChanged);
+                    cx.notify();
+                }
+                _ => {}
             }
         });
         let key = area.entity_id();
@@ -480,7 +599,60 @@ impl DockWorkspace {
             _subscriptions: vec![changed, released],
             equalize_motion: None,
             equalize_frame_pending: false,
+            auto_size_panes: true,
+            auto_size_pending: false,
+            auto_size_generation: 0,
+            restoring_layout: false,
+            restore_generation: 0,
+            live_group_count: 0,
+            live_panel_count: 0,
         }
+    }
+    pub fn auto_size_panes(&self) -> bool { self.auto_size_panes }
+    pub fn set_auto_size_panes(&mut self, enabled: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.auto_size_panes == enabled { return; }
+        self.auto_size_panes = enabled;
+        if enabled { self.schedule_auto_size(window, cx); }
+        else { self.cancel_layout_motion(); }
+        cx.emit(WorkspaceEvent::AutoSizePanesChanged(enabled));
+        cx.notify();
+    }
+    fn visible_group_count(&self, cx: &App) -> usize {
+        let area = self.area.read(cx);
+        [DockPlacement::Center, DockPlacement::Left, DockPlacement::Right, DockPlacement::Bottom]
+            .into_iter().filter(|placement| *placement == DockPlacement::Center || area.is_dock_open(*placement))
+            .filter_map(|placement| area.layout(placement))
+            .flat_map(|tree| groups_in(tree.root()))
+            .filter(|group| !group.panels.is_empty()).count()
+    }
+    fn visible_panel_count(&self, cx: &App) -> usize {
+        let area = self.area.read(cx);
+        [DockPlacement::Center, DockPlacement::Left, DockPlacement::Right, DockPlacement::Bottom]
+            .into_iter().filter(|placement| *placement == DockPlacement::Center || area.is_dock_open(*placement))
+            .filter_map(|placement| area.layout(placement))
+            .map(|tree| tree.panels().count()).sum()
+    }
+    fn schedule_auto_size(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.auto_size_panes || self.auto_size_pending || self.restoring_layout { return; }
+        self.auto_size_pending = true;
+        self.auto_size_generation = self.auto_size_generation.wrapping_add(1);
+        let generation = self.auto_size_generation;
+        let weak = cx.weak_entity();
+        // Sample after all inserts/moves and the first layout pass, never an
+        // intermediate tree while a new native pane is replacing its landing.
+        window.on_next_frame(move |window, cx| {
+            let _ = weak.update(cx, |workspace, cx| {
+                if !workspace.auto_size_pending || workspace.auto_size_generation != generation { return; }
+                workspace.auto_size_pending = false;
+                if workspace.auto_size_panes { workspace.equalize_workspace(window, cx); }
+            });
+        });
+        cx.notify();
+    }
+    fn cancel_layout_motion(&mut self) {
+        self.auto_size_pending = false;
+        self.auto_size_generation = self.auto_size_generation.wrapping_add(1);
+        self.equalize_motion = None;
     }
     pub fn area(&self) -> Entity<DockArea> {
         self.area.clone()
@@ -532,7 +704,12 @@ impl DockWorkspace {
     pub fn set_tab_appearance(&self, settings: &Value, scale: u16, cx: &mut App) {
         let hidden = settings["autoHideTabs"].as_bool().unwrap_or(false);
         let tern = crate::design::tile_theme() == NativeTileTheme::Tern;
-        self.auto_hide_tabs.set(hidden);
+        let hidden_changed = self.auto_hide_tabs.replace(hidden) != hidden;
+        if hidden_changed {
+            for panel in self.panels.borrow().values() {
+                panel.update(cx, |panel, cx| { if panel.is_git_pane() { cx.notify(); } });
+            }
+        }
         self.skin.set_panel_style(if tern {
             PanelStyle::Hidden
         } else if hidden {
@@ -583,14 +760,26 @@ impl DockWorkspace {
         }
         let id = spec.id.clone();
         let paint = self.paint.clone();
-        let panel = cx.new(|_| NativePanel {
-            spec,
-            paint,
-            removed: false,
-            retaining_layout: self.retaining_layout.clone(),
-            appearance: self.appearance.clone(),
-            auto_hide_tabs: self.auto_hide_tabs.clone(),
-            background: None,
+        let panel = cx.new(|cx: &mut Context<NativePanel>| {
+            let chat = spec.content.clone().downcast::<crate::chat::ChatPane>().ok();
+            let browser = spec.content.clone().downcast::<crate::browser::BrowserTab>().ok();
+            let working = chat.as_ref().is_some_and(|chat| chat.read(cx).is_working())
+                || browser.as_ref().is_some_and(|browser| browser.read(cx).is_loading());
+            let activity_subscription = if let Some(chat) = chat {
+                Some(cx.observe(&chat, |panel, chat, cx| {
+                    let working = chat.read(cx).is_working();
+                    panel.set_working(working, cx);
+                }))
+            } else { browser.map(|browser| cx.observe(&browser, |panel, browser, cx| {
+                let working = browser.read(cx).is_loading();
+                panel.set_working(working, cx);
+            })) };
+            NativePanel {
+                spec, paint, removed: false,
+                retaining_layout: self.retaining_layout.clone(),
+                appearance: self.appearance.clone(), auto_hide_tabs: self.auto_hide_tabs.clone(),
+                background: None, working, _activity_subscription: activity_subscription, dock_group: None,
+            }
         });
         self.panels.borrow_mut().insert(id, panel.clone());
         Ok(panel)
@@ -601,6 +790,12 @@ impl DockWorkspace {
     }
     pub fn has_panes(&self) -> bool {
         !self.panels.borrow().is_empty()
+    }
+    fn has_layout_panes(&self, cx: &App) -> bool {
+        let area = self.area.read(cx);
+        [DockPlacement::Center, DockPlacement::Left, DockPlacement::Right, DockPlacement::Bottom]
+            .into_iter().filter_map(|placement| area.layout(placement))
+            .any(|tree| tree.panels().next().is_some())
     }
     pub fn contains(&self, id: &str) -> bool {
         self.panels.borrow().contains_key(id)
@@ -635,6 +830,31 @@ impl DockWorkspace {
         })
     }
     /// Find the tab group containing the dock pane that owns keyboard focus.
+    /// Create the first landing pane when the final tab group has been removed.
+    pub fn add_focused_empty_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Result<String, String> {
+        if let Some(group) = self.focused_group_node(window, cx) { return self.add_empty_tab(group, window, cx); }
+        let occupied = {
+            let area = self.area.read(cx);
+            [DockPlacement::Center, DockPlacement::Left, DockPlacement::Right, DockPlacement::Bottom]
+                .into_iter().filter_map(|placement| area.layout(placement))
+                .any(|tree| tree.panels().next().is_some())
+        };
+        if occupied { return Err("Focus a workspace pane before opening a new tab.".into()); }
+        let mut index = 1_u64;
+        let id = loop {
+            let id = format!("{EMPTY_TAB_PREFIX}{index}");
+            if !self.contains(&id) { break id; }
+            index += 1;
+        };
+        let spec = self.empty_spec(&id, window, cx)?;
+        self.add(spec, DockPlacement::Center, None, window, cx)?;
+        self.focus(&id, window, cx);
+        Ok(id)
+    }
+    pub fn add_focused_empty_split(&mut self, vertical: bool, window: &mut Window, cx: &mut Context<Self>) -> Result<String, String> {
+        if let Some(group) = self.focused_group_node(window, cx) { self.add_empty_split(group, vertical, window, cx) }
+        else { self.add_focused_empty_tab(window, cx) }
+    }
     pub fn focused_group_node(&self, window: &Window, cx: &App) -> Option<NodeId> {
         let focused_id = self.focused_pane_id(window, cx)?;
         self.group_for_pane(&focused_id, cx)
@@ -837,70 +1057,14 @@ impl DockWorkspace {
             .is_some_and(|id| self.focus(&id, window, cx))
     }
 
-    /// Move the focused tab into the adjacent pane, or create a directional
-    /// split beside its current group when no neighbor exists.
+    /// Extract a tab beside its group, or relocate a standalone pane beyond
+    /// its directional neighbor. Native insertion keeps same-axis siblings flat.
     pub fn move_focused_tab(
         &mut self,
         direction: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(id) = self.focused_pane_id(window, cx) else {
-            return false;
-        };
-        let Some(key) = self.panel_key(&id) else {
-            return false;
-        };
-        let Some(group) = self.focused_group_node(window, cx) else {
-            return false;
-        };
-        let target = {
-            let area = self.area.read(cx);
-            let source = collect_workspace_frames(&area, cx)
-                .into_iter()
-                .find(|frame| frame.panels.contains(&key));
-            source.and_then(|source| {
-                collect_workspace_frames(&area, cx)
-                    .into_iter()
-                    .filter(|frame| !frame.panels.contains(&key))
-                    .filter_map(|frame| {
-                        directional_score(source.rect, frame.rect, direction)
-                            .map(|score| (score, frame))
-                    })
-                    .min_by(|a, b| a.0.total_cmp(&b.0))
-                    .map(|(_, frame)| frame)
-            })
-        };
-        if let Some(frame) = target {
-            if let Some(target_key) = frame.panels.get(frame.active_ix).copied() {
-                if let Some(node) = {
-                    let area = self.area.read(cx);
-                    [
-                        DockPlacement::Center,
-                        DockPlacement::Left,
-                        DockPlacement::Right,
-                        DockPlacement::Bottom,
-                    ]
-                    .into_iter()
-                    .filter_map(|placement| area.layout(placement))
-                    .find_map(|tree| tree.find_panel_node(target_key))
-                } {
-                    if self.move_pane(
-                        &id,
-                        InsertTarget::Tabs {
-                            node,
-                            ix: None,
-                            activate: true,
-                        },
-                        window,
-                        cx,
-                    ) {
-                        return self.focus(&id, window, cx);
-                    }
-                }
-            }
-            return false;
-        }
         let placement = match direction {
             "left" => gpui_kit::component::Placement::Left,
             "right" => gpui_kit::component::Placement::Right,
@@ -908,11 +1072,69 @@ impl DockWorkspace {
             "down" => gpui_kit::component::Placement::Bottom,
             _ => return false,
         };
-        self.area.update(cx, |area, cx| {
-            // split_at inserts another leaf; this shortcut relocates the
-            // existing pane and must detach its source in the same edit.
-            area.move_panel(key, InsertTarget::Split { node: group, placement, size: None }, window, cx)
-        });
+        let Some(id) = self.focused_pane_id(window, cx) else { return false; };
+        let Some(key) = self.panel_key(&id) else { return false; };
+        let Some((region, group, panels, shape)) = focused_group_location(self, window, cx) else { return false; };
+        // Resolve every retained panel before editing so failure can restore
+        // the original topology without creating or removing pane entities.
+        let rollback = {
+            let area = self.area.read(cx);
+            shape_to_layout(&shape, &area, cx)
+        };
+        let Some(rollback) = rollback else { return false; };
+        let (target, allocation, weights) = {
+            let area = self.area.read(cx);
+            let Some(tree) = area.layout(region) else { return false; };
+            let snapshots = area.split_geometry(cx);
+            if panels.len() > 1 {
+                (group, Some(split_allocation::SplitAllocation::capture(region, tree.root(), &snapshots)), HashMap::new())
+            } else {
+                let frames = collect_workspace_frames(&area, cx);
+                let Some(source) = frames.iter().find(|frame| frame.panels.contains(&key)) else { return false; };
+                let neighbor = frames.iter()
+                    .filter(|frame| !frame.panels.contains(&key))
+                    .filter_map(|frame| {
+                        let target_key = *frame.panels.get(frame.active_ix)?;
+                        let node = tree.find_panel_node(target_key)?;
+                        directional_score(source.rect, frame.rect, direction).map(|score| (score, node))
+                    })
+                    .min_by(|a, b| a.0.total_cmp(&b.0));
+                let Some((_, target)) = neighbor else { return false; };
+                let prior = split_allocation::leaf_weights(tree.root(), &snapshots);
+                let weights = groups_in(tree.root()).into_iter()
+                    .filter_map(|group| Some((*group.panels.first()?, *prior.get(&group.node)?)))
+                    .collect();
+                (target, None, weights)
+            }
+        };
+        self.area.update(cx, |area, cx| area.move_panel(key,
+            InsertTarget::Split { node: target, placement, size: None }, window, cx));
+        let mut snapshots = self.area.read(cx).split_geometry(cx);
+        let prepared = {
+            let area = self.area.read(cx);
+            area.layout(region).is_some_and(|tree| {
+                if let Some(allocation) = allocation {
+                    tree.find_panel_node(key).is_some_and(|leaf| allocation.targets(tree.root(), leaf, &mut snapshots))
+                } else {
+                    movement_weight_targets(tree.root(), &weights, &mut snapshots).is_some()
+                }
+            })
+        };
+        snapshots.retain(|snapshot| self.area.read(cx).layout(region)
+            .is_some_and(|tree| tree.find_node(snapshot.node).is_some()));
+        self.equalize_motion = None;
+        let applied = prepared && self.area.update(cx, |area, cx|
+            area.equalize_split_geometry(&snapshots, 1., true, cx));
+        if !applied {
+            self.retaining_layout.set(true);
+            self.area.update(cx, |area, cx| {
+                if region == DockPlacement::Center { area.set_center(rollback, window, cx); }
+                else { area.set_dock(region, rollback, window, cx); }
+            });
+            self.retaining_layout.set(false);
+            self.focus(&id, window, cx);
+            return false;
+        }
         self.focus(&id, window, cx)
     }
 
@@ -1056,7 +1278,9 @@ impl DockWorkspace {
         if !resize_shape_for_group(&mut shape, group, axis, amount, maximize) {
             return false;
         }
-        self.install_shape(placement, shape, window, cx)
+        let resized = self.install_shape(placement, shape, window, cx);
+        if resized { self.set_auto_size_panes(false, window, cx); }
+        resized
     }
 
     /// Split the focused tab group and put a retained empty pane beside it.
@@ -1077,30 +1301,9 @@ impl DockWorkspace {
             "down" => gpui_kit::component::Placement::Bottom,
             _ => return Ok(false),
         };
-        let mut index = 1_u64;
-        let id = loop {
-            let candidate = format!("{EMPTY_TAB_PREFIX}{index}");
-            if !self.contains(&candidate) {
-                break candidate;
-            }
-            index = index.saturating_add(1);
-        };
-        let spec = self.empty_spec(&id, window, cx)?;
-        self.add(spec, DockPlacement::Center, None, window, cx)?;
-        if !self.move_pane(
-            &id,
-            InsertTarget::Split {
-                node: group,
-                placement,
-                size: size.map(|size| px(size as f32)),
-            },
-            window,
-            cx,
-        ) {
-            self.remove(&id, window, cx);
-            return Ok(false);
-        }
-        self.focus(&id, window, cx);
+        self.add_empty_at(InsertTarget::Split {
+            node: group, placement, size: size.map(|size| px(size as f32)),
+        }, window, cx)?;
         Ok(true)
     }
 
@@ -1457,6 +1660,16 @@ impl DockWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<String, String> {
+        let allocation = if let InsertTarget::Split { node, size: None, .. } = &target {
+            let area = self.area.read(cx);
+            let snapshots = area.split_geometry(cx);
+            [DockPlacement::Center, DockPlacement::Left, DockPlacement::Right, DockPlacement::Bottom]
+                .into_iter().find_map(|placement| {
+                    let tree = area.layout(placement)?;
+                    tree.find_node(*node)?;
+                    Some(split_allocation::SplitAllocation::capture(placement, tree.root(), &snapshots))
+                })
+        } else { None };
         let mut index = 1_u64;
         let id = loop {
             let candidate = format!("{EMPTY_TAB_PREFIX}{index}");
@@ -1475,6 +1688,25 @@ impl DockWorkspace {
         ) {
             self.remove(&id, window, cx);
             return Err("The new pane could not be placed beside the focused pane.".into());
+        }
+        if let Some(allocation) = allocation {
+            let mut snapshots = self.area.read(cx).split_geometry(cx);
+            let prepared = {
+                let area = self.area.read(cx);
+                let key = self.panel_key(&id).expect("new pane retained");
+                area.layout(allocation.placement).and_then(|tree| tree.find_panel_node(key)
+                    .map(|new_leaf| allocation.targets(tree.root(), new_leaf, &mut snapshots)))
+                    .unwrap_or(false)
+            };
+            snapshots.retain(|snapshot| self.area.read(cx).layout(allocation.placement)
+                .is_some_and(|tree| tree.find_node(snapshot.node).is_some())
+                && snapshot.shares.iter().zip(&snapshot.target_shares)
+                    .any(|(share, target)| (share - target).abs() > 0.000001));
+            self.equalize_motion = None;
+            if !prepared || !self.area.update(cx, |area, cx| area.equalize_split_geometry(&snapshots, 1., true, cx)) {
+                self.remove(&id, window, cx);
+                return Err("The new pane's proportional split allocation could not be applied.".into());
+            }
         }
         self.focus(&id, window, cx);
         Ok(id)
@@ -1524,9 +1756,43 @@ impl DockWorkspace {
         self.area.update(cx, |area, cx| {
             area.add_panel_view(panel_handle(panel), placement, size, window, cx)
         });
+        // A new tab or landing replacement need not increase the group count.
+        // Coalesce explicit insertions with DockArea's structural notifications;
+        // the deferred pass samples the completed tree and resizes every split.
+        self.schedule_auto_size(window, cx);
         cx.notify();
         Ok(())
     }
+    /// Browser links create a separate split; the originating pane stays visible.
+    pub fn add_browser_beside(&mut self, spec: PaneSpec, origin: Option<NodeId>, window: &mut Window, cx: &mut Context<Self>) -> Result<(), String> {
+        let id = spec.id.clone();
+        if self.contains(&id) { return Err("The browser pane identity is already retained.".into()); }
+        self.add(spec, DockPlacement::Center, None, window, cx)?;
+        if let Some(node) = origin {
+            if !self.move_pane(&id, InsertTarget::Split { node, placement: gpui_kit::component::Placement::Right, size: None }, window, cx) {
+                self.remove(&id, window, cx);
+                return Err("The browser pane could not be placed beside its source.".into());
+            }
+        }
+        self.focus(&id, window, cx);
+        Ok(())
+    }
+
+    /// Create a separate pane below the named origin, regardless of focus.
+    pub fn add_below(&mut self, spec: PaneSpec, origin: &str, window: &mut Window, cx: &mut Context<Self>) -> Result<(), String> {
+        let node = self.group_for_pane(origin, cx).ok_or("The originating chat pane is unavailable.")?;
+        let id = spec.id.clone();
+        if self.contains(&id) { return Err("The new pane identity is already retained.".into()); }
+        self.add(spec, DockPlacement::Center, None, window, cx)?;
+        if !self.move_pane(&id, InsertTarget::Split { node, placement: gpui_kit::component::Placement::Bottom, size: None }, window, cx) {
+            self.remove(&id, window, cx);
+            return Err("The new pane could not be placed below its chat.".into());
+        }
+        self.focus(&id, window, cx);
+        cx.notify();
+        Ok(())
+    }
+
     pub fn set_title(&mut self, id: &str, title: SharedString, cx: &mut Context<Self>) {
         let panel = self.panels.borrow().get(id).cloned();
         if let Some(panel) = panel {
@@ -1540,6 +1806,23 @@ impl DockWorkspace {
     }
     pub fn pane_title(&self, id: &str, cx: &App) -> Option<SharedString> {
         self.panels.borrow().get(id).map(|panel| panel.read(cx).spec.title.clone())
+    }
+    /// Focus a pane already in this layout, opening its edge dock if needed.
+    /// Hidden retained workspace panels never qualify and are never inserted.
+    pub fn reveal_and_focus(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(panel) = self.panels.borrow().get(id).cloned() else { return false; };
+        let key = PanelId::from(panel.entity_id());
+        let placement = {
+            let area = self.area.read(cx);
+            [DockPlacement::Center, DockPlacement::Left, DockPlacement::Right, DockPlacement::Bottom]
+                .into_iter().find(|placement| area.layout(*placement)
+                    .is_some_and(|tree| tree.panels().any(|panel| panel == key)))
+        };
+        let Some(placement) = placement else { return false; };
+        if placement != DockPlacement::Center && !self.area.read(cx).is_dock_open(placement) {
+            self.area.update(cx, |area, cx| area.toggle_dock(placement, window, cx));
+        }
+        self.focus(id, window, cx)
     }
     pub fn focus(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let Some(panel) = self.panels.borrow().get(id).cloned() else {
@@ -1572,7 +1855,13 @@ impl DockWorkspace {
         self.area.update(cx, |area, cx| {
             area.move_panel(PanelId::from(panel.entity_id()), target, window, cx)
         });
+        self.schedule_auto_size(window, cx);
         true
+    }
+    /// Landing panes may be closed even when they are the last docked pane.
+    pub fn close_empty(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !id.starts_with(EMPTY_TAB_PREFIX) || !self.empty_panes.contains_key(id) { return false; }
+        self.remove(id, window, cx)
     }
     pub fn remove(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let Some(panel) = self.panels.borrow().get(id).cloned() else {
@@ -1663,9 +1952,23 @@ impl DockWorkspace {
                 self.retain(spec, cx)?;
             }
         }
-        self.area
-            .update(cx, |area, cx| area.load(state, window, cx))
-            .map_err(|error| error.to_string())?;
+        self.cancel_layout_motion();
+        self.restoring_layout = true;
+        self.restore_generation = self.restore_generation.wrapping_add(1);
+        let restore_generation = self.restore_generation;
+        let loaded = self.area.update(cx, |area, cx| area.load(state, window, cx));
+        // Dock events are delivered after the enclosing entity update. Keep
+        // the restore guard until those effects have been consumed; a load is
+        // never an inserted-pane gesture.
+        cx.defer_in(window, move |workspace, _, _| {
+            if workspace.restore_generation == restore_generation {
+                workspace.restoring_layout = false;
+            }
+        });
+        loaded.map_err(|error| error.to_string())?;
+        // Restoring/switching workspaces must preserve the saved proportions.
+        self.live_group_count = self.visible_group_count(cx);
+        self.live_panel_count = self.visible_panel_count(cx);
         // A single restored group has an unambiguous active pane. Give it
         // actual keyboard focus so shortcuts work before the first click.
         // Multiple split groups require an explicit user focus choice.
@@ -1719,6 +2022,7 @@ impl DockWorkspace {
                         .is_some_and(|panel| !panel.read(cx).removed);
                     if is_current && is_retained {
                         match event {
+                            EmptyPaneEvent::Close => cx.emit(WorkspaceEvent::EmptyClose { pane_id: event_id.clone() }),
                             EmptyPaneEvent::Action(action) => cx.emit(WorkspaceEvent::EmptyAction { pane_id: event_id.clone(), action: *action }),
                             EmptyPaneEvent::OpenSession(task_id) => cx.emit(WorkspaceEvent::EmptySession { pane_id: event_id.clone(), task_id: task_id.clone() }),
                         }
@@ -1762,6 +2066,10 @@ impl DockWorkspace {
     /// The existing chat entity is reused, including a running native session.
     pub fn replace_empty_with_chat(&mut self, empty: &str, chat: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if !empty.starts_with(EMPTY_TAB_PREFIX) || !chat.starts_with("chat:") { return false; }
+        self.replace_pane(empty, chat, window, cx)
+    }
+    /// Replace only the source tab, preserving its group and tab position.
+    pub fn replace_pane(&mut self, empty: &str, chat: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let Some(empty_key) = self.panel_key(empty) else { return false; };
         let Some(chat_key) = self.panel_key(chat) else { return false; };
         let destination = {
@@ -1787,6 +2095,7 @@ impl DockWorkspace {
         if !moved { return false; }
         self.remove(empty, window, cx);
         self.focus(chat, window, cx);
+        self.schedule_auto_size(window, cx);
         true
     }
     /// Call before hiding a route/window. Browser hooks must hide native child
@@ -1809,6 +2118,7 @@ impl DockWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        crate::native_pane_highlight::retain_panes(&next.iter().cloned().collect::<Vec<_>>(), window);
         let prior = std::mem::replace(&mut self.paint.borrow_mut().visible, next.clone());
         for id in prior.symmetric_difference(&next) {
             let visible = next.contains(id);
@@ -1829,10 +2139,6 @@ impl DockWorkspace {
 }
 impl Render for DockWorkspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // A rendered workspace is an authoritative observation point even if
-        // it currently has no active panel. A focused NativePanel may promote
-        // this to `true` while its TabGroupRenderer builds the deferred outline.
-        crate::native_pane_highlight::observe_candidate(false, window);
         // WKWebViews are native children above the GPU surface. Park them
         // before drawing a native dialog while retaining the desired route.
         if window.has_active_dialog(cx) {
@@ -1893,7 +2199,25 @@ impl Render for DockWorkspace {
                 });
             });
         }
-        div().size_full().child(self.area.clone())
+        let empty = !self.has_layout_panes(cx);
+        div().size_full().relative().child(self.area.clone())
+            .when(empty, |surface| surface.child(
+                div().id("empty-workspace").absolute().inset_0()
+                    .flex().flex_col().items_center().justify_center().gap(px(16.))
+                    .text_color(cx.theme().foreground)
+                    .child(div().text_size(px(16.)).child("Nothing to see here."))
+                    .child(div().flex().flex_wrap().justify_center().gap(px(8.))
+                        .children([
+                            ("empty-workspace-chat", "New Chat", EmptyPaneAction::Chat),
+                            ("empty-workspace-terminal", "Terminal", EmptyPaneAction::Terminal),
+                            ("empty-workspace-neovim", "Neovim", EmptyPaneAction::Neovim),
+                            ("empty-workspace-browser", "Browser", EmptyPaneAction::Browser),
+                        ].into_iter().map(|(id, label, action)| {
+                            gpui_kit::component::button::Button::new(id).label(label).small()
+                                .on_click(cx.listener(move |_, _, _, cx| {
+                                    cx.emit(WorkspaceEvent::EmptyWorkspaceAction(action));
+                                }))
+                        })))))
     }
 }
 
@@ -1938,6 +2262,29 @@ struct WorkspaceGroup {
     node: NodeId,
     panels: Vec<PanelId>,
     active_ix: usize,
+}
+
+/// Retarget geometry after relocation using stable panel keys, since native
+/// detach/insert can replace leaf and ancestor node IDs.
+fn movement_weight_targets(
+    node: &PaneNode,
+    weights: &HashMap<PanelId, f32>,
+    snapshots: &mut [DockSplitSnapshot],
+) -> Option<f32> {
+    match node.kind() {
+        PaneRef::Tabs { panels, .. } => panels.iter().find_map(|panel| weights.get(panel).copied()),
+        PaneRef::Split { children, .. } => {
+            let weights = children.iter().map(|child| movement_weight_targets(child, weights, snapshots))
+                .collect::<Option<Vec<_>>>()?;
+            let total: f32 = weights.iter().sum();
+            if !total.is_finite() || total <= 0. { return None; }
+            if children.len() > 1 {
+                let snapshot = snapshots.iter_mut().find(|snapshot| snapshot.node == node.id())?;
+                snapshot.target_shares = weights.iter().map(|weight| weight / total).collect();
+            }
+            Some(total)
+        }
+    }
 }
 
 fn capture_shape(node: &PaneNode) -> WorkspaceShape {

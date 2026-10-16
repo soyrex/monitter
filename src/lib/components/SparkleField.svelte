@@ -1,5 +1,5 @@
 <script lang="ts">
-  export type ActivityAnimation = 'sparkles' | 'grid' | 'matrix';
+  export type ActivityAnimation = 'sparkles' | 'liquid' | 'grid' | 'matrix';
 
   let {
     active = false,
@@ -70,9 +70,11 @@
 </script>
 
 {#if active}<div class="sparkle-field" class:mirror class:contained class:compact class:pane data-effect={animation} aria-hidden="true">
-  <div class="sparkle-glow"></div>
   {#if animation === 'sparkles'}
+    <div class="sparkle-glow"></div>
     {#each compact ? compactSparkles : sparkles as sparkle}<span class="sparkle" style:left={`${sparkle.x}%`} style:bottom={compact ? `${sparkle.y}%` : `${sparkle.y}px`} style:font-size={sparkle.size} style:animation-delay={`${sparkle.delay}s`}>✦</span>{/each}
+  {:else if animation === 'liquid'}
+    <div class="liquid-field"><div class="liquid-wave"></div><div class="liquid-wave"></div><div class="liquid-wave"></div></div>
   {:else if animation === 'grid'}
     <div class="pulse-grid"></div>
   {:else}
@@ -106,6 +108,15 @@
     70%, 100% { opacity:0; transform:translateY(-18px) scale(.6); }
   }
 
+  .liquid-field { position:absolute; inset:0; overflow:hidden; mask-image:linear-gradient(to top, #000, #000 28%, transparent 85%); }
+  .liquid-wave { position:absolute; left:-20%; bottom:-40%; width:140%; height:85%; border-radius:46% 54% 0 0 / 38% 48% 0 0; background:linear-gradient(to top, color-mix(in srgb,var(--accent) 32%,transparent), color-mix(in srgb,var(--accent) 14%,transparent)); filter:blur(9px); transform-origin:center bottom; animation:liquid-sway 7s ease-in-out infinite alternate; }
+  .liquid-wave:nth-child(2) { bottom:-28%; opacity:.6; border-radius:58% 42% 0 0 / 52% 36% 0 0; animation-duration:9s; animation-delay:-4s; animation-direction:alternate-reverse; }
+  .liquid-wave:nth-child(3) { bottom:-48%; opacity:.7; animation-duration:11s; animation-delay:-6s; }
+  @keyframes liquid-sway {
+    from { transform:translateX(-5%) rotate(-3deg) scaleY(.85); }
+    to { transform:translateX(5%) rotate(3deg) scaleY(1.12); }
+  }
+
   .pulse-grid { position:absolute; inset:0; opacity:.7; background-image:linear-gradient(color-mix(in srgb, var(--accent-ink) 43%, transparent) 1px, transparent 1px),linear-gradient(90deg, color-mix(in srgb, var(--accent-ink) 43%, transparent) 1px, transparent 1px); background-position:center bottom; background-size:18px 18px; mask-image:linear-gradient(to top, #000 0%, #000 43%, transparent 100%); animation:grid-pulse 2.8s ease-in-out infinite; }
   @keyframes grid-pulse {
     0%, 100% { opacity:.28; transform:scale(1); filter:drop-shadow(0 0 0 transparent); }
@@ -124,17 +135,23 @@
   }
 
   :global([data-motion="off"]) .sparkle,
+  :global([data-motion="off"]) .liquid-wave,
   :global([data-motion="off"]) .pulse-grid,
   :global([data-motion="off"]) .matrix-column { animation:none; }
   :global([data-motion="off"]) .sparkle-glow { animation:none; }
+  :global([data-motion="off"]) .liquid-field { opacity:.4; }
+  :global([data-motion="off"]) .liquid-wave { transform:none; }
   :global([data-motion="off"]) .sparkle { opacity:.55; transform:none; }
   :global([data-motion="off"]) .pulse-grid { opacity:.32; transform:none; filter:none; }
   :global([data-motion="off"]) .matrix-column { opacity:.38; transform:translateY(120%); }
   @media (prefers-reduced-motion:reduce) {
     :global(:root:not([data-motion="on"])) .sparkle-glow { animation:none; }
     :global(:root:not([data-motion="on"])) .sparkle,
+    :global(:root:not([data-motion="on"])) .liquid-wave,
     :global(:root:not([data-motion="on"])) .pulse-grid,
     :global(:root:not([data-motion="on"])) .matrix-column { animation:none; }
+    :global(:root:not([data-motion="on"])) .liquid-field { opacity:.4; }
+    :global(:root:not([data-motion="on"])) .liquid-wave { transform:none; }
     :global(:root:not([data-motion="on"])) .sparkle { opacity:.55; transform:none; }
     :global(:root:not([data-motion="on"])) .pulse-grid { opacity:.32; transform:none; filter:none; }
     :global(:root:not([data-motion="on"])) .matrix-column { opacity:.38; transform:translateY(120%); }

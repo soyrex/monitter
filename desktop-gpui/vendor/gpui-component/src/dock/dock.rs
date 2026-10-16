@@ -64,6 +64,13 @@ impl DockAreaRenderer for DockSkin {
         div().id("dock-area-center")
     }
 
+    fn split_gap_hit_extent(&self, _: &App) -> Pixels {
+        match self.shared.tile_style() {
+            DockTileStyle::Rounded { gutter, .. } => gutter,
+            DockTileStyle::Contiguous => gpui::px(12.),
+        }
+    }
+
     fn render_split_handle(
         &self,
         handle: &ResizeHandleContext,

@@ -1625,6 +1625,36 @@ mod tests {
     }
 
     #[gpui::test]
+    fn compact_code_block_preserves_lines_and_source_in_narrow_chat(cx: &mut TestAppContext) {
+        struct CodeRoot { view: Entity<TextViewState> }
+        impl Render for CodeRoot {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().w(px(280.)).text_size(px(20.)).line_height(px(30.))
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .child(TextView::new(&self.view).selectable(true).scrollable(false)
+                        .selection_format(crate::text::SelectionFormat::Source))
+            }
+        }
+        let source = format!("```javascript\nconst value = \"{}\";\nreturn value;\n```", "long ".repeat(40));
+        cx.update(crate::init);
+        let (root, cx) = cx.add_window_view(|_, cx| CodeRoot {
+            view: cx.new(|cx| TextViewState::markdown(&source, cx)),
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let body = cx.debug_bounds("code-block-body").expect("code body");
+        let gutter = cx.debug_bounds("code-block-gutter").expect("line numbers");
+        let header = cx.debug_bounds("code-block-header").expect("code header");
+        assert!(body.size.height <= px(40.), "two lines must not wrap: {body:?}");
+        assert!(body.size.width > px(280.), "long code must have horizontal extent");
+        assert!((body.top() - gutter.top()).abs() < px(1.), "gutter must align");
+        assert!(header.bottom() <= body.top(), "header must not obscure code");
+        let view = root.read_with(cx, |root, _| root.view.clone());
+        view.update(cx, |view, cx| view.select_all(cx));
+        assert_eq!(view.read_with(cx, |view, _| view.selected_text()), source);
+    }
+
+    #[gpui::test]
     fn list_item_renders_fenced_code_block_at_document_width(cx: &mut TestAppContext) {
         struct ListItemBlockRoot;
 

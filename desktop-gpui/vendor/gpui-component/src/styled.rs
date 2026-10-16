@@ -1,8 +1,9 @@
 pub use crate::component_traits::{Collapsible, Disableable, Selectable};
 pub use crate::sizing::{Sizable, Size, StyleSized};
 use gpui::{
-    App, BoxShadow, Corners, Edges, Hsla, InteractiveElement as _, ParentElement, Pixels,
-    StyleRefinement, Styled, Window, div, hsla, prelude::FluentBuilder as _, px,
+    App, BoxShadow, Corners, Div, Edges, FontWeight, Hsla, InteractiveElement as _, ParentElement,
+    Pixels, SharedString, StyleRefinement, Styled, Window, div, hsla, prelude::FluentBuilder as _,
+    px,
 };
 pub use gpui_base::{FocusableExt, RoleOverride, StyledExt, box_shadow, h_flex, v_flex};
 
@@ -15,24 +16,11 @@ const FOCUS_RING_OPACITY: f32 = 0.5;
 /// shadcn/ui spends at each elevation.
 const SURFACE_SHADOW_INK: f32 = 0.1;
 
-/// Ink of the hairline ring standing in for a popover's border.
-///
-/// shadcn/ui draws no border on a popup surface at all: its edge is a 1px
-/// `rgb(0 0 0 / 0.1)` ring spent as a shadow layer. Because the ring is
-/// translucent the shadow shows *through* it, which is what makes the edge read
-/// as part of one grounded surface rather than as an outline with a separate
-/// shadow below it. An opaque border cannot reproduce that — a border composites
-/// over the element's own background, not over the shadow.
-const POPOVER_RING_INK: f32 = 0.1;
-
-/// The colour of a popup surface's hairline ring in this theme.
-///
-/// shadcn spends black on it in light mode and white in dark
-/// (`oklch(1 0 0 / 10%)`), so it follows the foreground rather than the border
-/// token: a fixed black ring would all but vanish on a dark surface.
-///
+/// Shared popup border uses the same theme border as the model picker.
+/// Paint its crisp 1px edge through the shadow ring so animated and anchored
+/// popups keep identical edges without adding a second outline.
 pub(crate) fn popover_ring(cx: &App) -> Hsla {
-    cx.theme().foreground.alpha(POPOVER_RING_INK)
+    cx.theme().border
 }
 
 /// Monitter popup elevation: a hairline ring, surrounding ambient shadow,
@@ -101,6 +89,40 @@ pub(crate) fn raised_shadow() -> Vec<BoxShadow> {
             .blur_radius(px(1.))
             .spread_radius(px(-1.)),
     ]
+}
+
+/// Shared title, supporting text and edge-to-edge divider for popup surfaces.
+/// Keep this outside the body padding so the divider spans the whole surface.
+pub fn popup_header(title: SharedString, subtitle: SharedString, cx: &App) -> Div {
+    let title_selector = format!("popup-header-title-{title}");
+    let subtitle_selector = format!("popup-header-subtitle-{title}");
+    v_flex()
+        .when(cfg!(test), |this| {
+            this.debug_selector(|| "popup-header-divider".into())
+        })
+        .min_w_0()
+        .flex_none()
+        .font_family(cx.theme().font_family.clone())
+        .text_size(cx.theme().font_size)
+        .text_color(cx.theme().popover_foreground)
+        .border_b_1()
+        .border_color(cx.theme().border)
+        .child(
+            v_flex()
+                .min_w_0()
+                .p_3()
+                .gap_1()
+                .child(div().debug_selector(move || title_selector).font_weight(FontWeight::SEMIBOLD).child(title))
+                .child(
+                    div()
+                        .debug_selector(move || subtitle_selector)
+                        .min_w_0()
+                        .whitespace_normal()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(subtitle),
+                ),
+        )
 }
 
 /// Finished styles that read the theme.
@@ -176,10 +198,12 @@ impl<T: Styled + Sized> ThemeStyled for T {
 
     fn popover_style(self, cx: &App) -> Self {
         let theme = cx.theme();
-        // No border: the edge is the ring inside `popover_shadow`, which is how
-        // shadcn draws it and the only way the shadow can show through it.
+        // One visible theme border, painted as a crisp shadow ring, plus the
+        // shared ambient and lower drop shadows. Do not add a second border.
         self.bg(gpui::Background::from(theme.popover).backdrop_blur(16.))
             .text_color(theme.popover_foreground)
+            .font_family(theme.font_family.clone())
+            .text_size(theme.font_size)
             .shadow(popover_shadow(popover_ring(cx), 1.))
             .rounded(theme.radius)
     }

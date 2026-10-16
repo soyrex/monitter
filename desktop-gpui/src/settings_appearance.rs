@@ -168,9 +168,12 @@ pub(super) fn render(
             "Use the system appearance or choose light or dark.",
             palette,
         )
-        .child(div().flex().gap(px(crate::design::space::TIGHT)).children(
+        .flex_row().flex_wrap().items_center().justify_between()
+        .child(div().flex_shrink_0().flex().gap(px(2.)).p(px(3.))
+            .rounded(px(design::radius::CONTROL)).bg(design::surface_color(palette.code)).children(
             ["system", "light", "dark"].map(|mode| {
                 Button::new(SharedString::from(format!("theme-{mode}")))
+                    .compact().selected(theme == mode)
                     .label(if theme == mode {
                         format!("✓ {}", mode)
                     } else {
@@ -186,10 +189,12 @@ pub(super) fn render(
     let mut theme_card = card("Primary window surface", "Set the window material and background transparency.", palette)
         .child("Window surface")
         .child(
-            div().flex().gap(px(crate::design::space::TIGHT)).children(
+            div().flex().flex_wrap().gap(px(2.)).p(px(3.))
+                .rounded(px(design::radius::CONTROL)).bg(design::surface_color(palette.code)).children(
                 ["opaque", "translucent", "glass"].map(|value| {
                     let selected = surface == value || (surface.is_empty() && value == "opaque");
                     Button::new(SharedString::from(format!("surface-{value}")))
+                        .compact().selected(selected)
                         .label(if selected {
                             format!("✓ {}", value)
                         } else {
@@ -577,6 +582,51 @@ pub(super) fn render(
                     }))
             })));
         content = content.child(motion);
+        let selected_animation = crate::native_motion::ActivityAnimation::from_snapshot(
+            settings["activityAnimation"].as_str(),
+        );
+        let activity_animation = card(
+            "Working animation",
+            "Choose one accent effect for active chat panes. Motion controls whether it moves.",
+            palette,
+        )
+        .child(
+            div().flex().flex_wrap().gap(px(crate::design::space::TIGHT)).children(
+                crate::native_motion::ActivityAnimation::ALL.map(|mode| {
+                    Button::new(SharedString::from(format!("activity-animation-{}", mode.id())))
+                        .label(if selected_animation == mode {
+                            format!("✓ {}", mode.label())
+                        } else {
+                            mode.label().to_owned()
+                        })
+                        .disabled(desktop.busy)
+                        .on_click(cx.listener(move |view, _, _, cx| {
+                            view.patch_settings(json!({"activityAnimation":mode.id()}), cx);
+                        }))
+                }),
+            ),
+        );
+        content = content.child(activity_animation);
+        let auto_size_panes = desktop.dock.read(cx).auto_size_panes();
+        let auto_size = card(
+            "Auto Size Panes",
+            "Keep split panes evenly sized when panes are added. Resizing a divider turns this off.",
+            palette,
+        )
+        .child(settings_toggle(
+            "Auto Size Panes",
+            "New panes rebalance the workspace automatically until you resize a divider.",
+            auto_size_panes,
+            palette,
+        ).child(
+            Switch::new("settings-auto-size-panes")
+                .checked(auto_size_panes)
+                .accessibility_label("Auto Size Panes")
+                .on_change(cx.listener(|view, enabled, window, cx| {
+                    view.dock.update(cx, |dock, cx| dock.set_auto_size_panes(*enabled, window, cx));
+                })),
+        ));
+        content = content.child(auto_size);
     }
 
     let density = ["tight", "normal", "spacious"][state

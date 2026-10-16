@@ -136,6 +136,8 @@ pub fn build_sparkles(
         id,
         layout,
         mirror,
+        palette,
+        animation: crate::native_motion::ActivityAnimation::Sparkles,
         accent: palette.accent,
         ink: readable_accent(palette),
         dark: palette.dark,
@@ -162,12 +164,14 @@ pub(crate) struct ChatDecorationBounds {
 /// Retain one instance per visible running surface. Updating an equal config
 /// returns false so callers avoid unnecessary notifications.
 pub struct SparkleField {
+    obscured: bool,
     active_pane: bool,
     stars: Stars,
     id: SharedString,
     layout: SparkleLayout,
     mirror: bool,
     palette: Palette,
+    animation: crate::native_motion::ActivityAnimation,
     ink: u32,
     motion_allowed: bool,
     target_visible: bool,
@@ -195,6 +199,12 @@ pub struct VisibilityChange {
 }
 
 impl SparkleField {
+    pub(crate) fn set_obscured(&mut self, obscured: bool) -> bool {
+        let changed = self.obscured != obscured;
+        self.obscured = obscured;
+        changed
+    }
+
     pub(crate) fn set_active_pane(&mut self, active: bool) { self.active_pane = active; }
 
     pub(crate) fn set_paint_bounds(&mut self, bounds: PaintBounds) {
@@ -210,12 +220,14 @@ impl SparkleField {
     ) -> Self {
         let stars = surface_stars(&id, layout);
         Self {
+            obscured: false,
             active_pane: true,
             stars,
             id,
             layout,
             mirror,
             palette,
+            animation: crate::native_motion::ActivityAnimation::Sparkles,
             ink: readable_accent(palette),
             motion_allowed,
             target_visible: false,
@@ -250,6 +262,12 @@ impl SparkleField {
         if !motion_allowed && self.visibility.take().is_some() {
             self.visibility_generation = self.visibility_generation.wrapping_add(1);
         }
+        true
+    }
+
+    pub fn set_animation(&mut self, animation: crate::native_motion::ActivityAnimation) -> bool {
+        if self.animation == animation { return false; }
+        self.animation = animation;
         true
     }
 
@@ -336,12 +354,15 @@ impl VisibilityFade {
 
 impl Render for SparkleField {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        if self.obscured { return div().into_any_element(); }
         build_field(SparkleFieldRender {
             active_pane: self.active_pane,
             stars: self.stars.clone(),
             id: self.id.clone(),
             layout: self.layout,
             mirror: self.mirror,
+            palette: self.palette,
+            animation: self.animation,
             accent: self.palette.accent,
             ink: self.ink,
             dark: self.palette.dark,
@@ -361,6 +382,8 @@ struct SparkleFieldRender {
     id: SharedString,
     layout: SparkleLayout,
     mirror: bool,
+    palette: Palette,
+    animation: crate::native_motion::ActivityAnimation,
     accent: u32,
     ink: u32,
     dark: bool,
@@ -386,6 +409,9 @@ fn build_field(config: SparkleFieldRender) -> AnyElement {
         stars: config.stars,
         layout,
         mirror: config.mirror,
+        palette: config.palette,
+        animation: config.animation,
+        motion_allowed: config.motion_allowed,
         accent: config.accent,
         ink: config.ink,
         phase,
@@ -396,12 +422,22 @@ fn build_field(config: SparkleFieldRender) -> AnyElement {
     let animated = if config.motion_allowed && config.target_visible && !matches!(layout, SparkleLayout::DockWash | SparkleLayout::HeaderWash) {
         let last_painted_phase = config.last_painted_phase.clone();
         let animation_anchor = anchor.clone();
+        let (period, max_fps) = if layout == SparkleLayout::Pane {
+            match config.animation {
+                crate::native_motion::ActivityAnimation::Liquid => (Duration::from_secs(8), 16.),
+                crate::native_motion::ActivityAnimation::Matrix => (Duration::from_millis(4200), 16.),
+                crate::native_motion::ActivityAnimation::Grid => (Duration::from_millis(2800), 16.),
+                crate::native_motion::ActivityAnimation::Sparkles => (Duration::from_millis(3400), 30.),
+            }
+        } else {
+            (Duration::from_millis(3400), 30.)
+        };
         field
             .with_animation(
-                SharedString::from(format!("{}-animation", config.id)),
-                Animation::new(Duration::from_millis(3400))
+                SharedString::from(format!("{}-animation-{}", config.id, config.animation.id())),
+                Animation::new(period)
                     .repeat_synced()
-                    .with_max_fps(30.),
+                    .with_max_fps(max_fps),
                 move |mut field, phase| {
                     let current_phase = if matches!(layout, SparkleLayout::Tab | SparkleLayout::Header) {
                         animation_anchor.as_ref().map(|anchor| anchor.phase_at(Instant::now())).unwrap_or(phase)
@@ -484,6 +520,9 @@ struct SparkleCanvas {
     stars: Stars,
     layout: SparkleLayout,
     mirror: bool,
+    palette: Palette,
+    animation: crate::native_motion::ActivityAnimation,
+    motion_allowed: bool,
     accent: u32,
     ink: u32,
     phase: Option<f32>,
@@ -494,6 +533,20 @@ struct SparkleCanvas {
 
 impl RenderOnce for SparkleCanvas {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        if self.layout == SparkleLayout::Pane {
+            let pattern = match self.animation {
+                crate::native_motion::ActivityAnimation::Liquid => Some(crate::activity_patterns::PanePattern::Liquid),
+                crate::native_motion::ActivityAnimation::Matrix => Some(crate::activity_patterns::PanePattern::Matrix),
+                crate::native_motion::ActivityAnimation::Grid => Some(crate::activity_patterns::PanePattern::Grid),
+                crate::native_motion::ActivityAnimation::Sparkles => None,
+            };
+            if let Some(pattern) = pattern {
+                return crate::activity_patterns::build_pattern(
+                    SharedString::from("pane-activity-pattern"), pattern, self.palette,
+                    self.motion_allowed, self.phase, self.paint_bounds,
+                );
+            }
+        }
         let active_pane = self.active_pane;
         let stars = self.stars;
         let layout = self.layout;
@@ -662,6 +715,7 @@ impl RenderOnce for SparkleCanvas {
             },
         )
         .size_full()
+        .into_any_element()
     }
 }
 
@@ -789,15 +843,38 @@ fn ease_in(x: f32) -> f32 {
 }
 
 fn draw_star(window: &mut Window, center_x: f32, center_y: f32, size: f32, color: u32, alpha: u8) {
-    let radius = size * 0.5;
-    let inner = radius * 0.22;
+    // Reject paths before trigonometry, tessellation and scaled vertex allocation.
+    // Keep the full radius: a star or its larger halo can cross a clip edge even
+    // when its center is outside. Scene clipping still handles partial stars.
+    if !star_is_visible(
+        center_x,
+        center_y,
+        size,
+        alpha,
+        window.content_mask().bounds,
+    ) {
+        return;
+    }
+    if let Some(path) = star_path(center_x, center_y, size) {
+        window.paint_path(path, rgba((color << 8) | u32::from(alpha)));
+    }
+}
+
+thread_local! {
+    // The contour only changes by positive uniform scale and translation.
+    // Keep one tessellation per drawing thread instead of rebuilding Lyon's
+    // path, tessellator and vertex/index buffers for every ink and halo.
+    static STAR_MESH: Option<Path<Pixels>> = build_star_mesh();
+}
+
+fn build_star_mesh() -> Option<Path<Pixels>> {
     let mut path = PathBuilder::fill();
     for point_index in 0..8 {
         let angle = -std::f32::consts::FRAC_PI_2 + point_index as f32 * std::f32::consts::FRAC_PI_4;
-        let point_radius = if point_index % 2 == 0 { radius } else { inner };
+        let point_radius = if point_index % 2 == 0 { 1. } else { 0.22 };
         let p = point(
-            px(center_x + angle.cos() * point_radius),
-            px(center_y + angle.sin() * point_radius),
+            px(angle.cos() * point_radius),
+            px(angle.sin() * point_radius),
         );
         if point_index == 0 {
             path.move_to(p);
@@ -806,18 +883,292 @@ fn draw_star(window: &mut Window, center_x: f32, center_y: f32, size: f32, color
         }
     }
     path.close();
-    if let Ok(path) = path.build() {
-        window.paint_path(path, rgba((color << 8) | u32::from(alpha)));
+    path.build().ok()
+}
+
+fn star_path(center_x: f32, center_y: f32, size: f32) -> Option<Path<Pixels>> {
+    STAR_MESH.with(|mesh| {
+        let mut path = mesh.as_ref()?.clone();
+        let radius = size * 0.5;
+        let transform = |p: Point<Pixels>| {
+            point(
+                px(center_x + f32::from(p.x) * radius),
+                px(center_y + f32::from(p.y) * radius),
+            )
+        };
+        // Like plot::PathCache's translation, only finished bounds and vertices
+        // are consumed by paint_path. The builder cursor is never used again.
+        path.bounds = Bounds::from_corners(
+            transform(path.bounds.origin),
+            transform(path.bounds.bottom_right()),
+        );
+        for vertex in &mut path.vertices {
+            vertex.xy_position = transform(vertex.xy_position);
+        }
+        Some(path)
+    })
+}
+
+fn star_is_visible(
+    center_x: f32,
+    center_y: f32,
+    size: f32,
+    alpha: u8,
+    clip: Bounds<Pixels>,
+) -> bool {
+    if alpha == 0 || clip.is_empty() {
+        return false;
     }
+    // A small conservative fringe also avoids inward float rounding when a
+    // path's bounds reconstruct the far edge from origin + width.
+    let radius = size * 0.5 + 1.;
+    center_x + radius > f32::from(clip.left())
+        && center_x - radius < f32::from(clip.right())
+        && center_y + radius > f32::from(clip.top())
+        && center_y - radius < f32::from(clip.bottom())
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         COMPACT_STARS, CYCLE, PANE_STARS, SparkleField, VisibilityFade, retained_phase,
-        sparkle_frame,
+        sparkle_frame, star_is_visible, star_path,
     };
     use std::time::{Duration, Instant};
+
+    fn reference_star_points(x: f32, y: f32, size: f32) -> [gpui_kit::Point<gpui_kit::Pixels>; 8] {
+        let radius = size * 0.5;
+        let inner = radius * 0.22;
+        std::array::from_fn(|i| {
+            let angle = -std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::FRAC_PI_4;
+            let radius = if i % 2 == 0 { radius } else { inner };
+            gpui_kit::point(
+                gpui_kit::px(x + angle.cos() * radius),
+                gpui_kit::px(y + angle.sin() * radius),
+            )
+        })
+    }
+
+    fn reference_star_path(x: f32, y: f32, size: f32) -> gpui_kit::Path<gpui_kit::Pixels> {
+        let mut path = gpui_kit::PathBuilder::fill();
+        for (i, point) in reference_star_points(x, y, size).into_iter().enumerate() {
+            if i == 0 {
+                path.move_to(point);
+            } else {
+                path.line_to(point);
+            }
+        }
+        path.close();
+        path.build().unwrap()
+    }
+
+    fn xy(p: gpui_kit::Point<gpui_kit::Pixels>) -> [f64; 2] {
+        [f64::from(f32::from(p.x)), f64::from(f32::from(p.y))]
+    }
+
+    fn cross(a: [f64; 2], b: [f64; 2], p: [f64; 2]) -> f64 {
+        (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0])
+    }
+
+    fn mesh_area(path: &gpui_kit::Path<gpui_kit::Pixels>) -> f64 {
+        path.vertices
+            .chunks_exact(3)
+            .map(|t| {
+                cross(
+                    xy(t[0].xy_position),
+                    xy(t[1].xy_position),
+                    xy(t[2].xy_position),
+                )
+                .abs()
+                    * 0.5
+            })
+            .sum()
+    }
+
+    fn mesh_covers(path: &gpui_kit::Path<gpui_kit::Pixels>, p: [f64; 2]) -> bool {
+        path.vertices.chunks_exact(3).any(|t| {
+            let [a, b, c] = [
+                xy(t[0].xy_position),
+                xy(t[1].xy_position),
+                xy(t[2].xy_position),
+            ];
+            if cross(a, b, c).abs() <= f64::EPSILON {
+                return false;
+            }
+            let sides = [cross(a, b, p), cross(b, c, p), cross(c, a, p)];
+            sides.iter().all(|side| *side >= 0.) || sides.iter().all(|side| *side <= 0.)
+        })
+    }
+
+    fn distance_to_contour(points: &[gpui_kit::Point<gpui_kit::Pixels>; 8], p: [f64; 2]) -> f64 {
+        (0..8)
+            .map(|i| {
+                let a = xy(points[i]);
+                let b = xy(points[(i + 1) % 8]);
+                let d = [b[0] - a[0], b[1] - a[1]];
+                let t = (((p[0] - a[0]) * d[0] + (p[1] - a[1]) * d[1])
+                    / (d[0] * d[0] + d[1] * d[1]))
+                    .clamp(0., 1.);
+                (p[0] - a[0] - t * d[0]).hypot(p[1] - a[1] - t * d[1])
+            })
+            .fold(f64::INFINITY, f64::min)
+    }
+
+    #[::core::prelude::v1::test]
+    fn cached_star_mesh_matches_fresh_tessellation_over_motion_and_geometry() {
+        let mut checked_samples = 0;
+        for ui_scale in [0.75, 1., 1.5, 2.] {
+            for phase in [0.01, 0.14, 0.15, 0.4, 0.69] {
+                let (_, _, scale) = sparkle_frame(phase);
+                for source_size in [6., 9., 13.] {
+                    for halo in [1., 1.8] {
+                        let size = source_size * scale * ui_scale * halo;
+                        for (x, y) in [
+                            (0., 0.),
+                            (13.25, 29.5),
+                            (-33.5, 92.125),
+                            (3818.873, 2048.25),
+                        ] {
+                            let cached = star_path(x, y, size).unwrap();
+                            let reference = reference_star_path(x, y, size);
+                            // Reassociation of scale/translation can move an
+                            // edge by a few f32 ULPs, especially far from zero.
+                            let tolerance = 0.00001
+                                + f64::from(x.abs().max(y.abs()).max(size))
+                                    * f64::from(f32::EPSILON)
+                                    * 4.;
+                            for (a, b) in [
+                                (cached.bounds.left(), reference.bounds.left()),
+                                (cached.bounds.right(), reference.bounds.right()),
+                                (cached.bounds.top(), reference.bounds.top()),
+                                (cached.bounds.bottom(), reference.bounds.bottom()),
+                            ] {
+                                assert!(
+                                    (f64::from(f32::from(a)) - f64::from(f32::from(b))).abs()
+                                        <= tolerance
+                                );
+                            }
+                            assert!(
+                                (mesh_area(&cached) - mesh_area(&reference)).abs()
+                                    <= tolerance * f64::from(size) * 4.
+                            );
+                            let contour = reference_star_points(x, y, size);
+                            for ix in 0..15 {
+                                for iy in 0..15 {
+                                    let p = [
+                                        f64::from(x)
+                                            + (-1.05 + ix as f64 * 0.15) * f64::from(size) * 0.5,
+                                        f64::from(y)
+                                            + (-1.025 + iy as f64 * 0.15) * f64::from(size) * 0.5,
+                                    ];
+                                    if distance_to_contour(&contour, p) > tolerance {
+                                        assert_eq!(
+                                            mesh_covers(&cached, p),
+                                            mesh_covers(&reference, p),
+                                            "geometry x={x} y={y} size={size} sample={p:?}"
+                                        );
+                                        checked_samples += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(checked_samples > 100_000);
+    }
+
+    #[::core::prelude::v1::test]
+    fn transformed_mesh_does_not_mutate_the_cached_template() {
+        let baseline = star_path(0., 0., 2.).unwrap();
+        let mut moved = star_path(75.5, -38.25, 17.).unwrap();
+        moved.vertices[0].xy_position = gpui_kit::point(gpui_kit::px(999.), gpui_kit::px(999.));
+        let again = star_path(0., 0., 2.).unwrap();
+        assert_eq!(baseline.bounds, again.bounds);
+        assert_eq!(baseline.vertices.len(), again.vertices.len());
+        for (a, b) in baseline.vertices.iter().zip(&again.vertices) {
+            assert_eq!(a.xy_position, b.xy_position);
+            assert_eq!(a.st_position, b.st_position);
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn transformed_mesh_keeps_the_far_vertex_at_a_neighboring_float_clip_edge() {
+        use gpui_kit::{Bounds, point, px, size};
+        let path = star_path(3818.873, 50., 10.417278).unwrap();
+        let far_vertex = path
+            .vertices
+            .iter()
+            .map(|v| f32::from(v.xy_position.x))
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!(f32::from(path.bounds.right()) >= far_vertex);
+        let clip = Bounds::new(point(px(3824.0815), px(0.)), size(px(10.), px(100.)));
+        assert!(far_vertex > f32::from(clip.left()));
+        assert!(!path.bounds.intersect(&clip).is_empty());
+    }
+
+    #[::core::prelude::v1::test]
+    fn clipping_keeps_partial_stars_and_independent_halos() {
+        use gpui_kit::{Bounds, point, px, size};
+        let clip = Bounds::new(point(px(10.), px(20.)), size(px(100.), px(32.)));
+        assert!(!star_is_visible(60., 36., 10., 0, clip));
+        assert!(star_is_visible(60., 36., 10., 1, clip));
+        for (x, y) in [(8., 36.), (112., 36.), (60., 18.), (60., 54.)] {
+            assert!(star_is_visible(x, y, 10., 255, clip));
+        }
+        for (x, y) in [(4., 36.), (116., 36.), (60., 14.), (60., 58.)] {
+            assert!(!star_is_visible(x, y, 10., 255, clip));
+            assert!(star_is_visible(x, y, 18., 63, clip));
+        }
+        assert!(!star_is_visible(60., 36., 10., 255, Bounds::default()));
+
+        // Reconstructing the star's right edge as (center - radius) + size
+        // rounds inward at these coordinates; retain the visible sliver.
+        let clip = Bounds::new(point(px(3824.0815), px(0.)), size(px(10.), px(100.)));
+        assert!(star_is_visible(3818.873, 50., 10.417278, 255, clip));
+    }
+
+    #[::core::prelude::v1::test]
+    fn early_clipping_preserves_every_path_the_scene_could_draw() {
+        use gpui_kit::{Bounds, PathBuilder, point, px, size};
+        // Compare against the actual tessellated path over phases, UI scales,
+        // clip edges and both ink/halo sizes, rather than testing centers only.
+        let clip = Bounds::new(point(px(13.25), px(29.5)), size(px(80.5), px(32.)));
+        let mut culled = 0;
+        let mut visible = 0;
+        for ui_scale in [0.75, 1., 1.5, 2.] {
+            for phase in [0.01, 0.14, 0.15, 0.4, 0.69] {
+                let (opacity, _, scale) = sparkle_frame(phase);
+                for halo in [1., 1.8] {
+                    let star_size = 13. * scale * ui_scale * halo;
+                    let radius = star_size * 0.5;
+                    let alpha = (opacity * 255.) as u8;
+                    for x in [0., 10., 13.25, 50., 93.75, 98., 120.] {
+                        for y in [0., 24., 29.5, 45., 61.5, 66., 90.] {
+                            let mut path = PathBuilder::fill();
+                            for i in 0..8 {
+                                let angle = -std::f32::consts::FRAC_PI_2
+                                    + i as f32 * std::f32::consts::FRAC_PI_4;
+                                let r = if i % 2 == 0 { radius } else { radius * 0.22 };
+                                let p = point(px(x + angle.cos() * r), px(y + angle.sin() * r));
+                                if i == 0 { path.move_to(p); } else { path.line_to(p); }
+                            }
+                            path.close();
+                            let path = path.build().unwrap();
+                            if !star_is_visible(x, y, star_size, alpha, clip) {
+                                culled += 1;
+                                assert!(alpha == 0 || path.bounds.intersect(&clip).is_empty());
+                            } else {
+                                visible += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(culled > 0 && visible > 0, "exercise both sides of the clipping decision");
+    }
 
     #[::core::prelude::v1::test]
     fn source_geometry_and_stagger_are_bounded() {

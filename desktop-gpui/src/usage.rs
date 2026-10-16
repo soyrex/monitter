@@ -210,7 +210,7 @@ impl UsagePane {
         for task in tasks.iter().rev().take(24) {
             let task_id = text(task, "id");
             let model = text(task, "model");
-            let cleared_at = messages
+            let cleared_at = self.snapshot["nativeMessageContext"][&task_id]["contextClearedAt"].as_i64().or_else(|| messages
                 .iter()
                 .filter(|message| {
                     text(message, "taskId") == task_id
@@ -218,7 +218,7 @@ impl UsagePane {
                         && text(message, "text") == "Context Cleared"
                 })
                 .filter_map(|message| message.get("createdAt").and_then(Value::as_i64))
-                .max();
+                .max());
             let run = runs
                 .iter()
                 .filter(|run| {

@@ -464,9 +464,9 @@
         </section>
 
         <section class="setting-card" aria-labelledby="activity-animation-heading">
-          <div class="card-heading"><h2 id="activity-animation-heading">Working animation</h2><p>Choose the accent effect shown while an agent is working.</p></div>
+          <div class="card-heading"><h2 id="activity-animation-heading">Working animation</h2><p>Choose one accent effect shown while an agent is working.</p></div>
           <div class="segmented activity-animation" aria-label="Working animation">
-            {#each [{ id: 'sparkles', label: 'Sparkles' }, { id: 'grid', label: 'Pulse grid' }, { id: 'matrix', label: 'Letter stream' }] as option}
+            {#each [{ id: 'sparkles', label: 'Sparkles' }, { id: 'liquid', label: 'Liquid wave' }, { id: 'grid', label: 'Pulse grid' }, { id: 'matrix', label: 'Letter stream' }] as option}
               <button type="button" class:chosen={(settings.activityAnimation ?? 'sparkles') === option.id} aria-pressed={(settings.activityAnimation ?? 'sparkles') === option.id}
                 onclick={() => void save({ activityAnimation: option.id as NonNullable<Settings['activityAnimation']> })}>{option.label}</button>
             {/each}
@@ -582,6 +582,11 @@
           <label class="switch-row"><span><strong>Enable project boards</strong><small>Agents working in a project receive recent notes at turn start and can check for newer notes at meaningful checkpoints. Posting never wakes another agent. Turning this off hides boards but preserves their notes.</small></span><input type="checkbox" role="switch" aria-label="Enable project boards" checked={settings.projectBoardEnabled === true} onchange={(event) => void save({ projectBoardEnabled: event.currentTarget.checked })} /></label>
           <label class="board-guidance-field"><strong>Default agent guidance</strong><textarea bind:value={boardGuidanceDraft} maxlength="8000" rows="6" aria-label="Default project-board guidance" placeholder="Use the board when work could affect coordination with other agents…"></textarea><small>{Array.from(boardGuidanceDraft).length}/8000 characters. Project-specific guidance overrides this; blank uses Monitter's built-in wording. Guidance is context and does not grant permission.</small></label>
           <div class="setting-actions"><button class="secondary" type="button" disabled={pending > 0} onclick={() => { boardGuidanceDraft = ""; void save({ boardGuidanceText: null }); }}>Reset to built-in wording</button><button class="primary" type="button" disabled={pending > 0 || Array.from(boardGuidanceDraft).length > 8000} onclick={() => void save({ boardGuidanceText: boardGuidanceDraft.trim() ? boardGuidanceDraft : null })}>Save guidance</button></div>
+        </section>
+        <section class="setting-card" aria-labelledby="monitter-mcp-approval-heading">
+          <div class="card-heading"><h2 id="monitter-mcp-approval-heading">Monitter MCP approvals</h2><p>Choose whether built-in Monitter tools run without a harness approval prompt.</p></div>
+          <label class="switch-row"><span><strong>Automatically approve Monitter tools</strong><small>Let Codex and Claude use built-in Monitter tools without asking each time. Host terminal commands and skill installation still need approval. Changes apply when the agent process next starts; running agents keep their current setting.</small></span><input type="checkbox" role="switch" aria-label="Automatically approve Monitter tools" checked={settings.autoApproveMonitterMcp === true} disabled={pending > 0 || settings.autoApproveMonitterMcp === undefined} onchange={(event) => void save({ autoApproveMonitterMcp: event.currentTarget.checked })} /></label>
+          {#if settings.autoApproveMonitterMcp === undefined}<p class="hint">This setting requires a Monitter backend update.</p>{/if}
         </section>
       </div>
     {/if}

@@ -297,7 +297,7 @@ fn split_transcripts_keep_wheel_position_across_projection_refresh(cx: &mut Test
         // A genuine projection append must also preserve the user's stable
         // anchor while GPUI still cannot calculate total height.
         target.update(cx, |fixture, cx| {
-            let mut messages = fixture.state.messages.as_ref().clone();
+            let mut messages = fixture.state.messages.iter().cloned().collect::<Vec<_>>();
             messages.push(json!({
                 "id": format!("{column}-new"),
                 "role": "user",

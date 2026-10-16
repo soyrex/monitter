@@ -152,3 +152,78 @@ fn workspace_switch_retains_pane_identity_until_explicit_close(cx: &mut TestAppC
     });
     visual.run_until_parked();
 }
+
+#[gpui_kit::test]
+fn workspace_restore_refocuses_last_browser_terminal_or_empty_pane(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let factory: PaneFactory = Rc::new(|_, _, _| None);
+        let dock = cx.new(|cx| DockWorkspace::new("workspace-focus-test", factory, window, cx));
+        dock.update(cx, |dock, cx| {
+            let lifecycle: LifecycleHook = Rc::new(|_, _, _| {});
+            for id in ["empty:focus", "browser:42", "terminal:focus"] {
+                dock.add(spec(id, lifecycle.clone(), cx), DockPlacement::Center, None, window, cx).unwrap();
+            }
+            let identities = dock.panels.borrow().iter().map(|(id, panel)| (id.clone(), panel.entity_id())).collect::<Vec<_>>();
+            let mut outgoing = dock.serialize(cx).unwrap();
+            dock.register(spec("terminal:other-workspace", lifecycle.clone(), cx), cx).unwrap();
+            let incoming = crate::workspace_tabs::empty_layout();
+            for id in ["browser:42", "terminal:focus", "empty:focus"] {
+                assert!(dock.focus(id, window, cx));
+                let focused = dock.focused_pane_id(window, cx).unwrap();
+                crate::workspace_visibility::remember_focus(&mut outgoing, Some(&focused));
+                dock.restore_retaining(incoming.clone(), window, cx).unwrap();
+                dock.restore_retaining(outgoing.clone(), window, cx).unwrap();
+                for target in crate::workspace_visibility::focus_candidates(&outgoing, None) {
+                    if dock.focus(&target, window, cx) { break; }
+                }
+                assert_eq!(dock.focused_pane_id(window, cx).as_deref(), Some(id));
+                for (id, identity) in &identities { assert_eq!(dock.panels.borrow()[id].entity_id(), *identity); }
+            }
+        });
+        gpui_kit::component::Root::new(dock, window, cx)
+    });
+    visual.run_until_parked();
+}
+
+#[gpui_kit::test]
+fn sidebar_focus_restored_inactive_chat_and_closed_edge_retains_entities(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let factory_calls = Rc::new(RefCell::new(0));
+        let calls = factory_calls.clone();
+        let factory: PaneFactory = Rc::new(move |_, _, _| { *calls.borrow_mut() += 1; None });
+        let dock = cx.new(|cx| DockWorkspace::new("sidebar-retained-focus", factory, window, cx));
+        dock.update(cx, |dock, cx| {
+            let lifecycle: LifecycleHook = Rc::new(|_, _, _| {});
+            for id in ["chat:target", "chat:remembered"] {
+                dock.add(spec(id, lifecycle.clone(), cx), DockPlacement::Center, None, window, cx).unwrap();
+            }
+            dock.add(spec("chat:edge", lifecycle, cx), DockPlacement::Left, None, window, cx).unwrap();
+            let identities = dock.panels.borrow().iter().map(|(id, panel)|
+                (id.clone(), panel.entity_id(), panel.read(cx).spec.content.entity_id())).collect::<Vec<_>>();
+            dock.focus("chat:remembered", window, cx);
+            let mut saved = dock.serialize(cx).unwrap();
+            crate::workspace_visibility::remember_focus(&mut saved, Some("chat:remembered"));
+            saved["left_dock"]["open"] = serde_json::Value::Bool(false);
+            let empty = serde_json::json!({"version":1,"center":{"panel_name":"TabPanel",
+                "children":[],"info":{"tabs":{"active_index":0}}}});
+            dock.restore_retaining(empty, window, cx).unwrap();
+            assert!(!dock.reveal_and_focus("chat:target", window, cx), "retained hidden pane is not current ownership");
+            dock.restore_retaining(saved, window, cx).unwrap();
+            for id in ["chat:target", "chat:target", "chat:edge"] {
+                assert!(dock.reveal_and_focus(id, window, cx));
+                assert_eq!(dock.focused_pane_id(window, cx).as_deref(), Some(id));
+                assert_eq!(dock.panels.borrow().len(), identities.len(), "navigation never adds duplicate panes");
+                for (id, panel, content) in &identities {
+                    assert_eq!(dock.panels.borrow()[id].entity_id(), *panel);
+                    assert_eq!(dock.panels.borrow()[id].read(cx).spec.content.entity_id(), *content);
+                }
+            }
+            assert!(dock.area.read(cx).is_dock_open(DockPlacement::Left));
+            assert_eq!(*factory_calls.borrow(), 0, "retained focus never recreates content");
+        });
+        gpui_kit::component::Root::new(dock, window, cx)
+    });
+    visual.run_until_parked();
+}

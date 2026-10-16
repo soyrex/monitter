@@ -101,6 +101,13 @@ impl PopoverState {
         }
         self.set_open(opening, cx);
 
+        // Acquire the popup scene/focus lease before transferring keyboard
+        // focus. Otherwise the owner records the popup itself as its origin
+        // and the underlying pane briefly switches to its inactive appearance.
+        if opening && announce && let Some(callback) = self.on_open_change.as_ref() {
+            callback(&opening, window, cx);
+        }
+
         if self.open {
             // Weak: the subscription is stored on this state, so a strong
             // handle would keep the state, and its deferred-popover
@@ -127,7 +134,7 @@ impl PopoverState {
             }
         }
 
-        if announce && let Some(callback) = self.on_open_change.as_ref() {
+        if !opening && announce && let Some(callback) = self.on_open_change.as_ref() {
             callback(&opening, window, cx);
         }
         cx.notify();
@@ -173,6 +180,7 @@ pub struct Popover {
     id: ElementId,
     style: StyleRefinement,
     anchor: Anchor,
+    anchor_bounds: Option<gpui::Bounds<gpui::Pixels>>,
     offset: gpui::Pixels,
     on_position: Option<Box<dyn Fn(ResolvedPosition, gpui::Bounds<gpui::Pixels>)>>,
     default_open: bool,
@@ -191,6 +199,7 @@ impl Popover {
             id: id.into(),
             style: StyleRefinement::default(),
             anchor: Anchor::TopLeft,
+            anchor_bounds: None,
             offset: gpui::px(0.),
             on_position: None,
             default_open: false,
@@ -206,6 +215,13 @@ impl Popover {
 
     pub fn anchor(mut self, anchor: impl Into<Anchor>) -> Self {
         self.anchor = anchor.into();
+        self
+    }
+
+    /// Use a viewport-coordinate rectangle as the popup positioning reference.
+    /// The trigger remains in its normal layout position and keeps its hitbox.
+    pub fn anchor_bounds(mut self, bounds: gpui::Bounds<gpui::Pixels>) -> Self {
+        self.anchor_bounds = Some(bounds);
         self
     }
 
@@ -320,6 +336,7 @@ impl RenderOnce for Popover {
         let popup = Popup::new(self.id, trigger(open, window, cx))
             .refine_style(&self.style)
             .anchor(self.anchor)
+            .when_some(self.anchor_bounds, |this, bounds| this.anchor_bounds(bounds))
             .offset(self.offset)
             .when_some(self.on_position, |this, callback| {
                 this.on_position(callback)
@@ -476,6 +493,34 @@ mod tests {
         cx.update(|window, cx| window.draw(cx).clear(cx));
         assert!(cx.debug_bounds("base-popover-content").is_none());
         assert_eq!(&*changes.borrow(), &[true, false]);
+    }
+
+    #[gpui::test]
+    fn popup_open_lease_captures_pane_focus_before_popup_focus_transfer(cx: &mut gpui::TestAppContext) {
+        cx.update(crate::init);
+        let (_, visual) = cx.add_window_view(|_, _| PopoverHarness {
+            changes: Rc::new(RefCell::new(Vec::new())),
+            default_open: false,
+        });
+        visual.update(|window, cx| {
+            let origin = cx.focus_handle();
+            origin.focus(window, cx);
+            let recorded = Rc::new(RefCell::new(None));
+            let state = cx.new(|cx| PopoverState::new(false, cx));
+            state.update(cx, |state, _| {
+                let recorded = recorded.clone();
+                state.set_on_open_change(Some(Rc::new(move |open, window, cx| {
+                    if *open {
+                        *recorded.borrow_mut() = window.focused(cx);
+                    }
+                })));
+            });
+            state.update(cx, |state, cx| state.show(window, cx));
+            assert_eq!(*recorded.borrow(), Some(origin.clone()));
+            assert_ne!(window.focused(cx), Some(origin.clone()));
+            state.update(cx, |state, cx| state.dismiss(window, cx));
+            assert_eq!(window.focused(cx), Some(origin));
+        });
     }
 
     #[gpui::test]

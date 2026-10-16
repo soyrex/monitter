@@ -5,7 +5,7 @@ use super::{TranscriptPreparationKey, TranscriptViewport, defer_for_task};
 use crate::{design, transcript::TimelineRow};
 use gpui::{
     App, AppContext as _, Context, Entity, Focusable as _, IntoElement, ListAlignment, ListState,
-    ParentElement as _, Render, StyleRefinement, Styled as _, Subscription, TestAppContext,
+    ParentElement as _, InteractiveElement as _, Render, StyleRefinement, Styled as _, Subscription, TestAppContext,
     VisualTestContext, Window, WindowAppearance, div,
 };
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
@@ -27,19 +27,20 @@ impl Render for AnimationSibling {
 }
 struct IsolationHarness {
     snapshot: Rc<Value>,
-    history: Rc<Vec<TimelineRow>>,
+    history: Rc<im::Vector<TimelineRow>>,
     key: Option<TranscriptPreparationKey>,
     list: Option<Entity<StableTranscriptList>>,
     viewport: Entity<TranscriptViewport>,
     composer: Entity<TextareaState>,
     fixed_composer_height: bool,
+    working: bool,
     animation: Entity<AnimationSibling>,
     preparation_visits: Rc<Cell<usize>>,
     row_renders: Rc<Cell<usize>>,
     input_changes: Rc<Cell<usize>>,
     _input_change: Subscription,
 }
-fn fixture_key(snapshot: Rc<Value>, rows: Rc<Vec<TimelineRow>>) -> TranscriptPreparationKey {
+fn fixture_key(snapshot: Rc<Value>, rows: Rc<im::Vector<TimelineRow>>) -> TranscriptPreparationKey {
     TranscriptPreparationKey {
         snapshot: Rc::downgrade(&snapshot),
         rows: Some(rows),
@@ -58,7 +59,6 @@ fn fixture_key(snapshot: Rc<Value>, rows: Rc<Vec<TimelineRow>>) -> TranscriptPre
         complete: true,
         history_top_reached: false,
         refreshing: false,
-        disclosure_generation: 0,
         date: chrono::NaiveDate::from_ymd_opt(2026, 10, 12).unwrap(),
     }
 }
@@ -76,12 +76,13 @@ impl Render for IsolationHarness {
             let history = self.history.clone();
             let rendered = self.row_renders.clone();
             let rows: StableRowRenderer = Rc::new(RefCell::new(
-                move |index: usize, _: &mut Window, _: &mut App| {
+                move |index: usize, _: &mut Window, _: &mut App, _: f32| {
                     rendered.set(rendered.get() + 1);
                     let Some(row) = history.get(index) else {
                         return div().into_any_element();
                     };
                     div()
+                        .debug_selector(move || format!("isolation-row-{index}"))
                         .h(gpui_kit::px(24.))
                         .child(row.key())
                         .into_any_element()
@@ -91,6 +92,7 @@ impl Render for IsolationHarness {
                 &mut self.list,
                 ListState::new(self.history.len(), ListAlignment::Bottom, gpui_kit::px(0.)),
                 rows,
+                Rc::new(Vec::new()),
                 cx,
             );
             let list = self.list.clone();
@@ -117,6 +119,7 @@ impl Render for IsolationHarness {
                     .clone()
                     .cached(StyleRefinement::default().flex_1().min_h_0()),
             )
+            .child(super::super::working_clearance_spacer(self.working))
             .child(
                 self.animation
                     .clone()
@@ -144,7 +147,13 @@ fn mount(
         });
         composer.read(cx).focus_handle(cx).focus(window, cx);
         let viewport = cx.new(|_| TranscriptViewport {
+            selection_group: gpui_kit::base::TextSelectionGroupId::new(),
             task_id: "task".into(),
+            owner: None,
+            minimap_visible: false,
+            minimap_exit: None, minimap_jump: None,
+            minimap_emphasis: super::minimap::Emphasis::default(),
+            minimap_bottom_inset: gpui_kit::px(0.),
             load_earlier: Rc::new(|_, _| ()),
             load_unmeasured_history: Rc::new(|_, _| ()),
             render_count: 0,
@@ -167,6 +176,7 @@ fn mount(
             viewport,
             composer,
             fixed_composer_height: true,
+            working: false,
             animation: cx.new(|_| AnimationSibling { ticks: 0 }),
             preparation_visits: Rc::new(Cell::new(0)),
             row_renders: Rc::new(Cell::new(0)),
@@ -264,7 +274,7 @@ fn assert_typing_isolated(cx: &mut TestAppContext, count: usize) {
     // Content changes must still update the retained transcript after typing.
     host.update(visual, |host, cx| {
         let mut changed = host.history.as_ref().clone();
-        changed.push(TimelineRow::Message(Rc::new(
+        changed.push_back(TimelineRow::Message(Rc::new(
             json!({"id":"new-live-message"}),
         )));
         host.history = Rc::new(changed);
@@ -313,7 +323,7 @@ fn composer_growth_and_editing_preserve_transcript_preparation(cx: &mut TestAppC
 #[::core::prelude::v1::test]
 fn preparation_key_tracks_sources_and_semantic_context_without_deep_equality() {
     let snapshot = Rc::new(json!({"tasks":[]}));
-    let rows = Rc::new(vec![TimelineRow::Message(Rc::new(json!({"id":"one"})))]);
+    let rows = Rc::new(im::vector![TimelineRow::Message(Rc::new(json!({"id":"one"})))]);
     let base = fixture_key(snapshot.clone(), rows.clone());
     assert!(base == fixture_key(snapshot.clone(), rows.clone()));
     assert!(base != fixture_key(Rc::new(snapshot.as_ref().clone()), rows.clone()));
@@ -321,9 +331,6 @@ fn preparation_key_tracks_sources_and_semantic_context_without_deep_equality() {
     let mut boundary = base.clone();
     boundary.history_top_reached = true;
     assert!(base != boundary);
-    let mut disclosure = base.clone();
-    disclosure.disclosure_generation += 1;
-    assert!(base != disclosure);
     let mut width = base.clone();
     width.width -= 20.;
     width.companion_width += 20.;
@@ -872,6 +879,56 @@ fn streaming_bodies_preserve_scrollback_until_reader_follows(cx: &mut TestAppCon
 
 
 #[cfg(feature = "performance-profiling")]
+#[gpui::test]
+fn indexed_stream_chunks_hold_scrollback_without_full_history_fallback(cx: &mut TestAppContext) {
+    let snapshot = streaming_snapshot();
+    let (pane, visual) = mount_retention_pane(cx, Rc::new(snapshot.clone()));
+    draw(visual);
+    let position = pane.read_with(visual, |pane, _| {
+        pane.decoration_bounds.chat_column.get().unwrap().origin
+            + gpui::point(gpui::px(50.), gpui::px(50.))
+    });
+    visual.simulate_event(gpui::ScrollWheelEvent {
+        position,
+        delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.), gpui::px(1_000.))),
+        ..Default::default()
+    });
+    draw(visual);
+    let baseline = super::super::transcript_preparation_counts();
+    let (messages, anchor, body) = pane.read_with(visual, |pane, _| {
+        let state = &pane.transcripts["quiet-task"];
+        assert!(!state.list.is_following_tail());
+        (state.messages.clone(), state.list.logical_scroll_top(), pane.streaming_bodies["stream-9999"].clone())
+    });
+    let mut patch = snapshot["messages"][9_999].clone();
+    for chunk in 0..20 {
+        patch["text"] = json!(format!("Held point update {chunk}"));
+        pane.update(visual, |pane, cx| {
+            // Production reaches this only after background structural proof.
+            pane.transcript_context_unchanged = true;
+            assert!(pane.reconcile_body_patches(&[patch.clone()], cx),
+                "accepted body patch must not request full-history conversion");
+        });
+        draw(visual);
+    }
+    assert_eq!(super::super::transcript_preparation_counts(), baseline);
+    pane.read_with(visual, |pane, cx| {
+        let state = &pane.transcripts["quiet-task"];
+        assert!(state.has_pending_live());
+        assert!(Rc::ptr_eq(&state.messages, &messages));
+        assert_eq!(state.list.logical_scroll_top().item_ix, anchor.item_ix);
+        assert_eq!(state.list.logical_scroll_top().offset_in_item, anchor.offset_in_item);
+        assert_ne!(body.read(cx).source()["text"], patch["text"]);
+    });
+    pane.update(visual, |pane, cx| pane.finish_bottom_jump(cx));
+    draw(visual);
+    pane.read_with(visual, |pane, cx| {
+        assert!(!pane.transcripts["quiet-task"].has_pending_live());
+        assert_eq!(body.read(cx).source()["text"], "Held point update 19");
+    });
+}
+
+#[cfg(feature = "performance-profiling")]
 fn active_computer_fixture_snapshot() -> Value {
     let mut snapshot = retention_snapshot(0);
     snapshot["tasks"][0]["status"] = json!("running");
@@ -990,4 +1047,145 @@ fn activity_body_deferral_refreshes_sync_only_and_changed_event_publications(cx:
     });
     draw(visual);
     assert_eq!(pane.read_with(visual, |pane, _| pane.activity_context_refreshes), baseline + 2);
+}
+
+#[gpui::test]
+fn working_clearance_moves_native_tail_without_replacing_history(cx: &mut TestAppContext) {
+    let (host, visual) = mount(cx, 100);
+    draw(visual);
+    let list = host.read_with(visual, |host, _| host.list.clone().unwrap());
+    let state = list.read_with(visual, |list, _| list.state.clone());
+    // Measure the fixture once so viewport comparisons use identical row
+    // geometry. Scrollbar extent excludes padding, so use painted tail bounds.
+    state.clone().measure_all();
+    state.set_follow_mode(gpui::FollowMode::Tail);
+    list.update(visual, |_, cx| cx.notify());
+    draw(visual);
+    assert!(state.is_following_tail(), "fixture starts in production tail-follow mode");
+    let idle_tail_bottom = visual.debug_bounds("isolation-row-99").expect("idle tail rendered").bottom();
+    host.update(visual, |host, cx| { host.working = true; cx.notify(); });
+    draw(visual);
+    assert!(state.is_following_tail(), "adding clearance preserves tail follow");
+    let working_tail_bottom = visual.debug_bounds("isolation-row-99").expect("working tail rendered").bottom();
+    assert_eq!(working_tail_bottom, idle_tail_bottom - design::ui_scaled_px(48.),
+        "the final transcript row must actually move above the working controls");
+    let viewport_bottom = visual.debug_bounds("retained-transcript-viewport").expect("viewport rendered").bottom();
+    assert_eq!(working_tail_bottom, viewport_bottom, "tail fills the shortened viewport");
+    let clearance = visual.debug_bounds("working-clearance-spacer").expect("clearance rendered");
+    assert_eq!(clearance.top(), viewport_bottom);
+    assert_eq!(clearance.size.height, design::ui_scaled_px(48.),
+        "working controls have a real 48px empty region below the final row");
+    state.scroll_by(gpui_kit::px(-120.));
+    list.update(visual, |_, cx| cx.notify());
+    draw(visual);
+    let scrollback = state.logical_scroll_top();
+    host.update(visual, |host, cx| { host.working = false; cx.notify(); });
+    draw(visual);
+    let after = state.logical_scroll_top();
+    assert_eq!(after.item_ix, scrollback.item_ix, "removing clearance preserves the reader's history anchor");
+    assert_eq!(after.offset_in_item, scrollback.offset_in_item);
+}
+
+#[cfg(feature = "performance-profiling")]
+#[gpui::test]
+fn response_disclosure_reuses_transcript_preparation_and_renderer(cx: &mut TestAppContext) {
+    let mut snapshot = retention_snapshot(0);
+    snapshot["messages"][0]["responseMetadata"] = json!({"model":"fixture-model", "inputTokens":12});
+    let (pane, visual) = mount_retention_pane(cx, Rc::new(snapshot));
+    draw(visual);
+    let baseline = super::super::transcript_preparation_counts();
+    let renderer = pane.read_with(visual, |pane, cx| pane.detail_transcript_cache.as_ref().unwrap().read(cx).rows.clone());
+    for expanded in [true, false] {
+        let bounds = visual.debug_bounds("response-metadata-toggle-quiet-message").expect("metadata toggle");
+        visual.simulate_click(bounds.center(), Default::default());
+        draw(visual);
+        assert_eq!(super::super::transcript_preparation_counts(), baseline, "disclosure must not revisit history");
+        pane.read_with(visual, |pane, cx| {
+            assert_eq!(pane.response_details_expanded.borrow().contains("quiet-message"), expanded);
+            assert!(Rc::ptr_eq(&renderer, &pane.detail_transcript_cache.as_ref().unwrap().read(cx).rows));
+        });
+        assert_eq!(visual.debug_bounds("response-details-quiet-message").is_some(), expanded);
+    }
+}
+
+#[cfg(feature = "performance-profiling")]
+#[gpui::test]
+fn hidden_indexed_patch_supersedes_earlier_materialized_history(cx: &mut TestAppContext) {
+    use monitter_gpui_desktop::native_publication::{self, PublicationChanges};
+    use std::{collections::{HashMap, HashSet}, sync::Arc};
+    fn index(source: &Value) -> Arc<native_publication::PublicationIndex> {
+        let mut typed = monitter_lib::model::default_snapshot();
+        typed.messages = source["messages"].as_array().unwrap().iter()
+            .map(|row| serde_json::from_value(row.clone()).unwrap()).collect::<Vec<_>>().into();
+        native_publication::prepare_visible(typed, HashSet::from(["quiet-task".into()]),
+            HashSet::new(), &PublicationChanges::default(), None).unwrap().index
+    }
+    struct IndexedVisibilityHarness {
+        pane: Entity<super::super::ChatPane>,
+        shown: bool,
+    }
+    impl Render for IndexedVisibilityHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let frame = div().size_full();
+            if self.shown {
+                frame.child(self.pane.clone().cached(StyleRefinement::default().size_full()))
+            } else { frame }
+        }
+    }
+    let initial = retention_snapshot(0);
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        crate::surface_blend::initialize_for_ui_fixture();
+        crate::native_motion::initialize_for_ui_fixture(cx);
+    });
+    let mounted = Rc::new(initial.clone());
+    let (host, visual) = cx.add_window_view(move |window, cx| {
+        let pane = cx.new(|cx| super::super::ChatPane::performance_fixture("quiet-task".into(), mounted, window, cx));
+        IndexedVisibilityHarness { pane, shown:true }
+    });
+    let pane = host.read_with(visual, |host, _| host.pane.clone());
+    draw(visual);
+    pane.update(visual, |pane, cx| pane.set_dock_visible(false, cx));
+    draw(visual);
+    // A hidden production dock removes the cached pane from the rendered tree.
+    // A mounted ChatPane root would correctly drain its publication when drawn.
+    host.update(visual, |host, cx| { host.shown = false; cx.notify(); });
+    draw(visual);
+    let canonical = pane.read_with(visual, |pane, _| pane.transcripts["quiet-task"].messages.clone());
+    let mut structural = initial.clone();
+    structural["messages"].as_array_mut().unwrap().push(json!({
+        "id":"new-indexed-body", "taskId":"quiet-task", "role":"assistant",
+        "text":"Earlier materialized body", "streamStatus":"streaming", "createdAt":2,
+    }));
+    let first_index = index(&structural);
+    let mut compact = structural.clone();
+    compact.as_object_mut().unwrap().remove("messages");
+    pane.update(visual, |pane, cx| pane.publish_indexed(Rc::new(compact), Some("indexed-1".into()),
+        Arc::new(vec![]), Arc::new(HashMap::new()), false,
+        Some(structural["messages"].as_array().unwrap().clone()), false, None,
+        Some(first_index), None, true, cx));
+    let mut latest = structural.clone();
+    latest["messages"][1]["text"] = json!("Latest indexed body after hidden patch");
+    let latest_index = index(&latest);
+    let patch = latest["messages"][1].clone();
+    let mut compact = latest.clone();
+    compact.as_object_mut().unwrap().remove("messages");
+    pane.update(visual, |pane, cx| pane.publish_indexed(Rc::new(compact), Some("indexed-2".into()),
+        Arc::new(vec![]), Arc::new(HashMap::new()), true, None, false, None,
+        Some(latest_index), Some(vec![patch]), true, cx));
+    pane.read_with(visual, |pane, _| {
+        assert!(Rc::ptr_eq(&canonical, &pane.transcripts["quiet-task"].messages), "hidden publications stay deferred");
+        assert!(pane.deferred_publication.as_ref().unwrap().history.is_none(), "stale materialized history is discarded");
+    });
+    pane.update(visual, |pane, cx| pane.set_dock_visible(true, cx));
+    host.update(visual, |host, cx| { host.shown = true; cx.notify(); });
+    draw(visual);
+    pane.read_with(visual, |pane, cx| {
+        let rows = &pane.transcripts["quiet-task"].messages;
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1]["text"], latest["messages"][1]["text"]);
+        assert_eq!(pane.streaming_bodies["new-indexed-body"].read(cx).source()["text"], latest["messages"][1]["text"]);
+        assert!(pane.deferred_publication.is_none());
+        assert!(pane.snapshot.get("messages").is_none(), "compact snapshots do not need a global history fallback");
+    });
 }

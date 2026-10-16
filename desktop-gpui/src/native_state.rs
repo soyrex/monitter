@@ -84,11 +84,7 @@ impl NativeState {
         let Some(snapshot) = self.snapshot.as_mut() else {
             return false;
         };
-        let count = snapshot
-            .messages
-            .iter()
-            .filter(|row| row.task_id == task_id)
-            .count();
+        let count = snapshot.messages.scope_indices(task_id).len();
         let mut drop = count.saturating_sub(keep);
         if drop == 0 {
             return false;
@@ -218,7 +214,39 @@ impl NativeState {
             changed_subagent_transcript_ids: unique(metadata.subagent_transcripts.keys().cloned()),
             ..ChangeSet::default()
         };
-        metadata.messages = if delta.messages.is_empty() && delta.removed_message_ids.is_empty() {
+        // A scope move invalidates both owners, even though the journal row
+        // carries only its new task ID.
+        changes.changed_task_message_ids = unique(
+            changes.changed_task_message_ids.into_iter().chain(
+                delta
+                    .messages
+                    .iter()
+                    .filter_map(|next| old.messages.get_by_id(&next.id).ok().flatten())
+                    .map(|prior| prior.task_id.clone()),
+            ),
+        );
+        // Point replacements preserve the persistent History lineage and its
+        // indexes. Inserts, scope/order changes and removals use the sorted merge.
+        let point_updates = delta.removed_message_ids.is_empty()
+            && delta.messages.iter().all(|next| {
+                old.messages
+                    .get_by_id(&next.id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|prior| {
+                        prior.task_id == next.task_id && prior.created_at == next.created_at
+                    })
+            });
+        metadata.messages = if point_updates {
+            let mut messages = old.messages.clone();
+            for next in delta.messages {
+                let key = next.id.clone();
+                messages
+                    .update_by_id(&key, |row| *row = next)
+                    .expect("validated unique message ID");
+            }
+            messages
+        } else if delta.messages.is_empty() && delta.removed_message_ids.is_empty() {
             old.messages.clone()
         } else {
             merge_messages(
@@ -469,6 +497,8 @@ mod tests {
     #[::core::prelude::v1::test]
     fn ui_page_eviction_keeps_other_scopes_revision_and_reloadability() {
         let mut state = state();
+        // A keep limit already satisfied by this scope is an exact no-op.
+        assert!(!state.trim_task_messages("t", 1));
         state
             .merge_task_page(
                 "t",
@@ -740,5 +770,23 @@ mod tests {
         assert_eq!(state.snapshot().unwrap(), &before);
         assert_eq!(candidate.snapshot().unwrap(), &before);
         assert_eq!(state.revision(), Some("e:1"));
+    }
+    #[test]
+    fn scope_and_order_moves_refresh_both_owners_and_keep_sorted_fallback() {
+        let mut state = state();
+        let mut edit = delta(&state);
+        edit.messages = vec![
+            message("tail", "other", 1, "moved"),
+            message("new", "t", 0, "first"),
+        ];
+        let ApplyResult::Delta(changes) = state.apply(response(edit)) else {
+            panic!("expected delta")
+        };
+        assert_eq!(changes.changed_task_message_ids, vec!["other", "t"]);
+        let messages = &state.snapshot().unwrap().messages;
+        assert_eq!(messages[0].id, "new");
+        assert_eq!(messages[1].task_id, "other");
+        assert_eq!(messages.scope_indices("t").len(), 1);
+        assert_eq!(messages.scope_indices("other").len(), 1);
     }
 }

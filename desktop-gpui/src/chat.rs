@@ -3,7 +3,8 @@ use super::*;
 use crate::design::{radius, space, ui_scaled_px as px};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use gpui_kit::assets::IconName;
-use gpui_kit::component::{ActiveTheme as _, Icon, Sizable, WindowExt as _};
+use gpui_kit::component::{ActiveTheme as _, Icon, Sizable, Size, WindowExt as _};
+use gpui_kit::{Animation, Transformation, ease_in_out, percentage};
 use std::{sync::Arc, time::Duration};
 #[path = "chat_attachments.rs"]
 mod attachments;
@@ -15,12 +16,21 @@ mod copy_feedback;
 mod message_attachments;
 #[path = "system_divider.rs"]
 mod system_divider;
+#[path = "message_presentation.rs"]
+mod message_presentation;
+#[path = "agent_exchange.rs"]
+pub(crate) mod agent_exchange;
+#[cfg(all(test, feature = "visual-export", feature = "performance-profiling"))]
+#[path = "message_presentation_tests.rs"]
+mod message_presentation_tests;
 use attachments::{AttachmentScope, ChatAttachments};
 #[path = "run_activity.rs"]
 pub(crate) mod run_activity;
 use super::transcript::TimelineRow;
 #[path = "chat_transcript_view.rs"]
 mod transcript_view;
+#[path = "chat_minimap.rs"]
+mod minimap;
 use transcript_view::{TranscriptGeometry, TranscriptPreparationKey, TranscriptViewport};
 #[path = "chat_slash.rs"]
 mod chat_slash;
@@ -31,17 +41,46 @@ pub(crate) mod task_activity;
 #[path = "connection_recovery.rs"]
 pub(crate) mod connection_recovery;
 
+#[cfg(all(test, feature = "visual-export"))]
+#[path = "composer_ack_tests.rs"]
+mod composer_ack_tests;
+
+#[cfg(all(test, feature = "visual-export"))]
+#[path = "secondary_sidebar_restore_tests.rs"]
+mod secondary_sidebar_restore_tests;
+
+#[cfg(all(test, feature = "visual-export", feature = "performance-profiling"))]
+#[path = "chat_scroll_chrome_tests.rs"]
+mod chat_scroll_chrome_tests;
+
 #[cfg(test)]
 #[path = "chat_column_fixture_tests.rs"]
 mod chat_column_fixture_tests;
 #[cfg(all(test, feature = "visual-export", feature = "performance-profiling"))]
+#[path = "chat_header_tests.rs"]
+mod chat_header_tests;
+#[cfg(all(test, feature = "visual-export", feature = "performance-profiling"))]
 #[path = "chat_width_reflow_tests.rs"]
 mod chat_width_reflow_tests;
+#[cfg(all(test, feature = "visual-export", feature = "performance-profiling"))]
+#[path = "approval_modal_tests.rs"]
+mod approval_modal_tests;
 
 #[cfg(any(test, feature = "performance-profiling"))]
 static TRANSCRIPT_PREPARATIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 #[cfg(any(test, feature = "performance-profiling"))]
 static TRANSCRIPT_PREPARED_ROWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(any(test, feature = "performance-profiling"))]
+static CHAT_CHROME_RENDERS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(any(test, feature = "performance-profiling"))]
+static DETAIL_BODY_RENDERS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Parent chrome and inline detail bodies, independently of history preparation.
+#[cfg(any(test, feature = "performance-profiling"))]
+pub(crate) fn chrome_render_counts() -> (u64, u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (CHAT_CHROME_RENDERS.load(Relaxed), DETAIL_BODY_RENDERS.load(Relaxed))
+}
 
 /// Numeric diagnostics only; no draft, message, task or provider data.
 #[cfg(any(test, feature = "performance-profiling"))]
@@ -71,6 +110,9 @@ fn transcript_column(content: impl IntoElement) -> gpui_kit::AnyElement {
     div()
         .w_full()
         .min_w_0()
+        // Give the minimap breathing room in narrow panes. Once the column
+        // reaches its width cap, centering absorbs this inset on wide panes.
+        .px(px(5.))
         .flex()
         .justify_center()
         .child(
@@ -81,6 +123,11 @@ fn transcript_column(content: impl IntoElement) -> gpui_kit::AnyElement {
                 .child(content),
         )
         .into_any_element()
+}
+
+/// Agent messages and activity marks share a small inset within the reading column.
+fn agent_transcript_column(content: impl IntoElement) -> gpui_kit::AnyElement {
+    transcript_column(div().w_full().min_w_0().pl(px(5.)).child(content))
 }
 
 fn split_operator_message(text: &str) -> (Option<String>, String) {
@@ -130,13 +177,13 @@ fn typed_submit_for_key(
     chat_slash::typed_submit_before_menu(&input)
 }
 
-fn current_reply_content(
-    messages: &[Rc<Value>],
+fn current_reply_content<'a>(
+    messages: impl IntoIterator<Item = &'a Rc<Value>>,
     message_id: &str,
     fallback_author: &str,
 ) -> Option<(String, String)> {
     let message = messages
-        .iter()
+        .into_iter()
         .find(|message| field(message, "id") == message_id)?;
     let (operator, text) = match field(message, "role").as_str() {
         "user" => split_operator_message(&field(message, "text")),
@@ -548,10 +595,23 @@ fn approval_history_label(
     }
 }
 
+pub(crate) fn open_markdown_link(owner: Option<WeakEntity<ChatPane>>, link: &str, cx: &mut App) {
+    let path = link.split(['?', '#']).next().unwrap_or(link);
+    let html = std::path::Path::new(path).is_absolute() && std::path::Path::new(path).extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("html") || e.eq_ignore_ascii_case("htm"));
+    if html || url::Url::parse(link).is_ok_and(|u| matches!(u.scheme(), "http" | "https" | "file")) {
+        if let Some(owner) = owner {
+            let _ = owner.update(cx, |pane, cx| cx.emit(ChatEvent::OpenBrowser { url: link.to_owned(), task_id: pane.task_id() }));
+            return;
+        }
+    }
+    cx.open_url(link);
+}
+
 const FINAL_ANSWER_GREEN: u32 = 0x4f9d69;
 
 #[derive(Clone)]
 pub enum ChatEvent {
+    OpenBrowser { url: String, task_id: String },
     Refresh,
     Archived(String),
     DraftChanged {
@@ -589,12 +649,27 @@ struct DeferredChatPublication {
     child_transcripts: monitter_gpui_desktop::native_publication::PreparedChildTranscripts,
     context_unchanged: bool,
     history: Option<Vec<Value>>,
+    history_source: Option<Arc<monitter_gpui_desktop::native_publication::PublicationIndex>>,
+    body_patches: Option<Vec<Value>>,
+    history_dirty: bool,
     reset: bool,
     boundary: Option<Option<String>>,
 }
 #[cfg(all(test, feature = "performance-profiling"))]
 #[path = "hidden_publication_tests.rs"]
 mod hidden_publication_tests;
+
+struct CommandAcceptance {
+    command: &'static str,
+    resolved_request: Option<String>,
+    sent_attachments: Option<Vec<String>>,
+    sent: Option<(String, String)>,
+}
+#[path = "stop_requests.rs"]
+mod stop_requests;
+fn command_wire_name(command: &'static str) -> &'static str {
+    if command == "send_message" { "send_message_fast" } else { command }
+}
 
 pub struct ChatPane {
     dock_group: Option<WeakEntity<gpui_kit::component::dock::TabGroup>>,
@@ -623,8 +698,9 @@ pub struct ChatPane {
     pub(super) error: Option<String>,
     pub(super) busy: bool,
     starting_turn: bool,
+    stop_requests: stop_requests::StopRequests,
     activity_rows: HashMap<String, Entity<run_activity::RunActivityRow>>,
-    activity_projection_source: Option<(Rc<Vec<transcript::ConversationItem>>, bool, bool)>,
+    activity_projection_source: Option<(Rc<im::Vector<transcript::ConversationItem>>, bool, bool)>,
     grouped_rows: HashMap<String, Entity<run_activity::RunActivityRow>>,
     message_attachment_rows: HashMap<String, Entity<message_attachments::MessageAttachments>>,
     message_action_focus: HashMap<String, FocusHandle>,
@@ -637,6 +713,8 @@ pub struct ChatPane {
     activity_refresh_pending: bool,
     #[cfg(test)]
     activity_context_refreshes: usize,
+    #[cfg(test)]
+    chrome_render_count: usize,
     pub(crate) decoration_bounds: crate::activity_sparkles::ChatDecorationBounds,
     task_actions: Option<Entity<crate::chat_task_actions::ChatTaskActionsPane>>,
     task_actions_subscription: Option<Subscription>,
@@ -645,7 +723,16 @@ pub struct ChatPane {
     pending_fork_open: Option<String>,
     pub(super) refreshing: bool,
     pub(super) clear_sent: Option<(String, String)>,
+    composer_window: gpui_kit::AnyWindowHandle,
     pub(super) transcripts: HashMap<String, TranscriptState>,
+    /// True after a current-revision latest page has been accepted, including
+    /// an empty page that proves this task has no history yet.
+    pub(super) latest_history_loaded: bool,
+    /// Suppresses duplicate bootstrap reads while the page result is in flight.
+    pub(super) latest_history_inflight: bool,
+    /// Full resets clear TranscriptState.loading, so keep request ownership
+    /// separately until the corresponding HistoryPage event arrives.
+    pub(super) history_page_inflight: bool,
     pub(super) dock_visible: bool,
     pub(super) answers: HashMap<(String, String), Entity<InputState>>,
     pub(super) form_choices: HashMap<(String, String), Value>,
@@ -654,6 +741,7 @@ pub struct ChatPane {
     typography: Option<String>,
     transcript_block_spacing: Option<f32>,
     composer_scroll_distance: Pixels,
+    scroll_event_generation: Rc<std::cell::Cell<u64>>,
     bottom_jump: Option<crate::composer_scroll::BottomJump>,
     bottom_button_exit: Option<crate::composer_scroll::BottomButtonExit>,
     chat_family: SharedString,
@@ -669,6 +757,10 @@ pub struct ChatPane {
     _working_bubble_change: Subscription,
     _activity_change: Subscription,
     companion: Entity<crate::collaboration::SubagentPane>,
+    agent_graph: Entity<crate::agent_graph::AgentGraph>,
+    agent_graph_visible: bool,
+    _companion_events: Subscription,
+    _agent_graph_events: Subscription,
     companion_visible: bool,
     companion_saved_visible: bool,
     companion_programmatic_resizes: usize,
@@ -676,11 +768,11 @@ pub struct ChatPane {
     pane_height_design: f32,
     compact_detail: bool,
     detail_motion: crate::companion_sidebar::RailMotion,
+    detail_motion_settle_pending: bool,
     detail_animation_frame: bool,
     detail_transcript_cache: Option<Entity<StableTranscriptList>>,
     transcript_viewport: Option<Entity<TranscriptViewport>>,
     transcript_preparation_key: Option<TranscriptPreparationKey>,
-    response_disclosure_generation: u64,
     detail_tab: crate::companion_sidebar::DetailTab,
     detail_tabs_motion: Rc<std::cell::RefCell<crate::sidebar_tabs_motion::SidebarTabsMotion>>,
     detail_focus: [FocusHandle; 4],
@@ -689,10 +781,11 @@ pub struct ChatPane {
     approval_popup_id: Option<String>,
     pub(super) interaction_request_id: Option<String>,
     pub(super) mcp_approval_supported: bool,
-    approval_popup_open: bool,
+    pub(crate) approval_popup_open: bool,
     approval_focus: FocusHandle,
     pub(super) approval_details_expanded: bool,
-    response_details_expanded: HashSet<String>,
+    response_details_expanded: Rc<std::cell::RefCell<HashSet<String>>>,
+    peer_details_expanded: Rc<std::cell::RefCell<HashSet<String>>>,
     companion_context: (Option<String>, String),
     companion_width: f32,
     companion_scale: u16,
@@ -817,12 +910,17 @@ impl ChatPane {
             });
         let composer_change = cx.subscribe(&composer, |pane, input, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
-                let text = input.read(cx).value().to_string();
+                let text = input.read(cx).value();
+                let slash_was_open = pane.slash.read(cx).is_open();
                 pane.slash
                     .update(cx, |slash, cx| slash.set_input(text.clone(), cx));
                 let task_id = pane.task_id();
                 pane.voice
                     .update(cx, |voice, cx| voice.set_context(task_id, text.clone(), cx));
+                let chrome_changed = slash_was_open != pane.slash.read(cx).is_open()
+                    || (!text.is_empty() && pane.slash_notice.is_some())
+                    || pane.bottom_jump.is_some()
+                    || pane.composer_scroll_distance != gpui_kit::px(0.);
                 if !text.is_empty() {
                     pane.slash_notice = None;
                 }
@@ -831,9 +929,11 @@ impl ChatPane {
                 pane.draft_touched = true;
                 cx.emit(ChatEvent::DraftChanged {
                     task_id: pane.task_id(),
-                    text,
+                    text: text.to_string(),
                 });
-                cx.notify();
+                // The editor and slash palette own their paint notifications.
+                // Typing only rebuilds pane chrome when it actually changes.
+                if chrome_changed { cx.notify(); }
             }
         });
         let queue_editor = cx.new(|cx| TextareaState::new(window, cx));
@@ -862,7 +962,7 @@ impl ChatPane {
                 .collect(),
             true,
         );
-        let known_messages = transcript.messages.as_ref().clone();
+        let known_messages = transcript.messages.iter().cloned().collect::<Vec<_>>();
         let transcripts = HashMap::from([(task_id.clone(), transcript)]);
         let scope = Self::attachment_scope(&snapshot, &task_id);
         let attachments = cx.new(|_| ChatAttachments::new(service.clone(), task_id.clone(), scope));
@@ -950,6 +1050,29 @@ impl ChatPane {
         // The child list and its visor occupy separate parts of this pane.
         // Child selection and asynchronous transcript reads invalidate both.
         let companion_change = cx.observe(&companion, |_, _, cx| cx.notify());
+        let agent_graph = cx.new(crate::agent_graph::AgentGraph::new);
+        let companion_events = cx.subscribe_in(&companion, window, |pane, _, event, window, cx| {
+            match event {
+                crate::collaboration::SubagentPaneEvent::ShowGraph => {
+                    if pane.agent_graph_visible {
+                        pane.close_agent_graph(window, cx);
+                        return;
+                    }
+                    pane.agent_graph_visible = true;
+                    pane.companion.update(cx, |child, cx| { child.dismiss_drawer(cx); });
+                    for body in pane.streaming_bodies.values() {
+                        body.update(cx, |body, cx| body.set_visible(false, cx));
+                    }
+                    window.focus(&pane.focus, cx);
+                    cx.notify();
+                }
+            }
+        });
+        let agent_graph_events = cx.subscribe_in(&agent_graph, window, |pane, _, event, window, cx| {
+            match event {
+                crate::agent_graph::AgentGraphEvent::BackToChat => pane.close_agent_graph(window, cx),
+            }
+        });
         let details = cx.new(|cx| {
             crate::pane_details::PaneDetails::new(
                 service.clone(),
@@ -1052,6 +1175,7 @@ impl ChatPane {
             error: None,
             busy: false,
             starting_turn: false,
+            stop_requests: Default::default(),
             activity_rows: HashMap::new(),
             activity_projection_source: None,
             grouped_rows: HashMap::new(),
@@ -1066,6 +1190,8 @@ impl ChatPane {
             activity_refresh_pending: false,
             #[cfg(test)]
             activity_context_refreshes: 0,
+            #[cfg(test)]
+            chrome_render_count: 0,
             task_actions: None,
             task_actions_subscription: None,
             fork_dialog: None,
@@ -1073,7 +1199,11 @@ impl ChatPane {
             pending_fork_open: None,
             refreshing: false,
             clear_sent: None,
+            composer_window: window.window_handle(),
             transcripts,
+            latest_history_loaded: false,
+            latest_history_inflight: false,
+            history_page_inflight: false,
             dock_visible: true,
             answers: HashMap::new(),
             form_choices: HashMap::new(),
@@ -1082,6 +1212,7 @@ impl ChatPane {
             typography: None,
             transcript_block_spacing: None,
             composer_scroll_distance: gpui_kit::px(0.),
+            scroll_event_generation: Rc::new(std::cell::Cell::new(0)),
             bottom_jump: None,
             bottom_button_exit: None,
             chat_family: ".SystemUIFont".into(),
@@ -1097,6 +1228,10 @@ impl ChatPane {
             _working_bubble_change: working_bubble_change,
             _activity_change: activity_change,
             companion,
+            agent_graph,
+            agent_graph_visible: false,
+            _companion_events: companion_events,
+            _agent_graph_events: agent_graph_events,
             companion_visible: true,
             companion_saved_visible: true,
             companion_programmatic_resizes: 0,
@@ -1104,11 +1239,11 @@ impl ChatPane {
             pane_height_design: 0.0,
             compact_detail: false,
             detail_motion: Default::default(),
+            detail_motion_settle_pending: true,
             detail_animation_frame: false,
             detail_transcript_cache: None,
             transcript_viewport: None,
             transcript_preparation_key: None,
-            response_disclosure_generation: 0,
             detail_tab: crate::companion_sidebar::DetailTab::Details,
             detail_tabs_motion: Default::default(),
             detail_focus: std::array::from_fn(|_| cx.focus_handle()),
@@ -1120,7 +1255,8 @@ impl ChatPane {
             approval_popup_open: false,
             approval_focus: cx.focus_handle(),
             approval_details_expanded: false,
-            response_details_expanded: HashSet::new(),
+            response_details_expanded: Rc::new(std::cell::RefCell::new(HashSet::new())),
+            peer_details_expanded: Rc::new(std::cell::RefCell::new(HashSet::new())),
             companion_context,
             companion_width: reference_detail_width(),
             companion_scale: design::interface_scale(),
@@ -1186,9 +1322,19 @@ impl ChatPane {
         window.focus(&self.approval_focus, cx);
         cx.notify();
     }
+    pub(super) fn review_notification_request(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        if !rows(&self.snapshot, "approvalRequests").iter().any(|request|
+            field(request, "id") == id && field(request, "taskId") == self.task_id()
+                && field(request, "status") == "pending") { return; }
+        self.interaction_request_id = Some(id.clone());
+        let ordinary = rows(&self.snapshot, "approvalRequests").iter()
+            .any(|request| field(request, "id") == id && (request["input"].is_null() || !crate::approval_prompt::mcp_approval_choices(request).is_empty()));
+        if ordinary { self.show_approval_prompt(id, window, cx); }
+        else { self.approval_popup_open = false; cx.notify(); }
+    }
     fn pending_tool_approval(&self) -> Option<Value> {
         rows(&self.snapshot, "approvalRequests").into_iter()
-            .filter(|r| field(r, "taskId") == self.task_id() && field(r, "status") == "pending" && r["input"].is_null())
+            .filter(|r| field(r, "taskId") == self.task_id() && field(r, "status") == "pending" && (r["input"].is_null() || !crate::approval_prompt::mcp_approval_choices(r).is_empty()))
             .min_by_key(|r| (self.approval_popup_id.as_ref().is_none_or(|id| *id != field(r,"id")), r["createdAt"].as_i64().unwrap_or_default()))
     }
     fn attachment_scope(snapshot: &Value, task_id: &str) -> AttachmentScope {
@@ -1199,6 +1345,22 @@ impl ChatPane {
             host_id: task.map(|task| field(task, "hostId")).unwrap_or_default(),
             cwd: task.map(|task| field(task, "cwd")).unwrap_or_default(),
         }
+    }
+    /// Apply acceptance outside painting so the retained editor and persisted
+    /// draft change together, even when this pane is hidden or showing its map.
+    fn clear_acknowledged_composer(
+        &mut self, task_id: &str, sent: &str, window: &mut Window, cx: &mut Context<Self>,
+    ) -> bool {
+        if self.task_id() != task_id || self.composer.read(cx).value().as_ref() != sent {
+            return false;
+        }
+        self.composer.update(cx, |input, cx| input.set_value("", window, cx));
+        self.voice.update(cx, |voice, cx| voice.set_context(task_id.to_owned(), String::new(), cx));
+        self.slash.update(cx, |slash, cx| slash.set_input(String::new(), cx));
+        self.draft_touched = true;
+        cx.emit(ChatEvent::DraftChanged { task_id: task_id.to_owned(), text: String::new() });
+        cx.notify();
+        true
     }
     /// Reads only the explicit unsent composer, never transcripts/attachments.
     pub fn draft(&self, cx: &App) -> String {
@@ -1270,10 +1432,27 @@ impl ChatPane {
         cx.write_to_clipboard(ClipboardItem::new_string(text));
         true
     }
+    pub(crate) fn is_working(&self) -> bool {
+        self.starting_turn || self.snapshot["tasks"].as_array().into_iter().flatten()
+            .any(|task| field(task, "id") == self.task_id() && field(task, "status") == "running")
+    }
+
     pub fn task_id(&self) -> String {
         self.selected.clone().unwrap_or_default()
     }
+    fn close_agent_graph(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.agent_graph_visible = false;
+        for body in self.streaming_bodies.values() {
+            body.update(cx, |body, cx| body.set_visible(self.dock_visible, cx));
+        }
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
     pub(crate) fn set_dock_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if self.dock_visible != visible {
+            self.settle_secondary_sidebar_motion();
+        }
         if visible && !self.dock_visible {
             self.apply_deferred_publication(cx);
             // Install sources while the reveal effect is still hidden. Normal
@@ -1291,6 +1470,7 @@ impl ChatPane {
             self.streaming_bodies_initialized = false;
         }
         self.dock_visible = visible;
+        self.composer_git.update(cx, |strip, cx| strip.set_visible(visible, cx));
         self.attachments.update(cx, |view, cx| view.set_visible(visible, cx));
         self.companion.update(cx, |pane, cx| pane.set_surface_visibility(
             visible && self.companion_visible && !self.compact_detail && self.detail_tab == crate::companion_sidebar::DetailTab::Subagents, visible, cx));
@@ -1298,7 +1478,7 @@ impl ChatPane {
             control.update(cx, |control, cx| control.set_visible(visible, cx));
         }
         for body in self.streaming_bodies.values() {
-            body.update(cx, |body, cx| body.set_visible(visible, cx));
+            body.update(cx, |body, cx| body.set_visible(visible && !self.agent_graph_visible, cx));
         }
     }
     /// Keep one latest prepared update while hidden. Backend collection and
@@ -1310,11 +1490,28 @@ impl ChatPane {
         context_unchanged: bool, history: Option<Vec<Value>>, reset: bool,
         boundary: Option<Option<String>>, cx: &mut Context<Self>,
     ) {
-        let update = DeferredChatPublication {
-            task_id: self.task_id(),
-            snapshot, revision, records, child_transcripts, context_unchanged,
-            history, reset, boundary,
-        };
+        self.publish_indexed(snapshot, revision, records, child_transcripts, context_unchanged,
+            history, reset, boundary, None, None, false, cx);
+    }
+    pub(super) fn wants_history_publication(&self) -> bool {
+        self.dock_visible || self.transcripts.get(&self.task_id()).is_some_and(|state| state.loading)
+    }
+    pub(super) fn publish_indexed(
+        &mut self, snapshot: Rc<Value>, revision: Option<String>, records: Arc<Vec<Value>>,
+        child_transcripts: monitter_gpui_desktop::native_publication::PreparedChildTranscripts,
+        context_unchanged: bool, history: Option<Vec<Value>>, reset: bool, boundary: Option<Option<String>>,
+        history_source: Option<Arc<monitter_gpui_desktop::native_publication::PublicationIndex>>,
+        body_patches: Option<Vec<Value>>, history_dirty: bool, cx: &mut Context<Self>,
+    ) {
+        // A full snapshot can replace the message coverage available to this
+        // pane. Deltas preserve accepted pages; only a full reset requires a
+        // fresh latest-page proof.
+        if reset {
+            self.latest_history_loaded = false;
+        }
+        let update = DeferredChatPublication { task_id: self.task_id(), snapshot, revision,
+            records, child_transcripts, context_unchanged, history, reset, boundary,
+            history_source, body_patches, history_dirty };
         if self.dock_visible {
             self.install_publication(update, cx);
             return;
@@ -1347,6 +1544,18 @@ impl ChatPane {
             pending.child_transcripts = update.child_transcripts;
             pending.context_unchanged &= update.context_unchanged;
             pending.reset |= update.reset;
+            // A later indexed patch supersedes any earlier materialized history.
+            // Keeping both would let the older explicit history win on reveal.
+            if update.history_source.is_some() {
+                if (update.history_dirty || update.body_patches.is_some()) && update.history.is_none() {
+                    if let Some(retired) = pending.history.take() {
+                        cx.background_executor().spawn(async move { drop(retired) }).detach();
+                    }
+                }
+                pending.history_source = update.history_source;
+            }
+            pending.history_dirty |= update.history_dirty || update.body_patches.is_some();
+            pending.body_patches = None;
             if update.reset {
                 pending.boundary = None;
                 if let Some(retired) = pending.history.take() {
@@ -1374,29 +1583,37 @@ impl ChatPane {
     }
     fn install_publication(&mut self, update: DeferredChatPublication, cx: &mut Context<Self>) {
         let DeferredChatPublication { task_id: source_task, snapshot, revision, records, child_transcripts,
-            context_unchanged, history, reset, boundary } = update;
+            context_unchanged, history, reset, boundary, history_source, body_patches, history_dirty } = update;
         let task_id = self.task_id();
         if source_task != task_id {
             crate::retire_snapshot(snapshot, cx);
             cx.background_executor().spawn(async move { drop(history) }).detach();
             return;
         }
-        // Production resets always include prepared history. Keep the helper
-        // safe for a sync-only reset by deriving this task's authoritative rows.
-        let history = history.or_else(|| reset.then(|| {
-            snapshot["messages"].as_array().into_iter().flatten()
-                .filter(|row| row["taskId"].as_str() == Some(task_id.as_str())).cloned().collect()
+        // A hidden pane retains only the latest typed source, materializing once
+        // on reveal. Explicit legacy/fixture publications retain their fallback.
+        let history = history.or_else(|| (reset || (history_dirty && body_patches.is_none())).then(|| {
+            history_source.as_ref().map(|index| index.task_history(&task_id)).unwrap_or_else(||
+                snapshot["messages"].as_array().into_iter().flatten()
+                    .filter(|row| row["taskId"].as_str() == Some(task_id.as_str())).cloned().collect())
         }));
-        // A later reset clears accepted page boundaries. A later removal also
-        // prevents an old cursor being restored after authoritative history.
         let boundary = boundary.filter(|before| before.as_ref().is_none_or(|id| {
-            snapshot["messages"].as_array().is_some_and(|rows| rows.iter().any(|row| {
-                row["id"].as_str() == Some(id) && row["taskId"].as_str() == Some(task_id.as_str())
-            }))
+            if let Some(index) = &history_source {
+                index.messages.get_by_id(id).ok().flatten().is_some_and(|row| row.task_id == task_id)
+            } else {
+                history.as_ref().is_some_and(|rows| rows.iter().any(|row| row["id"].as_str() == Some(id)))
+                    || snapshot["messages"].as_array().is_some_and(|rows| rows.iter().any(|row|
+                        row["id"].as_str() == Some(id) && row["taskId"].as_str() == Some(task_id.as_str())))
+            }
         }));
         if reset { self.companion.update(cx, |pane, cx| pane.suppress_completion_motion(cx)); }
         self.sync_prepared(snapshot, revision, records, child_transcripts, context_unchanged, cx);
         if let Some(history) = history { self.reconcile_history(history, reset, cx); }
+        else if let Some(patches) = body_patches {
+            if !self.reconcile_body_patches(&patches, cx) {
+                if let Some(index) = history_source { self.reconcile_history(index.task_history(&task_id), false, cx); }
+            }
+        }
         if let Some(boundary) = boundary { self.restore_history_boundary(boundary, cx); }
     }
     pub fn sync_prepared(
@@ -1518,7 +1735,7 @@ impl ChatPane {
         }
         self.refreshing = false;
         if !transcript_context_unchanged && let Some(transcript) = self.transcripts.get(&self.task_id()) {
-            let messages = transcript.messages.as_ref().clone();
+            let messages = transcript.messages.iter().cloned().collect::<Vec<_>>();
             self.composer_footer
                 .update(cx, |footer, cx| footer.set_context_messages(messages, cx));
         }
@@ -1555,7 +1772,7 @@ impl ChatPane {
     fn prune_hidden_entities(&mut self) {
         let task_id = self.task_id();
         let state = &self.transcripts[&task_id];
-        let event_ids = transcript::visible_projection_event_ids(&state.projection);
+        let event_ids = transcript::visible_projection_event_ids(state.projection.iter());
         let group_ids: HashSet<_> = state.projection.iter().map(transcript::ConversationItem::stable_key).collect();
         let message_ids: HashSet<_> = state.messages.iter().map(|message| field(message, "id")).collect();
         self.activity_rows.retain(|id, _| event_ids.contains(id));
@@ -1564,6 +1781,29 @@ impl ChatPane {
         self.message_action_focus.retain(|id, _| message_ids.contains(id));
         self.copy_controls.retain(|id, _| message_ids.contains(id));
         self.streaming_bodies.retain(|id, _| message_ids.contains(id));
+    }
+    fn reconcile_body_patches(&mut self, patches: &[Value], cx: &mut Context<Self>) -> bool {
+        if !std::mem::take(&mut self.transcript_context_unchanged) { return false; }
+        let state = self.transcripts.entry(self.task_id()).or_default();
+        if state.defer_stream_body_patches(patches) {
+            self.activity_refresh_pending = false;
+            return true;
+        }
+        let previous_rows = state.rows.clone();
+        let Some((changed, indices)) = state.reconcile_stream_body_patches(patches,
+            |id| self.streaming_bodies.contains_key(id)) else { return false; };
+        self.activity_refresh_pending = false;
+        if let Some(key) = &mut self.transcript_preparation_key { key.advance_stream_rows(&previous_rows, &state.rows); }
+        for message in changed {
+            if let Some(control) = self.copy_controls.get(&field(&message, "id")) {
+                control.update(cx, |control, cx| control.set_disabled(field(&message, "text").is_empty(), cx));
+            }
+            self.streaming_bodies[&field(&message, "id")].update(cx, |body, cx| body.set_message(message, cx));
+        }
+        let remeasure = !indices.is_empty();
+        for index in indices { state.list.remeasure_items(index..index + 1); }
+        if remeasure { self.invalidate_transcript_list(cx); }
+        true
     }
     /// Authoritative cache integration: pass all known task messages, including
     /// loaded older pages. Never use this with a bounded compact snapshot tail.
@@ -1610,7 +1850,7 @@ impl ChatPane {
         let state = self.transcripts.entry(task_id).or_default();
         state.reconcile(messages, reset);
         state.reconcile_activities(events, reset);
-        let known_messages = state.messages.as_ref().clone();
+        let known_messages = state.messages.iter().cloned().collect::<Vec<_>>();
         self.composer_footer.update(cx, |footer, cx| {
             footer.set_context_messages(known_messages, cx)
         });
@@ -1643,13 +1883,21 @@ impl ChatPane {
         result: Result<Value, String>,
         cx: &mut Context<Self>,
     ) {
+        let latest_request = self.latest_history_inflight;
+        self.latest_history_inflight = false;
+        self.history_page_inflight = false;
         let state = self.transcripts.entry(self.task_id()).or_default();
         state.loading = false;
         match result {
-            Ok(page) => state.merge_page(&page),
+            Ok(page) => {
+                state.merge_page(&page);
+                if latest_request {
+                    self.latest_history_loaded = true;
+                }
+            }
             Err(error) => state.error = Some(error),
         }
-        let known_messages = state.messages.as_ref().clone();
+        let known_messages = state.messages.iter().cloned().collect::<Vec<_>>();
         self.composer_footer.update(cx, |footer, cx| {
             footer.set_context_messages(known_messages, cx)
         });
@@ -1824,6 +2072,24 @@ impl ChatPane {
         cx.emit(ChatEvent::Refresh);
     }
     pub(super) fn command(&mut self, command: &'static str, args: Value, cx: &mut Context<Self>) {
+        if command == "cancel_task" {
+            let task = field(&args, "taskId");
+            if !task.is_empty() {
+                self.stop_requests.request(task);
+                self.drive_stop_requests(cx);
+                cx.notify();
+            }
+            return;
+        }
+        self.dispatch_command(command, args, cx);
+    }
+    fn drive_stop_requests(&mut self, cx: &mut Context<Self>) {
+        if self.service.is_none() { return; }
+        if let Some(task) = self.stop_requests.next(self.busy) {
+            self.dispatch_command("cancel_task", json!({"taskId":task}), cx);
+        }
+    }
+    fn dispatch_command(&mut self, command: &'static str, args: Value, cx: &mut Context<Self>) {
         if self.busy {
             return;
         }
@@ -1866,23 +2132,47 @@ impl ChatPane {
                 .map(|message| json!({"id":message["id"]})).collect::<Vec<_>>(),
             "recoveryStartedAt": chrono::Utc::now().timestamp_millis(),
         });
+        let recovery_executor = cx.background_executor().clone();
         let task = cx
             .background_executor()
             .spawn(async move {
-                let result = service.invoke(command, args.clone());
+                let result = service.invoke(command_wire_name(command), args.clone());
+                if command == "cancel_task" && result.as_ref().err().is_some_and(|error| error == "Task is not running.") {
+                    return Ok(json!({"stopped":true}));
+                }
                 let Err(error) = &result else { return result; };
                 if !connection_recovery::transient(error) { return result; }
                 // Read only: a lost response may follow a fully executed mutation.
                 let mut connected = false;
-                for delay in [0, 150, 450] {
-                    if delay != 0 { std::thread::sleep(Duration::from_millis(delay)); }
-                    if let Ok(mut value) = service.invoke("get_ui_snapshot", json!({})) {
-                        connected = true;
-                        if command == "send_message" {
-                            if let Ok(page) = service.read_task_messages(&field(&args, "taskId"), None, Some(100)) {
-                                value["snapshot"]["messages"] = json!(page.messages);
+                for delay in connection_recovery::READ_RETRY_DELAYS_MS {
+                    if delay != 0 { recovery_executor.timer(Duration::from_millis(delay)).await; }
+                    if command == "send_message" {
+                        // A bounded task page is enough to confirm a delivered
+                        // prompt without downloading the whole workspace.
+                        let mut after = json!({"messages":[]});
+                        if let Ok(page) = service.read_task_messages(&field(&args, "taskId"), None, Some(100)) {
+                            connected = true;
+                            after["messages"] = json!(page.messages);
+                            if connection_recovery::confirmed(command, &args, &before, &after) {
+                                return Ok(json!({"accepted":true}));
                             }
                         }
+                        // A running turn may have queued the prompt instead.
+                        // Native metadata is the fallback, never the legacy
+                        // full snapshot containing durable message history.
+                        if let Ok(value) = service.read_ui_changes(None) {
+                            connected = true;
+                            if let Some(snapshot) = value.snapshot {
+                                let queued = snapshot.queued_messages.into_iter()
+                                    .filter(|message| message.task_id == field(&args, "taskId")).collect::<Vec<_>>();
+                                after["queuedMessages"] = json!(queued);
+                                if connection_recovery::confirmed(command, &args, &before, &after) {
+                                    return Ok(json!({"accepted":true}));
+                                }
+                            }
+                        }
+                    } else if let Ok(value) = service.invoke("get_ui_snapshot", json!({})) {
+                        connected = true;
                         if connection_recovery::confirmed(command, &args, &before, &value["snapshot"]) {
                             return Ok(value);
                         }
@@ -1891,39 +2181,54 @@ impl ChatPane {
                 Err(if connected {
                     "Reconnected, but could not confirm the change. Check the chat before trying again. Your draft is kept."
                 } else {
-                    "Could not reconnect. Your draft is kept; check the chat after reconnecting before trying again."
+                    connection_recovery::RECONNECT_EXHAUSTED
                 }.into())
             });
+        self.await_command_acceptance(task, CommandAcceptance { command, resolved_request, sent_attachments, sent }, cx);
+    }
+    /// The same async window delivery handles real IPC results and synthetic
+    /// acknowledgement futures in native regression tests.
+    fn await_command_acceptance(
+        &mut self, task: gpui_kit::Task<Result<Value, String>>, acceptance: CommandAcceptance, cx: &mut Context<Self>,
+    ) {
+        let CommandAcceptance { command, resolved_request, sent_attachments, sent } = acceptance;
+        let composer_window = self.composer_window;
         cx.spawn(async move |pane, cx| {
             let result = task.await;
-            let _ = pane.update(cx, |pane, cx| {
-                pane.busy = false;
-                pane.composer_footer
-                    .update(cx, |footer, cx| footer.set_busy(false, cx));
-                pane.starting_turn = false;
-                match result {
-                    Ok(_) => {
-                        if let Some(id) = resolved_request {
-                            pane.answers.retain(|(request_id, _), _| request_id != &id);
-                            pane.form_choices
-                                .retain(|(request_id, _), _| request_id != &id);
+            let _ = cx.update_window(composer_window, |_, window, cx| {
+                pane.update(cx, |pane, cx| {
+                    pane.busy = false;
+                    pane.composer_footer
+                        .update(cx, |footer, cx| footer.set_busy(false, cx));
+                    pane.starting_turn = false;
+                    if command == "cancel_task" { pane.stop_requests.complete(); }
+                    match result {
+                        Ok(_) => {
+                            if let Some(id) = resolved_request {
+                                pane.answers.retain(|(request_id, _), _| request_id != &id);
+                                pane.form_choices
+                                    .retain(|(request_id, _), _| request_id != &id);
+                            }
+                            if command == "edit_queued_message" {
+                                pane.queue_edit = None;
+                            }
+                            if let Some(ids) = sent_attachments {
+                                pane.attachments
+                                    .update(cx, |attachments, cx| attachments.acknowledge(&ids, cx));
+                            }
+                            if let Some((task_id, text)) = sent {
+                                pane.clear_acknowledged_composer(&task_id, &text, window, cx);
+                            }
+                            pane.refresh(cx);
                         }
-                        if command == "edit_queued_message" {
-                            pane.queue_edit = None;
+                        Err(error) => {
+                            pane.error = Some(error);
+                            pane.refresh(cx);
                         }
-                        if let Some(ids) = sent_attachments {
-                            pane.attachments
-                                .update(cx, |attachments, cx| attachments.acknowledge(&ids, cx));
-                        }
-                        pane.clear_sent = sent;
-                        pane.refresh(cx);
                     }
-                    Err(error) => {
-                        pane.error = Some(error);
-                        pane.refresh(cx);
-                    }
-                }
-                cx.notify();
+                    pane.drive_stop_requests(cx);
+                    cx.notify();
+                })
             });
         })
         .detach();
@@ -1936,15 +2241,33 @@ impl ChatPane {
             list.update(cx, |_, cx| cx.notify());
         }
     }
+    #[cfg(feature = "performance-profiling")]
+    pub(crate) fn minimap_fixture_marker_jump(&mut self, row: usize, cx: &mut Context<Self>) {
+        if let Some(viewport) = &self.transcript_viewport { viewport.update(cx, |view, cx| view.minimap_marker_jump(row, cx)); }
+    }
+    #[cfg(feature = "performance-profiling")]
+    pub(crate) fn minimap_fixture_scroll(&mut self, row: Option<usize>, cx: &mut Context<Self>) {
+        let Some(row) = row else { self.finish_bottom_jump(cx); return; };
+        self.bottom_jump = None;
+        if let Some(state) = self.transcripts.get_mut(&self.task_id()) {
+            state.list.set_follow_mode(FollowMode::Normal);
+            state.list.scroll_to(gpui_kit::ListOffset { item_ix: row, offset_in_item: gpui_kit::px(0.) });
+        }
+        self.invalidate_transcript_list(cx);
+        if let Some(viewport) = &self.transcript_viewport { viewport.update(cx, |view, cx| { view.cancel_minimap_jump(); cx.notify(); }); }
+        cx.notify();
+    }
     fn finish_bottom_jump(&mut self, cx: &mut Context<Self>) {
         self.bottom_jump = None;
         self.composer_scroll_distance = gpui_kit::px(0.);
         if let Some(state) = self.transcripts.get_mut(&self.task_id()) {
             state.release_live();
+            state.history_top_reached = false;
             state.list.set_follow_mode(FollowMode::Tail);
             state.list.scroll_to_end();
         }
         self.invalidate_transcript_list(cx);
+        if let Some(viewport) = &self.transcript_viewport { viewport.update(cx, |view, cx| { view.cancel_minimap_jump(); cx.notify(); }); }
         cx.notify();
     }
     fn back_to_bottom(&mut self, cx: &mut Context<Self>) {
@@ -2032,8 +2355,10 @@ impl ChatPane {
             return;
         }
         let compact = width_design < COMPACT_DETAIL_BREAKPOINT;
-        let changed =
-            (self.pane_width_design - width_design).abs() >= 1.0 || self.compact_detail != compact;
+        let scale = design::ui_scaled_px(1.).as_f32();
+        let bottom_bar_changed = (self.pane_width_design * scale < 700.) != (width_design * scale < 700.);
+        let changed = (self.pane_width_design - width_design).abs() >= 1.0
+            || self.compact_detail != compact || bottom_bar_changed;
         if !changed {
             return;
         }
@@ -2041,9 +2366,14 @@ impl ChatPane {
         {
             self.companion_visible = false;
         }
-        let restore_wide_width = !compact && (self.pane_width_design <= 0.0 || self.compact_detail);
+        let first_measurement = self.pane_width_design <= 0.0;
+        let presentation_changed = self.compact_detail != compact;
+        let restore_wide_width = !compact && (first_measurement || self.compact_detail);
         self.pane_width_design = width_design;
         self.compact_detail = compact;
+        if first_measurement || presentation_changed {
+            self.settle_secondary_sidebar_motion();
+        }
         if restore_wide_width && self.companion_resize.read(cx).sizes().len() == 2 {
             let width = design::ui_px(
                 self.companion_width
@@ -2092,6 +2422,7 @@ impl ChatPane {
             NativeDetailTab::Approvals => DetailTab::Approvals,
             NativeDetailTab::Subagents => DetailTab::Subagents,
         };
+        self.settle_secondary_sidebar_motion();
         if !self.compact_detail
             && self.pane_width_design > 0.0
             && self.companion_resize.read(cx).sizes().len() == 2
@@ -2107,6 +2438,15 @@ impl ChatPane {
                 .update(cx, |state, cx| state.resize_panel(1, width, window, cx));
         }
         cx.notify();
+    }
+
+    fn settle_secondary_sidebar_motion(&mut self) {
+        self.detail_motion.settle(self.companion_visible && self.pane_width_design > 0.0);
+        // Native layout reports width after the first render. Keep that first
+        // measured presentation settled too, rather than animating from zero.
+        self.detail_motion_settle_pending = self.pane_width_design <= 0.0;
+        self.detail_animation_frame = false;
+        self.detail_tabs_motion.borrow_mut().settle(self.detail_tab.index());
     }
 
     pub(super) fn toggle_companion(&mut self, cx: &mut Context<Self>) {
@@ -2141,25 +2481,28 @@ impl ChatPane {
     }
 }
 
-type StableRowRenderer = Rc<std::cell::RefCell<dyn FnMut(usize, &mut Window, &mut App) -> AnyElement>>;
+type StableRowRenderer = Rc<std::cell::RefCell<dyn FnMut(usize, &mut Window, &mut App, f32) -> AnyElement>>;
 struct StableTranscriptList {
     state: ListState,
     rows: StableRowRenderer,
+    minimap: Rc<Vec<minimap::Marker>>,
 }
 fn retain_transcript_list(
     retained: &mut Option<Entity<StableTranscriptList>>,
     state: ListState,
     rows: StableRowRenderer,
+    minimap: Rc<Vec<minimap::Marker>>,
     cx: &mut App,
 ) {
     if let Some(cached) = retained.as_ref() {
         cached.update(cx, |list, cx| {
             list.state = state;
             list.rows = rows;
+            list.minimap = minimap;
             cx.notify();
         });
     } else {
-        *retained = Some(cx.new(|_| StableTranscriptList { state, rows }));
+        *retained = Some(cx.new(|_| StableTranscriptList { state, rows, minimap }));
     }
 }
 #[cfg(all(test, feature = "visual-export"))]
@@ -2168,12 +2511,35 @@ mod tree_click_tests;
 impl Render for StableTranscriptList {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let rows = self.rows.clone();
-        list(self.state.clone(), move |index, window, cx| rows.borrow_mut()(index, window, cx)).size_full()
+        list(self.state.clone(), move |index, window, cx| rows.borrow_mut()(index, window, cx, 1.)).size_full()
     }
+}
+
+/// Every control below the composer shares its measured slide distance.
+fn composer_scroll_stack(hidden: Pixels) -> Div {
+    div().relative().w_full().flex().flex_col().flex_shrink_0().mb(-hidden)
+}
+
+/// The floating jump control owns its pointer region, including its exit
+/// animation when the child button is disabled. Do not click through it.
+fn back_to_bottom_surface() -> Stateful<Div> {
+    div().id("chat-back-to-bottom-hit-surface")
+        .debug_selector(|| "chat-back-to-bottom-hit-surface".into()).occlude()
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+}
+
+fn working_clearance_spacer(working: bool) -> impl IntoElement {
+    div().w_full().h(px(if working { 48. } else { 0. })).flex_shrink_0()
+        .debug_selector(|| "working-clearance-spacer".into())
 }
 
 impl Render for ChatPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(any(test, feature = "performance-profiling"))]
+        CHAT_CHROME_RENDERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        #[cfg(test)]
+        { self.chrome_render_count += 1; }
         // Painting is the earliest authoritative reveal observation; the dock
         // visibility callback follows this draw. Install latest content now so
         // even the first revealed frame cannot display an old hidden snapshot.
@@ -2194,6 +2560,40 @@ impl Render for ChatPane {
         let palette = self
             .composed_palette
             .unwrap_or_else(|| settings::palette(&self.snapshot["settings"], window.appearance()));
+        let graph_progress = crate::collaboration::visor_slide(
+            SharedString::from(format!("agent-map-pin-{:?}", cx.entity_id())),
+            self.agent_graph_visible, 1., crate::native_motion::motion_allowed(), window, cx,
+        );
+        if self.agent_graph_visible {
+            let bar = self.companion.update(cx, |pane, cx| {
+                pane.render_graph_bar(palette, self.pane_height_design,
+                    self.pane_width_design * design::ui_scaled_px(1.).as_f32(), window, cx)
+            });
+            let pin_gap = (1. - graph_progress).clamp(0., 1.) * (self.pane_height_design - 240.).max(0.);
+            let snapshot = self.snapshot.clone();
+            let task_id = self.task_id();
+            let items = self.companion.read(cx).records();
+            self.companion.update(cx, |pane, cx| pane.set_surface_visibility(false, false, cx));
+            self.agent_graph.update(cx, |graph, cx| graph.set_context(snapshot, &task_id, items, palette, cx));
+            return div()
+                .key_context("MonitterChat")
+                .track_focus(&self.focus)
+                .size_full().relative().flex().flex_col()
+                .on_key_down(cx.listener(|pane, event: &KeyDownEvent, window, cx| {
+                    if event.keystroke.key == "escape" && !window.has_active_dialog(cx) {
+                        pane.close_agent_graph(window, cx);
+                        cx.stop_propagation();
+                    }
+                }))
+                .on_mouse_down(MouseButton::Left, cx.listener(|pane, _, _, cx| {
+                    cx.emit(ChatEvent::Focused(pane.task_id()));
+                }))
+                .overflow_hidden()
+                .child(div().h(px(pin_gap)).flex_shrink_0())
+                .child(div().w_full().flex_shrink_0().child(bar))
+                .child(div().flex_1().min_h_0().w_full().overflow_hidden().child(self.agent_graph.clone()))
+                .into_any_element();
+        }
         let transcript_gap = transcript_block_gap(&self.snapshot["settings"]);
         if self.transcript_block_spacing != Some(transcript_gap) {
             // Separators belong to measured virtual rows. Density changes must
@@ -2241,26 +2641,28 @@ impl Render for ChatPane {
             self.apply_chat_typography(cx);
         let composer_chat_family = chat_family.clone();
         if let Some((task_id, sent)) = self.clear_sent.take() {
-            if self.composer.read(cx).value().as_ref() == sent {
-                self.composer
-                    .update(cx, |input, cx| input.set_value("", window, cx));
-                let voice_task = self.task_id();
-                self.voice.update(cx, |voice, cx| voice.set_context(voice_task, String::new(), cx));
-                self.slash.update(cx, |slash, cx| slash.set_input(String::new(), cx));
-                // Programmatic set_value does not emit InputEvent::Change.
-                // Persist the acknowledged clear explicitly, while keeping
-                // a newer draft typed during the send untouched.
-                cx.emit(ChatEvent::DraftChanged {
-                    task_id,
-                    text: String::new(),
-                });
-            }
+            self.clear_acknowledged_composer(&task_id, &sent, window, cx);
         }
-        let agents = rows(&self.snapshot, "agents");
-        let tasks = rows(&self.snapshot, "tasks");
+        // Borrow chrome records from a shared snapshot; ancestor redraws do
+        // not clone every task and agent just to find the selected task.
+        let render_snapshot = self.snapshot.clone();
+        let agents = render_snapshot["agents"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+        let tasks = render_snapshot["tasks"].as_array().map(Vec::as_slice).unwrap_or(&[]);
         let selected = tasks
             .iter()
             .find(|task| Some(field(task, "id")) == self.selected);
+        let pending_approval = self.pending_tool_approval();
+        let next_approval_id = pending_approval.as_ref().map(|r| field(r, "id"));
+        if next_approval_id != self.approval_popup_id {
+            self.approval_popup_open = next_approval_id.is_some();
+            if self.approval_popup_open && self.focus.contains_focused(window, cx) {
+                let focus = self.approval_focus.clone();
+                window.defer(cx, move |window, cx| window.focus(&focus, cx));
+            }
+            self.approval_details_expanded = false;
+            self.approval_popup_id = next_approval_id;
+        }
+        crate::activity_effects::set_pane_obscured(&self.task_id(), self.approval_popup_open, cx);
         let header = self.render_chat_header(selected, &agents, palette, window, cx);
         let mut content = div()
             .relative()
@@ -2279,7 +2681,12 @@ impl Render for ChatPane {
         if let Some(error) = self.error.as_deref().and_then(connection_recovery::visible_error) {
             content = content.child(transcript_column(
                 div()
-                    .p_3()
+                    .px(px(8.)).py(px(6.))
+                    .font_family(interface_family.clone())
+                    .font_weight(FontWeight::NORMAL)
+                    .text_size(px(12. * interface_font_ratio))
+                    .line_height(px(16. * interface_font_ratio))
+                    .text_color(rgb(0xe2645a))
                     .bg(design::raised_surface_color(0x462535))
                     .child(format!("Error: {error}")),
             ));
@@ -2330,8 +2737,11 @@ impl Render for ChatPane {
                     .as_bool()
                     .unwrap_or(false),
             );
+            state.set_exchange_context(transcript::ExchangeContext::from_snapshot(&self.snapshot,&task_id));
             state.sync_projection(&approvals);
             let timeline_rows = state.projection.clone();
+            let source_rows:Vec<_>=timeline_rows.iter().enumerate().flat_map(|(index,item)|item.leaves().into_iter().map(move|leaf|(index,leaf))).collect();
+            let minimap_markers = Rc::new(minimap::prepare(timeline_rows.iter(), palette));
             #[cfg(any(test, feature = "performance-profiling"))]
             TRANSCRIPT_PREPARED_ROWS.fetch_add(timeline_rows.len() as u64, std::sync::atomic::Ordering::Relaxed);
             history_error = state.error.as_deref()
@@ -2347,6 +2757,7 @@ impl Render for ChatPane {
             let task_id = field(task, "id");
             let scroll_pane = cx.entity().downgrade();
             let scroll_task_id = task_id.clone();
+            let scroll_event_generation = self.scroll_event_generation.clone();
             // Native user-scroll events replace the permanently visible pager row.
             // Defer before touching the list: its callback holds a RefCell borrow.
             list_state.set_scroll_handler(move |event, _, cx| {
@@ -2356,12 +2767,26 @@ impl Render for ChatPane {
                 let near_top = event.is_scrolled && event.visible_range.start <= 2;
                 let at_bottom = !event.is_scrolled;
                 let reached_start = event.is_scrolled && event.visible_range.start == 0;
+                let generation = scroll_event_generation.get().wrapping_add(1);
+                scroll_event_generation.set(generation);
+                let latest_generation = scroll_event_generation.clone();
                 let pane = scroll_pane.clone();
                 let task_id = scroll_task_id.clone();
                 cx.defer(move |cx| {
                     let _ = pane.update(cx, |pane, cx| {
+                        // Scroll callbacks are deferred because ListState still
+                        // holds its internal borrow. Activity can update the
+                        // transcript before this runs; never let an older
+                        // at-bottom event reveal the composer after a newer
+                        // user scroll has moved it away.
+                        if latest_generation.get() != generation {
+                            return;
+                        }
                         if pane.selected.as_deref() != Some(task_id.as_str()) {
                             return;
+                        }
+                        if let Some(viewport) = &pane.transcript_viewport {
+                            viewport.update(cx, |view, cx| { view.cancel_minimap_jump(); view.repaint_scroll(cx); });
                         }
                         let Some(state) = pane.transcripts.get_mut(&task_id) else {
                             return;
@@ -2431,9 +2856,9 @@ impl Render for ChatPane {
                 })
                 .collect();
             let task_snapshot = task.clone();
-            let agents_snapshot = agents.clone();
+            let agents_snapshot = agents.to_vec();
             let visible_agent_ids: HashSet<String> = timeline_rows
-                .iter()
+                .iter().flat_map(|item|item.leaves())
                 .filter_map(|item| match item {
                     transcript::ConversationItem::Message(message)
                         if field(message, "role") == "assistant" =>
@@ -2468,10 +2893,10 @@ impl Render for ChatPane {
                     .filter(|request| field(request, "taskId") == task_id)
                     .map(|request| (field(&request, "id"), field(&request, "decision")))
                     .collect();
-            let visible_ids = transcript::visible_projection_event_ids(&timeline_rows);
+            let visible_ids = transcript::visible_projection_event_ids(timeline_rows.iter());
             self.activity_rows.retain(|id, _| visible_ids.contains(id));
             let visible_groups: HashSet<String> = timeline_rows
-                .iter()
+                .iter().flat_map(|item|item.leaves())
                 .filter_map(|item| match item {
                     transcript::ConversationItem::ReasoningGroup(_) => Some(item.stable_key()),
                     transcript::ConversationItem::ToolGroup(_) => Some(item.stable_key()),
@@ -2492,7 +2917,8 @@ impl Render for ChatPane {
             // Decorative clocks and composer input must not deep-clone every
             // retained process tree. Reconcile only committed projection changes.
             if let Some(service) = self.service.clone().filter(|_| activity_changed) {
-                for (index, item) in timeline_rows.iter().enumerate() {
+                let git_owner = cx.weak_entity();
+                for (index, item) in source_rows.iter().copied() {
                     let events: Vec<Rc<Value>> = match item {
                         transcript::ConversationItem::Activity(event) => vec![event.clone()],
                         transcript::ConversationItem::ReasoningGroup(events)
@@ -2505,6 +2931,7 @@ impl Render for ChatPane {
                         if let Some(row) = self.activity_rows.get(&id) {
                             row.update(cx, |row, cx| {
                                 row.set_list_item(list_state.clone(), index);
+                                row.set_git_owner(git_owner.clone());
                                 row.set_event(&task_id, event, cx);
                             });
                         } else {
@@ -2517,6 +2944,7 @@ impl Render for ChatPane {
                                     cx,
                                 );
                                 row.set_list_item(list_state.clone(), index);
+                                row.set_git_owner(git_owner.clone());
                                 row
                             });
                             self.activity_rows.insert(id, row);
@@ -2580,6 +3008,7 @@ impl Render for ChatPane {
                             .collect();
                         entity.update(cx, |row, cx| {
                             row.set_list_item(list_state.clone(), index);
+                            row.set_git_owner(git_owner.clone());
                             row.set_group(&task_id, events.iter().map(|event| (**event).clone()).collect(), running, self.snapshot["settings"]["compressToolCalls"].as_bool().unwrap_or(false), cx);
                             row.set_detail_rows(children, cx);
                             if let transcript::ConversationItem::ProcessGroup { groups, approvals, .. } = item {
@@ -2616,7 +3045,7 @@ impl Render for ChatPane {
                 }
             }
             let message_ids: HashSet<String> = timeline_rows
-                .iter()
+                .iter().flat_map(|item|item.leaves())
                 .filter_map(|item| match item {
                     transcript::ConversationItem::Message(message)
                         if ["user", "assistant"].contains(&field(message, "role").as_str()) =>
@@ -2626,13 +3055,17 @@ impl Render for ChatPane {
                     _ => None,
                 })
                 .collect();
-            self.response_details_expanded.retain(|id| message_ids.contains(id));
+            self.response_details_expanded.borrow_mut().retain(|id| message_ids.contains(id));
+            self.peer_details_expanded.borrow_mut().retain(|id| {
+                timeline_rows.iter().flat_map(|item|item.leaves())
+                    .any(|item| item.exchange_disclosure_key() == *id)
+            });
             self.message_action_focus
                 .retain(|id, _| message_ids.contains(id));
             self.copy_controls.retain(|id, _| message_ids.contains(id));
             let copy_owner = cx.weak_entity();
             let copy_task = self.task_id();
-            for item in timeline_rows.iter() {
+            for (_,item) in source_rows.iter().copied() {
                 let transcript::ConversationItem::Message(message) = item else { continue; };
                 let id = field(message, "id");
                 let control = self.copy_controls.entry(id.clone()).or_insert_with(|| {
@@ -2653,14 +3086,14 @@ impl Render for ChatPane {
                     .entry(id.clone())
                     .or_insert_with(|| cx.focus_handle());
             }
-            let attachment_ids: HashSet<String> = timeline_rows.iter().filter_map(|item| {
+            let attachment_ids: HashSet<String> = timeline_rows.iter().flat_map(|item|item.leaves()).filter_map(|item| {
                 let transcript::ConversationItem::Message(message) = item else { return None; };
                 message["attachments"].as_array().filter(|items| !items.is_empty())
                     .map(|_| field(message, "id"))
             }).collect();
             self.message_attachment_rows.retain(|id, _| attachment_ids.contains(id));
             if let Some(service) = self.service.clone() {
-                for (index, item) in timeline_rows.iter().enumerate() {
+                for (index, item) in source_rows.iter().copied() {
                     let transcript::ConversationItem::Message(message) = item else { continue; };
                     let Some(attachments) = message["attachments"].as_array().filter(|items| !items.is_empty()) else { continue; };
                     let entity = self.message_attachment_rows.entry(field(message, "id"))
@@ -2672,11 +3105,12 @@ impl Render for ChatPane {
                     });
                 }
             }
+            let browser_link_owner = cx.weak_entity();
             let message_attachment_rows = self.message_attachment_rows.clone();
             // Each live body owns its reveal timer. Character ticks invalidate
             // only its virtual row, never the full pane or backend snapshot.
             self.streaming_bodies.retain(|id, _| message_ids.contains(id));
-            for (index, item) in timeline_rows.iter().enumerate() {
+            for (index, item) in source_rows.iter().copied() {
                 let transcript::ConversationItem::Message(message) = item else { continue; };
                 let id = field(message, "id");
                 if field(message, "role") != "assistant" ||
@@ -2686,6 +3120,7 @@ impl Render for ChatPane {
                     crate::streaming_message::StreamingMessage::new(message.clone(), animate, cx)
                 }));
                 body.update(cx, |body, cx| {
+                    body.set_link_owner(browser_link_owner.clone());
                     body.set_list_item(list_state.clone(), index);
                     body.set_visible(self.dock_visible, cx);
                     body.set_message(message.clone(), cx);
@@ -2697,6 +3132,7 @@ impl Render for ChatPane {
             let message_action_focus = self.message_action_focus.clone();
             let copy_controls = self.copy_controls.clone();
             let response_details_expanded = self.response_details_expanded.clone();
+            let peer_details_expanded = self.peer_details_expanded.clone();
             let activities = self.activity_rows.clone();
             let grouped = self.grouped_rows.clone();
             let pane = cx.entity().downgrade();
@@ -2704,17 +3140,99 @@ impl Render for ChatPane {
             let message_appearance = window.appearance();
             let transcript_geometry = self.transcript_geometry.clone();
             let interface_family = interface_family.clone();
-            let row_renderer: StableRowRenderer = Rc::new(std::cell::RefCell::new(move |index: usize, _: &mut Window, cx: &mut App| {
-                    let rendered = (|| {
-                    // ListState can have a newer row count than this retained render closure.
-                    let Some(timeline_row) = timeline_rows.get(index) else {
-                        return div().into_any_element();
+            drop(source_rows);
+            let exchange_tasks = rows(&self.snapshot, "tasks").iter().map(|task| field(task, "id")).collect::<std::collections::HashSet<_>>();
+            let collaborations_snapshot: HashMap<String, Value> = rows(&self.snapshot, "collaborations")
+                .iter().map(|item| (field(item, "id"), (*item).clone())).collect();
+            let row_renderer: StableRowRenderer = Rc::new(std::cell::RefCell::new(move |index: usize, _: &mut Window, cx: &mut App, scale: f32| {
+                    // Preview uses the same message tree, scaled in both pixel and rem units.
+                    let px = |value: f32| design::ui_scaled_px(value * scale);
+                    let preview = scale != 1.;
+                    let Some(projected_row)=timeline_rows.get(index) else{return div().into_any_element();};
+                    // Consecutive activity disclosures form one compact visual block.
+                    // Keep normal density spacing around prose, approvals and dates.
+                    let compact_activity = |item: &transcript::ConversationItem| match item {
+                        transcript::ConversationItem::ExchangeGroup { .. }
+                        | transcript::ConversationItem::ReasoningGroup(_)
+                        | transcript::ConversationItem::ToolGroup(_)
+                        | transcript::ConversationItem::ProcessGroup { .. } => true,
+                        transcript::ConversationItem::Activity(event) => matches!(
+                            event["kind"].as_str(), Some("tool" | "reasoning" | "collaboration" | "subagent")),
+                        transcript::ConversationItem::Message(message) =>
+                            message_presentation::origin(message) == message_presentation::Origin::Peer
+                            || message["collaborationId"].as_str().is_some_and(|id| !id.is_empty()),
+                        _ => false,
                     };
+                    let transcript_gap = if compact_activity(projected_row)
+                        && timeline_rows.get(index + 1).is_some_and(compact_activity)
+                        && !date_breaks.contains_key(&(index + 1))
+                    { transcript_gap.min(2.) } else { transcript_gap };
+                    let render_item = |timeline_row:&transcript::ConversationItem, group_member:bool, cx:&mut App| {
+                    (|| {
                     let geometry = transcript_geometry.get();
                     let bubble_width = geometry.bubble_fraction();
-                    let date_break = date_breaks.get(&index).cloned();
+                    let date_break = date_breaks.get(&index).filter(|_| !preview && !group_member).cloned();
                     let message = match timeline_row {
+                        transcript::ConversationItem::ExchangeGroup {..}=>return div().into_any_element(),
                         transcript::ConversationItem::Activity(event) => {
+                            if field(event, "kind") == "collaboration" {
+                                let event_id = field(event, "id");
+                                let disclosure_id = format!("event:{event_id}");
+                                let collaboration = collaborations_snapshot.get(&field(event, "detail"));
+                                let task_id = field(&task_snapshot, "id");
+                                let outgoing = collaboration.is_some_and(|item| field(item, "fromTaskId") == task_id);
+                                let is_reply = matches!(field(event, "title").as_str(), "Collaboration completed" | "Collaboration error");
+                                let agent_id = collaboration.map(|item| field(item,
+                                    if outgoing { "toAgentId" } else { "fromAgentId" })).unwrap_or_default();
+                                let agent_name = agents_snapshot.iter()
+                                    .find(|agent| field(agent, "id") == agent_id)
+                                    .map(|agent| field(agent, "name"))
+                                    .filter(|name| !name.is_empty()).unwrap_or_else(|| "Unknown peer".into());
+                                let expanded = peer_details_expanded.borrow().contains(&disclosure_id);
+                                let toggle_pane = pane.clone();
+                                let toggle_id = disclosure_id.clone();
+                                let mut exchange = agent_exchange::project(collaboration, &task_id, "", Some(&agent_name), event["createdAt"].as_i64());
+                                if is_reply && exchange.direction == agent_exchange::Direction::Outgoing { exchange.direction = agent_exchange::Direction::Incoming; }
+                                exchange.status = field(event, "title");
+                                for row in timeline_rows.iter().flat_map(|row|row.leaves()) {
+                                    if let transcript::ConversationItem::Activity(step) = row {
+                                        if field(step, "kind") == "collaboration" && field(step, "detail") == field(event, "detail") {
+                                            if let Some(time) = step["createdAt"].as_i64().filter(|time| *time > 0) { exchange.steps.push((time, field(step, "title"))); }
+                                        }
+                                    }
+                                }
+                                let mut details = div().w_full().min_w_0().flex().flex_col().gap(px(8.));
+                                if let Some(item) = collaboration {
+                                    for (key,label) in [("text","Asked"),("result","Replied"),("error","Error")] {
+                                        let value=field(item,key);
+                                        if !value.is_empty() { details=details.child(div().min_w_0().whitespace_normal().child(format!("{label}: {value}"))); }
+                                    }
+                                    let peer_task=field(item,if outgoing {"toTaskId"}else{"fromTaskId"});
+                                    if !peer_task.is_empty() && exchange_tasks.contains(&peer_task) && peer_task != task_id {
+                                        let open=pane.clone();
+                                        details=details.child(Button::new(SharedString::from(format!("exchange-open-{event_id}"))).ghost().compact().with_size(Size::XSmall).self_start()
+                                            .h(px(22.)).px(px(5.)).text_size(px(11.)).font_weight(FontWeight::NORMAL).text_color(rgb(palette.muted)).label("Open peer pane")
+                                            .on_click(move |_,_,cx|{let _=open.update(cx,|_,cx|cx.emit(ChatEvent::OpenTask(peer_task.clone())));}));
+                                    }
+                                }
+                                if group_member {
+                                    if let Some(record)=collaboration {let endpoint=field(record,if outgoing {"toTaskId"}else{"fromTaskId"});if !endpoint.is_empty(){exchange.peer=format!("{} · task {}",exchange.peer,endpoint);}}
+                                    return agent_exchange::render_step(exchange,event_id.clone(),palette,details.into_any_element()).into_any_element();
+                                }
+                                let bubble = agent_exchange::render(exchange,event_id.clone(),format!("collaboration-toggle-{event_id}"),format!("collaboration-status-{event_id}"),expanded,palette,details.into_any_element(),
+                                    move |_,_,cx|{let _=toggle_pane.update(cx,|pane,cx|{
+                                        let mut set=pane.peer_details_expanded.borrow_mut();if !set.remove(&toggle_id){set.insert(toggle_id.clone());}drop(set);
+                                        if let Some(state)=pane.transcripts.get(&pane.task_id()) {
+                                            if let Some(row)=state.source_index(&format!("activity:{}",toggle_id.strip_prefix("event:").unwrap_or(&toggle_id))).filter(|row|*row<state.list.item_count()){state.list.splice(row..row+1,1);}
+                                        }
+                                        pane.invalidate_transcript_list(cx);
+                                    });}).debug_selector({let id=event_id.clone();move||format!("collaboration-event-{id}")});
+                                let mut wrapped = div().w_full().pb(px(transcript_gap));
+                                if let Some(label) = date_break.as_deref() {
+                                    wrapped = wrapped.child(date_separator(label, palette));
+                                }
+                                return agent_transcript_column(wrapped.child(bubble));
+                            }
                             let row = activities
                                 .get(&field(event, "id"))
                                 .map(|row| div().w_full().child(row.clone()).into_any_element())
@@ -2728,7 +3246,8 @@ impl Render for ChatPane {
                             if let Some(label) = date_break.as_deref() {
                                 wrapped = wrapped.child(date_separator(label, palette));
                             }
-                            return transcript_column(wrapped.child(row));
+                            return if group_member { wrapped.child(row).into_any_element() }
+                                else { agent_transcript_column(wrapped.child(row)) };
                         }
                         transcript::ConversationItem::ReasoningGroup(_)
                         | transcript::ConversationItem::ToolGroup(_)
@@ -2741,7 +3260,8 @@ impl Render for ChatPane {
                             if let Some(label) = date_break.as_deref() {
                                 wrapped = wrapped.child(date_separator(label, palette));
                             }
-                            return transcript_column(wrapped.child(row));
+                            return if group_member { wrapped.child(row).into_any_element() }
+                                else { agent_transcript_column(wrapped.child(row)) };
                         }
                         transcript::ConversationItem::Approval(approval) => {
                             let mut row = div()
@@ -2796,9 +3316,14 @@ impl Render for ChatPane {
                         }
                         return transcript_column(wrapper.child(divider));
                     }
-                    let user = field(message, "role") == "user";
-                    let system = field(message, "role") == "system";
-                    let final_answer = field(message, "phase") == "final_answer";
+                    let origin = message_presentation::origin(message);
+                    let peer = origin == message_presentation::Origin::Peer;
+                    let user = origin == message_presentation::Origin::User;
+                    let system = origin == message_presentation::Origin::System;
+                    let auxiliary = peer || system;
+                    let peer_comm = peer || (system && !field(message, "collaborationId").is_empty());
+                    let neutral = message_presentation::neutral_colours(palette);
+                    let final_answer = !auxiliary && field(message, "phase") == "final_answer";
                     let message_agent_id = field(message, "senderAgentId");
                     let message_agent = if !message_agent_id.is_empty() {
                         agents_snapshot
@@ -2817,11 +3342,14 @@ impl Render for ChatPane {
                         (None, field(message, "text"))
                     };
                     let stream_presentation = message_stream_presentation(message, &visible_text);
-                    let streaming_body = streaming_bodies.get(&field(message, "id")).cloned();
+                    let streaming_body = streaming_bodies.get(&field(message, "id")).filter(|_| !preview).cloned();
                     let participant_name = operator_name.as_deref().or_else(||
                         (user && !sharing_primary.is_empty()).then_some(sharing_primary.as_str()));
                     let participant_colour = participant_name.map(operator_colour);
-                    let label = if user {
+                    let label = if peer_comm {
+                        message_presentation::peer_label(message,
+                            message_agent.map(|agent| field(agent, "name")).as_deref())
+                    } else if user {
                         operator_name
                             .clone()
                             .filter(|name| !name.is_empty())
@@ -2879,7 +3407,7 @@ impl Render for ChatPane {
                                     ),
                             );
                         }
-                    } else if let Some(agent) = message_agent {
+                    } else if let Some(agent) = message_agent.filter(|_| !auxiliary) {
                         let avatar = agent_images.get(&field(agent, "id")).cloned();
                         if let Some(avatar) = avatar {
                             metadata =
@@ -2928,18 +3456,24 @@ impl Render for ChatPane {
                             );
                         }
                     }
-                    metadata = metadata.child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(11. * interface_font_ratio))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(palette.ink))
-                            .child(label.clone()),
-                    );
+                    let origin_label = div()
+                        .min_w_0().truncate()
+                        .text_size(px(11. * interface_font_ratio))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(if auxiliary { neutral.ink } else { palette.ink }))
+                        .child(label.clone());
+                    #[cfg(test)]
+                    let origin_label = {
+                        let id = field(message, "id"); let label = label.clone();
+                        origin_label.debug_selector(move || format!("message-origin-{id}-{label}"))
+                    };
+                    metadata = metadata.child(origin_label);
+                    #[cfg(test)]
+                    { let id = field(message, "id"); metadata = metadata.debug_selector(move || format!("message-identity-{id}")); }
                     let message_id = field(message, "id");
+                    let peer_expanded = peer_details_expanded.borrow().contains(&message_id);
                     let group: SharedString = format!("message-actions-{message_id}").into();
-                    if message_action_focus.contains_key(&message_id) {
+                    if !preview && message_action_focus.contains_key(&message_id) {
                         let reply_message = message_id.clone();
                         let reply_author = label.clone();
                         let reply_task = field(&task_snapshot, "id");
@@ -2962,7 +3496,7 @@ impl Render for ChatPane {
                                     let _ = reply_pane.update(cx, |pane, cx| {
                                         if pane.task_id() != reply_task { return; }
                                         let Some((author, text)) = pane.transcripts.get(&reply_task)
-                                            .and_then(|state| current_reply_content(&state.messages, &reply_message, &reply_author))
+                                            .and_then(|state| current_reply_content(state.messages.iter(), &reply_message, &reply_author))
                                         else { return; };
                                         pane.attachments.update(cx, |attachments, cx| {
                                             attachments.attach_message_text(&author, &text, cx);
@@ -2993,15 +3527,23 @@ impl Render for ChatPane {
                                 .child(chat_time_label(timestamp, now_ms)),
                         );
                     }
-                    let (bubble_metadata, full_width_metadata) = if user || system {
+                    let (bubble_metadata, full_width_metadata) = if user || auxiliary || final_answer {
                         (Some(metadata), None)
                     } else {
                         (None, Some(metadata))
                     };
-                    let mut bubble = div().w(relative(bubble_width)).min_w_0().max_w_full()
+                    let mut bubble = div().w(relative(if final_answer || auxiliary { 1.0 } else { bubble_width })).min_w_0().max_w_full()
                         .flex_shrink_1().flex().flex_col();
+                    if auxiliary && !peer_comm {
+                        bubble = bubble.opacity(0.6).hover(|style| style.opacity(1.));
+                    }
                     #[cfg(test)]
-                    { let id = message_id.clone(); bubble = bubble.debug_selector(move || format!("message-bubble-{id}")); }
+                    { let id = message_id.clone(); bubble = bubble.debug_selector(move || {
+                        if peer { format!("peer-message-{id}") }
+                        else if system { format!("system-message-{id}") }
+                        else { format!("message-bubble-{id}") }
+                    }); }
+                    let body_scale = if auxiliary { 0.86 } else { 1. };
                     let mut body = div()
                         .id(SharedString::from(format!("message-body-{message_id}")))
                         .w_full()
@@ -3011,27 +3553,34 @@ impl Render for ChatPane {
                         .flex()
                         .flex_col()
                         .gap(px(space::TIGHT))
-                        .font_family(chat_family.clone())
-                        .font_weight(chat_weight)
-                        .text_size(px(chat_size))
-                        .line_height(px(chat_line_height))
-                        .children(bubble_metadata)
-                        .child(if let Some(streaming_body) = &streaming_body {
+                        .text_color(rgb(if auxiliary { neutral.ink } else { palette.ink }))
+                        .font_family(if system { interface_family.clone() } else { chat_family.clone() })
+                        .font_weight(if auxiliary { FontWeight::NORMAL } else { chat_weight })
+                        .text_size(px(chat_size * body_scale))
+                        .line_height(px(chat_line_height * body_scale))
+                        .children(bubble_metadata.filter(|_| !peer_comm));
+                    if !peer_comm || peer_expanded || preview || group_member {
+                        body = body.child(if let Some(streaming_body) = &streaming_body {
                             streaming_body.clone().into_any_element()
                         } else {
                             gpui_kit::component::text::TextView::markdown(
                                 SharedString::from(format!(
-                                    "message-markdown-{}",
-                                    field(message, "id")
+                                    "message-markdown-{}-{}",
+                                    field(message, "id"), if preview { "preview" } else { "transcript" }
                                 )),
                                 stream_presentation.markdown_source,
                             )
+                            .on_link_click({
+                                let owner = pane.clone();
+                                move |url, _, _, cx| open_markdown_link(Some(owner.clone()), url.as_str(), cx)
+                            })
                             .selectable(true)
                             .scrollable(false)
                             .w_full()
                             .min_w_0()
                             .max_w_full().into_any_element()
                         });
+                    }
                     #[cfg(test)]
                     { let id = message_id.clone(); body = body.debug_selector(move || format!("message-body-{id}")); }
                     if let Some(status_label) = stream_presentation.status_label.filter(|_| streaming_body.is_none()) {
@@ -3042,7 +3591,15 @@ impl Render for ChatPane {
                                 .child(status_label),
                         );
                     }
-                    if user {
+                    if auxiliary && !peer_comm {
+                        body = body.p(px(space::INSET));
+                        bubble = bubble.border(gpui_kit::px(scale))
+                            .border_color(design::surface_color(neutral.border))
+                            .rounded_md()
+                            .bg(crate::surface_blend::raised_background(
+                                crate::surface_blend::Area::Bubbles, neutral.background,
+                            ));
+                    } else if user {
                         let tinted = message_settings["tintUserMessages"].as_bool() == Some(true) || participant_name.is_some();
                         let tint_colour = participant_colour.unwrap_or(palette.accent);
                         let user_border = if tinted {
@@ -3057,7 +3614,7 @@ impl Render for ChatPane {
                         };
                         body = body.p(px(space::INSET));
                         bubble = bubble
-                            .border_1()
+                            .border(gpui_kit::px(scale))
                             .border_color(design::surface_color(user_border))
                             .rounded_tl(px(radius::CARD))
                             .rounded_tr(px(radius::CARD))
@@ -3069,7 +3626,7 @@ impl Render for ChatPane {
                     } else if final_answer {
                         body = body.p(px(space::INSET));
                         bubble = bubble
-                            .border_1()
+                            .border(gpui_kit::px(scale))
                             .border_color(design::surface_color(mix_rgb(
                                 palette.line,
                                 FINAL_ANSWER_GREEN,
@@ -3083,15 +3640,18 @@ impl Render for ChatPane {
                                 crate::surface_blend::Area::Bubbles,
                                 mix_rgb(palette.panel, FINAL_ANSWER_GREEN, 0.07),
                             ));
-                    } else if system {
-                        body = body
-                            .pl_3()
-                            .border_l_2()
-                            .border_color(design::surface_color(palette.line))
-                            .text_color(rgb(palette.muted));
                     }
-                    if let Some(attachments) = message_attachment_rows.get(&message_id) {
+                    let attachments = message_attachment_rows.get(&message_id)
+                        .filter(|_| !peer_comm || peer_expanded || preview || group_member)
+                        .map(|attachments| {
+                        if preview {
+                            let snapshot = attachments.read(cx).preview_snapshot(scale);
+                            cx.new(|_| snapshot)
+                        } else { attachments.clone() }
+                    });
+                    if let Some(attachments) = attachments.as_ref() {
                         use message_attachments::AttachmentLayout;
+                        attachments.update(cx, |attachments, _| attachments.set_compact_images(!user && !system));
                         let width = geometry.attachment_width();
                         let layout = geometry.attachment_layout(attachments.read(cx).layout());
                         attachments.update(cx, |attachments, cx| attachments.set_bubble_layout(width, layout, cx));
@@ -3106,10 +3666,60 @@ impl Render for ChatPane {
                             AttachmentLayout::LandscapeBottom => {
                                 bubble = bubble.overflow_hidden().child(body).child(attachments.clone());
                             }
-                            AttachmentLayout::Cards => { bubble = bubble.child(body.child(attachments.clone())); }
+                            AttachmentLayout::Cards => { let id=message_id.clone(); bubble = bubble.child(body.child(div().debug_selector(move||format!("message-attachment-cards-{id}")).child(attachments.clone()))); }
                         }
                     } else {
                         bubble = bubble.child(body);
+                    }
+                    if peer_comm {
+                        let record=collaborations_snapshot.get(&field(message,"collaborationId"));
+                        let mut exchange=agent_exchange::project(record,&field(&task_snapshot,"id"),&message_agent_id,message_agent.map(|agent|field(agent,"name")).as_deref(),message["createdAt"].as_i64());
+                        // A message proves delivery, not the collaboration's current lifecycle.
+                        exchange.status = if system { "Reply received" } else { "Message received" }.into();
+                        // Stored peer messages are deliveries into this task, including replies.
+                        // Missing sender and record identity remain explicitly unknown.
+                        if !message_agent_id.is_empty() || record.is_some_and(|r| r["toTaskId"] == task_snapshot["id"] || r["fromTaskId"] == task_snapshot["id"]) {exchange.direction=agent_exchange::Direction::Incoming;}
+                        if record.is_some() {
+                            for row in timeline_rows.iter().flat_map(|row|row.leaves()) {
+                                if let transcript::ConversationItem::Activity(step)=row {
+                                    if field(step,"kind")=="collaboration" && field(step,"detail")==field(message,"collaborationId") {
+                                        if let Some(time)=step["createdAt"].as_i64().filter(|time|*time>0){exchange.steps.push((time,field(step,"title")));}
+                                    }
+                                }
+                            }
+                        }
+                        let toggle_pane=pane.clone();let toggle_id=message_id.clone();
+                        let mut details=div().w_full().min_w_0().flex().flex_col().gap(px(8.));
+                        if let Some(item)=record {
+                            for(key,label)in[("text","Asked"),("result","Replied"),("error","Error")] {
+                                let value=field(item,key);if !value.is_empty(){details=details.child(div().min_w_0().whitespace_normal().child(format!("{label}: {value}")));}
+                            }
+                            let current=field(&task_snapshot,"id");
+                            let peer_task=field(item,if field(item,"fromTaskId")==current{"toTaskId"}else{"fromTaskId"});
+                            if !peer_task.is_empty() && peer_task!=current && exchange_tasks.contains(&peer_task){
+                                let open=pane.clone();details=details.child(Button::new(SharedString::from(format!("exchange-open-{message_id}"))).ghost().compact().with_size(Size::XSmall).self_start()
+                                    .h(px(22.)).px(px(5.)).text_size(px(11.)).font_weight(FontWeight::NORMAL).text_color(rgb(palette.muted)).label("Open peer pane")
+                                    .on_click(move|_,_,cx|{let _=open.update(cx,|_,cx|cx.emit(ChatEvent::OpenTask(peer_task.clone())));}));
+                            }
+                        }
+                        details=details.child(bubble);
+                        if group_member {
+                            let current=field(&task_snapshot,"id");
+                            let endpoint=record.map(|r|field(r,if field(r,"fromTaskId")==current {"toTaskId"}else{"fromTaskId"})).filter(|s|!s.is_empty()).unwrap_or_else(||field(message,"senderTaskId"));
+                            if !endpoint.is_empty(){exchange.peer=format!("{} · task {}",exchange.peer,endpoint);}
+                            return agent_exchange::render_step(exchange,message_id.clone(),palette,details.into_any_element()).into_any_element();
+                        }
+                        let exchange=agent_exchange::render(exchange,message_id.clone(),format!("peer-message-toggle-{message_id}"),format!("exchange-status-{message_id}"),peer_expanded||preview,palette,details.into_any_element(),move|_,_,cx|{
+                            let _=toggle_pane.update(cx,|pane,cx|{
+                                let mut set=pane.peer_details_expanded.borrow_mut();if !set.remove(&toggle_id){set.insert(toggle_id.clone());}drop(set);
+                                if let Some(state)=pane.transcripts.get(&pane.task_id()){
+                                    if let Some(row)=state.source_index(&format!("message:{toggle_id}")).filter(|row|*row<state.list.item_count()){state.list.splice(row..row+1,1);}
+                                }pane.invalidate_transcript_list(cx);
+                            });
+                        }).debug_selector({let id=message_id.clone();move||format!("peer-message-{id}")});
+                        let mut wrapped=div().w_full().pb(px(transcript_gap));
+                        if let Some(label)=date_break.as_deref(){wrapped=wrapped.child(date_separator(label,palette));}
+                        return transcript_column(wrapped.child(exchange));
                     }
                     let mut row = div().w_full().min_w_0().flex();
                     if user {
@@ -3123,36 +3733,85 @@ impl Render for ChatPane {
                     // the composer and activity rows. Bubbles fill their share
                     // of that column, aligned to the speaker's side.
                     wrapper = wrapper.children(full_width_metadata).child(row.child(bubble));
-                    if field(message, "role") == "assistant" && message["responseMetadata"].as_object().is_some_and(|m| !m.is_empty()) {
+                    if !preview && field(message, "role") == "assistant" && message["responseMetadata"].as_object().is_some_and(|m| !m.is_empty()) {
                         let toggle_pane = pane.clone();
                         let toggle_id = message_id.clone();
                         wrapper = wrapper.child(crate::response_metadata::render(
                             &message["responseMetadata"], &message_id, &message_settings, message_appearance,
-                            response_details_expanded.contains(&message_id),
+                            response_details_expanded.borrow().contains(&message_id),
                             move |_, cx| {
                                 let _ = toggle_pane.update(cx, |pane, cx| {
-                                    if !pane.response_details_expanded.remove(&toggle_id) {
-                                        pane.response_details_expanded.insert(toggle_id.clone());
+                                    {
+                                        let mut expanded = pane.response_details_expanded.borrow_mut();
+                                        if !expanded.remove(&toggle_id) { expanded.insert(toggle_id.clone()); }
                                     }
-                                    pane.response_disclosure_generation = pane.response_disclosure_generation.wrapping_add(1);
                                     // Disclosure changes the virtual row height, too.
                                     if let Some(state) = pane.transcripts.get(&pane.task_id()) {
-                                        if let Some(index) = state.projection.iter().position(|item| {
+                                        let matches_id = |item: &transcript::ConversationItem| {
                                             matches!(item, transcript::ConversationItem::Message(message) if field(message, "id") == toggle_id)
-                                        }) {
-                                            if index < state.list.item_count() {
-                                                state.list.splice(index..index + 1, 1);
-                                            }
+                                        };
+                                        let row = state.projection.get(index).filter(|item| matches_id(item))
+                                            .map(|_| index)
+                                            .or_else(|| state.projection.iter().position(matches_id));
+                                        if let Some(row) = row.filter(|row| *row < state.list.item_count()) {
+                                            state.list.splice(row..row + 1, 1);
                                         }
                                     }
-                                    cx.notify();
+                                    // The retained renderer reads the shared disclosure set.
+                                    // Only this row needs to repaint; pane preparation stays cached.
+                                    pane.invalidate_transcript_list(cx);
                                 });
                             },
                         ));
                     }
-                    transcript_column(wrapper)
-                    })();
-                    if index == 0 && history_top_reached {
+                    if !auxiliary && !user { agent_transcript_column(wrapper) }
+                    else { transcript_column(wrapper) }
+                    })()
+                    };
+                    let rendered=if let transcript::ConversationItem::ExchangeGroup{members,exchange_count,peer_key}=projected_row {
+                        let first=members.first().expect("nonempty exchange projection");
+                        let disclosure=first.exchange_disclosure_key();
+                        let disclosure_ids:Vec<_>=members.iter().map(|member|member.exchange_disclosure_key()).collect();
+                        let expanded=disclosure_ids.iter().any(|id|peer_details_expanded.borrow().contains(id))||preview;
+                        let mut details=div().w_full().min_w_0().flex().flex_col().gap(px(12.));
+                        let mut exchanges=Vec::new();
+                        for member in members {
+                            let (row,is_event)=match member{transcript::ConversationItem::Message(row)=>(row,false),transcript::ConversationItem::Activity(row)=>(row,true),_=>{if expanded {details=details.child(render_item(member,true,cx));} continue;}};
+                            let record=collaborations_snapshot.get(&field(row,if is_event{"detail"}else{"collaborationId"}));
+                            let current=field(&task_snapshot,"id");
+                            let outgoing=record.is_some_and(|record|field(record,"fromTaskId")==current);
+                            let actor=if is_event{record.map(|record|field(record,if outgoing{"toAgentId"}else{"fromAgentId"})).unwrap_or_default()}else{agent_exchange::peer_agent_id(record,&current,&field(row,"senderAgentId"))};
+                            let name=agents_snapshot.iter().find(|agent|field(agent,"id")==actor).map(|agent|field(agent,"name"));
+                            let mut exchange=agent_exchange::project(record,&current,&actor,name.as_deref(),row["createdAt"].as_i64());
+                            if !is_event {exchange.direction=agent_exchange::Direction::Incoming;}
+                            else if outgoing && matches!(field(row,"title").as_str(),"Collaboration completed"|"Collaboration error"){exchange.direction=agent_exchange::Direction::Incoming;}
+                            exchange.status=if is_event{field(row,"title")}else if row["role"]=="system"{"Reply received".into()}else{"Message received".into()};
+                            exchanges.push(exchange);
+                            if expanded{details=details.child(render_item(member,true,cx));}
+                        }
+                        let mut summary=agent_exchange::aggregate(&exchanges).expect("nonempty exchange group");
+                        let activity = members.iter().any(|member| matches!(member,transcript::ConversationItem::ToolGroup(_)|transcript::ConversationItem::ReasoningGroup(_)|transcript::ConversationItem::ProcessGroup{..}));
+                        if activity {
+                            let tools=members.iter().flat_map(|member|member.activity_tool_keys()).collect::<HashSet<_>>().len();
+                            summary.peer=format!("Agent activity · {tools} {} · {exchange_count} {}",if tools==1 {"tool"}else{"tools"},if *exchange_count==1 {"exchange"}else{"exchanges"});
+                            let failed=members.iter().flat_map(|member|member.activity_failed_tool_keys()).collect::<HashSet<_>>().len();
+                            if failed > 0 {summary.peer.push_str(&format!(" · {failed} failed"));summary.status="failed".into();}
+                        } else if peer_key == "multiple-peers" { summary.peer=format!("Agent exchanges · {exchange_count}"); }
+                        let neutral_label=activity || peer_key == "multiple-peers";
+                        let owner=pane.clone();let key=first.stable_key();
+                        let marker=agent_exchange::render_group(summary,if neutral_label {0}else{*exchange_count},disclosure.clone(),expanded,palette,details.into_any_element(),move|_,_,cx|{
+                            let _=owner.update(cx,|pane,cx|{
+                                let mut set=pane.peer_details_expanded.borrow_mut();
+                                if expanded {for id in &disclosure_ids{set.remove(id);}}else{set.insert(disclosure.clone());}drop(set);
+                                if let Some(state)=pane.transcripts.get(&pane.task_id()) {if let Some(index)=state.source_index(&key){state.list.remeasure_items(index..index+1);}}
+                                pane.invalidate_transcript_list(cx);
+                            });
+                        });
+                        let mut wrapped=div().w_full().pb(px(transcript_gap));
+                        if let Some(label)=date_breaks.get(&index).filter(|_|!preview){wrapped=wrapped.child(date_separator(label,palette));}
+                        agent_transcript_column(wrapped.child(marker))
+                    }else{render_item(projected_row,false,cx)};
+                    if !preview && index == 0 && history_top_reached {
                         let reload_pane = pane.clone();
                         let earlier_pane = pane.clone();
                         let controls = div().w_full().mb(px(transcript_gap)).flex().items_center().justify_center().gap(px(space::TIGHT))
@@ -3167,13 +3826,15 @@ impl Render for ChatPane {
                                     .tooltip("Reload stored transcript; does not restart the agent")
                                     .disabled(refreshing || history_loading)
                                     .on_click(move |_, _, cx| { let _ = reload_pane.update(cx, |pane, cx| pane.refresh(cx)); }));
+                        #[cfg(test)]
+                        let controls = controls.debug_selector(|| "chat-history-boundary-controls".into());
                         div().w_full()
                             .child(transcript_column(controls))
                             .child(rendered)
                             .into_any_element()
                     } else { rendered }
                 }));
-            retain_transcript_list(&mut self.detail_transcript_cache, list_state, row_renderer, cx);
+            retain_transcript_list(&mut self.detail_transcript_cache, list_state, row_renderer, minimap_markers, cx);
         } else {
             self.detail_transcript_cache = None;
         }
@@ -3199,6 +3860,21 @@ impl Render for ChatPane {
         let transcript = self.transcript_viewport.as_ref().unwrap().clone()
             .cached(StyleRefinement::default().flex_1().min_h_0());
         let task_running = selected.is_some_and(|task| field(task, "status") == "running");
+        let composer_working = task_running || self.starting_turn;
+        let composer_active = crate::docking::pane_visual_active(&self.focus, window, cx)
+            && !crate::preferences_modal::workspace_blocked(cx);
+        let composer_color = if composer_working {
+            crate::surface_blend::working_composer_color(palette.card, palette.dark)
+        } else {
+            palette.card
+        };
+        let composer_color = if composer_active {
+            crate::surface_blend::theme_tint_color(composer_color, palette.dark, 0.10)
+        } else { composer_color };
+        self.composer_git.update(cx, |strip, cx| {
+            strip.set_working(composer_working, cx);
+            strip.set_active(composer_active, cx);
+        });
         let composer_bottom = match field(&self.snapshot["settings"], "interfaceDensity").as_str() {
             "tight" => space::TIGHT,
             "spacious" => space::SECTION,
@@ -3211,6 +3887,9 @@ impl Render for ChatPane {
             .map(|bounds| bounds.size.height).unwrap_or(px(180.));
         let composer_hidden = crate::composer_scroll::composer_slide(
             self.composer_scroll_distance, composer_height, !crate::native_motion::motion_allowed());
+        if let Some(viewport) = &self.transcript_viewport {
+            viewport.update(cx, |viewport, cx| viewport.set_composer_hidden(composer_hidden, cx));
+        }
         let away_from_bottom = self.transcripts.get(&self.task_id())
             .is_some_and(|state| !state.list.is_following_tail());
         let attachments_for_paste = self.attachments.clone();
@@ -3227,6 +3906,12 @@ impl Render for ChatPane {
         );
         self.composer_footer.update(cx, |footer, cx| footer.set_appearance(palette, footer_width, cx));
         self.composer_context_bar.update(cx, |bar, cx| bar.set_appearance(palette, cx));
+        // Keep the companion controls and their open drawer in the same
+        // measured stack as the composer, so transcript scrolling hides both.
+        let visor = self.companion.update(cx, |pane, cx| {
+            pane.render_visor(palette, self.pane_height_design,
+                    self.pane_width_design * design::ui_scaled_px(1.).as_f32(), window, cx)
+        });
         content = content
             // Anchor the alpha ramps to the viewport edges, flush with the
             // pane dock above and composer area below, rather than an inset list.
@@ -3237,6 +3922,9 @@ impl Render for ChatPane {
                 window.viewport_size().height * 0.10,
                 px(24.),
             ))
+            // Give the paint-only working controls their own layout region.
+            // The native viewport shrinks, preserving its retained scroll state.
+            .child(working_clearance_spacer(composer_working))
             .child(transcript_column(self.render_interactions(window, cx)))
             .when(slash_open, |content| {
                 content.child(
@@ -3269,8 +3957,7 @@ impl Render for ChatPane {
                     ),
                 )
             })
-            .child(div().relative().w_full().flex().flex_col().flex_shrink_0()
-                .mb(-composer_hidden)
+            .child(composer_scroll_stack(composer_hidden)
                 .child({
                     let geometry = self.decoration_bounds.working_anchor.clone();
                     canvas(move |bounds, _, _| geometry.set(Some(bounds)), |_, _, _, _| ())
@@ -3316,7 +4003,7 @@ impl Render for ChatPane {
                                     })
                                     .overflow_hidden()
                                     .bg(crate::surface_blend::raised_background(
-                                        crate::surface_blend::Area::Composer, palette.card,
+                                        crate::surface_blend::Area::Composer, composer_color,
                                     ))
                                     .child(self.attachments.clone())
                                     .child(
@@ -3409,7 +4096,7 @@ impl Render for ChatPane {
                                 self.composer_footer.clone().cached(self.composer_footer.read(cx).cached_style()),
                             ))),
                     )),
-            ));
+            ).child(div().id("composer-companion-controls").w_full().flex_shrink_0().child(visor)));
         let scale = design::interface_scale();
         if self.companion_scale != scale {
             self.companion_scale = scale;
@@ -3423,6 +4110,9 @@ impl Render for ChatPane {
         }
         // Notify this retained chat entity explicitly: a window redraw alone
         // can replay NativePanel's cached chat subtree without advancing layout.
+        if self.detail_motion_settle_pending {
+            self.settle_secondary_sidebar_motion();
+        }
         let (detail_progress, detail_running) = self.detail_motion.sample(
             self.companion_visible && self.pane_width_design > 0.0,
             cx.reduce_motion(),
@@ -3442,11 +4132,14 @@ impl Render for ChatPane {
             self.dock_visible && detail_mounted && self.detail_tab == crate::companion_sidebar::DetailTab::Subagents, self.dock_visible, cx));
         self.working_bubble.update(cx, |bubble, cx| {
             bubble.set_context(
-                (task_running || self.starting_turn) && !(self.compact_detail && detail_mounted),
-                !task_running && self.starting_turn, self.busy, palette, cx,
+                (task_running || self.starting_turn) && !self.approval_popup_open && !(self.compact_detail && detail_mounted),
+                !task_running && self.starting_turn, self.stop_requests.contains(&self.task_id()), palette,
+                &self.snapshot, &self.task_id(), cx,
             );
         });
         let rail = detail_mounted.then(|| {
+            #[cfg(any(test, feature = "performance-profiling"))]
+            DETAIL_BODY_RENDERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             self.companion
                 .update(cx, |pane, cx| pane.set_composed_palette(palette, cx));
             use crate::companion_sidebar::DetailTab;
@@ -3497,13 +4190,13 @@ impl Render for ChatPane {
                 "chat-back-to-bottom-surface", self.bottom_button_exit.is_none(), window, cx,
             );
             let background = hover.background("background",
-                crate::surface_blend::floating_control_background(palette.panel),
-                crate::surface_blend::floating_control_hover_background(palette.panel), window, cx);
+                crate::surface_blend::floating_control_background(palette.panel, palette.dark),
+                crate::surface_blend::floating_control_hover_background(palette.panel, palette.dark), window, cx);
             let highlight: gpui_kit::Hsla = rgb(palette.accent).into();
             let foreground = hover.color("foreground", rgb(palette.ink).into(), highlight, window, cx);
             let border = hover.color("border", rgb(palette.line).into(), highlight, window, cx);
             let glow = hover.color("glow", highlight.opacity(0.), highlight.opacity(0.28), window, cx);
-            let jump = div().size(px(36.)).rounded_full()
+            let jump = back_to_bottom_surface().size(px(36.)).rounded_full()
                 .border_1().border_color(border)
                 .bg(background).shadow(vec![
                     gpui_kit::BoxShadow::new(px(0.), px(3.), rgba(0x00000033).into()).blur_radius(px(8.)),
@@ -3520,7 +4213,10 @@ impl Render for ChatPane {
                         hover.on_hover(*hovered, cx);
                         cx.notify();
                     }))
-                    .on_click(cx.listener(|pane, _, _, cx| pane.back_to_bottom(cx))))
+                    .on_click(cx.listener(|pane, _, _, cx| {
+                        cx.stop_propagation();
+                        pane.back_to_bottom(cx);
+                    })))
                 .into_any_element();
             content = content.child(task_activity::working_bubble::ComposerAnchor::new(
                 self.decoration_bounds.working_anchor.clone(),
@@ -3528,21 +4224,22 @@ impl Render for ChatPane {
                 px(if task_running || self.starting_turn { 46. } else { 14. }),
             ).fly_down(button_flight));
         }
-        content = content.child(self.computer_bubble.clone());
-        let pending_approval = self.pending_tool_approval();
-        let next_approval_id = pending_approval.as_ref().map(|r| field(r, "id"));
-        if next_approval_id != self.approval_popup_id {
-            // Pending requests stay in the approval dock above the composer.
-            self.approval_popup_open = false;
-            if self.approval_popup_open && self.focus.contains_focused(window,cx) { window.focus(&self.approval_focus,cx); }
-            self.approval_details_expanded = false;
-            self.approval_popup_id = next_approval_id;
-        }
+        if !self.approval_popup_open { content = content.child(self.computer_bubble.clone()); }
+        let mut approval_overlay = None;
         if let Some(request) = pending_approval.filter(|_| self.approval_popup_open) {
             let approval_id = field(&request, "id");
             let owner = cx.weak_entity();
+            let mcp_approval = !crate::approval_prompt::mcp_approval_choices(&request).is_empty();
+            let native_mcp_supported = self.mcp_approval_supported;
             let decision = Rc::new(move |decision: &'static str, _: &mut Window, cx: &mut App| {
-                let _ = owner.update(cx, |pane, cx| pane.command("resolve_approval", json!({"approvalId": approval_id, "decision": decision}), cx));
+                let _ = owner.update(cx, |pane, cx| {
+                    if mcp_approval && !native_mcp_supported && decision == "approve_once" {
+                        pane.command("resolve_input", json!({"approvalId": approval_id, "response": {}}), cx);
+                    } else {
+                        pane.command(if mcp_approval && decision != "deny" { "resolve_mcp_approval" } else { "resolve_approval" },
+                            json!({"approvalId": approval_id, "decision": decision}), cx);
+                    }
+                });
             });
             let owner = cx.weak_entity();
             let toggle = Rc::new(move |_: &mut Window, cx: &mut App| {
@@ -3550,19 +4247,20 @@ impl Render for ChatPane {
             });
             let task = rows(&self.snapshot, "tasks").into_iter().find(|t| field(t,"id") == self.task_id()).unwrap_or(Value::Null);
             let prompt = crate::approval_prompt::render_approval_prompt(&request, &task, &self.snapshot, palette, cx.theme().font_family.clone(), cx.theme().font_size, self.busy, self.approval_details_expanded, self.mcp_approval_supported, decision, toggle, window, cx);
-            content = content.child(div().absolute().inset_0().occlude().flex().items_center().justify_center().p_3()
+            approval_overlay = Some(div().id("pane-approval-overlay").debug_selector(|| "pane-approval-overlay".into())
+                .absolute().inset_0().occlude().flex().items_center().justify_center().p(px(24.))
                 .child(div().absolute().inset_0()
-                    .bg(Background::from(rgba(0x00000055)).backdrop_blur(20.))
+                    .bg(Background::from(rgba(if palette.dark { 0x00000055 } else { 0xffffff66 })).backdrop_blur(20.))
                     .on_mouse_down(MouseButton::Left, cx.listener(|pane, _, _, cx| { pane.approval_popup_open = false; cx.stop_propagation(); cx.notify(); })))
-                .child(div().id("pane-approval-modal").role(Role::Dialog).aria_label("Approval needed").font_family(cx.theme().font_family.clone()).text_size(cx.theme().font_size).track_focus(&self.approval_focus).relative().w_full().max_w(gpui_kit::px(560.))
-                    .max_h(px((self.pane_height_design - 32.).max(200.))).overflow_y_scroll()
+                .child(div().id("pane-approval-modal").debug_selector(|| "pane-approval-modal".into()).role(Role::Dialog).aria_label("Approval needed").font_family(cx.theme().font_family.clone()).text_size(cx.theme().font_size).track_focus(&self.approval_focus).relative().w_full().max_w(px(560.))
+                    .max_h_full().min_h_0().flex().flex_col().overflow_hidden()
                     .rounded_lg().bg(design::modal_surface_color(palette.panel))
                     .shadow(vec![BoxShadow::new(px(0.), px(18.), rgba(0x00000066).into()).blur_radius(px(48.))])
                     .on_mouse_down(MouseButton::Left, |_,_,cx| cx.stop_propagation())
                     .child(prompt)
-                    .children(self.error.as_deref().and_then(connection_recovery::visible_error).map(|error| div().px_4().py_2().text_color(rgb(0xe2645a)).child(error.to_owned())))
-                    .child(div().flex().justify_end().p_2().child(Button::new("approval-review-later").text_size(cx.theme().font_size).label("Review later")
-                        .on_click(cx.listener(|pane,_,_,cx| { pane.approval_popup_open = false; cx.notify(); }))))));
+                    .children(self.error.as_deref().and_then(connection_recovery::visible_error).map(|error| div().px(px(8.)).py(px(6.)).font_weight(FontWeight::NORMAL).text_size(px(12. * interface_font_ratio)).line_height(px(16. * interface_font_ratio)).text_color(rgb(0xe2645a)).child(error.to_owned())))
+                    .child(div().flex().flex_shrink_0().justify_end().px(px(20.)).pb(px(12.)).pt(px(4.)).child(Button::new("approval-review-later").compact().text_size(px(11. * interface_font_ratio)).label("Review later")
+                        .on_click(cx.listener(|pane,_,_,cx| { pane.approval_popup_open = false; cx.notify(); }))))).into_any_element());
         }
 
         let pane_content = if self.compact_detail {
@@ -3618,7 +4316,6 @@ impl Render for ChatPane {
                                 scale,
                             ))
                             .max_w_full()
-                            .bg(crate::surface_blend::tinted_pane_background(palette.paper, palette.dark, 0.15))
                             .overflow_hidden()
                             .child(rail),
                     );
@@ -3714,13 +4411,6 @@ impl Render for ChatPane {
         )
         .absolute()
         .size_full();
-        // The visor is a root layout sibling: it spans the entire pane and
-        // reduces the upper workspace, including its decorative field.
-        let visor = (self.companion.read(cx).record_count() > 0).then(|| {
-            self.companion.update(cx, |pane, cx| {
-                pane.render_visor(palette, self.pane_height_design, window, cx)
-            })
-        });
         let upper_workspace = div()
             .w_full()
             .flex_1()
@@ -3826,7 +4516,8 @@ impl Render for ChatPane {
                         pane.slash.read(cx).is_open()
                     );
                 }
-                if pane.composer.read(cx).focus_handle(cx).is_focused(window)
+                if matches!(event.keystroke.key.as_str(), "up" | "down" | "escape" | "enter")
+                    && pane.composer.read(cx).focus_handle(cx).is_focused(window)
                     && !pane.composer.update(cx, |input, cx| {
                         EntityInputHandler::marked_text_range(input, window, cx).is_some()
                     })
@@ -3863,6 +4554,11 @@ impl Render for ChatPane {
             }))
             .on_key_down(cx.listener(|pane, event: &KeyDownEvent, window, cx| {
                 let modifiers = &event.keystroke.modifiers;
+                if event.keystroke.key == "escape" && !window.has_active_dialog(cx)
+                    && pane.companion.update(cx, |child, cx| child.dismiss_drawer(cx)) {
+                    window.focus(&pane.focus, cx);
+                    cx.stop_propagation(); cx.notify(); return;
+                }
                 if event.keystroke.key == "escape" && pane.approval_popup_open {
                     pane.approval_popup_open = false;
                     cx.stop_propagation(); cx.notify(); return;
@@ -3897,7 +4593,8 @@ impl Render for ChatPane {
             .text_color(rgb(palette.ink))
             .child(measurement)
             .child(upper_workspace)
-            .children(visor.map(|visor| div().w_full().flex_shrink_0().child(visor)))
+            .children(approval_overlay)
+            .into_any_element()
     }
 }
 // Comparison-only override; normal app launches retain Tauri's default.
@@ -4022,22 +4719,35 @@ impl ChatPane {
             (false, "spacious") => 34.,
             _ => 30.,
         };
+        // Working motion belongs to the header in both layouts, never the dock tab.
+        let animate_identity = self.is_working() && !cx.reduce_motion()
+            && crate::native_motion::motion_allowed();
         let identity_mark = if let Some(image) = provider_icon {
+            let image = img(image)
+                .w(px(22. * avatar_size / 30.))
+                .h(px(22. * avatar_size / 30.))
+                .flex_shrink_0();
+            let image = if animate_identity {
+                image.with_animation(
+                    "pane-header-logo-spin",
+                    Animation::new(Duration::from_millis(1500)).repeat().with_easing(ease_in_out),
+                    |image, progress| image.with_transformation(Transformation::rotate(percentage(progress))),
+                ).into_any_element()
+            } else {
+                image.into_any_element()
+            };
             div()
                 .size(px(avatar_size))
+                .flex_shrink_0()
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(
-                    img(image)
-                        .w(px(22. * avatar_size / 30.))
-                        .h(px(22. * avatar_size / 30.))
-                        .flex_shrink_0(),
-                )
+                .child(image)
                 .into_any_element()
         } else {
             div()
                 .size(px(avatar_size))
+                .flex_shrink_0()
                 .rounded_md()
                 .bg(rgb(color))
                 .text_color(rgb(0xffffff))
@@ -4048,72 +4758,19 @@ impl ChatPane {
                 .child(name.chars().next().unwrap_or('m').to_string())
                 .into_any_element()
         };
-        let identity = div()
-            .flex_1().min_w_0().h_full().flex().items_center()
-            .gap(px(if tern_tiles { 8. } else { space::INSET }))
-            .child(identity_mark)
-            .child(div().flex_1().min_w_0().flex().flex_col().child(
-                div().text_size(px(13.2))
-                    .when(tern_tiles, |title| title.relative().top(px(2.)))
-                    .font_weight(if tern_tiles { FontWeight::MEDIUM } else { FontWeight::BOLD })
-                    .truncate().child(title),
-            ));
-        let identity = if tern_tiles {
-            if let Some(group) = self.dock_group.as_ref().and_then(|group| group.upgrade()) {
-                gpui_kit::component::dock::pane_drag_region(identity, &group.read(cx).context(cx), cx)
-                    .into_any_element()
-            } else { identity.into_any_element() }
-        } else { identity.into_any_element() };
-        let mut header = div()
-            // Keep avatar and row geometry aligned with the native density tokens.
-            .h(px(avatar_size + 2. * header_padding_y))
-            .flex_shrink_0()
-            .relative()
-            .overflow_hidden()
-            .flex()
-            .items_center()
-            .gap(px(if tern_tiles { 8. } else { space::INSET }))
-            .px(px(if tern_tiles { 13. } else { space::GROUP }))
-            .border_b_1()
-            .border_color(rgb(palette.line))
-            .border_blend_mode(crate::surface_blend::separator_mode())
-            .when(tern_tiles, |this| {
-                this.border_color(design::tile_border_color(palette))
-                    .border_blend_mode(0)
-            })
-            .when(tern_tiles && design::border_opacity() == 0, |this| this.border_b_0())
-            .when(active_border_visible, |this| {
-                if tern_tiles && pane_appearance.border_opacity == 0 {
-                    this.border_b_0()
-                } else {
-                    let mut color = rgb(pane_appearance.resolved_active_border_color());
-                    if tern_tiles {
-                        color.a = pane_appearance.border_opacity as f32 / 100.;
-                    }
-                    this.border_color(color).border_blend_mode(0)
-                }
-            })
-            .child({
-                let geometry = self.decoration_bounds.header.clone();
-                canvas(move |bounds, _, _| geometry.set(Some(bounds)), |_, _, _, _| ())
-                    .absolute().size_full()
-            })
-            .children(crate::activity_effects::for_task_in_window(
-                &self.task_id(), "header-wash", crate::activity_sparkles::SparkleLayout::HeaderWash,
-                true, window, cx,
-            ))
-            .child(identity);
-        if let Some(group) = self.dock_group.clone() {
+        let identity_mark = if let Some(group) = self.dock_group.clone() {
             use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
             let owner = cx.weak_entity();
             let task_id = self.task_id();
             let can_archive = rows(&self.snapshot, "tasks").into_iter().find(|task| field(task, "id") == task_id).is_some_and(|task| field(&task, "status") != "running");
-            header = header.child(
-                Button::new("header-pane-menu")
+            Button::new("header-pane-menu")
                     .compact()
-                    .text()
-                    .icon(Icon::new(IconName::Ellipsis))
-                    .accessibility_label("Pane menu")
+                    .ghost()
+                    .w(px(avatar_size)).h(px(avatar_size)).p_0().rounded(px(4.))
+                    .child(identity_mark)
+                    .debug_selector(|| "chat-header-menu-trigger".into())
+                    .accessibility_label("Chat pane menu")
+                    .on_click(|_, _, cx| cx.stop_propagation())
                     .tooltip("Pane menu")
                     .dropdown_menu(move |menu, window, cx| {
                         let Some(group) = group.upgrade() else {
@@ -4139,29 +4796,91 @@ impl ChatPane {
                             }));
                         gpui_kit::component::dock::pane_menu(menu, &context, window, cx)
                     })
-                    .anchor(Anchor::TopRight),
-            );
-        }
-        header = header.child(
-                Button::new("toggle-pane-secondary-sidebar")
-                    .compact()
-                    .text()
-                    .icon(
-                        Icon::default()
-                            .data(gpui_kit::assets::__private::PanelRight.1)
-                            .with_size(px(16.)),
-                    )
-                    .accessibility_label(if self.companion_visible {
-                        "Hide this pane's secondary sidebar"
-                    } else {
-                        "Show this pane's secondary sidebar"
-                    })
-                    .on_click(cx.listener(|pane, _, _, cx| pane.toggle_companion(cx))),
-            );
-        if tern_tiles {
+                    .anchor(Anchor::TopLeft)
+                    .into_any_element()
+        } else { identity_mark };
+        let identity = div()
+            .flex_1().min_w_0().h_full().flex().items_center()
+            .gap(px(if tern_tiles { 8. } else { space::INSET }))
+            .child(div().flex_1().min_w_0().flex().flex_col().child(
+                div().text_size(px(11.2))
+                    .when(tern_tiles, |title| title.relative().top(px(2.)))
+                    .font_weight(if tern_tiles { FontWeight::MEDIUM } else { FontWeight::BOLD })
+                    .truncate().child(title),
+            ));
+        let identity = if tern_tiles {
             if let Some(group) = self.dock_group.as_ref().and_then(|group| group.upgrade()) {
-                header = header.child(gpui_kit::component::dock::pane_controls(&group.read(cx).context(cx), cx));
-            }
+                gpui_kit::component::dock::pane_drag_region(identity, &group.read(cx).context(cx), cx)
+                    .into_any_element()
+            } else { identity.into_any_element() }
+        } else { identity.into_any_element() };
+        let mut header = div()
+            .id("chat-pane-header").debug_selector(|| "chat-pane-header".into())
+            // Keep avatar and row geometry aligned with the native density tokens.
+            .h(px(avatar_size + 2. * header_padding_y))
+            .flex_shrink_0()
+            .relative()
+            .overflow_hidden()
+            .flex()
+            .items_center()
+            .gap(px(if tern_tiles { 8. } else { space::INSET }))
+            .pl(px(if tern_tiles { 13. } else { space::GROUP }))
+            .pr(px(if tern_tiles { (avatar_size + 2. * header_padding_y - 24.) / 2. } else { space::GROUP }))
+            .border_b_1()
+            .border_color(rgb(palette.line))
+            .border_blend_mode(crate::surface_blend::separator_mode())
+            .when(tern_tiles, |this| {
+                this.border_color(design::tile_border_color(palette))
+                    .border_blend_mode(0)
+            })
+            .when(active_border_visible, |this| {
+                let mut color = rgb(pane_appearance.resolved_active_border_color());
+                if tern_tiles {
+                    color.a = pane_appearance.resolved_active_border_opacity();
+                }
+                this.border_color(color).border_blend_mode(0)
+            })
+            .child({
+                let geometry = self.decoration_bounds.header.clone();
+                canvas(move |bounds, _, _| geometry.set(Some(bounds)), |_, _, _, _| ())
+                    .absolute().size_full()
+            })
+            .when(!self.approval_popup_open, |header| header.children(crate::activity_effects::for_task_in_window(
+                &self.task_id(), "header-wash", crate::activity_sparkles::SparkleLayout::HeaderWash,
+                true, window, cx,
+            )))
+            .child(identity_mark)
+            .child(identity);
+        let sidebar_toggle = Button::new("toggle-pane-secondary-sidebar")
+            .compact()
+            .text()
+            .when(tern_tiles, |button| button.w(px(24.)).h(px(24.)).p_0())
+            .icon(Icon::default().data(gpui_kit::assets::__private::PanelRight.1).with_size(px(16.)))
+            .accessibility_label(if self.companion_visible {
+                "Hide this pane's secondary sidebar"
+            } else {
+                "Show this pane's secondary sidebar"
+            })
+            .on_click(cx.listener(|pane, _, _, cx| pane.toggle_companion(cx)));
+        if let Some(group) = self.dock_group.as_ref().and_then(|group| group.upgrade()).filter(|_| tern_tiles) {
+            let context = group.read(cx).context(cx);
+            // Equal insets around the close control, mirrored across the divider.
+            let inset = px((avatar_size + 2. * header_padding_y - 24.) / 2.);
+            header = header
+                .child(div().flex().items_center().gap(inset)
+                    .when(self.pane_width_design >= 420., |controls| {
+                        controls.children(gpui_kit::component::dock::pane_zoom_control(&context, cx)
+                            .map(|button| button.w(px(24.)).h(px(24.)).p_0()
+                                .debug_selector(|| "chat-header-zoom".into())))
+                    })
+                    .child(sidebar_toggle)
+                    .child(div().flex_shrink_0().w(px(1.)).h(px(18.))
+                        .bg(rgb(palette.ink).opacity(0.24)))
+                    .child(gpui_kit::component::dock::pane_close_control(&context, cx)
+                        .w(px(24.)).h(px(24.)).p_0()
+                        .debug_selector(|| "chat-header-close".into())));
+        } else {
+            header = header.child(sidebar_toggle);
         }
         header.into_any_element()
     }

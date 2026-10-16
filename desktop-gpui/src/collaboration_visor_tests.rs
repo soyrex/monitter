@@ -9,7 +9,7 @@ use std::{cell::RefCell, time::Duration};
 const WINDOW_WIDTH: f32 = 800.0;
 const WINDOW_HEIGHT: f32 = 600.0;
 const TAB_HEIGHT: f32 = 36.0;
-const EXPANDED_HEIGHT: f32 = 240.0;
+const EXPANDED_HEIGHT: f32 = WINDOW_HEIGHT * 0.5;
 const TOLERANCE: f32 = 1.0;
 
 fn expanded_physical_height() -> f32 {
@@ -137,7 +137,7 @@ fn set_state(
 }
 
 #[gpui_kit::test]
-fn visor_expands_closes_and_reverses_without_jumping(cx: &mut TestAppContext) {
+fn drawer_toolbar_slides_above_body_and_reverses_without_jumping(cx: &mut TestAppContext) {
     cx.update(|cx| gpui_kit::init(cx));
     let (fixture, mut visual) = cx.add_window_view(|_, _| VisorFixture {
         open: false,
@@ -182,6 +182,11 @@ fn visor_expands_closes_and_reverses_without_jumping(cx: &mut TestAppContext) {
     assert!((tab_open.size.height.as_f32() - TAB_HEIGHT).abs() <= TOLERANCE);
     assert!((tab_open.top().as_f32() - upper_open_bounds.bottom().as_f32()).abs() <= TOLERANCE);
     assert!((clip_open.top().as_f32() - tab_open.bottom().as_f32()).abs() <= TOLERANCE);
+    assert!((clip_open.bottom().as_f32() - WINDOW_HEIGHT).abs() <= TOLERANCE);
+    assert!(
+        (tab_open.top().as_f32() - (tab_closed.top().as_f32() - expanded_physical_height())).abs()
+            <= TOLERANCE
+    );
     assert!((clip_open.size.width.as_f32() - WINDOW_WIDTH).abs() <= TOLERANCE);
     assert!((clip_open.size.height.as_f32() - expanded_physical_height()).abs() <= TOLERANCE);
     assert!((open_upper - (closed_upper - expanded_physical_height())).abs() <= TOLERANCE);
@@ -218,7 +223,7 @@ fn visor_expands_closes_and_reverses_without_jumping(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn visor_reduced_motion_changes_height_immediately(cx: &mut TestAppContext) {
+fn drawer_reduced_motion_changes_height_immediately(cx: &mut TestAppContext) {
     cx.update(|cx| gpui_kit::init(cx));
     let (fixture, mut visual) = cx.add_window_view(|_, _| VisorFixture {
         open: true,

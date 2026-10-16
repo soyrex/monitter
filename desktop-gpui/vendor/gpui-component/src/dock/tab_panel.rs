@@ -53,7 +53,8 @@ pub fn pane_menu(
     let zoomed = group.is_zoomed();
     let menu_zoom = zoom_control(group, cx).is_some_and(|control| control.menu_visible());
     let zoom_group = group.clone();
-    menu.when_some(panel, |menu, panel| panel.dropdown_menu(menu, window, cx))
+    menu.header("Pane", "Manage this pane and its layout.")
+        .when_some(panel, |menu, panel| panel.dropdown_menu(menu, window, cx))
         .separator()
         .item(
             crate::menu::PopupMenuItem::new(if zoomed {
@@ -243,16 +244,23 @@ pub fn pane_drag_region(region: Div, group: &TabGroupContext, cx: &App) -> State
 /// Move and close the owning active pane through the ordinary dock lifecycle.
 /// Reusable in a pane's own header and the skin's floating corner controls.
 pub fn pane_controls(group: &TabGroupContext, cx: &App) -> AnyElement {
+    h_flex().gap(px(4.))
+        .child(pane_move_control(group, cx))
+        .when(!group.active_panel().and_then(PanelHandle::of)
+            .is_some_and(|handle| !handle.close_button_visible(cx)), |this| {
+            this.child(pane_close_control(group, cx))
+        })
+        .into_any_element()
+}
+
+pub fn pane_move_control(group: &TabGroupContext, cx: &App) -> AnyElement {
     let radius = group.drag_preview_radius();
     let panel = group.active_panel().cloned();
-    let panel_id = panel.as_ref().map(|panel| panel.panel_id(cx));
     let drag = panel.as_ref().and_then(|panel| {
         group.panels().iter().position(|candidate| candidate.panel_id(cx) == panel.panel_id(cx))
             .and_then(|ix| tab_drag(group, ix, cx))
     });
-    let close_group = group.clone();
-    h_flex().gap(px(4.))
-        .child(div().id("pane-move-handle").cursor_grab()
+    div().id("pane-move-handle").cursor_grab()
             .child(Button::new("pane-move").icon(crate::Icon::new(gpui_kit_assets::IconName::Move)).small().ghost()
                 .disabled(drag.is_none()).tooltip("Move pane").accessibility_label("Move pane")
                 .debug_selector(|| "dock-pane-move-control".into()))
@@ -261,15 +269,40 @@ pub fn pane_controls(group: &TabGroupContext, cx: &App) -> AnyElement {
                 drag.set_drag_offset(offset);
                 drag.set_preview_size(DRAG_PREVIEW_SIZE);
                 cx.new(|_| DragPanelPreview { radius, panel: panel.clone().expect("drag has a panel") })
-            })))
-        .child(Button::new("pane-close").icon(IconName::Close).small().ghost()
+            }))
+        .into_any_element()
+}
+
+pub fn pane_close_control(group: &TabGroupContext, cx: &App) -> Button {
+    let close_group = group.clone();
+    let panel_id = group.active_panel().map(|panel| panel.panel_id(cx));
+    Button::new("pane-close").icon(IconName::Close).small().ghost()
             .disabled(!group.is_closable()).tooltip("Close pane").accessibility_label("Close pane")
             .debug_selector(|| "dock-pane-close-control".into())
             .on_click(move |_, window, cx| {
                 cx.stop_propagation();
                 if let Some(panel_id) = panel_id { close_group.close(panel_id, window, cx); }
-            }))
-        .into_any_element()
+            })
+}
+
+/// The owning pane's zoom action, reusable in a responsive content header.
+pub fn pane_zoom_control(group: &TabGroupContext, cx: &App) -> Option<Button> {
+    let zoomed = group.is_zoomed();
+    if !zoomed && !zoom_control(group, cx)
+        .is_some_and(|control| control.menu_visible() || control.toolbar_visible()) {
+        return None;
+    }
+    let owner = group.clone();
+    let label = if zoomed { "Zoom Out" } else { "Zoom In" };
+    Some(Button::new("pane-zoom")
+        .icon(if zoomed { IconName::Minimize } else { IconName::Maximize })
+        .small().ghost().selected(zoomed)
+        .tooltip_with_action(label, &ToggleZoom, None)
+        .accessibility_label(label)
+        .on_click(move |_, window, cx| {
+            cx.stop_propagation();
+            owner.toggle_zoom(window, cx);
+        }))
 }
 
 /// The left-most, top-most tab group in a container — where a left dock's
@@ -711,6 +744,7 @@ impl TabGroupSkin {
                             .when(
                                 !collapsed
                                     && self.shared.close_button_visible.get()
+                                    && !handle.is_some_and(|handle| !handle.close_button_visible(cx))
                                     && group.is_panel_closable(panel.panel_id(cx), cx),
                                 |this| {
                                     this.suffix(
@@ -2033,6 +2067,7 @@ mod tests {
     struct TabProbe {
         focus_handle: FocusHandle,
         closable: bool,
+        close_button_visible: bool,
         activated: Rc<Cell<bool>>,
     }
 
@@ -2041,6 +2076,7 @@ mod tests {
             cx.new(|cx| Self {
                 focus_handle: cx.focus_handle(),
                 closable,
+                close_button_visible: true,
                 activated: Rc::new(Cell::new(false)),
             })
         }
@@ -2062,7 +2098,11 @@ mod tests {
         }
     }
 
-    impl Panel for TabProbe {}
+    impl Panel for TabProbe {
+        fn close_button_visible(&self, _: &App) -> bool {
+            self.close_button_visible
+        }
+    }
 
     impl EventEmitter<PanelEvent> for TabProbe {}
 
@@ -2083,6 +2123,10 @@ mod tests {
     /// filler (a lone panel draws no tab bar) that never draws one, so the
     /// probe is unambiguous.
     fn drew_close_button(cx: &mut TestAppContext, closable: bool, enabled: bool) -> bool {
+        drew_close_button_with_visibility(cx, closable, enabled, true)
+    }
+
+    fn drew_close_button_with_visibility(cx: &mut TestAppContext, closable: bool, enabled: bool, visible: bool) -> bool {
         cx.update(|cx| crate::init(cx));
         let mut skin = None;
         let (area, cx) = cx.add_window_view(|window, cx| {
@@ -2096,6 +2140,7 @@ mod tests {
         }
         cx.update(|window, cx| {
             let under_test = TabProbe::new(closable, cx);
+            under_test.update(cx, |panel, _| panel.close_button_visible = visible);
             let filler = TabProbe::new(false, cx);
             let layout = DockLayout::tabs()
                 .panel_view(panel_handle(under_test), cx)
@@ -2105,7 +2150,7 @@ mod tests {
         cx.run_until_parked();
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let button = cx.debug_bounds(CLOSE_BUTTON_SELECTOR);
-        if enabled && closable {
+        if enabled && closable && visible {
             assert_eq!(
                 button.as_ref().map(|bounds| bounds.size.width),
                 Some(px(20.)),
@@ -2122,6 +2167,11 @@ mod tests {
             drew_close_button(cx, true, true),
             "a closable panel's tab must draw a close button"
         );
+    }
+
+    #[gpui::test]
+    fn a_panel_with_its_own_close_control_hides_the_skin_button(cx: &mut TestAppContext) {
+        assert!(!drew_close_button_with_visibility(cx, true, true, false));
     }
 
     /// A non-closable panel draws no close button (the gate is real).

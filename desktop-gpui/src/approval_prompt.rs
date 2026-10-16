@@ -19,16 +19,17 @@ struct TechnicalDetails {
     muted: u32,
     code: u32,
     clock: Clock,
+    code_size: Pixels,
 }
 impl Render for TechnicalDetails {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let progress = self.clock.borrow_mut().progress(cx.reduce_motion());
         feedback::painted(
-            div().id("approval-expanded-details").flex().flex_col().gap_2()
+            div().id("approval-expanded-details").flex().flex_col().gap(px(12.)).text_size(self.code_size)
                 .opacity(0.65 + progress * 0.35)
                 .children(self.lines.iter().map(|line| div().text_color(rgb(self.muted)).child(line.clone())))
-                .child(div().p_2().bg(design::modal_surface_color(self.code)).rounded_md()
-                    .font_family(design::FONT_MONO).child(self.payload.clone())),
+                .child(div().id("approval-technical-code").overflow_x_scroll().p_2().bg(design::modal_surface_color(self.code)).rounded_md()
+                    .font_family(design::FONT_MONO).child(code_lines(&self.payload))),
             self.clock.clone(),
         )
     }
@@ -36,16 +37,17 @@ impl Render for TechnicalDetails {
 
 fn technical_details(
     id: SharedString, lines: Vec<String>, payload: SharedString, palette: Palette,
-    entering: bool, window: &mut Window, cx: &mut App,
+    code_size: Pixels, entering: bool, window: &mut Window, cx: &mut App,
 ) -> Entity<TechnicalDetails> {
     let holder = window.use_keyed_state(id, cx, |_, cx| cx.new(|_| {
         let clock = FeedbackClock::new();
         if entering { clock.borrow_mut().start(std::time::Duration::from_millis(120)); }
-        TechnicalDetails { lines: Vec::new(), payload: "".into(), muted: palette.muted, code: palette.code, clock }
+        TechnicalDetails { lines: Vec::new(), payload: "".into(), muted: palette.muted, code: palette.code, clock, code_size }
     }));
     let details = holder.read(cx).clone();
     details.update(cx, |view, cx| {
-        if view.lines != lines || view.payload != payload || view.muted != palette.muted || view.code != palette.code {
+        if view.lines != lines || view.payload != payload || view.muted != palette.muted || view.code != palette.code || view.code_size != code_size {
+            view.code_size = code_size;
             view.lines = lines;
             view.payload = payload;
             view.muted = palette.muted;
@@ -75,6 +77,29 @@ fn bounded(value: &str, limit: usize) -> String {
         format!("{head}\n… Preview truncated")
     } else {
         head
+    }
+}
+
+/// Separate rows preserve indentation and empty lines in shell and JSON previews.
+fn code_lines(value: &str) -> Div {
+    let preview = bounded(value, 65_536);
+    let mut lines = preview.split('\n');
+    let rows: Vec<_> = lines.by_ref().take(1024).map(|line| {
+        div().whitespace_nowrap().child(if line.is_empty() { " ".to_owned() } else { line.to_owned() })
+    }).collect();
+    let truncated_lines = lines.next().is_some();
+    div().flex().flex_col().children(rows).when(truncated_lines, |view| {
+        view.child(div().child("… Preview truncated after 1024 lines"))
+    })
+}
+
+fn approval_heading(summary: &str, tool: &str, has_command: bool) -> String {
+    if has_command {
+        "Allow this command?".to_owned()
+    } else if summary.trim().is_empty() || summary.trim_start().starts_with(['{', '[']) {
+        format!("Allow {}?", bounded(tool, 120))
+    } else {
+        bounded(summary, 240)
     }
 }
 
@@ -207,27 +232,31 @@ pub fn render_approval_prompt(
     } else {
         palette.accent
     };
+    let scale = f32::from(interface_size) / f32::from(px(design::INTERFACE_FONT_SIZE));
+    let body_size = px(12. * scale);
+    let small_size = px(11. * scale);
+    let detail = text(request, "detail");
+    let parsed = serde_json::from_str::<Value>(&detail)
+        .ok()
+        .filter(|value| value.is_object());
+    let has_command = parsed.as_ref().is_some_and(|value| {
+        value["command"].as_str().is_some_and(|command| !command.is_empty())
+            || value["command"].as_array().is_some_and(|parts| !parts.is_empty())
+    });
     let mut body = div()
         .id("approval-dock-body")
         .debug_selector(|| "approval-dock-body".into())
         .min_h(px(0.))
         .max_h(px(220.))
         .overflow_y_scroll()
-        .p_3()
+        .p(px(20.))
         .flex()
         .flex_col()
-        .gap_2()
-        .child(div().font_weight(FontWeight::SEMIBOLD).child(
-            if summary.trim().is_empty() || summary.trim_start().starts_with(['{', '[']) {
-                format!("Allow {}?", bounded(&tool, 120))
-            } else {
-                bounded(&summary, 6000)
-            },
-        ));
-    let detail = text(request, "detail");
-    let parsed = serde_json::from_str::<Value>(&detail)
-        .ok()
-        .filter(|value| value.is_object());
+        .gap(px(12.))
+        .text_size(body_size)
+        .line_height(px(17. * scale))
+        .font_weight(FontWeight::NORMAL)
+        .child(div().child(approval_heading(&summary, &tool, has_command)));
     if !mcp_approval_choices(request).is_empty() {
         if let Some(detail) = parsed.as_ref() {
             body = body.child(div().text_color(rgb(palette.muted)).child(format!(
@@ -250,7 +279,10 @@ pub fn render_approval_prompt(
                             .rounded_md()
                             .bg(design::modal_surface_color(palette.code))
                             .font_family(design::FONT_MONO)
-                            .child(bounded(&preview, 2000)),
+                            .text_size(small_size)
+                            .id("approval-tool-params")
+                            .overflow_x_scroll()
+                            .child(code_lines(&preview)),
                     );
                 }
             }
@@ -282,7 +314,10 @@ pub fn render_approval_prompt(
                 .border_color(rgb(palette.line))
                 .bg(design::modal_surface_color(palette.code))
                 .font_family(design::FONT_MONO)
-                .child(bounded(&command, 2000)),
+                .text_size(small_size)
+                .id("approval-command")
+                .overflow_x_scroll()
+                .child(code_lines(&command)),
         );
     }
     if !reason.is_empty() {
@@ -308,7 +343,7 @@ pub fn render_approval_prompt(
     if !detail.is_empty() {
         body = body.child(
             Button::new("approval-request-details")
-                .text_size(interface_size)
+                .text_size(small_size)
                 .label(if expanded {
                     "Hide technical request details"
                 } else {
@@ -341,7 +376,7 @@ pub fn render_approval_prompt(
             .unwrap_or(detail);
         body = body.child(technical_details(
             SharedString::from(format!("approval-details-content-{}", text(request, "id"))),
-            lines, bounded(&payload, 6000).into(), palette, details_entering, window, cx,
+            lines, bounded(&payload, 6000).into(), palette, small_size, details_entering, window, cx,
         ));
     }
     let mut actions = div()
@@ -350,8 +385,8 @@ pub fn render_approval_prompt(
         .flex()
         .flex_wrap()
         .items_center()
-        .gap_2()
-        .p_3()
+        .gap(px(8.))
+        .p(px(20.))
         .border_t_1()
         .border_color(rgb(palette.line))
         .flex_shrink_0();
@@ -365,8 +400,8 @@ pub fn render_approval_prompt(
                 } else {
                     IconName::Check
                 }))
-                .h(px(44.))
-                .text_size(interface_size)
+                .h(px(30.))
+                .text_size(small_size)
                 .when(decision == "approve_once", |button| button.primary())
                 .when(decision == "deny", |button| button.danger())
                 .disabled(busy)
@@ -388,14 +423,16 @@ pub fn render_approval_prompt(
         .role(Role::Group)
         .aria_label("Pending approvals")
         .w_full()
-        .flex_shrink_0()
+        .min_w_0()
+        .min_h_0()
         .rounded_lg()
         .border_1()
         .border_color(rgb(risk_color))
         .bg(design::modal_surface_color(palette.panel))
         .text_color(rgb(palette.ink))
         .font_family(interface_family)
-        .text_size(interface_size)
+        .text_size(body_size)
+        .font_weight(FontWeight::NORMAL)
         .flex()
         .flex_col()
         .overflow_hidden()
@@ -403,8 +440,8 @@ pub fn render_approval_prompt(
             div()
                 .flex()
                 .items_center()
-                .gap_2()
-                .p_3()
+                .gap(px(12.))
+                .p(px(20.))
                 .border_b_1()
                 .border_color(rgb(palette.line))
                 .flex_shrink_0()
@@ -421,11 +458,12 @@ pub fn render_approval_prompt(
                         .child(
                             div()
                                 .font_weight(FontWeight::SEMIBOLD)
+                                .text_size(px(13. * scale))
                                 .child("Approval needed"),
                         )
                         .child(
                             div()
-                                .text_sm()
+                                .text_size(small_size)
                                 .text_color(rgb(palette.muted))
                                 .child(format!(
                                     "{} · {} · {} risk",
@@ -445,6 +483,14 @@ pub fn render_approval_prompt(
 mod tests {
     use super::*;
     use serde_json::json;
+    #[::core::prelude::v1::test]
+    fn command_heading_keeps_shell_payload_out_of_summary() {
+        let command = "printf 'first\n  second'\n".repeat(100);
+        assert_eq!(approval_heading(&command, "shell", true), "Allow this command?");
+        assert_eq!(approval_heading("Review file changes", "edit", false), "Review file changes");
+        assert_eq!(approval_heading("", "edit", false), "Allow edit?");
+    }
+
     fn mcp_request(persist: Value) -> Value {
         json!({"status":"pending","provider":"codex","input":{"kind":"form","schema":{"type":"object","properties":{}}},
             "detail":json!({"mode":"form","message":"Allow tool?","requestedSchema":{"type":"object","properties":{}},"serverName":"test-mcp","_meta":{"codex_approval_kind":"mcp_tool_call","persist":persist}}).to_string()})
@@ -530,7 +576,8 @@ mod layout_tests {
     struct Fixture;
     impl Render for Fixture {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            let request = serde_json::json!({"status":"pending","summary":"Long tool explanation. ".repeat(1000), "provider":"codex","tool":"Command execution","risk":"unknown","rememberable":true});
+            let command = "printf 'first\n  second'\n".repeat(1000);
+            let request = serde_json::json!({"status":"pending","summary":command, "detail":serde_json::json!({"command":command}).to_string(), "provider":"codex","tool":"Command execution","risk":"unknown","rememberable":true});
             let palette = crate::design::palette(
                 &serde_json::json!({"theme":"dark"}),
                 gpui::WindowAppearance::Dark,
@@ -572,6 +619,7 @@ mod layout_tests {
         let actions = visual
             .debug_bounds("approval-dock-actions")
             .expect("actions rendered");
+        assert!(body.size.height >= crate::design::ui_scaled_px(219.), "tall command fills the bounded scroller");
         assert!(body.size.height <= crate::design::ui_scaled_px(221.), "body height {:?}, expected <= {:?}", body.size.height, crate::design::ui_scaled_px(221.));
         assert!(
             actions.top() >= body.bottom(),

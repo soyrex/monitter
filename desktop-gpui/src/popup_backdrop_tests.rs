@@ -239,3 +239,36 @@ fn controlled_popup_close_releases_backdrop_and_reopen_acquires_fresh_capture(cx
     visual.update(|window,cx| { window.refresh(); window.draw(cx).clear(cx); });
     assert_eq!(captures.get(),2);
 }
+
+#[gpui_kit::test]
+fn popup_geometry_publishes_actual_positioned_bounds_survives_cache_and_clears_first_close(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let open = Rc::new(Cell::new(false));
+    let (_, visual) = cx.add_window_view({
+        let open = open.clone();
+        move |window, cx| {
+            let content = cx.new(|_| ControlledPopupHarness { open });
+            gpui_kit::component::Root::new(content, window, cx)
+        }
+    });
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    open.set(true);
+    visual.update(|window, cx| {
+        window.refresh();
+        window.draw(cx).clear(cx);
+        window.draw(cx).clear(cx);
+        let bounds = gpui_kit::component::surface_backdrop::popup_bounds(window, cx);
+        assert_eq!(bounds.len(), 1);
+        assert!(bounds[0].size.width >= px(100.));
+        assert!(bounds[0].size.height >= px(100.));
+        assert!(bounds[0].origin.y > px(0.), "popup is positioned relative to its trigger");
+        window.draw(cx).clear(cx);
+        assert_eq!(gpui_kit::component::surface_backdrop::popup_bounds(window, cx), bounds);
+    });
+    open.set(false);
+    visual.update(|window, cx| {
+        window.refresh();
+        window.draw(cx).clear(cx);
+        assert!(gpui_kit::component::surface_backdrop::popup_bounds(window, cx).is_empty());
+    });
+}

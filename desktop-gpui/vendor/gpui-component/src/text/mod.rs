@@ -90,16 +90,18 @@ pub(crate) fn component_code_block_highlighter(
             return Vec::new();
         };
         let code = block.code();
+        // Parsing runs synchronously on the UI thread; enormous logs stay plain.
+        if code.len() > 128 * 1024 { return Vec::new(); }
+        let Some(config) = LanguageRegistry::singleton().language(lang.as_ref()) else {
+            return Vec::new();
+        };
         HIGHLIGHTERS.with(|cache| {
             let mut cache = cache.borrow_mut();
-            let highlighter = cache
-                .entry(lang.clone())
-                .or_insert_with(|| SyntaxHighlighter::new(lang.as_ref()));
-            if let Some(config) = LanguageRegistry::singleton().language(lang.as_ref())
-                && highlighter.language() != &config.name
-            {
-                *highlighter = SyntaxHighlighter::new(lang.as_ref());
-            }
+            // Canonical names avoid separate parser entries for aliases; bound
+            // the cache even when plugins register more grammars over time.
+            if cache.len() >= 32 && !cache.contains_key(&config.name) { cache.clear(); }
+            let highlighter = cache.entry(config.name.clone())
+                .or_insert_with(|| SyntaxHighlighter::new(config.name.as_ref()));
 
             let old_end_byte = highlighter.text().len();
             let old_end_position = highlighter.text().offset_to_point(old_end_byte);
@@ -112,7 +114,12 @@ pub(crate) fn component_code_block_highlighter(
                 old_end_position,
                 new_end_position: code_rope.offset_to_point(code.len()),
             };
-            highlighter.update_input(Some(edit), &code_rope, None);
+            if !highlighter.update_input(Some(edit), &code_rope, Some(std::time::Duration::from_millis(8))) {
+                // A timed-out parser retains its old tree. Never paint those
+                // stale ranges against the replacement text, or reuse it later.
+                cache.remove(&config.name);
+                return Vec::new();
+            }
             highlighter.styles(&(0..code.len()), highlight_theme.as_ref())
         })
     }
@@ -231,6 +238,21 @@ mod tests {
                 .and_then(|(_, style)| style.color)
         }
 
+        #[cfg(all(feature = "tree-sitter-javascript", feature = "tree-sitter-rust"))]
+        #[test]
+        fn real_grammars_highlight_code_and_leave_bounded_fallbacks_plain() {
+            let highlighter = super::super::component_code_block_highlighter(HighlightTheme::default_light());
+            let js = CodeBlock::from_code("const answer = 42;", Some("javascript"));
+            assert!(highlighter(&js).iter().any(|(_, style)| style.color.is_some()));
+            let rust = CodeBlock::from_code("fn main() { let n = 42; }", None::<&str>);
+            assert_eq!(rust.lang().as_deref(), Some("rust"));
+            assert!(highlighter(&rust).iter().any(|(_, style)| style.color.is_some()));
+            let huge = CodeBlock::from_code("const answer = 42;\n".repeat(8192), Some("javascript"));
+            assert!(highlighter(&huge).is_empty());
+            let unknown = CodeBlock::from_code("const answer = 42;", Some("unsupported-random-name"));
+            assert!(highlighter(&unknown).is_empty());
+        }
+
         #[test]
         fn registering_a_language_refreshes_the_cached_highlighter() {
             let lang = SharedString::from("json-cache-test");
@@ -239,8 +261,8 @@ mod tests {
             let highlighter =
                 super::super::component_code_block_highlighter(HighlightTheme::default_light());
 
-            // The first call caches a plain-text highlighter for the unknown
-            // language; the cache must not outlive the registration.
+            // Unknown languages stay plain; registration must be recognized
+            // by the existing highlighter closure on its next call.
             let block = CodeBlock::from_code(code.clone(), Some(lang.clone()));
             assert_eq!(color_at(&highlighter(&block), number.clone()), None);
 

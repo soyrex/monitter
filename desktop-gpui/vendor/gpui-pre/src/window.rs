@@ -1196,6 +1196,9 @@ pub struct Window {
     pub(crate) next_tooltip_id: TooltipId,
     pub(crate) tooltip_bounds: Option<TooltipBounds>,
     pub(crate) next_frame_callbacks: Rc<RefCell<Vec<FrameCallback>>>,
+    /// Views already queued by `request_animation_frame`; many animated
+    /// elements in one view only need one notification for the next frame.
+    pending_animation_frame_views: RefCell<FxHashSet<EntityId>>,
     pub(crate) dirty_views: FxHashSet<EntityId>,
     content_inert: bool,
     pub(crate) cache_frame_generation: u64,
@@ -1595,6 +1598,7 @@ impl Window {
         let hovered = Rc::new(Cell::new(platform_window.is_hovered()));
         let needs_present = Rc::new(Cell::new(false));
         let next_frame_callbacks: Rc<RefCell<Vec<FrameCallback>>> = Default::default();
+        let pending_animation_frame_views: RefCell<FxHashSet<EntityId>> = Default::default();
         let input_rate_tracker = Rc::new(RefCell::new(InputRateTracker::default()));
         let last_frame_time = Rc::new(Cell::new(None));
 
@@ -2051,6 +2055,7 @@ impl Window {
             rendered_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
             next_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
             next_frame_callbacks,
+            pending_animation_frame_views,
             next_hitbox_id: HitboxId(0),
             next_tooltip_id: TooltipId::default(),
             tooltip_bounds: None,
@@ -2751,7 +2756,23 @@ impl Window {
     /// and skip the frame request when it is set.
     pub fn request_animation_frame(&self) {
         let entity = self.current_view();
-        self.on_next_frame(move |_, cx| cx.notify(entity));
+        if !self
+            .pending_animation_frame_views
+            .borrow_mut()
+            .insert(entity)
+        {
+            return;
+        }
+
+        self.on_next_frame(move |window, cx| {
+            // Clear before notifying: the resulting render must be able to
+            // request the following animation frame for this view.
+            window
+                .pending_animation_frame_views
+                .borrow_mut()
+                .remove(&entity);
+            cx.notify(entity);
+        });
     }
 
     /// Runs all callbacks scheduled via [`Self::on_next_frame`], returning how many ran.
@@ -4316,6 +4337,14 @@ impl Window {
         result
     }
 
+    /// Whether keyed element state belongs to the frame currently being drawn.
+    /// Cached prepaint replay preserves this membership. Outside drawing this
+    /// queries the last committed frame instead of retired element storage.
+    pub fn is_element_state_current(&self, global_id: &GlobalElementId) -> bool {
+        let frame = if self.invalidator.not_drawing() { &self.rendered_frame } else { &self.next_frame };
+        frame.accessed_element_states.iter().any(|(id, _)| id == global_id)
+    }
+
     /// Use a piece of state that exists as long this element is being rendered in consecutive frames.
     pub fn use_keyed_state<S: 'static>(
         &mut self,
@@ -4959,6 +4988,8 @@ impl Window {
                 content_mask,
                 tile,
                 opacity,
+                transformation: TransformationMatrix::unit(),
+                transformed_bounds: bounds,
             });
         }
         Ok(())
@@ -5046,6 +5077,24 @@ impl Window {
         frame_index: usize,
         grayscale: bool,
     ) -> Result<()> {
+        self.paint_image_with_transformation(
+            bounds, image_bounds, corner_radii, data, frame_index, grayscale,
+            TransformationMatrix::unit(),
+        )
+    }
+
+    /// Paint a cached image with a device-space transformation. Layout, image cropping and
+    /// corner radii are resolved before transformation; the parent content mask stays fixed.
+    pub fn paint_image_with_transformation(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        image_bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        data: Arc<RenderImage>,
+        frame_index: usize,
+        grayscale: bool,
+        transformation: TransformationMatrix,
+    ) -> Result<()> {
         self.invalidator.debug_assert_paint();
 
         let visible_bounds = bounds.intersect(&image_bounds);
@@ -5131,6 +5180,8 @@ impl Window {
             corner_radii,
             tile: sub_tile,
             opacity,
+            transformation,
+            transformed_bounds: transformation.transform_bounds(visible_bounds_snapped),
         });
         Ok(())
     }
@@ -7859,6 +7910,8 @@ fn with_element_arena_erased(callback: &mut dyn FnMut(&mut Arena)) -> Result<(),
 
 #[cfg(test)]
 mod tests {
+    use super::DrawPhase;
+
     use std::{
         cell::{Cell, RefCell},
         path::PathBuf,
@@ -8228,10 +8281,16 @@ mod tests {
         test_window.simulate_frame_request(RequestFrameOptions::default());
 
         let callback_ran = Rc::new(Cell::new(false));
+        let animation_view_id = window.entity(cx).unwrap().entity_id();
         window
             .update(cx, {
                 let callback_ran = callback_ran.clone();
                 move |_, window, _| {
+                    window.invalidator.set_phase(DrawPhase::Prepaint);
+                    window.with_rendered_view(animation_view_id, |window| {
+                        window.request_animation_frame();
+                    });
+                    window.invalidator.set_phase(DrawPhase::None);
                     window.on_next_frame(move |_, _| callback_ran.set(true));
                 }
             })
@@ -8249,6 +8308,81 @@ mod tests {
             test_window.frame_wake_count() > baseline || callback_ran.get(),
             "a frame request with pending next-frame callbacks must either run them or re-arm the frame source"
         );
+        window
+            .update(cx, |_, window, _| {
+                let callbacks_pending = !window.next_frame_callbacks.borrow().is_empty();
+                let animation_pending = window
+                    .pending_animation_frame_views
+                    .borrow()
+                    .contains(&animation_view_id);
+                assert_eq!(
+                    animation_pending, callbacks_pending,
+                    "an animation view remains pending exactly while its deferred frame callback is queued"
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn test_animation_frame_requests_deduplicate_per_view_and_preserve_generic_callbacks(
+        cx: &mut TestAppContext,
+    ) {
+        let window = cx.add_window(|_, _| EmptyView);
+        let first_view = cx.new(|_| EmptyView);
+        let second_view = cx.new(|_| EmptyView);
+        let first_id = first_view.entity_id();
+        let second_id = second_view.entity_id();
+        let generic_order = Rc::new(RefCell::new(Vec::new()));
+
+        cx.update_window(window.into(), {
+            let generic_order = generic_order.clone();
+            move |_, window, cx| {
+                // Exercise the same API in distinct rendered view scopes,
+                // without needing a platform frame loop.
+                window.invalidator.set_phase(DrawPhase::Prepaint);
+                window.with_rendered_view(first_id, |window| {
+                    window.request_animation_frame();
+                    window.request_animation_frame();
+                    window.request_animation_frame();
+                });
+                window.with_rendered_view(second_id, |window| {
+                    window.request_animation_frame();
+                    window.request_animation_frame();
+                });
+
+                // Generic callbacks remain distinct and FIFO-ordered.
+                let order = generic_order.clone();
+                window.on_next_frame(move |_, _| order.borrow_mut().push(1));
+                let order = generic_order.clone();
+                window.on_next_frame(move |_, _| order.borrow_mut().push(2));
+
+                assert_eq!(window.simulate_next_frame(cx), 4);
+                assert_eq!(*generic_order.borrow(), vec![1, 2]);
+                assert!(
+                    !window
+                        .pending_animation_frame_views
+                        .borrow()
+                        .contains(&first_id)
+                );
+                assert!(
+                    !window
+                        .pending_animation_frame_views
+                        .borrow()
+                        .contains(&second_id)
+                );
+
+                // A delivered callback releases its key before the next
+                // animation render schedules another frame.
+                window.with_rendered_view(first_id, |window| {
+                    window.request_animation_frame();
+                    window.request_animation_frame();
+                });
+                assert_eq!(window.simulate_next_frame(cx), 1);
+                assert_eq!(*generic_order.borrow(), vec![1, 2]);
+                window.invalidator.set_phase(DrawPhase::None);
+            }
+        })
+        .unwrap();
     }
 
     #[gpui::test]

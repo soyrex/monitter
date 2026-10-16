@@ -16,7 +16,7 @@ use std::{
 };
 
 const APPLICATION_ID: i64 = 0x4d4f4e54; // "MONT"
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 const LEGACY_SCHEMA_VERSION: i64 = 1;
 
 pub(crate) type StateRef<'a> = (
@@ -183,18 +183,136 @@ impl Database {
         usage_before: &History<RunUsageSample>,
         usage_after: &History<RunUsageSample>,
         captured_since: Option<i64>,
+        work_records: &[crate::work_log::PendingRecord],
+        removed_usage: &[RunUsageSample],
     ) -> Result<(), String> {
         let mut connection = self.lock()?;
         let transaction = connection
             .transaction()
             .map_err(|error| error.to_string())?;
         diff_state(&transaction, before, after)?;
+        for sample in removed_usage { crate::work_log::outbox::usage(&transaction,sample)?; }
         diff_usage_history(&transaction, usage_before, usage_after)?;
+        // While paused, lifecycle emits only a real task ending at the last
+        // observed boundary. Deliver that semantic closure without enabling
+        // general collection or usage capture outside this transaction.
+        let saved_settings=crate::work_log::outbox::settings(&transaction)?;
+        let forced_closure=!saved_settings.enabled && !work_records.is_empty();
+        if forced_closure {
+            let mut temporary=saved_settings.clone();temporary.enabled=true;
+            crate::work_log::outbox::set_meta(&transaction,"settings",&serde_json::to_string(&temporary).map_err(|e|e.to_string())?)?;
+        }
+        crate::work_log::outbox::append(&transaction,work_records,false)?;
+        if forced_closure {crate::work_log::outbox::set_meta(&transaction,"settings",&serde_json::to_string(&saved_settings).map_err(|e|e.to_string())?)?;}
         set_capture_since_if_changed(&transaction, captured_since)?;
         transaction
             .commit()
             .map_err(|error| format!("Cannot commit SQLite update: {error}"))?;
         private_sidecars(&self.path)
+    }
+
+    pub(crate) fn work_log_active_context(&self,run:&str)->Result<Option<crate::work_log::ContextRef>,String>{
+        let c=self.lock()?;let raw:Option<String>=c.query_row("SELECT payload FROM work_log_context_active WHERE run_id=?1",[run],|r|r.get(0)).optional().map_err(|e|e.to_string())?;
+        raw.map(|r|serde_json::from_str(&r).map_err(|_|"Work log context invalid.".into())).transpose()
+    }
+    pub(crate) fn work_log_segment_through(&self,reference:&crate::work_log::ContextRef)->Result<Option<String>,String>{
+        let c=self.lock()?;let start=reference.segment_start_id.as_ref().map(|id|c.query_row("SELECT position FROM entities WHERE collection='messages' AND task_id=?1 AND id=?2",params![reference.task_id,id],|r|r.get::<_,i64>(0)).optional()).transpose().map_err(|e|e.to_string())?.flatten().unwrap_or(-1);
+        c.query_row("SELECT id FROM entities WHERE collection='messages' AND task_id=?1 AND json_extract(payload,'$.role') IN ('user','assistant') AND position>=?2 AND position<coalesce((SELECT min(position) FROM entities WHERE collection='messages' AND task_id=?1 AND position>?2 AND json_extract(payload,'$.role')='system' AND json_extract(payload,'$.text')='Context Cleared'),9223372036854775807) ORDER BY position DESC LIMIT 1",params![reference.task_id,start],|r|r.get(0)).optional().map_err(|e|e.to_string())
+    }
+    pub(crate) fn work_log_context_anchors(&self,task:&str)->Result<(Option<String>,Option<String>),String>{
+        let c=self.lock()?;
+        let marker:Option<String>=c.query_row("SELECT id FROM entities WHERE collection='messages' AND task_id=?1 AND json_extract(payload,'$.role')='system' AND json_extract(payload,'$.text')='Context Cleared' ORDER BY position DESC LIMIT 1",[task],|r|r.get(0)).optional().map_err(|e|e.to_string())?;
+        let first:Option<String>=c.query_row("SELECT id FROM entities WHERE collection='messages' AND task_id=?1 AND json_extract(payload,'$.role') IN ('user','assistant') ORDER BY position LIMIT 1",[task],|r|r.get(0)).optional().map_err(|e|e.to_string())?;
+        let last:Option<String>=c.query_row("SELECT id FROM entities WHERE collection='messages' AND task_id=?1 AND json_extract(payload,'$.role') IN ('user','assistant') AND position>coalesce((SELECT max(position) FROM entities WHERE collection='messages' AND task_id=?1 AND json_extract(payload,'$.role')='system' AND json_extract(payload,'$.text')='Context Cleared'),-1) ORDER BY position DESC LIMIT 1",[task],|r|r.get(0)).optional().map_err(|e|e.to_string())?;
+        Ok((marker.or(first),last))
+    }
+    pub(crate) fn work_log_lineage(&self,task:&str)->Result<(Option<String>,Option<String>,Option<String>,Option<String>),String>{
+        let c=self.lock()?;
+        let raw:Option<String>=c.query_row("SELECT json_extract(payload,'$.detail') FROM entities WHERE collection='events' AND task_id=?1 AND json_extract(payload,'$.kind')='contextLineage' ORDER BY position DESC LIMIT 1",[task],|r|r.get(0)).optional().map_err(|e|e.to_string())?;
+        let v:serde_json::Value=raw.and_then(|v|serde_json::from_str(&v).ok()).unwrap_or_default();
+        let text=|k|v.get(k).and_then(|v|v.as_str()).map(str::to_owned);
+        let root=text("lineageRootTaskId").unwrap_or_else(||task.into());
+        Ok((text("kind"),text("sourceTaskId"),text("sourceThroughMessageId"),Some(root)))
+    }
+    pub(crate) fn work_log_stats(&self)->Result<(u64,u64,Option<String>),String>{let c=self.lock()?;let(n,b)=c.query_row("SELECT count(*),coalesce(sum(length(CAST(payload AS BLOB))),0) FROM work_log_outbox",[],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?))).map_err(|e|e.to_string())?;Ok((n as u64,b as u64,crate::work_log::outbox::meta(&c,"degraded")?.filter(|s|!s.is_empty())))}
+    pub(crate) fn work_log_grants_json(&self)->Result<Option<String>,String>{crate::work_log::outbox::meta(&*self.lock()?,"grants")}
+    pub(crate) fn work_log_set_grants_json(&self,value:&str)->Result<(),String>{crate::work_log::outbox::set_meta(&*self.lock()?,"grants",value)}
+    pub(crate) fn work_log_settings(&self) -> Result<crate::work_log::CollectionSettings,String> {crate::work_log::outbox::settings(&*self.lock()?)}
+    pub(crate) fn work_log_identity(&self) -> Result<(String,String),String> {let c=self.lock()?;Ok((crate::work_log::outbox::identity(&c,"installationId")?,crate::work_log::outbox::identity(&c,"profileId")?))}
+    pub(crate) fn work_log_active(&self) -> Result<Vec<crate::work_log::WorkRun>,String> {crate::work_log::outbox::active(&*self.lock()?)}
+    pub(crate) fn work_log_pending(&self,limit:usize) -> Result<Vec<crate::work_log::CommittedRecord>,String> {crate::work_log::outbox::pending(&*self.lock()?,limit)}
+    pub(crate) fn work_log_acknowledge(&self,through:i64)->Result<(),String>{crate::work_log::outbox::acknowledge(&*self.lock()?,through)}
+    pub(crate) fn work_log_append(&self,records:&[crate::work_log::PendingRecord])->Result<(),String>{
+        let mut c=self.lock()?;let tx=c.transaction().map_err(|e|e.to_string())?;
+        crate::work_log::outbox::append(&tx,records,false)?;
+        tx.commit().map_err(|e|e.to_string())
+    }
+    pub(crate) fn work_log_configure(&self,settings:&crate::work_log::CollectionSettings)->Result<(),String>{
+        self.work_log_configure_with_records(settings,&mut [])
+    }
+    /// Settings, observed pause endpoints and gap boundaries share one primary
+    /// transaction. The caller holds the state-writer fence and publishes its
+    /// cloned lifecycle only after this commit succeeds.
+    pub(crate) fn work_log_configure_with_records(&self,settings:&crate::work_log::CollectionSettings,records:&mut [crate::work_log::PendingRecord])->Result<(),String>{
+        settings.validate()?;
+        let mut c=self.lock()?;
+        let tx=c.transaction().map_err(|e|e.to_string())?;
+        let old=crate::work_log::outbox::settings(&tx)?;
+        let switching_off=old.enabled && !settings.enabled;
+        let switching_on=!old.enabled && settings.enabled;
+        let mut batch=records.to_vec();
+        if switching_off {
+            for record in &mut batch {
+                if let crate::work_log::WorkRecord::Context(context)=&mut record.record {
+                    // Only a reference with a known source anchor may capture
+                    // an endpoint. A resumed segment awaiting its first new
+                    // message must not absorb text written during the pause.
+                    if context.availability==crate::work_log::ContextAvailability::Available {
+                        let start=match context.segment_start_id.as_ref() {
+                            Some(anchor)=>tx.query_row("SELECT position FROM entities WHERE collection='messages' AND task_id=?1 AND id=?2",params![context.task_id,anchor],|r|r.get::<_,i64>(0)).optional().map_err(|e|e.to_string())?.ok_or("Work log context anchor unavailable.")?,
+                            None=>-1,
+                        };
+                        let end:Option<(String,i64)>=tx.query_row("SELECT id,length(CAST(json_extract(payload,'$.text') AS BLOB)) FROM entities WHERE collection='messages' AND task_id=?1 AND json_extract(payload,'$.role') IN ('user','assistant') AND position>=?2 AND position<coalesce((SELECT min(position) FROM entities WHERE collection='messages' AND task_id=?1 AND position>?2 AND json_extract(payload,'$.role')='system' AND json_extract(payload,'$.text')='Context Cleared'),9223372036854775807) ORDER BY position DESC LIMIT 1",params![context.task_id,start],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(|e|e.to_string())?;
+                        if let Some((id,bytes))=end {
+                            context.through_message_id=Some(id);
+                            context.through_message_text_bytes=Some(bytes.max(0).min(u32::MAX as i64) as u32);
+                        }
+                    }
+                }
+            }
+            let paused_at=batch.iter().find_map(|r|match &r.record {crate::work_log::WorkRecord::Run(run)=>Some(run.observed_at),_=>None}).unwrap_or_else(now);
+            let gap=crate::work_log::CollectorGap{gap_id:id(),run_id:None,started_at:paused_at,ended_at:None,reason:"collectionPaused".into(),dropped:0};
+            crate::work_log::outbox::set_meta(&tx,"pause_gap",&serde_json::to_string(&gap).map_err(|e|e.to_string())?)?;
+            batch.push(crate::work_log::PendingRecord{source_key:format!("pause:{}:open",gap.gap_id),record:crate::work_log::WorkRecord::Gap(gap)});
+            crate::work_log::outbox::append(&tx,&batch,false)?;
+            for (original,updated) in records.iter_mut().zip(batch.iter()) { *original=updated.clone(); }
+            crate::work_log::outbox::set_meta(&tx,"settings",&serde_json::to_string(settings).map_err(|e|e.to_string())?)?;
+        } else if switching_on {
+            crate::work_log::outbox::set_meta(&tx,"settings",&serde_json::to_string(settings).map_err(|e|e.to_string())?)?;
+            if let Some(raw)=crate::work_log::outbox::meta(&tx,"pause_gap")? {
+                let mut gap:crate::work_log::CollectorGap=serde_json::from_str(&raw).map_err(|_|"Invalid saved collection pause gap.")?;
+                gap.ended_at=Some(batch.iter().find_map(|r|match &r.record {crate::work_log::WorkRecord::Event(event) if event.kind=="resume"=>Some(event.occurred_at),_=>None}).unwrap_or_else(now));
+                batch.insert(0,crate::work_log::PendingRecord{source_key:format!("pause:{}:close",gap.gap_id),record:crate::work_log::WorkRecord::Gap(gap)});
+                tx.execute("DELETE FROM work_log_meta WHERE key='pause_gap'",[]).map_err(|e|e.to_string())?;
+            }
+            crate::work_log::outbox::append(&tx,&batch,false)?;
+        } else {
+            crate::work_log::outbox::set_meta(&tx,"settings",&serde_json::to_string(settings).map_err(|e|e.to_string())?)?;
+        }
+        tx.commit().map_err(|e|e.to_string())
+    }
+    pub(crate) fn work_log_append_recovery(&self,records:&[crate::work_log::PendingRecord])->Result<(),String>{
+        let mut c=self.lock()?;let tx=c.transaction().map_err(|e|e.to_string())?;
+        let old=crate::work_log::outbox::settings(&tx)?;
+        if !old.enabled { let mut temporary=old.clone();temporary.enabled=true;crate::work_log::outbox::set_meta(&tx,"settings",&serde_json::to_string(&temporary).map_err(|e|e.to_string())?)?; }
+        crate::work_log::outbox::append(&tx,records,false)?;
+        if !old.enabled {crate::work_log::outbox::set_meta(&tx,"settings",&serde_json::to_string(&old).map_err(|e|e.to_string())?)?;}
+        tx.commit().map_err(|e|e.to_string())
+    }
+    pub(crate) fn work_log_report(&self,run:&crate::work_log::WorkRun,input:&crate::work_log::ReportInput)->Result<crate::work_log::ReportReceipt,String>{
+        let mut c=self.lock()?;let tx=c.transaction().map_err(|e|e.to_string())?;
+        let receipt=crate::work_log::outbox::report(&tx,run,input)?;
+        tx.commit().map_err(|_|"Cannot commit work log report; reopen to reconcile durable state.".to_string())?;Ok(receipt)
     }
 
     pub(crate) fn read_resident_snapshot(&self) -> Result<(Snapshot, HashMap<String, Host>, HashMap<String, StoredAttachment>, Vec<RunUsageSample>, Option<i64>), String> {
@@ -230,6 +348,8 @@ impl Database {
             messages: read_history(&connection, "messages", resident)?,
             mail_batches: read_vec(&connection, "mail_batches")?,
             work_plans: read_vec(&connection, "work_plans")?,
+            build_requests: read_vec(&connection, "build_requests")?,
+            build_runs: read_vec(&connection, "build_runs")?,
             events: read_history(&connection, "events", resident)?,
             channels: read_channels(&connection,resident)?,
             project_board_messages: read_vec(&connection, "project_board_messages")?,
@@ -438,7 +558,8 @@ fn initialize_schema(connection: &Connection) -> Result<(), String> {
              CREATE INDEX usage_samples_position ON usage_samples(position);
              INSERT INTO meta(key, value) VALUES('schema_version', '{SCHEMA_VERSION}');"
         ))
-        .map_err(|e| format!("Cannot initialise SQLite schema: {e}"))
+        .map_err(|e| format!("Cannot initialise SQLite schema: {e}"))?;
+    connection.execute_batch(crate::work_log::outbox::DDL).map_err(|e|e.to_string())
 }
 
 fn validate_schema(connection: &Connection) -> Result<(), String> {
@@ -518,11 +639,12 @@ fn migrate_schema(connection: &Connection) -> Result<(), String> {
     validate_schema_layout(connection)?;
     match read_schema_version(connection)? {
         SCHEMA_VERSION => Ok(()),
-        LEGACY_SCHEMA_VERSION => {
+        2 | LEGACY_SCHEMA_VERSION => {
             let transaction = connection
                 .unchecked_transaction()
                 .map_err(|error| error.to_string())?;
-            migrate_channels_v1_to_v2(&transaction)?;
+            if read_schema_version(&transaction)? == LEGACY_SCHEMA_VERSION { migrate_channels_v1_to_v2(&transaction)?; }
+            transaction.execute_batch(crate::work_log::outbox::DDL).map_err(|e|e.to_string())?;
             transaction
                 .execute(
                     "UPDATE meta SET value=?1 WHERE key='schema_version'",
@@ -601,6 +723,8 @@ fn write_state(transaction: &Transaction<'_>, state: StateRef<'_>) -> Result<(),
         mail_batch_key,
     )?;
     write_vec(transaction, "work_plans", &snapshot.work_plans, plain_id)?;
+    write_vec(transaction, "build_requests", &snapshot.build_requests, plain_id)?;
+    write_vec(transaction, "build_runs", &snapshot.build_runs, plain_id)?;
     write_history(transaction, "events", &snapshot.events, event_key)?;
     write_channels(transaction, &snapshot.channels)?;
     write_vec(
@@ -712,6 +836,8 @@ fn diff_state(
         &after_snapshot.work_plans,
         plain_id,
     )?;
+    diff_vec(transaction, "build_requests", &before_snapshot.build_requests, &after_snapshot.build_requests, plain_id)?;
+    diff_vec(transaction, "build_runs", &before_snapshot.build_runs, &after_snapshot.build_runs, plain_id)?;
     diff_history(
         transaction,
         "events",
@@ -847,6 +973,8 @@ has_id!(
     Message,
     MailBatch,
     WorkPlan,
+    BuildRequest,
+    BuildRun,
     RunEvent,
     Channel,
     ChannelMessage,
@@ -1585,6 +1713,7 @@ fn put_usage(
     sample: &RunUsageSample,
     position: usize,
 ) -> Result<(), String> {
+    crate::work_log::outbox::usage(transaction,sample)?;
     transaction.execute("INSERT INTO usage_samples(sample_id,position,payload) VALUES(?1,?2,?3) ON CONFLICT(sample_id) DO UPDATE SET position=excluded.position,payload=excluded.payload", params![sample.sample_id, position as i64, serde_json::to_string(sample).map_err(|e| e.to_string())?]).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -1773,6 +1902,7 @@ mod tests {
             observed_at: 2,
             final_sample: false,
             classification: "delta".into(),
+            counter_epoch: None,
             provider_turn_id: None,
             tokens: UsageTokens::default(),
             cost_usd: None,
@@ -2746,4 +2876,35 @@ mod tests {
         assert!(Database::open(&path).is_err());
         fs::remove_dir_all(directory).unwrap();
     }
+    #[test]
+    fn work_log_primary_v2_migration_backup_and_rollback_rehearsal() {
+        use std::os::unix::fs::OpenOptionsExt;
+        let (directory,path)=temp_path("work-log-migration");
+        let database=Database::create(&path).unwrap();
+        let mut before=crate::model::default_snapshot();
+        before.messages.push(history_message("durable-message","fixture-task","preserved source body"));
+        database.replace_all(state(&before),&[],None).unwrap();
+        {let connection=database.lock().unwrap();assert_eq!(connection.query_row("PRAGMA synchronous",[],|r|r.get::<_,i64>(0)).unwrap(),2);assert_eq!(connection.query_row("PRAGMA journal_mode",[],|r|r.get::<_,String>(0)).unwrap(),"wal");}
+        drop(database);
+        let c=Connection::open(&path).unwrap();
+        c.execute_batch("UPDATE meta SET value='2' WHERE key='schema_version'; DROP TABLE work_log_meta; DROP TABLE work_log_outbox; DROP TABLE work_log_active; DROP TABLE work_log_context_active; DROP TABLE work_log_loss; DROP TABLE work_log_receipts;").unwrap();
+        let backup=directory.join("pre-migration.sqlite3");
+        std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&backup).unwrap();
+        c.execute("VACUUM INTO ?1",[backup.to_str().unwrap()]).unwrap();
+        drop(c);
+        let migrated=Database::open(&path).unwrap();assert_eq!(migrated.read_snapshot().unwrap().0,before);
+        assert_eq!(read_schema_version(&migrated.lock().unwrap()).unwrap(),3);
+        migrated.integrity_check().unwrap();drop(migrated);
+        // A rollback copy remains a complete older schema; opening the upgraded
+        // database with an older binary is deliberately not promised as safe.
+        let c=Connection::open(&backup).unwrap();assert_eq!(read_schema_version(&c).unwrap(),2);
+        assert_eq!(c.query_row("PRAGMA integrity_check",[],|r|r.get::<_,String>(0)).unwrap(),"ok");
+        assert_eq!(c.query_row("SELECT json_extract(payload,'$.text') FROM entities WHERE collection='messages' AND id='durable-message'",[],|r|r.get::<_,String>(0)).unwrap(),"preserved source body");
+        c.execute_batch("CREATE TRIGGER fail_work_log_migration BEFORE UPDATE ON meta WHEN NEW.key='schema_version' BEGIN SELECT RAISE(ABORT,'fixture migration failure'); END;").unwrap();drop(c);
+        assert!(Database::open(&backup).is_err());
+        let c=Connection::open(&backup).unwrap();assert_eq!(read_schema_version(&c).unwrap(),2);
+        assert_eq!(c.query_row("SELECT count(*) FROM sqlite_master WHERE name='work_log_outbox'",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+        drop(c);fs::remove_dir_all(directory).unwrap();
+    }
+
 }

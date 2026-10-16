@@ -52,7 +52,11 @@ fn composer(
     Entity<TextareaState>,
     Rc<Cell<usize>>,
 ) {
-    cx.update(gpui_kit::init);
+    cx.update(|app| {
+        gpui_kit::init(app);
+        app.bind_keys(crate::shortcut_desktop::pane_and_workspace_bindings());
+        app.on_action(|_: &crate::native_menu::Fullscreen, _| {});
+    });
     let input_slot = Rc::new(std::cell::RefCell::new(None));
     let sends = Rc::new(Cell::new(0));
     let (_, visual) = cx.add_window_view({
@@ -99,7 +103,7 @@ fn plain_enter_sends_only_when_preference_is_enabled(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn shift_enter_inserts_newline_and_secondary_enter_sends(cx: &mut TestAppContext) {
+fn shift_enter_inserts_newline_and_cmd_enter_does_not_send(cx: &mut TestAppContext) {
     let (visual, input, sends) = composer(cx, true);
     visual.update(|window, app| input.update(app, |state, cx| state.focus(window, cx)));
     enter(visual, "shift-enter");
@@ -109,7 +113,8 @@ fn shift_enter_inserts_newline_and_secondary_enter_sends(cx: &mut TestAppContext
     let (visual, input, sends) = composer(cx, false);
     visual.update(|window, app| input.update(app, |state, cx| state.focus(window, cx)));
     enter(visual, "cmd-enter");
-    assert_eq!(sends.get(), 1);
+    assert_eq!(sends.get(), 0);
+    input.read_with(cx, |state, _| assert_eq!(state.value().as_ref(), ""));
 }
 
 #[gpui::test]
@@ -124,4 +129,45 @@ fn marked_ime_composition_enter_never_sends(cx: &mut TestAppContext) {
     });
     enter(visual, "enter");
     assert_eq!(sends.get(), 0);
+}
+
+#[gpui::test]
+fn fullscreen_aliases_dispatch_without_sending_or_changing_composer(cx: &mut TestAppContext) {
+    let toggles = Rc::new(Cell::new(0));
+    let (visual, input, sends) = composer(cx, true);
+    let observed = toggles.clone();
+    visual.update(move |_, app| { app.on_action(move |_: &crate::native_menu::Fullscreen, _| {
+        observed.set(observed.get() + 1);
+    }); });
+    visual.update(|window, app| input.update(app, |state, cx| {
+        state.set_value("draft", window, cx);
+        state.focus(window, cx);
+    }));
+    enter(visual, "cmd-ctrl-f");
+    enter(visual, "cmd-enter");
+    assert_eq!(toggles.get(), 2);
+    assert_eq!(sends.get(), 0);
+    input.read_with(cx, |state, _| assert_eq!(state.value().as_ref(), "draft"));
+}
+
+#[gpui::test]
+fn fullscreen_aliases_toggle_real_window_from_focused_composer(cx: &mut TestAppContext) {
+    let (visual, input, sends) = composer(cx, true);
+    visual.update(|window, app| {
+        crate::native_menu::install(app);
+        window.activate_window();
+        input.update(app, |state, cx| {
+            state.set_value("preserved draft", window, cx);
+            state.focus(window, cx);
+        });
+        assert!(!window.is_fullscreen());
+    });
+    enter(visual, "cmd-ctrl-f");
+    visual.run_until_parked();
+    visual.update(|window, _| assert!(window.is_fullscreen(), "Ctrl+Cmd+F enters fullscreen"));
+    enter(visual, "cmd-enter");
+    visual.run_until_parked();
+    visual.update(|window, _| assert!(!window.is_fullscreen(), "Cmd+Enter exits fullscreen"));
+    assert_eq!(sends.get(), 0);
+    input.read_with(cx, |state, _| assert_eq!(state.value().as_ref(), "preserved draft"));
 }

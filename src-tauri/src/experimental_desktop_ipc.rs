@@ -5,6 +5,15 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 const VERSION: u32 = 1;
 const MAX_FRAME: usize = 32 * 1024 * 1024;
 const MAX_CONNECTIONS: usize = 32;
+pub(super) const UNKNOWN_PRIVATE_NATIVE_METHOD: &str =
+    "Unknown private native method. Server shutdown is available only in the menu-bar server.";
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct NativeUiChangesArgs {
+    revision: Option<String>,
+    message_task_ids: Vec<String>,
+}
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -74,7 +83,7 @@ mod unix {
             },
         },
         path::Path,
-        sync::Mutex,
+        sync::{Mutex, Condvar},
         thread,
         time::{Duration, Instant},
     };
@@ -266,8 +275,94 @@ mod unix {
         }
     }
 
+    // Tickets are allocated before dispatch. An evicted/expired ticket can only
+    // fail: execution never allocates a replacement, so no tombstones are needed.
+    const REPLAY_TTL: Duration = Duration::from_secs(600);
+    const REPLAY_LIMIT: usize = 64;
+    const REPLAY_ARGS_LIMIT: usize = 16 * 1024 * 1024;
+    const REPLAY_RESPONSE_LIMIT: usize = 256 * 1024;
+    type ReplayResult = Result<Value, String>;
+    enum ReplayStatus { Reserved(Value), Running, Complete(ReplayResult) }
+    struct ReplayEntry {
+        created: Instant,
+        method: String,
+        bytes: usize,
+        status: Mutex<ReplayStatus>,
+        changed: Condvar,
+    }
+    #[derive(Default)]
+    struct ReplayReceipts(Mutex<std::collections::HashMap<String, Arc<ReplayEntry>>>);
+    impl ReplayReceipts {
+        fn reserve(&self, method: String, args: Value) -> Result<String, String> {
+            if matches!(method.as_str(), "reserve_replay" | "execute_replay" | "subscribe_changes") {
+                return Err("Invalid private IPC replay target.".into());
+            }
+            let bytes = serde_json::to_vec(&args).map_err(|_| "Invalid private IPC replay arguments.")?.len() + method.len();
+            let mut entries = self.0.lock().map_err(|_| "Private IPC replay receipts unavailable.")?;
+            entries.retain(|_, entry| entry.created.elapsed() < REPLAY_TTL ||
+                matches!(*entry.status.lock().unwrap_or_else(|e| e.into_inner()), ReplayStatus::Running));
+            if bytes > REPLAY_ARGS_LIMIT { return Err("Private IPC replay arguments exceed capacity; no command was dispatched.".into()); }
+            while entries.len() >= REPLAY_LIMIT || entries.values().map(|entry| entry.bytes).sum::<usize>() + bytes > REPLAY_ARGS_LIMIT {
+                let oldest = entries.iter().filter(|(_, entry)|
+                    !matches!(*entry.status.lock().unwrap_or_else(|e| e.into_inner()), ReplayStatus::Running))
+                    .min_by_key(|(_, entry)| entry.created).map(|(ticket, _)| ticket.clone());
+                match oldest {
+                    Some(ticket) => { entries.remove(&ticket); }
+                    None => return Err("Private IPC replay capacity is temporarily full; no command was dispatched.".into()),
+                }
+            }
+            let ticket = uuid::Uuid::new_v4().to_string();
+            entries.insert(ticket.clone(), Arc::new(ReplayEntry { created: Instant::now(), method, bytes,
+                status: Mutex::new(ReplayStatus::Reserved(args)), changed: Condvar::new() }));
+            Ok(ticket)
+        }
+        fn execute(&self, ticket: &str, dispatch: impl FnOnce(&str, Value) -> ReplayResult) -> ReplayResult {
+            let entries = self.0.lock().map_err(|_| "Private IPC replay receipts unavailable.")?;
+            let entry = entries.get(ticket).cloned().ok_or("Private IPC replay receipt expired or backend changed. Refresh state before retrying.")?;
+            let mut status = entry.status.lock().map_err(|_| "Private IPC replay receipt unavailable.")?;
+            // Mark Reserved -> Running while still holding the table lock, so
+            // capacity eviction cannot race the transition into execution.
+            let owned_args = match &mut *status {
+                ReplayStatus::Reserved(args) => {
+                    if entry.created.elapsed() >= REPLAY_TTL { return Err("Private IPC replay reservation expired; no command was dispatched.".into()); }
+                    Some(std::mem::take(args))
+                }
+                _ => None,
+            };
+            if owned_args.is_some() { *status = ReplayStatus::Running; }
+            drop(entries);
+            if let Some(args) = owned_args {
+                drop(status);
+                // Move sensitive inputs out of the receipt; completed receipts
+                // retain only the result, never a second copy of arguments.
+                let result = dispatch(&entry.method, args);
+                let cached = if serde_json::to_vec(&result).map_or(true, |v| v.len() > REPLAY_RESPONSE_LIMIT) {
+                    Err("Private IPC command completed but its replay receipt is too large. Refresh state before retrying.".into())
+                } else { result.clone() };
+                *entry.status.lock().unwrap_or_else(|e| e.into_inner()) = ReplayStatus::Complete(cached);
+                entry.changed.notify_all();
+                return result;
+            }
+            let deadline = Instant::now() + Duration::from_secs(360);
+            loop {
+                match &*status {
+                    ReplayStatus::Complete(result) => return result.clone(),
+                    ReplayStatus::Running => {
+                        let remaining = deadline.saturating_duration_since(Instant::now());
+                        let (next, timeout) = entry.changed.wait_timeout(status, remaining)
+                            .map_err(|_| "Private IPC replay receipt unavailable.")?;
+                        status = next;
+                        if timeout.timed_out() { return Err("Private IPC command remains in flight. Refresh state before retrying.".into()); }
+                    }
+                    ReplayStatus::Reserved(_) => unreachable!("reservation claimed under table lock"),
+                }
+            }
+        }
+    }
+
     struct ServerState {
         backend: BackendService,
+        replay: ReplayReceipts,
         profile: PathBuf,
         instance: String,
         stopping: AtomicBool,
@@ -309,6 +404,7 @@ mod unix {
                 .map_err(|_| "Cannot configure private IPC socket.")?;
             let state = Arc::new(ServerState {
                 backend,
+                replay: ReplayReceipts::default(),
                 profile,
                 instance: uuid::Uuid::new_v4().to_string(),
                 stopping: AtomicBool::new(false),
@@ -366,6 +462,11 @@ mod unix {
                 accept: Mutex::new(Some(accept)),
             })
         }
+        pub fn prepare_replacement(&self) -> Result<(), String> { self.state.backend.prepare_replacement() }
+        pub fn begin_restart(&self, mode: crate::server_restart::RestartMode) -> Result<crate::server_restart::RestartStatus, String> { self.state.backend.begin_restart(mode) }
+        pub fn poll_restart(&self) -> Result<Option<crate::server_restart::RestartStatus>, String> { self.state.backend.poll_restart() }
+        pub fn cancel_restart(&self) -> Result<(), String> { self.state.backend.cancel_restart() }
+        pub fn active_agents(&self) -> Result<Vec<crate::server_restart::RestartAgent>, String> { self.state.backend.restart_active_agents() }
         pub fn instance_id(&self) -> &str {
             &self.state.instance
         }
@@ -459,7 +560,18 @@ mod unix {
             }
             return Ok(());
         }
-        let result = dispatch(&state.backend, &request.method, request.args);
+        let result = match request.method.as_str() {
+            "reserve_replay" => (|| {
+                let method = arg::<String>(&request.args, "method")?;
+                let args = arg::<Value>(&request.args, "args")?;
+                state.replay.reserve(method, args).map(Value::String)
+            })(),
+            "execute_replay" => (|| {
+                let ticket = arg::<String>(&request.args, "ticket")?;
+                state.replay.execute(&ticket, |method, args| dispatch(&state.backend, method, args))
+            })(),
+            _ => dispatch(&state.backend, &request.method, request.args),
+        };
         let response = match result {
             Ok(result) => Response {
                 id: request.id,
@@ -517,8 +629,8 @@ mod unix {
     }
     fn read_only_request(method: &str, args: &Value) -> bool {
         match method {
-            "read_ui_changes" | "read_idle_runtime_status" | "read_task_messages" | "read_channel_messages" | "read_attachment_file" | "load_native_preferences" | "read_lan_status" | "get_agent_extension_assignments" | "subscribe_changes" => true,
-            "invoke" => matches!(args["command"].as_str(), Some("get_snapshot" | "get_ui_snapshot" | "get_ui_delta" | "get_process_metrics" | "get_task_messages" | "get_channel_messages" | "get_task_events" | "get_task_event_detail" | "get_usage_overview" | "get_task_goal" | "get_task_slash_commands" | "get_subagent_transcript" | "get_task_git_status" | "get_task_git_diff" | "list_terminals" | "read_terminal" | "get_command_capabilities")),
+            "read_browser_open_requests" | "read_ui_changes" | "read_native_ui_changes" | "read_idle_runtime_status" | "read_task_messages" | "read_channel_messages" | "read_attachment_file" | "load_native_preferences" | "read_lan_status" | "get_agent_extension_assignments" | "subscribe_changes" => true,
+            "invoke" => matches!(args["command"].as_str(), Some("read_admin_activity" | "get_snapshot" | "get_ui_snapshot" | "get_ui_delta" | "get_process_metrics" | "get_task_messages" | "get_channel_messages" | "get_task_events" | "get_task_event_detail" | "get_usage_overview" | "get_task_goal" | "get_task_slash_commands" | "get_subagent_transcript" | "get_task_git_status" | "get_task_git_diff" | "list_terminals" | "read_terminal" | "get_command_capabilities")),
             _ => false,
         }
     }
@@ -573,9 +685,27 @@ mod unix {
             method: &str,
             args: Value,
         ) -> Result<T, String> {
-            retry_client(read_only_request(method, &args), || {
+            let id = uuid::Uuid::new_v4().to_string();
+            let read_only = read_only_request(method, &args);
+            if !read_only {
+                // Reserving cannot execute the target. Older v1 servers reject
+                // this method before dispatch; retain their conservative policy.
+                let reservation: Result<String, String> = retry_client(true, || {
+                    let mut socket = self.socket_typed()?;
+                    request_on_socket_typed(&mut socket, &id, "reserve_replay",
+                        serde_json::json!({"method": method, "args": args.clone()}))
+                }, thread::sleep);
+                match reservation {
+                    Ok(ticket) => return retry_client(true, || {
+                        let mut socket = self.socket_typed()?;
+                        request_on_socket_typed(&mut socket, &id, "execute_replay", serde_json::json!({"ticket": ticket}))
+                    }, thread::sleep),
+                    Err(error) if error == UNKNOWN_PRIVATE_NATIVE_METHOD => {},
+                    Err(error) => return Err(error),
+                }
+            }
+            retry_client(read_only, || {
                 let mut socket = self.socket_typed()?;
-                let id = uuid::Uuid::new_v4().to_string();
                 request_on_socket_typed(&mut socket, &id, method, args.clone())
             }, thread::sleep)
         }
@@ -727,6 +857,123 @@ mod unix {
         use super::*;
         use serde_json::json;
         #[test]
+        fn ipc_retry_client_ticket_drop_semantic_error_and_legacy_fallback() {
+            for mode in ["drop", "semantic", "legacy"] {
+                let root = std::env::temp_dir().join(format!("gpui-ipc-client-fixture-{}", uuid::Uuid::new_v4()));
+                let profile = secure_profile(&root.join(APP_ID), true).unwrap();
+                let path = socket_path(&profile, true).unwrap();
+                let listener = UnixListener::bind(&path).unwrap();
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+                let server_profile = profile.clone();
+                let worker = thread::spawn(move || {
+                    let instance = uuid::Uuid::new_v4().to_string();
+                    let receipts = ReplayReceipts::default();
+                    let mut executions = 0;
+                    let mut execute_id = None;
+                    let connections = if mode == "drop" { 4 } else { 3 };
+                    for index in 0..connections {
+                        let (mut peer, _) = listener.accept().unwrap();
+                        peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                        let hello: Hello = read_frame(&mut peer).unwrap();
+                        assert_eq!(hello.profile, server_profile.to_string_lossy());
+                        write_frame(&mut peer, &Welcome { version: VERSION, instance_id: instance.clone(), pid: std::process::id() }).unwrap();
+                        if index == 0 { continue; } // Client::connect handshake.
+                        let request: Request = read_frame(&mut peer).unwrap();
+                        let result = match request.method.as_str() {
+                            "reserve_replay" if mode == "legacy" => Err(UNKNOWN_PRIVATE_NATIVE_METHOD.into()),
+                            "reserve_replay" => {
+                                let method = arg::<String>(&request.args, "method").unwrap();
+                                let args = arg::<Value>(&request.args, "args").unwrap();
+                                receipts.reserve(method, args).map(Value::String)
+                            }
+                            "execute_replay" => {
+                                if let Some(id) = &execute_id { assert_eq!(id, &request.id); }
+                                else { execute_id = Some(request.id.clone()); }
+                                receipts.execute(request.args["ticket"].as_str().unwrap(), |method, args| {
+                                    assert_eq!(method, "invoke"); assert_eq!(args["command"], "fixture_mutation");
+                                    executions += 1;
+                                    if mode == "semantic" { Err("Private IPC connection lost inside a backend validation error".into()) }
+                                    else { Ok(json!(42)) }
+                                })
+                            }
+                            "invoke" if mode == "legacy" => { executions += 1; Ok(json!(42)) }
+                            other => panic!("unexpected fixture method: {other}"),
+                        };
+                        if mode == "drop" && index == 2 { continue; } // Committed, acknowledgement lost.
+                        let (result, error) = match result { Ok(value) => (value, None), Err(error) => (Value::Null, Some(error)) };
+                        write_frame(&mut peer, &Response { id: request.id, result, error }).unwrap();
+                    }
+                    assert_eq!(executions, 1);
+                });
+                let client = Client::connect(&profile).unwrap();
+                let result: Result<Value, String> = client.call("invoke", json!({"command":"fixture_mutation","args":{}}));
+                if mode == "semantic" { assert_eq!(result.unwrap_err(), "Private IPC connection lost inside a backend validation error"); }
+                else { assert_eq!(result.unwrap(), json!(42)); }
+                worker.join().unwrap();
+                drop(client); std::fs::remove_file(&path).unwrap();
+                std::fs::remove_dir(path.parent().unwrap()).unwrap();
+                std::fs::remove_dir_all(root).unwrap();
+            }
+        }
+        #[test]
+        fn replay_receipt_survives_dropped_response_and_coalesces_concurrent_execute() {
+            let receipts = Arc::new(ReplayReceipts::default());
+            let ticket = receipts.reserve("fixture_mutation".into(), json!({"value": 42})).unwrap();
+            let calls = Arc::new(AtomicUsize::new(0));
+            let (started_tx, started_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let first_receipts = receipts.clone(); let first_ticket = ticket.clone(); let first_calls = calls.clone();
+            let (client, mut peer) = UnixStream::pair().unwrap();
+            let first = thread::spawn(move || {
+                let result = first_receipts.execute(&first_ticket, |method, args| {
+                    assert_eq!(method, "fixture_mutation"); assert_eq!(args["value"], 42);
+                    first_calls.fetch_add(1, Ordering::SeqCst);
+                    started_tx.send(()).unwrap(); release_rx.recv().unwrap(); Ok(json!(42))
+                });
+                // The mutation completes after the original socket disappears.
+                assert!(write_frame(&mut peer, &Response { id: "fixture".into(), result: result.unwrap(), error: None }).is_err());
+            });
+            started_rx.recv().unwrap(); drop(client);
+            let entry = receipts.0.lock().unwrap().get(&ticket).unwrap().clone();
+            let duplicate_receipts = receipts.clone(); let duplicate_ticket = ticket.clone();
+            let duplicate = thread::spawn(move || duplicate_receipts.execute(&duplicate_ticket,
+                |_, _| panic!("concurrent replay must not dispatch")));
+            // Table + first executor + observer + duplicate executor. Wait for
+            // duplicate lookup while the first dispatch is still held, rather
+            // than relying on scheduler timing or sleeping.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Arc::strong_count(&entry) < 4 {
+                assert!(Instant::now() < deadline, "duplicate did not enter execution");
+                thread::yield_now();
+            }
+            release_tx.send(()).unwrap(); first.join().unwrap();
+            assert_eq!(duplicate.join().unwrap().unwrap(), json!(42));
+            assert_eq!(receipts.execute(&ticket, |_, _| panic!("completed replay must not dispatch")).unwrap(), json!(42));
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+        }
+        #[test]
+        fn replay_missing_expired_evicted_and_large_receipts_never_dispatch_again() {
+            let receipts = ReplayReceipts::default();
+            let ticket = receipts.reserve("fixture".into(), Value::Null).unwrap();
+            receipts.execute(&ticket, |_, _| Ok(json!(42))).unwrap();
+            for _ in 0..REPLAY_LIMIT { receipts.reserve("fixture".into(), Value::Null).unwrap(); }
+            assert!(receipts.execute(&ticket, |_, _| panic!("eviction must deny execution")).is_err());
+            assert!(ReplayReceipts::default().execute(&ticket, |_, _| panic!("restart must deny execution")).is_err());
+            let ticket = receipts.reserve("fixture".into(), Value::Null).unwrap();
+            { let mut entries = receipts.0.lock().unwrap();
+              Arc::get_mut(entries.get_mut(&ticket).unwrap()).unwrap().created = Instant::now() - REPLAY_TTL; }
+            assert!(receipts.execute(&ticket, |_, _| panic!("expired reservation must not execute")).is_err());
+            let ticket = receipts.reserve("fixture".into(), Value::Null).unwrap();
+            let large = json!("x".repeat(REPLAY_RESPONSE_LIMIT));
+            assert_eq!(receipts.execute(&ticket, |_, _| Ok(large.clone())).unwrap(), large);
+            assert!(receipts.execute(&ticket, |_, _| panic!("large receipt must not execute again")).is_err());
+            let ticket = receipts.reserve("fixture".into(), Value::Null).unwrap();
+            assert_eq!(receipts.execute(&ticket, |_, _| Err("semantic validation error".into())).unwrap_err(), "semantic validation error");
+            assert_eq!(receipts.execute(&ticket, |_, _| panic!("semantic failure must be cached")).unwrap_err(), "semantic validation error");
+            assert!(receipts.reserve("execute_replay".into(), Value::Null).is_err());
+            assert!(receipts.0.lock().unwrap().len() <= REPLAY_LIMIT);
+        }
+        #[test]
         fn ipc_retry_policy_is_bounded_and_never_replays_ambiguous_mutations() {
             for (read_only, dispatched, semantic, expected) in [(true,false,false,3),(false,false,false,3),(true,true,false,3),(false,true,false,1),(true,false,true,1)] {
                 let mut calls = 0;
@@ -762,8 +1009,10 @@ mod unix {
                 assert_eq!(result.is_ok(), read_only);
             }
             assert!(!read_only_request("invoke", &json!({"command":"autoname"})));
+            assert!(read_only_request("read_native_ui_changes", &json!({"revision":null,"messageTaskIds":[]})));
             assert!(!read_only_request("invoke", &json!({"command":"rename_task"})));
             assert!(read_only_request("invoke", &json!({"command":"get_task_goal"})));
+            assert!(read_only_request("invoke", &json!({"command":"read_admin_activity"})));
         }
         #[test]
         fn ipc_retry_backend_errors_are_not_transport_failures() {
@@ -787,6 +1036,35 @@ mod unix {
                 assert!(!read_only_request("invoke", &json!({"command": command})));
             }
             assert!(!read_only_request("write_terminal_input", &Value::Null));
+        }
+        #[test]
+        fn browser_open_private_ipc_nondestructive_and_not_invoke() {
+            let (root, server) = fixture(); let client = Client::connect(&server.state.profile).unwrap();
+            let first: Value = client.call("read_browser_open_requests", json!({})).unwrap(); assert_eq!(first, json!([]));
+            let second: Value = client.call("read_browser_open_requests", json!({})).unwrap(); assert_eq!(first, second);
+            assert!(read_only_request("read_browser_open_requests", &json!({}))); assert!(!read_only_request("ack_browser_open_request", &json!({"id":"x"})));
+            let ack: Result<Value, _> = client.call("ack_browser_open_request", json!({"id":"x"})); assert!(ack.is_err());
+            for command in ["browser_open","read_browser_open_requests","ack_browser_open_request"] { let result: Result<Value, _> = client.call("invoke", json!({"command":command,"args":{}})); assert!(result.is_err()); }
+            drop(client); retire(root, server);
+        }
+        #[test]
+        fn report_styles_private_publication_is_validated_and_not_public_invoke() {
+            let (root, server) = fixture();
+            let client = Client::connect(&server.state.profile).unwrap();
+            assert!(server.state.backend.0.service.get_report_styles().unwrap_err().contains("not published"));
+            let mut theme = crate::report_styles::tests::theme();
+            let published: Result<(), _> = client.call("publish_report_theme", json!({"theme":theme}));
+            published.unwrap();
+            assert_eq!(server.state.backend.0.service.get_report_styles().unwrap()["theme"], json!(theme));
+            theme.accent = 0x1000000;
+            let invalid: Result<(), _> = client.call("publish_report_theme", json!({"theme":theme})); assert!(invalid.is_err());
+            let extra: Result<(), _> = client.call("publish_report_theme", json!({"theme":crate::report_styles::tests::theme(), "caller":"spoof"})); assert!(extra.is_err());
+            for command in ["publish_report_theme", "get_report_styles"] {
+                let result: Result<Value, _> = client.call("invoke", json!({"command":command,"args":{}})); assert!(result.is_err());
+                assert!(server.state.backend.0.service.lan_invoke(command, json!({})).is_err());
+            }
+            assert!(!read_only_request("publish_report_theme", &json!({})));
+            drop(client); retire(root, server);
         }
         fn fixture() -> (PathBuf, DesktopServer) {
             let root = std::env::temp_dir().join(format!("gpui-ipc-test-{}", uuid::Uuid::new_v4()));
@@ -1050,8 +1328,34 @@ fn decode_response<T: DeserializeOwned>(response: Response, id: &str) -> Result<
 }
 fn dispatch(backend: &BackendService, method: &str, args: Value) -> Result<Value, String> {
     match method {
-        "invoke" => backend.invoke(&arg::<String>(&args, "command")?, arg(&args, "args")?),
+        "invoke" => {
+            let command = arg::<String>(&args, "command")?;
+            let command_args = arg::<Value>(&args, "args")?;
+            let result = backend.invoke(&command, command_args.clone())?;
+            if command == "autoname" {
+                if let Some(task_id) = command_args["target"]["taskId"].as_str() {
+                    let title = result["tasks"]
+                        .as_array()
+                        .and_then(|tasks| tasks.iter().find(|task| task["id"].as_str() == Some(task_id)))
+                        .and_then(|task| task["title"].as_str())
+                        .ok_or("Auto-name completed but the renamed chat was not returned.")?;
+                    return Ok(Value::String(title.to_owned()));
+                }
+            }
+            Ok(result)
+        }
         "read_ui_changes" => encode(backend.read_ui_changes(optional::<String>(&args, "revision")?.as_deref())?),
+        "read_native_ui_changes" => {
+            let args: NativeUiChangesArgs = serde_json::from_value(args)
+                .map_err(|_| "Invalid native UI change arguments.")?;
+            encode(backend.read_native_ui_changes(args.revision.as_deref(), &args.message_task_ids)?)
+        },
+        "work_log_owner" => backend.work_log_owner(&arg::<String>(&args,"operation")?,arg(&args,"args")?),
+        "publish_report_theme" => {
+            if !args.as_object().is_some_and(|object| object.len() == 1 && object.contains_key("theme")) { return Err("Invalid report theme publication arguments.".into()); }
+            backend.publish_report_theme(&arg::<crate::report_styles::ReportTheme>(&args, "theme")?)?; Ok(Value::Null) },
+        "read_browser_open_requests" => encode(backend.read_browser_open_requests()?),
+        "ack_browser_open_request" => { backend.ack_browser_open_request(&arg::<String>(&args, "id")?)?; Ok(Value::Null) },
         "read_idle_runtime_status" => backend.read_idle_runtime_status(),
         "read_task_messages" => encode(backend.read_task_messages(&arg::<String>(&args, "taskId")?, optional::<String>(&args, "beforeId")?.as_deref(), optional(&args, "limit")?)?),
         "read_channel_messages" => encode(backend.read_channel_messages(&arg::<String>(&args, "channelId")?, optional::<String>(&args, "beforeId")?.as_deref(), optional(&args, "limit")?)?),
@@ -1065,11 +1369,12 @@ fn dispatch(backend: &BackendService, method: &str, args: Value) -> Result<Value
         "save_schedule" => encode(backend.save_schedule(arg(&args, "input")?)?),
         "schedule_action" => encode(backend.schedule_action(arg(&args, "id")?, arg(&args, "action")?)?),
         "read_lan_status" => encode(backend.read_lan_status()?),
+        "set_lan_access_code" => encode(backend.set_lan_access_code(arg(&args, "code")?)?),
         "start_lan" => encode(backend.start_lan()?),
         "stop_lan" => encode(backend.stop_lan()?),
         "get_agent_extension_assignments" => encode(backend.get_agent_extension_assignments(&arg::<String>(&args, "agentId")?)?),
         "set_agent_extension_assignment" => encode(backend.set_agent_extension_assignment(&arg::<String>(&args, "agentId")?, &arg::<String>(&args, "entryId")?, arg(&args, "kind")?, arg(&args, "assigned")?, &arg::<String>(&args, "expectedRevision")?)?),
-        _ => Err("Unknown private native method. Server shutdown is available only in the menu-bar server.".into()),
+        _ => Err(UNKNOWN_PRIVATE_NATIVE_METHOD.into()),
     }
 }
 
@@ -1124,6 +1429,21 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn native_ui_changes_args_require_typed_scope_and_reject_unknown_fields() {
+        let args: NativeUiChangesArgs = serde_json::from_value(serde_json::json!({"revision":null,"messageTaskIds":["task"]})).unwrap();
+        assert!(args.revision.is_none());
+        assert_eq!(args.message_task_ids, vec!["task"]);
+        for invalid in [
+            serde_json::json!({"revision":null}),
+            serde_json::json!({"revision":null,"messageTaskIds":null}),
+            serde_json::json!({"revision":42,"messageTaskIds":[]}),
+            serde_json::json!({"messageTaskIds":[42]}),
+            serde_json::json!({"messageTaskIds":[],"unexpected":true}),
+        ] {
+            assert!(serde_json::from_value::<NativeUiChangesArgs>(invalid).is_err());
+        }
+    }
     #[cfg(all(unix, feature = "gpui-ui-fixtures"))]
     #[test]
     fn ui_fixture_client_rejects_reads_writes_and_subscriptions_without_a_profile() {

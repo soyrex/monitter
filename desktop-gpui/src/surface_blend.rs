@@ -3,6 +3,7 @@
 use gpui_kit::*;
 use serde_json::{Value, json};
 use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Area {
@@ -73,6 +74,23 @@ impl Mode {
         }
     }
 }
+static THEME_DARK: AtomicBool = AtomicBool::new(true);
+
+pub(crate) fn set_theme_dark(dark: bool) {
+    THEME_DARK.store(dark, Ordering::Relaxed);
+}
+
+fn effective_mode(mode: Mode, dark: bool) -> Mode {
+    if !dark && mode == Mode::Multiply { Mode::Screen } else { mode }
+}
+
+/// Resolve surface blending for the current theme without rewriting preferences.
+pub(crate) fn effective_shader(area: Area) -> u32 {
+    let mode = current(area);
+    if area == Area::Separators { mode.shader() }
+    else { effective_mode(mode, THEME_DARK.load(Ordering::Relaxed)).shader() }
+}
+
 const FILE: &str = "surface-blend.json";
 static STATE: OnceLock<Mutex<Value>> = OnceLock::new();
 /// Install fixture defaults before any surface is rendered, without profile IO.
@@ -126,39 +144,47 @@ fn area_tint(area: Area, color: u32) -> u32 {
 }
 pub fn background(area: Area, color: u32) -> Background {
     let mut fill: Background = crate::design::surface_color(area_tint(area, color)).into();
-    fill.blend_mode = current(area).shader();
+    fill.blend_mode = effective_shader(area);
     fill
 }
 
 /// Tint pane RGB without changing transparency or adding another surface layer.
 pub fn tinted_pane_background(color: u32, dark: bool, amount: f32) -> Background {
+    background(Area::Pane, pane_tint(color, dark, amount))
+}
+
+fn pane_tint(color: u32, dark: bool, amount: f32) -> u32 {
     let channel = |shift: u32| {
         let value = ((color >> shift) & 255) as f32;
         if dark { (value * (1. - amount)).round() as u32 }
         else { (value + (255. - value) * amount).round() as u32 }
     };
-    let tint = (channel(16) << 16) | (channel(8) << 8) | channel(0);
-    background(Area::Pane, tint)
+    (channel(16) << 16) | (channel(8) << 8) | channel(0)
 }
 
 pub fn raised_background(area: Area, color: u32) -> Background {
     let mut fill: Background = crate::design::raised_surface_color(color).into();
-    fill.blend_mode = current(area).shader();
+    fill.blend_mode = effective_shader(area);
     fill
 }
 
-/// Floating chat controls blur the content under a darker multiply fill.
-pub(crate) fn floating_control_background(color: u32) -> Background {
-    floating_control_tint(color, 0.72)
+/// Working panes share an equally strong dark or light composer and Git tint.
+/// RGB changes preserve the user's transparency and blend preferences.
+pub(crate) fn working_composer_color(color: u32, dark: bool) -> u32 {
+    theme_tint_color(color, dark, 0.52)
 }
-pub(crate) fn floating_control_hover_background(color: u32) -> Background {
-    floating_control_tint(color, 0.50)
+
+/// Floating controls mirror their multiply tint with Screen in light themes.
+pub(crate) fn floating_control_background(color: u32, dark: bool) -> Background {
+    floating_control_tint(color, dark, 0.28)
 }
-fn floating_control_tint(color: u32, factor: f32) -> Background {
-    let channel = |shift: u32| (((color >> shift) & 0xff) as f32 * factor).round() as u32;
-    let tint = (channel(16) << 16) | (channel(8) << 8) | channel(0);
+pub(crate) fn floating_control_hover_background(color: u32, dark: bool) -> Background {
+    floating_control_tint(color, dark, 0.50)
+}
+fn floating_control_tint(color: u32, dark: bool, amount: f32) -> Background {
+    let tint = theme_tint_color(color, dark, amount);
     let mut fill: Background = crate::design::raised_surface_color(tint).into();
-    fill.blend_mode = Mode::Multiply.shader();
+    fill.blend_mode = if dark { Mode::Multiply } else { Mode::Screen }.shader();
     fill.backdrop_blur(20.)
 }
 
@@ -168,4 +194,51 @@ pub(crate) fn separator(color: u32) -> Background {
     let mut line: Background = gpui::rgb(color).into();
     line.blend_mode = separator_mode();
     line
+}
+
+/// The pane already paints beneath both fixed and sliding detail rails.
+/// Tint that resolved surface once, rather than compositing its fill again.
+pub(crate) fn secondary_sidebar_background(dark: bool) -> Background {
+    let mut fill: Background = gpui_kit::rgb(if dark { 0x000000 } else { 0xffffff }).opacity(0.25).into();
+    fill.blend_mode = if dark { Mode::Multiply } else { Mode::Screen }.shader();
+    fill
+}
+
+/// Black Multiply and white Screen have mirrored channel distances.
+pub(crate) fn theme_tint_color(color: u32, dark: bool, amount: f32) -> u32 {
+    pane_tint(color, dark, amount)
+}
+
+/// Git controls are five percentage points more transparent than the input.
+pub(crate) fn git_surface_color(color: u32) -> Rgba {
+    let mut fill = crate::design::raised_surface_color(color);
+    fill.a = (fill.a - 0.05).max(0.);
+    fill
+}
+
+#[cfg(test)]
+mod theme_tint_tests {
+    use super::*;
+
+    #[::core::prelude::v1::test]
+    fn multiply_surfaces_use_screen_in_light_themes() {
+        assert_eq!(effective_mode(Mode::Multiply, false), Mode::Screen);
+        assert_eq!(effective_mode(Mode::Multiply, true), Mode::Multiply);
+        assert_eq!(effective_mode(Mode::Normal, false), Mode::Normal);
+        assert_eq!(effective_mode(Mode::Screen, false), Mode::Screen);
+    }
+
+    #[::core::prelude::v1::test]
+    fn theme_tints_mirror_distance_to_black_and_white() {
+        assert_eq!(theme_tint_color(0x6496c8, true, 0.10), 0x5a87b4);
+        assert_eq!(theme_tint_color(0x6496c8, false, 0.10), 0x74a1ce);
+        assert_eq!(theme_tint_color(0x000000, false, 0.25), 0x404040);
+        assert_eq!(theme_tint_color(0xffffff, true, 0.25), 0xbfbfbf);
+    }
+
+    #[::core::prelude::v1::test]
+    fn working_composer_tint_uses_the_same_strength_in_both_themes() {
+        assert_eq!(working_composer_color(0xffffff, true), 0x7a7a7a);
+        assert_eq!(working_composer_color(0x000000, false), 0x858585);
+    }
 }

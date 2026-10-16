@@ -1,17 +1,31 @@
 //! Native sidebar with agent, project and activity views plus route controls.
 use super::*;
 use crate::design::ui_scaled_px as px;
+
+// Keep sidebar text in step with the interface font setting while preserving
+// the compact hierarchy used by secondary labels and metadata.
+fn sidebar_text_px(value: f32, settings: &Value) -> Pixels {
+    let font_ratio = settings["interfaceFontSize"]
+        .as_f64()
+        .unwrap_or(14.)
+        .clamp(8., 32.) as f32
+        / 14.;
+    px(value * 0.9 * font_ratio)
+}
+
+fn sidebar_primary_text_px(font_size: Pixels) -> Pixels {
+    ((font_size - px(4.)).max(px(8.))) * 1.1
+}
 use gpui_kit::{
     assets::{__private as icons_assets, IconName},
     component::menu::{DropdownMenu, PopupMenuItem},
-    component::{button::*, ActiveTheme as _, Icon, Sizable},
+    component::{ActiveTheme as _, Icon, Sizable, button::*},
 };
 
 #[path = "sidebar_compact.rs"]
 mod sidebar_compact;
 #[path = "sidebar_hover.rs"]
 mod sidebar_hover;
-
 
 use crate::collaboration::completion_feedback::CompletionMarker;
 
@@ -23,55 +37,100 @@ struct TaskMarkers {
 }
 impl Global for TaskMarkers {}
 fn marker_view(view: SidebarView) -> u8 {
-    match view { SidebarView::Agents => 0, SidebarView::Projects => 1, SidebarView::Activity => 2 }
+    match view {
+        SidebarView::Agents => 0,
+        SidebarView::Projects => 1,
+        SidebarView::Activity => 2,
+    }
 }
 fn ensure_markers(cx: &mut App) {
-    if cx.try_global::<TaskMarkers>().is_none() { cx.set_global(TaskMarkers::default()); }
+    if cx.try_global::<TaskMarkers>().is_none() {
+        cx.set_global(TaskMarkers::default());
+    }
 }
 pub(crate) fn set_task_markers_visible(visible: bool, view: SidebarView, cx: &mut App) {
     ensure_markers(cx);
     let next = visible.then_some(marker_view(view));
-    if cx.global::<TaskMarkers>().visible_view == next { return; }
+    if cx.global::<TaskMarkers>().visible_view == next {
+        return;
+    }
     cx.global_mut::<TaskMarkers>().visible_view = next;
     let markers = cx.global::<TaskMarkers>().markers.clone();
     for ((_, view), marker) in markers {
         marker.update(cx, |marker, cx| marker.set_visible(next == Some(view), cx));
     }
 }
-pub(crate) fn sync_task_markers(index: &monitter_gpui_desktop::native_publication::PublicationIndex, reset: bool, cx: &mut App) {
+pub(crate) fn sync_task_markers(
+    index: &monitter_gpui_desktop::native_publication::PublicationIndex,
+    reset: bool,
+    cx: &mut App,
+) {
     ensure_markers(cx);
     let statuses = index.task_statuses();
-    if !reset && cx.global::<TaskMarkers>().statuses.as_ref().is_some_and(|previous| Arc::ptr_eq(previous, &statuses)) { return; }
+    if !reset
+        && cx
+            .global::<TaskMarkers>()
+            .statuses
+            .as_ref()
+            .is_some_and(|previous| Arc::ptr_eq(previous, &statuses))
+    {
+        return;
+    }
     cx.global_mut::<TaskMarkers>().statuses = Some(statuses);
-    if cx.global::<TaskMarkers>().markers.is_empty() { return; }
-    cx.global_mut::<TaskMarkers>().markers.retain(|(id, _), _| index.task_status(id).is_some());
+    if cx.global::<TaskMarkers>().markers.is_empty() {
+        return;
+    }
+    cx.global_mut::<TaskMarkers>()
+        .markers
+        .retain(|(id, _), _| index.task_status(id).is_some());
     let registry = cx.global::<TaskMarkers>();
     let visible_view = registry.visible_view;
     let markers = registry.markers.clone();
     for ((id, view), marker) in markers {
-        let Some(status) = index.task_status(&id) else { continue; };
+        let Some(status) = index.task_status(&id) else {
+            continue;
+        };
         marker.update(cx, |marker, cx| {
-            if reset { marker.suppress(cx); }
+            if reset {
+                marker.suppress(cx);
+            }
             marker.set_status(&id, status, !reset && visible_view == Some(view), cx);
         });
     }
 }
-fn task_marker(task: &Value, view: SidebarView, palette: design::Palette, cx: &mut App) -> Entity<CompletionMarker> {
+fn task_marker(
+    task: &Value,
+    view: SidebarView,
+    palette: design::Palette,
+    cx: &mut App,
+) -> Entity<CompletionMarker> {
     ensure_markers(cx);
     let id = field(task, "id");
     let status = field(task, "status");
     let key = (id.clone(), marker_view(view));
-    let marker = cx.global::<TaskMarkers>().markers.get(&key).cloned().unwrap_or_else(|| {
-        let marker = cx.new(|_| CompletionMarker::new(&id, &status));
-        cx.global_mut::<TaskMarkers>().markers.insert(key.clone(), marker.clone());
-        marker
-    });
+    let marker = cx
+        .global::<TaskMarkers>()
+        .markers
+        .get(&key)
+        .cloned()
+        .unwrap_or_else(|| {
+            let marker = cx.new(|_| CompletionMarker::new(&id, &status));
+            cx.global_mut::<TaskMarkers>()
+                .markers
+                .insert(key.clone(), marker.clone());
+            marker
+        });
     let visible = cx.global::<TaskMarkers>().visible_view == Some(key.1);
-    let icon = match status.as_str() { "running" => "◌", "completed" => "✓", "error" => "!", "interrupted" => "■", _ => "" };
+    let icon = match status.as_str() {
+        "running" => "◌",
+        "completed" => "✓",
+        "error" => "!",
+        "interrupted" => "■",
+        _ => "",
+    };
     marker.update(cx, |marker, cx| {
         marker.set_visible(visible, cx);
         marker.set_appearance(icon, design::status_color(&status, palette), 14., cx);
-        marker.show_done(cx);
     });
     marker
 }
@@ -137,6 +196,10 @@ const BRAND_ACTIONS: &[BrandAction] = &[
     },
 ];
 
+fn sidebar_task_row_frame() -> Div {
+    div().px(px(design::space::INSET))
+}
+
 impl Desktop {
     /// Narrow icon rail used when the workspace sidebar is collapsed.
     pub(super) fn render_compact_sidebar(
@@ -167,20 +230,33 @@ impl Desktop {
         let provider = provider_label(&self.snapshot, task);
         let model = field(task, "model");
         let project_name = context.filter(|name| !name.is_empty());
-        let updated_at = task.get("updatedAt").and_then(Value::as_i64).filter(|time| *time > 0);
+        let updated_at = task
+            .get("updatedAt")
+            .and_then(Value::as_i64)
+            .filter(|time| *time > 0);
         let relative_time = updated_at.map(relative_task_time);
         let title = field(task, "title");
         let hover_key = format!("{id_prefix}-{task_id}");
         let (hover_state, background_opacity) =
             sidebar_hover::state(&hover_key, active, window, cx);
-        let provider_icon = crate::branding::provider_for_ink(&field(task, "provider"), &model, palette.ink)
-            .map(|image| img(image).w(px(17.)).h(px(17.)).into_any_element())
-            .unwrap_or_else(|| Icon::new(IconName::MessageSquare).size(px(16.)).into_any_element());
+        let provider_icon =
+            crate::branding::provider_for_ink(&field(task, "provider"), &model, palette.ink)
+                .map(|image| img(image).w(px(17.)).h(px(17.)).into_any_element())
+                .unwrap_or_else(|| {
+                    Icon::new(IconName::MessageSquare)
+                        .size(px(16.))
+                        .into_any_element()
+                });
         let meta = if let Some(project_name) = project_name.clone() {
             if provider.is_empty() {
                 div().flex_1().min_w_0().truncate().child(project_name)
             } else {
-                div().flex_1().min_w_0().flex().items_center().gap(px(3.))
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(3.))
                     .child(div().min_w_0().truncate().child(provider.clone()))
                     .child("·")
                     .child(div().min_w_0().truncate().child(project_name))
@@ -189,55 +265,115 @@ impl Desktop {
             div().flex_1().min_w_0().truncate().child(provider.clone())
         };
         let mut accessible_parts = vec![title.clone()];
-        if !provider.is_empty() { accessible_parts.push(provider.clone()); }
-        if let Some(project) = project_name.as_ref() { accessible_parts.push(project.clone()); }
-        if !status.is_empty() { accessible_parts.push(status.clone()); }
-        if let Some(time) = relative_time.as_ref() { accessible_parts.push(time.clone()); }
+        if !provider.is_empty() {
+            accessible_parts.push(provider.clone());
+        }
+        if let Some(project) = project_name.as_ref() {
+            accessible_parts.push(project.clone());
+        }
+        if !status.is_empty() {
+            accessible_parts.push(status.clone());
+        }
+        if let Some(time) = relative_time.as_ref() {
+            accessible_parts.push(time.clone());
+        }
         let accessible_label = accessible_parts.join(" · ");
-        div()
+        sidebar_task_row_frame()
             .id(SharedString::from(hover_key))
             .role(Role::Button)
             .aria_label(accessible_label)
             .flex_shrink_0()
-            .ml(px(design::space::GROUP))
-            .px(px(design::space::INSET))
             .py(px(8.))
             .rounded_md()
             .cursor_pointer()
-            .relative().overflow_hidden()
+            .relative()
+            .overflow_hidden()
             .bg(crate::design::surface_color(palette.soft).opacity(background_opacity))
             .flex()
             .items_center()
             .gap(px(design::space::TIGHT))
-            .children(crate::activity_effects::for_task(&task_id, id_prefix, crate::activity_sparkles::SparkleLayout::Compact, false, cx))
+            .children(crate::activity_effects::for_task(
+                &task_id,
+                id_prefix,
+                crate::activity_sparkles::SparkleLayout::Compact,
+                false,
+                cx,
+            ))
             .child(
-                div().w(px(30.)).h(px(30.)).flex_shrink_0().rounded_md().relative().flex().items_center().justify_center()
+                div()
+                    .w(px(30.))
+                    .h(px(30.))
+                    .flex_shrink_0()
+                    .rounded_md()
+                    .relative()
+                    .flex()
+                    .items_center()
+                    .justify_center()
                     .bg(crate::design::surface_color(palette.panel))
                     .child(provider_icon)
-                    .child(div().absolute().right(px(1.)).bottom(px(1.))
-                        .w(px(design::STATUS_DOT)).h(px(design::STATUS_DOT)).rounded_full()
-                        .bg(rgb(if status == "running" { palette.accent } else { design::status_color(&status, palette) }))),
+                    .child(
+                        div()
+                            .absolute()
+                            .right(px(1.))
+                            .bottom(px(1.))
+                            .w(px(design::STATUS_DOT))
+                            .h(px(design::STATUS_DOT))
+                            .rounded_full()
+                            .bg(rgb(if status == "running" {
+                                palette.accent
+                            } else {
+                                design::status_color(&status, palette)
+                            })),
+                    ),
             )
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
-                    .flex().flex_col().gap(px(2.))
-                    .child(div().min_w_0().truncate().text_size(px(13.))
-                        .font_weight(if older { FontWeight::THIN } else { FontWeight::SEMIBOLD })
-                        .text_color(rgb(palette.ink).opacity(if older { 0.7 } else { 1. })).child(title))
-                    .child(div().min_w_0().flex().items_center().gap(px(3.))
-                        .text_size(px(10.)).font_weight(if older { FontWeight::THIN } else { FontWeight::NORMAL })
-                        .text_color(rgb(palette.muted).opacity(if older { 0.7 } else { 1. }))
-                        .child(meta)
-                        .when_some(relative_time, |row, time| row.child(div().flex_shrink_0().whitespace_nowrap().child(time))),
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(sidebar_primary_text_px(cx.theme().font_size))
+                            .font_weight(if older {
+                                FontWeight::THIN
+                            } else {
+                                FontWeight::SEMIBOLD
+                            })
+                            .text_color(rgb(palette.ink).opacity(if older { 0.7 } else { 1. }))
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .gap(px(3.))
+                            .text_size(sidebar_text_px(10., &self.snapshot["settings"]))
+                            .font_weight(if older {
+                                FontWeight::THIN
+                            } else {
+                                FontWeight::NORMAL
+                            })
+                            .text_color(rgb(palette.muted).opacity(if older { 0.7 } else { 1. }))
+                            .child(meta)
+                            .when_some(relative_time, |row, time| {
+                                row.child(div().flex_shrink_0().whitespace_nowrap().child(time))
+                            }),
                     ),
             )
-            .when(matches!(status.as_str(), "running" | "completed" | "error" | "interrupted"), |row| row.child(completion_marker))
+            .when(
+                matches!(
+                    status.as_str(),
+                    "running" | "completed" | "error" | "interrupted"
+                ),
+                |row| row.child(completion_marker),
+            )
             .on_click(cx.listener(move |view, _, window, cx| {
-                view.switch_surface(Sidebar::Chats, window, cx);
-                view.selected = Some(task_id.clone());
-                cx.notify();
+                view.navigate_sidebar_task(task_id.clone(), window, cx);
             }))
             .on_hover(cx.listener(move |_, hovered, _, cx| {
                 sidebar_hover::set(&hover_state, *hovered, cx);
@@ -257,13 +393,31 @@ impl Desktop {
         let now = sidebar_now_ms();
         let mut ordered = tasks;
         ordered.sort_by_key(|task| std::cmp::Reverse(task_activity_ms(task)));
-        let mut group = div().flex_shrink_0().flex().flex_col().gap(px(design::space::TIGHT));
+        let mut group = div()
+            .flex_shrink_0()
+            .flex()
+            .flex_col()
+            .gap(px(design::space::TIGHT));
         for older in [false, true] {
-            let rows: Vec<_> = ordered.iter().copied().filter(|task| task_is_older(task, now) == older).collect();
-            if rows.is_empty() { continue; }
-            group = group.child(Self::section_label(if older { "Older" } else { "Recent" }, palette));
+            let rows: Vec<_> = ordered
+                .iter()
+                .copied()
+                .filter(|task| task_is_older(task, now) == older)
+                .collect();
+            if rows.is_empty() {
+                continue;
+            }
+            group = group.child(Self::section_label(
+                if older { "Older" } else { "Recent" },
+                palette,
+                &self.snapshot["settings"],
+            ));
             for task in rows {
-                let context = if show_project { project_name(&self.snapshot, task) } else { None };
+                let context = if show_project {
+                    project_name(&self.snapshot, task)
+                } else {
+                    None
+                };
                 group = group.child(self.task_row(task, context, palette, id_prefix, window, cx));
             }
         }
@@ -277,12 +431,16 @@ impl Desktop {
         collapsed: bool,
         collapse: Entity<ProjectCollapseState>,
         palette: design::Palette,
+        metadata_font_size: Pixels,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let name = field(project, "name");
         let icon = project_icon(&field(project, "icon"));
         let color = design::parse_color(&field(project, "color"), palette.accent);
-        let count = format!("{chat_count} {}", if chat_count == 1 { "chat" } else { "chats" });
+        let count = format!(
+            "{chat_count} {}",
+            if chat_count == 1 { "chat" } else { "chats" }
+        );
         let mut tile = div()
             .w(px(38.))
             .h(px(38.))
@@ -317,27 +475,45 @@ impl Desktop {
                 div()
                     .min_w_0()
                     .truncate()
-                    .text_size(px(14.))
+                    .text_size(sidebar_primary_text_px(cx.theme().font_size))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(palette.ink))
                     .child(name.clone()),
             )
             .child(
                 div()
-                    .text_size(px(11.))
+                    .text_size(metadata_font_size)
                     .text_color(rgb(palette.muted))
                     .child(count.clone()),
             );
         let project_id = field(project, "id");
-        div().id(SharedString::from(format!("project-group-{project_id}")))
+        div()
+            .id(SharedString::from(format!("project-group-{project_id}")))
             .flex_shrink_0()
-            .w_full().px(px(design::space::TIGHT)).py(px(design::space::TIGHT))
-            .flex().items_center().gap(px(design::space::TIGHT))
+            .w_full()
+            .px(px(design::space::TIGHT))
+            .py(px(design::space::TIGHT))
+            .flex()
+            .items_center()
+            .gap(px(design::space::TIGHT))
             .child(tile)
             .child(copy)
-            .child(Icon::new(if collapsed { IconName::ChevronRight } else { IconName::ChevronDown }).size(px(13.)).text_color(rgb(palette.muted)))
+            .child(
+                Icon::new(if collapsed {
+                    IconName::ChevronRight
+                } else {
+                    IconName::ChevronDown
+                })
+                .size(px(13.))
+                .text_color(rgb(palette.muted)),
+            )
             .role(Role::Button)
-            .aria_label(format!("{} project, {}. {}", if collapsed { "Expand" } else { "Collapse" }, name, count))
+            .aria_label(format!(
+                "{} project, {}. {}",
+                if collapsed { "Expand" } else { "Collapse" },
+                name,
+                count
+            ))
             .cursor_pointer()
             .on_click(cx.listener(move |_, _, _, cx| {
                 collapse.update(cx, |state, _| state.collapsed = !state.collapsed);
@@ -345,16 +521,20 @@ impl Desktop {
             }))
     }
 
-    fn section_label(label: &str, palette: design::Palette) -> Div {
+    fn section_label(label: &str, palette: design::Palette, settings: &Value) -> Div {
         div()
             .flex_shrink_0()
             .px(px(design::space::INSET))
             .pt(px(design::space::SECTION))
             .pb(px(design::space::TIGHT))
-            .text_size(px(10.))
+            .text_size(sidebar_text_px(10., settings))
             .text_color(rgb(palette.muted))
             .font_family(design::FONT_MONO)
-            .child(label.to_uppercase())
+            .child(
+                div()
+                    .debug_selector(|| "sidebar-section-copy".into())
+                    .child(label.to_uppercase()),
+            )
     }
 
     pub(super) fn render_sidebar(
@@ -365,10 +545,12 @@ impl Desktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let tern = design::tile_theme()
-            == monitter_lib::experimental_desktop::NativeTileTheme::Tern;
-        let tree_scroll = window.use_keyed_state("sidebar-tree-overflow", cx,
-            |_, _| ScrollHandle::new()).read(cx).clone();
+        let tern =
+            design::tile_theme() == monitter_lib::experimental_desktop::NativeTileTheme::Tern;
+        let tree_scroll = window
+            .use_keyed_state("sidebar-tree-overflow", cx, |_, _| ScrollHandle::new())
+            .read(cx)
+            .clone();
         let mut tree = div()
             .id("sidebar-tree")
             .flex_1()
@@ -407,12 +589,13 @@ impl Desktop {
                         .rounded_md()
                         .relative()
                         .overflow_hidden()
-                        .bg(crate::design::surface_color(palette.soft).opacity(agent_background_opacity))
+                        .bg(crate::design::surface_color(palette.soft)
+                            .opacity(agent_background_opacity))
                         .flex()
                         .items_center()
                         .gap(px(design::space::TIGHT))
                         .py(px(design::space::INSET))
-                        .px(px(design::space::TIGHT))
+                        .px(px(design::space::INSET))
                         .child(
                             div()
                                 .id(SharedString::from(format!("agent-toggle-{id}")))
@@ -440,10 +623,10 @@ impl Desktop {
                                 .flex()
                                 .flex_col()
                                 .gap(px(design::space::TIGHT))
-                                .child(div().text_size(px(13.)).child(field(agent, "name")))
+                                .child(div().text_size(sidebar_primary_text_px(cx.theme().font_size)).child(field(agent, "name")))
                                 .child(
                                     div()
-                                        .text_size(px(10.))
+                                        .text_size(sidebar_text_px(10., &self.snapshot["settings"]))
                                         .text_color(rgb(palette.muted))
                                         .child(format!(
                                             "{} · {}",
@@ -466,18 +649,31 @@ impl Desktop {
                         })),
                 );
                 if !collapsed {
-                    tree = tree.child(self.grouped_task_rows(owned, true, palette, "agent-task", window, cx));
+                    tree = tree.child(self.grouped_task_rows(
+                        owned,
+                        true,
+                        palette,
+                        "agent-task",
+                        window,
+                        cx,
+                    ));
                 }
             }
             // A removed agent may own an unarchived chat in older stores; keep it reachable.
-            let orphaned = tasks.iter().filter(|task| {
-                !agents.iter().any(|agent| field(agent, "id") == field(task, "agentId"))
-            }).collect();
-            tree = tree.child(self.grouped_task_rows(orphaned, true, palette, "orphan", window, cx));
+            let orphaned = tasks
+                .iter()
+                .filter(|task| {
+                    !agents
+                        .iter()
+                        .any(|agent| field(agent, "id") == field(task, "agentId"))
+                })
+                .collect();
+            tree =
+                tree.child(self.grouped_task_rows(orphaned, true, palette, "orphan", window, cx));
             if tasks.is_empty() {
                 tree = tree.child(
                     div()
-                        .text_size(px(11.))
+                        .text_size(sidebar_text_px(11., &self.snapshot["settings"]))
                         .text_color(rgb(palette.muted))
                         .p(px(design::space::INSET))
                         .child("No chats yet. Use + beside an agent to start one."),
@@ -493,16 +689,34 @@ impl Desktop {
                     .iter()
                     .filter(|task| field(task, "projectId") == project_id)
                     .collect();
-                let running = project_tasks.iter().any(|task| field(task, "status") == "running");
+                let running = project_tasks
+                    .iter()
+                    .any(|task| field(task, "status") == "running");
                 let collapse = window.use_keyed_state(
                     SharedString::from(format!("project-collapse-{project_id}")),
                     cx,
                     |_, _| ProjectCollapseState { collapsed: false },
                 );
                 let collapsed = collapse.read(cx).collapsed;
-                tree = tree.child(Self::project_row(project, project_tasks.len(), running, collapsed, collapse, palette, cx));
+                tree = tree.child(Self::project_row(
+                    project,
+                    project_tasks.len(),
+                    running,
+                    collapsed,
+                    collapse,
+                    palette,
+                    sidebar_text_px(11., &self.snapshot["settings"]),
+                    cx,
+                ));
                 if !collapsed {
-                    tree = tree.child(self.grouped_task_rows(project_tasks, false, palette, "project-task", window, cx));
+                    tree = tree.child(self.grouped_task_rows(
+                        project_tasks,
+                        false,
+                        palette,
+                        "project-task",
+                        window,
+                        cx,
+                    ));
                 }
             }
             let missing_project_ids: std::collections::BTreeSet<_> = tasks
@@ -514,22 +728,40 @@ impl Desktop {
                 tree = tree.child(Self::section_label(
                     &format!("Other project · {project_id}"),
                     palette,
+                    &self.snapshot["settings"],
                 ));
-                let project_tasks = tasks.iter().filter(|task| field(task, "projectId") == project_id).collect();
-                tree = tree.child(self.grouped_task_rows(project_tasks, false, palette, "unlisted-project-task", window, cx));
+                let project_tasks = tasks
+                    .iter()
+                    .filter(|task| field(task, "projectId") == project_id)
+                    .collect();
+                tree = tree.child(self.grouped_task_rows(
+                    project_tasks,
+                    false,
+                    palette,
+                    "unlisted-project-task",
+                    window,
+                    cx,
+                ));
             }
             let unassigned: Vec<_> = tasks
                 .iter()
                 .filter(|task| field(task, "projectId").is_empty())
                 .collect();
             if !unassigned.is_empty() {
-                tree = tree.child(Self::section_label("No project", palette));
-                tree = tree.child(self.grouped_task_rows(unassigned, false, palette, "unassigned-task", window, cx));
+                tree = tree.child(Self::section_label("No project", palette, &self.snapshot["settings"]));
+                tree = tree.child(self.grouped_task_rows(
+                    unassigned,
+                    false,
+                    palette,
+                    "unassigned-task",
+                    window,
+                    cx,
+                ));
             }
             if tasks.is_empty() {
                 tree = tree.child(
                     div()
-                        .text_size(px(11.))
+                        .text_size(sidebar_text_px(11., &self.snapshot["settings"]))
                         .text_color(rgb(palette.muted))
                         .p(px(design::space::INSET))
                         .child("No chats yet."),
@@ -552,18 +784,32 @@ impl Desktop {
             running.sort_by(by_updated);
             recent.sort_by(by_updated);
             if !running.is_empty() {
-                tree = tree.child(Self::section_label("Running", palette));
+                tree = tree.child(Self::section_label("Running", palette, &self.snapshot["settings"]));
                 for task in running {
-                    tree = tree.child(self.task_row(task, project_name(&self.snapshot, task), palette, "activity-running", window, cx));
+                    tree = tree.child(self.task_row(
+                        task,
+                        project_name(&self.snapshot, task),
+                        palette,
+                        "activity-running",
+                        window,
+                        cx,
+                    ));
                 }
             }
             if !recent.is_empty() {
-                tree = tree.child(self.grouped_task_rows(recent, true, palette, "activity-recent", window, cx));
+                tree = tree.child(self.grouped_task_rows(
+                    recent,
+                    true,
+                    palette,
+                    "activity-recent",
+                    window,
+                    cx,
+                ));
             }
             if tasks.is_empty() {
                 tree = tree.child(
                     div()
-                        .text_size(px(11.))
+                        .text_size(sidebar_text_px(11., &self.snapshot["settings"]))
                         .text_color(rgb(palette.muted))
                         .p(px(design::space::INSET))
                         .child("No recent activity."),
@@ -575,10 +821,19 @@ impl Desktop {
         // These views change the sidebar listing while leaving the selected
         // main content surface intact.
         let active_view = self.sidebar_view;
-        self.sidebar_tabs_motion.borrow_mut().observe(match active_view {
-            SidebarView::Agents => 0, SidebarView::Projects => 1, SidebarView::Activity => 2,
-        });
-        let tree = self.sidebar_tabs_motion.borrow().body("primary-sidebar", tree.into_any_element(), cx.reduce_motion(), true);
+        self.sidebar_tabs_motion
+            .borrow_mut()
+            .observe(match active_view {
+                SidebarView::Agents => 0,
+                SidebarView::Projects => 1,
+                SidebarView::Activity => 2,
+            });
+        let tree = self.sidebar_tabs_motion.borrow().body(
+            "primary-sidebar",
+            tree.into_any_element(),
+            cx.reduce_motion(),
+            true,
+        );
         let modern_tabs = field(&self.snapshot["settings"], "tabStyle") == "modern";
         let modern_height: f32 =
             match field(&self.snapshot["settings"], "interfaceDensity").as_str() {
@@ -653,7 +908,7 @@ impl Desktop {
                             .border_0()
                             .border_t_1()
                             .border_color(rgb(palette.line))
-            .border_blend_mode(crate::surface_blend::separator_mode())
+                            .border_blend_mode(crate::surface_blend::separator_mode())
                             .when(tab_index + 1 < VIEWS.len(), |entry| entry.border_r_1())
                             .when(!active, |entry| entry.border_b_1())
                     })
@@ -669,7 +924,7 @@ impl Desktop {
                     )
                     .child(
                         div()
-                            .text_size(px(design::SIDEBAR_TAB_FONT_SIZE))
+                            .text_size(sidebar_primary_text_px(cx.theme().font_size))
                             .font_family(design::FONT_MONO)
                             .child(label),
                     )
@@ -680,8 +935,9 @@ impl Desktop {
             );
         }
 
-        // Tern keeps its view navigation in the native titlebar control row.
-        // The controls sit at the same 16px size as the compact sidebar reveal.
+        // Share the workspace pill's outer height and glyph sizing, including
+        // interface font changes. Button::icon would replace our glyph size.
+        let tab_metrics = design::workspace_tab_metrics(cx.theme().font_size);
         let mut tern_view_toggles = div()
             .id("tern-sidebar-view-toggles")
             .flex()
@@ -691,25 +947,43 @@ impl Desktop {
             let next_view = tab.view;
             let active = active_view == tab.view;
             tern_view_toggles = tern_view_toggles.child(
-                div().rounded(px(4.)).overflow_hidden().border_1()
+                div()
+                    .w(tab_metrics.height)
+                    .h(tab_metrics.height)
+                    .flex_shrink_0()
+                    .rounded(px(4.))
+                    .overflow_hidden()
+                    .border_1()
                     .border_color(rgb(palette.accent).opacity(if active { 0.65 } else { 0. }))
                     .bg(rgb(palette.accent).opacity(if active { 0.14 } else { 0. }))
-                    .child(Button::new(SharedString::from(format!(
-                    "tern-sidebar-view-{}",
-                    tab.label.to_ascii_lowercase()
-                )))
-                    .ghost()
-                    .compact()
-                    .icon(Icon::default().data(tab.icon).with_size(design::ui_scaled_px(16.))
-                        .text_color(rgb(if active { palette.accent } else { palette.ink })))
-                    .tooltip(tab.label)
-                    .accessibility_label(tab.label)
-                    .toggled(active)
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(cx.listener(move |desktop, _, _, cx| {
-                        desktop.sidebar_view = next_view;
-                        cx.notify();
-                    }))),
+                    .child(
+                        Button::new(SharedString::from(format!(
+                            "tern-sidebar-view-{}",
+                            tab.label.to_ascii_lowercase()
+                        )))
+                        .ghost()
+                        .compact()
+                        .w_full()
+                        .h_full()
+                        .p_0()
+                        .rounded(px(4.))
+                        .child(
+                            Icon::default()
+                                .data(tab.icon)
+                                .with_size(tab_metrics.icon_size)
+                                .text_color(rgb(if active { palette.accent } else { palette.ink })),
+                        )
+                        .tooltip(tab.label)
+                        .accessibility_label(tab.label)
+                        .toggled(active)
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(cx.listener(
+                            move |desktop, _, _, cx| {
+                                desktop.sidebar_view = next_view;
+                                cx.notify();
+                            },
+                        )),
+                    ),
             );
         }
 
@@ -721,14 +995,14 @@ impl Desktop {
         };
         // Align the combined logo + sidebar tabs with the actual dock strip
         // + chat header. Classic dock strips use native component points.
-        let sidebar_tabs_height = if modern_tabs {
-            modern_height
-        } else {
-            35.
-        };
+        let sidebar_tabs_height = if modern_tabs { modern_height } else { 35. };
         let interface_scale = design::interface_scale() as f32 / 100.;
-        let dock_strip_height = design::workspace_tabbar_height_points(&self.snapshot["settings"], design::interface_scale()) / interface_scale;
-        let brand_row_height = (dock_strip_height + chat_header_height - sidebar_tabs_height).max(0.);
+        let dock_strip_height = design::workspace_tabbar_height_points(
+            &self.snapshot["settings"],
+            design::interface_scale(),
+        ) / interface_scale;
+        let brand_row_height =
+            (dock_strip_height + chat_header_height - sidebar_tabs_height).max(0.);
         let mut logo_shade: Background = rgba(0x0000001a).into();
         logo_shade.blend_mode = 2;
         let brand_row = div()
@@ -750,9 +1024,22 @@ impl Desktop {
             .border_color(rgb(palette.line))
             .border_blend_mode(crate::surface_blend::separator_mode())
             // Optical size targets 70% of the previous rendered mark, which was header-height constrained.
-            .child(img(branding::sidebar_wordmark(91.2 * interface_scale * window.scale_factor())).w(px(91.2)).h(px(30.4)).max_w_full().max_h_full().object_fit(ObjectFit::Contain));
+            .child(
+                img(branding::sidebar_wordmark(
+                    91.2 * interface_scale * window.scale_factor(),
+                ))
+                .w(px(91.2))
+                .h(px(30.4))
+                .max_w_full()
+                .max_h_full()
+                .object_fit(ObjectFit::Contain),
+            );
 
-        let usage_width = self.sidebar_resize.read(cx).sizes().first()
+        let usage_width = self
+            .sidebar_resize
+            .read(cx)
+            .sizes()
+            .first()
             .map(|width| *width / design::ui_px(1., self.sidebar_scale))
             .filter(|width| width.is_finite() && *width > 0.)
             .unwrap_or_else(|| self.current_sidebar_width(cx));
@@ -762,44 +1049,98 @@ impl Desktop {
             usage_width
         };
         let usage_stats = self.sidebar_usage.as_ref().map(|usage| {
-            usage.update(cx, |usage, cx| usage.set_composed_palette(palette, usage_width, cx));
+            usage.update(cx, |usage, cx| {
+                usage.set_composed_palette(palette, usage_width, cx)
+            });
             usage.clone()
         });
-        let pending = rows(&self.snapshot, "approvalRequests").into_iter()
-            .filter(|r| field(r,"status") == "pending" && r["input"].is_null()).collect::<Vec<_>>();
-        let approval_block = if pending.is_empty() { None } else {
-            let mut block = div().id("sidebar-pending-approvals").flex_shrink_0().max_h(px(160.)).overflow_y_scroll()
-                .px(px(design::space::INSET)).py(px(design::space::TIGHT)).flex().flex_col()
-                .font_family(cx.theme().font_family.clone()).text_size(cx.theme().font_size);
+        let pending = rows(&self.snapshot, "approvalRequests")
+            .into_iter()
+            .filter(|r| field(r, "status") == "pending" && r["input"].is_null())
+            .collect::<Vec<_>>();
+        let approval_block = if pending.is_empty() {
+            None
+        } else {
+            let mut block = div()
+                .id("sidebar-pending-approvals")
+                .flex_shrink_0()
+                .max_h(px(160.))
+                .overflow_y_scroll()
+                .px(px(design::space::INSET))
+                .py(px(design::space::TIGHT))
+                .flex()
+                .flex_col()
+                .font_family(cx.theme().font_family.clone())
+                .text_size(cx.theme().font_size * 0.9);
             for request in pending {
-                let approval_id = field(&request,"id");
-                let task_id = field(&request,"taskId");
-                let title = tasks.iter().find(|t| field(t,"id") == task_id).map(|t| field(t,"title")).unwrap_or_else(|| "Agent request".into());
-                block = block.child(div().id(SharedString::from(format!("sidebar-approval-{}",approval_id)))
-                    .role(Role::Button).aria_label(format!("Review approval for {title}"))
-                    .h((cx.theme().font_size * 1.4 + px(6.)).max(px(28.))).flex_shrink_0().px(px(design::space::TIGHT)).rounded_md().cursor_pointer()
-                    .hover(|s| s.bg(design::surface_color(palette.soft)))
-                    .flex().items_center().gap(px(design::space::TIGHT)).min_w_0().text_color(rgb(palette.accent))
-                    .child(Icon::new(IconName::TriangleAlert).size(px(14.)).flex_shrink_0())
-                    .child(div().min_w_0().truncate().child(format!("Review approval · {title}")))
-                    .on_click(cx.listener(move |view,_,window,cx| {
-                        view.switch_surface(Sidebar::Chats,window,cx);
-                        view.selected = Some(task_id.clone());
-                        let pane = view.chat_panes.borrow().get(&task_id).cloned();
-                        if let Some(pane) = pane { pane.update(cx, |pane,cx| pane.show_approval_prompt(approval_id.clone(),window,cx)); }
-                        cx.notify();
-                    })));
+                let approval_id = field(&request, "id");
+                let task_id = field(&request, "taskId");
+                let title = tasks
+                    .iter()
+                    .find(|t| field(t, "id") == task_id)
+                    .map(|t| field(t, "title"))
+                    .unwrap_or_else(|| "Agent request".into());
+                block = block.child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "sidebar-approval-{}",
+                            approval_id
+                        )))
+                        .role(Role::Button)
+                        .aria_label(format!("Review approval for {title}"))
+                        .h((cx.theme().font_size * 1.4 + px(6.)).max(px(28.)))
+                        .flex_shrink_0()
+                        .px(px(design::space::TIGHT))
+                        .rounded_md()
+                        .cursor_pointer()
+                        .hover(|s| s.bg(design::surface_color(palette.soft)))
+                        .flex()
+                        .items_center()
+                        .gap(px(design::space::TIGHT))
+                        .min_w_0()
+                        .text_color(rgb(palette.accent))
+                        .child(
+                            Icon::new(IconName::TriangleAlert)
+                                .size(px(14.))
+                                .flex_shrink_0(),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .child(format!("Review approval · {title}")),
+                        )
+                        .on_click(cx.listener(move |view, _, window, cx| {
+                            view.switch_surface(Sidebar::Chats, window, cx);
+                            view.selected = Some(task_id.clone());
+                            let pane = view.chat_panes.borrow().get(&task_id).cloned();
+                            if let Some(pane) = pane {
+                                pane.update(cx, |pane, cx| {
+                                    pane.show_approval_prompt(approval_id.clone(), window, cx)
+                                });
+                            }
+                            cx.notify();
+                        })),
+                );
             }
             Some(block)
         };
         let sidebar = div()
             .id("sidebar-root")
+            .text_size(cx.theme().font_size * 0.9)
             .on_scroll_wheel(cx.listener(|desktop, event: &ScrollWheelEvent, _, cx| {
                 let delta = event.delta.pixel_delta(gpui_kit::px(20.));
                 if let Some(index) = desktop.sidebar_tabs_motion.borrow_mut().wheel(
-                    delta.x.into(), delta.y.into(), 3, std::time::Instant::now(),
+                    delta.x.into(),
+                    delta.y.into(),
+                    3,
+                    std::time::Instant::now(),
                 ) {
-                    desktop.sidebar_view = [SidebarView::Agents, SidebarView::Projects, SidebarView::Activity][index];
+                    desktop.sidebar_view = [
+                        SidebarView::Agents,
+                        SidebarView::Projects,
+                        SidebarView::Activity,
+                    ][index];
                     cx.stop_propagation();
                     cx.notify();
                 }
@@ -810,7 +1151,12 @@ impl Desktop {
             .flex_col()
             .border_color(rgb(palette.line))
             .border_blend_mode(crate::surface_blend::separator_mode())
-            .when(!tern, |sidebar| sidebar.bg(crate::surface_blend::background(crate::surface_blend::Area::Sidebar, palette.sidebar)));
+            .when(!tern, |sidebar| {
+                sidebar.bg(crate::surface_blend::background(
+                    crate::surface_blend::Area::Sidebar,
+                    palette.sidebar,
+                ))
+            });
         let footer = div()
             .id("sidebar-footer")
             .flex_shrink_0()
@@ -827,10 +1173,10 @@ impl Desktop {
                 .top(px(-outer_pad))
                 .left(px(-outer_pad))
                 .right(px(-outer_pad))
-                .h(gpui_kit::px(58.))
-                .pl(gpui_kit::px(82.))
+                .h(tab_metrics.row_height)
                 .flex()
                 .items_center()
+                .justify_center()
                 .child(tern_view_toggles)
                 .on_mouse_down(MouseButton::Left, |event, window, _| {
                     if event.click_count == 2 {
@@ -839,23 +1185,27 @@ impl Desktop {
                         window.start_window_move();
                     }
                 });
-            let sidebar_content_top = gpui_kit::px(29.)
-                + px(16. + design::tern_spacing(&self.snapshot["settings"]).gutter - outer_pad);
+            let sidebar_content_top = (tab_metrics.row_height + tab_metrics.height) / 2.
+                + px(design::tern_spacing(&self.snapshot["settings"]).gutter - outer_pad);
             sidebar
-                .p(px(design::tern_spacing(&self.snapshot["settings"]).gutter / 2.))
+                .p(px(
+                    design::tern_spacing(&self.snapshot["settings"]).gutter / 2.
+                ))
                 .gap(px(design::tern_spacing(&self.snapshot["settings"]).gutter))
-                .child(div()
-                    .id("sidebar-navigation")
-                    .relative()
-                    .flex_1()
-                    .min_h_0()
-                    .w_full()
-                    .flex()
-                    .flex_col()
-                    .pt(sidebar_content_top)
-                    .child(header)
-                    .children(approval_block)
-                    .child(tree))
+                .child(
+                    div()
+                        .id("sidebar-navigation")
+                        .relative()
+                        .flex_1()
+                        .min_h_0()
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .pt(sidebar_content_top)
+                        .child(header)
+                        .children(approval_block)
+                        .child(tree),
+                )
                 .child(footer)
         } else {
             sidebar
@@ -889,7 +1239,10 @@ fn provider_label(snapshot: &Value, task: &Value) -> String {
     let provider = {
         let task_provider = field(task, "provider");
         if task_provider.is_empty() {
-            agent.as_ref().map(|agent| field(agent, "provider")).unwrap_or_default()
+            agent
+                .as_ref()
+                .map(|agent| field(agent, "provider"))
+                .unwrap_or_default()
         } else {
             task_provider
         }
@@ -933,13 +1286,18 @@ fn project_icon(id: &str) -> IconName {
 const OLDER_TASK_AGE_MS: i64 = 4 * 60 * 60 * 1000;
 
 fn sidebar_now_ms() -> i64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64).unwrap_or(0)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or(0)
 }
 
 fn task_activity_ms(task: &Value) -> i64 {
-    task.get("updatedAt").and_then(Value::as_i64).filter(|time| *time > 0)
-        .or_else(|| task.get("createdAt").and_then(Value::as_i64)).unwrap_or(0)
+    task.get("updatedAt")
+        .and_then(Value::as_i64)
+        .filter(|time| *time > 0)
+        .or_else(|| task.get("createdAt").and_then(Value::as_i64))
+        .unwrap_or(0)
 }
 
 fn task_is_older(task: &Value, now_ms: i64) -> bool {
@@ -951,7 +1309,11 @@ fn relative_task_time(timestamp_ms: i64) -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
         .unwrap_or(timestamp_ms);
-    let minutes = now_ms.saturating_sub(timestamp_ms).max(0).saturating_add(30_000) / 60_000;
+    let minutes = now_ms
+        .saturating_sub(timestamp_ms)
+        .max(0)
+        .saturating_add(30_000)
+        / 60_000;
     if minutes < 1 {
         "now".into()
     } else if minutes < 60 {
@@ -983,3 +1345,46 @@ fn surface_slug(surface: Sidebar) -> &'static str {
 #[cfg(all(test, feature = "visual-export"))]
 #[path = "sidebar_hover_tests.rs"]
 mod sidebar_hover_tests;
+
+#[cfg(all(test, feature = "visual-export"))]
+mod sidebar_alignment_tests {
+    use super::sidebar_task_row_frame;
+    use crate::{Desktop, design};
+    use gpui::InteractiveElement as _;
+    use gpui_kit::{
+        AppContext as _, Context, IntoElement, ParentElement as _, Render, Styled as _,
+        TestAppContext, Window, div,
+    };
+    struct AlignmentFixture;
+    impl Render for AlignmentFixture {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let palette = design::PRESETS[0].1;
+            let settings = serde_json::json!({"interfaceFontSize": 14});
+            div()
+                .w(gpui_kit::px(240.))
+                .flex()
+                .flex_col()
+                .child(Desktop::section_label("Recent", palette, &settings))
+                .child(
+                    sidebar_task_row_frame().child(
+                        div()
+                            .debug_selector(|| "sidebar-agent-avatar".into())
+                            .w(gpui_kit::px(30.))
+                            .h(gpui_kit::px(30.)),
+                    ),
+                )
+        }
+    }
+    #[gpui_kit::test]
+    fn sidebar_agent_row_avatar_is_flush_with_recent_heading(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (_, mut visual) = cx.add_window_view(|_, _| AlignmentFixture);
+        let heading = visual
+            .debug_bounds("sidebar-section-copy")
+            .expect("heading renders");
+        let avatar = visual
+            .debug_bounds("sidebar-agent-avatar")
+            .expect("row avatar renders");
+        assert!((f32::from(heading.origin.x) - f32::from(avatar.origin.x)).abs() < 0.01);
+    }
+}

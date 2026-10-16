@@ -347,6 +347,15 @@ impl<T: HistoryRecord> History<T> {
         Some(update(&mut row))
     }
 
+    /// Replace an evicted row with a complete payload and a tracked point update.
+    /// Callers must supply the full durable record, never a compact UI shell.
+    pub(crate) fn replace_full_at(&mut self, index: usize, value: T) -> Option<()> {
+        let id = self.rows.get(index)?.id().to_owned();
+        assert_eq!(id, value.id(), "full payload replacement preserves identity");
+        self.cold_payload_ids.remove(&id);
+        self.update_at(index, |row| *row = value)
+    }
+
     pub fn update_by_id<R, F>(
         &mut self,
         id: &str,
@@ -792,6 +801,24 @@ mod tests {
                 .collect();
             assert_eq!(scoped.iter().copied().collect::<Vec<_>>(), expected_scoped);
         }
+    }
+
+    #[test]
+    fn tool_call_lifecycle_full_replacement_tracks_and_thaws_only_target() {
+        let mut before = History::from_vec(vec![row(0, 0, 10), row(1, 0, 20)]);
+        before.evict_payload(0, row(0, 0, 0));
+        before.evict_payload(1, row(1, 0, 0));
+        let mut after = before.clone();
+        assert_eq!(after.replace_full_at(0, row(0, 0, 30)), Some(()));
+        assert!(!after.payload_is_cold("id-0"));
+        assert!(after.payload_is_cold("id-1"));
+        assert!(before.payload_is_cold("id-0"));
+        assert_eq!(after.get_by_id("id-0").unwrap().unwrap().value, 30);
+        assert_eq!(after.delta_since(&before), HistoryDelta::Incremental {
+            from_version: before.version(), to_version: after.version(),
+            changes: vec![HistoryChange::Update { index: 0 }],
+        });
+        assert_indexes_match(&after, &[row(0, 0, 30), row(1, 0, 0)]);
     }
 
     #[test]

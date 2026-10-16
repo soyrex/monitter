@@ -162,48 +162,13 @@ impl chat::ChatPane {
             let id = field(&request, "id");
             let mcp_approval = !crate::approval_prompt::mcp_approval_choices(&request).is_empty();
             if request["input"].is_null() || mcp_approval {
-                let approval_id = id.clone();
-                let native_mcp_supported = self.mcp_approval_supported;
-                let owner = cx.weak_entity();
-                let decision = Rc::new(
-                    move |decision: &'static str, _: &mut Window, cx: &mut App| {
-                        let _ = owner.update(cx, |pane, cx| {
-                            if mcp_approval && !native_mcp_supported && decision == "approve_once" {
-                                pane.command("resolve_input", json!({"approvalId": approval_id, "response":{}}), cx);
-                            } else {
-                                pane.command(
-                                    if mcp_approval && decision != "deny" { "resolve_mcp_approval" } else { "resolve_approval" },
-                                    json!({"approvalId": approval_id, "decision": decision}), cx);
-                            }
-                        });
-                    },
-                );
-                let owner = cx.weak_entity();
-                let toggle = Rc::new(move |_: &mut Window, cx: &mut App| {
-                    let _ = owner.update(cx, |pane, cx| {
-                        pane.approval_details_expanded = !pane.approval_details_expanded;
-                        cx.notify();
-                    });
-                });
-                let task = rows(&self.snapshot, "tasks")
-                    .into_iter()
-                    .find(|task| field(task, "id") == task_id)
-                    .unwrap_or(Value::Null);
-                panel = panel.child(crate::approval_prompt::render_approval_prompt(
-                    &request,
-                    &task,
-                    &self.snapshot,
-                    palette,
-                    cx.theme().font_family.clone(),
-                    cx.theme().font_size,
-                    self.busy,
-                    self.approval_details_expanded,
-                    self.mcp_approval_supported,
-                    decision,
-                    toggle,
-                    window,
-                    cx,
-                ));
+                if !self.approval_popup_open {
+                    panel = panel.child(Button::new("review-pending-approval")
+                        .compact().label("Review approval")
+                        .on_click(cx.listener(move |pane, _, window, cx| {
+                            pane.show_approval_prompt(id.clone(), window, cx);
+                        })));
+                }
                 continue;
             }
             let pending = field(&request, "status") == "pending";

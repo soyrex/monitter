@@ -53,3 +53,28 @@ fn popup_focus_preserves_pane_activity_until_last_popup_closes(cx: &mut TestAppC
         assert!(crate::docking::pane_visual_active(&pane, window, cx));
     });
 }
+
+#[gpui_kit::test]
+fn popup_open_callback_captures_original_focus_before_transfer_and_restores_it(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (_, visual) = cx.add_window_view(|_, cx| FocusFixture {
+        pane: cx.focus_handle(), origin: cx.focus_handle(), popup: cx.focus_handle(),
+    });
+    visual.update(|window, cx| {
+        let origin = cx.focus_handle();
+        origin.focus(window, cx);
+        let recorded = Rc::new(RefCell::new(None));
+        let state = cx.new(|cx| gpui_kit::base::PopoverState::new(false, cx));
+        state.update(cx, |state, _| {
+            let recorded = recorded.clone();
+            state.set_on_open_change(Some(Rc::new(move |open, window, cx| {
+                if *open { *recorded.borrow_mut() = window.focused(cx); }
+            })));
+        });
+        state.update(cx, |state, cx| state.show(window, cx));
+        assert_eq!(*recorded.borrow(), Some(origin.clone()));
+        assert_ne!(window.focused(cx), Some(origin.clone()));
+        state.update(cx, |state, cx| state.dismiss(window, cx));
+        assert_eq!(window.focused(cx), Some(origin));
+    });
+}

@@ -1116,7 +1116,7 @@ mod tests {
             sandbox: agent.sandbox.clone(),
             project_id: None,
             acp: agent.acp.clone(),
-            archived_agent_name: None,
+            archived_agent_name: None, agent_worktree: None,
         };
         let mut imported_agent = agent;
         if new_host {

@@ -28,6 +28,7 @@ struct UsageState {
     committed: crate::history::History<RunUsageSample>,
     staged: crate::history::History<RunUsageSample>,
     captured_since: Option<i64>,
+    removed: Vec<RunUsageSample>,
 }
 
 pub struct Store {
@@ -83,6 +84,7 @@ impl Store {
                 committed: samples.clone(),
                 staged: samples,
                 captured_since,
+                removed: Vec::new(),
             }),
             poisoned: AtomicBool::new(false),
             _lease: lease,
@@ -124,6 +126,9 @@ impl Store {
     }
 
     pub fn save_update(&self, before: StateRef<'_>, after: StateRef<'_>) -> Result<(), String> {
+        self.save_update_work_log(before,after,&[])
+    }
+    pub(crate) fn save_update_work_log(&self,before:StateRef<'_>,after:StateRef<'_>,records:&[crate::work_log::PendingRecord])->Result<(),String>{
         self.require_writable()?;
         let mut usage = self
             .usage
@@ -134,9 +139,10 @@ impl Store {
             .or_else(|| (!usage.staged.is_empty()).then(now));
         let result =
             self.database
-                .apply_update_history_usage(before, after, &usage.committed, &usage.staged, captured);
+                .apply_update_history_usage(before, after, &usage.committed, &usage.staged, captured, records, &usage.removed);
         match result {
             Ok(()) => {
+                usage.removed.clear();
                 usage.committed = usage.staged.clone();
                 // Start a new direct lineage for the next usage transaction.
                 usage.staged = usage.committed.clone();
@@ -167,13 +173,28 @@ impl Store {
 
     pub fn remove_task_usage(&self, task_id: &str) -> Result<(), String> {
         self.require_writable()?;
-        self.usage
-            .lock()
-            .map_err(|_| "Monitter usage state lock failed.".to_string())?
-            .staged
-            .retain(|sample| sample.task_id != task_id);
+        let mut usage=self.usage.lock().map_err(|_| "Monitter usage state lock failed.".to_string())?;
+        let removed=usage.staged.iter().filter(|sample|sample.task_id==task_id).cloned().collect::<Vec<_>>();
+        usage.removed.extend(removed);
+        usage.staged.retain(|sample| sample.task_id != task_id);
         Ok(())
     }
+
+    pub(crate) fn work_log_active_context(&self,run:&str)->Result<Option<crate::work_log::ContextRef>,String>{self.database.work_log_active_context(run)}
+    pub(crate) fn work_log_segment_through(&self,reference:&crate::work_log::ContextRef)->Result<Option<String>,String>{self.database.work_log_segment_through(reference)}
+    pub(crate) fn work_log_context_anchors(&self,task:&str)->Result<(Option<String>,Option<String>),String>{self.database.work_log_context_anchors(task)}
+    pub(crate) fn work_log_lineage(&self,task:&str)->Result<(Option<String>,Option<String>,Option<String>,Option<String>),String>{self.database.work_log_lineage(task)}
+    pub(crate) fn work_log_stats(&self)->Result<(u64,u64,Option<String>),String>{self.database.work_log_stats()}
+    pub(crate) fn work_log_grants_json(&self)->Result<Option<String>,String>{self.database.work_log_grants_json()}
+    pub(crate) fn work_log_set_grants_json(&self,value:&str)->Result<(),String>{self.require_writable()?;self.database.work_log_set_grants_json(value)}
+    pub(crate) fn work_log_settings(&self)->Result<crate::work_log::CollectionSettings,String>{self.database.work_log_settings()}
+    pub(crate) fn work_log_identity(&self)->Result<(String,String),String>{self.database.work_log_identity()}
+    pub(crate) fn work_log_active(&self)->Result<Vec<crate::work_log::WorkRun>,String>{self.database.work_log_active()}
+    pub(crate) fn work_log_append(&self,records:&[crate::work_log::PendingRecord])->Result<(),String>{self.require_writable()?;self.database.work_log_append(records).inspect_err(|_|{self.poisoned.store(true,Ordering::Release);})}
+    pub(crate) fn work_log_configure(&self,settings:&crate::work_log::CollectionSettings)->Result<(),String>{self.require_writable()?;self.database.work_log_configure(settings).inspect_err(|_|{self.poisoned.store(true,Ordering::Release);})}
+    pub(crate) fn work_log_configure_with_records(&self,settings:&crate::work_log::CollectionSettings,records:&mut [crate::work_log::PendingRecord])->Result<(),String>{self.require_writable()?;self.database.work_log_configure_with_records(settings,records).inspect_err(|_|{self.poisoned.store(true,Ordering::Release);})}
+    pub(crate) fn work_log_append_recovery(&self,records:&[crate::work_log::PendingRecord])->Result<(),String>{self.require_writable()?;self.database.work_log_append_recovery(records).inspect_err(|_|{self.poisoned.store(true,Ordering::Release);})}
+    pub(crate) fn work_log_report(&self,run:&crate::work_log::WorkRun,input:&crate::work_log::ReportInput)->Result<crate::work_log::ReportReceipt,String>{self.require_writable()?;self.database.work_log_report(run,input).inspect_err(|e|{if e.starts_with("Cannot commit work log report"){self.poisoned.store(true,Ordering::Release);}})}
 
     pub fn usage_overview(&self) -> Result<UsageOverview, String> {
         let usage = self
@@ -341,3 +362,8 @@ fn aggregate_usage(samples: Vec<RunUsageSample>, captured_since: Option<i64>) ->
 #[cfg(test)]
 #[path = "store_tests.rs"]
 mod tests;
+
+impl crate::work_log::OutboxSource for Store {
+ fn pending(&self,limit:usize)->Result<Vec<crate::work_log::CommittedRecord>,String>{self.database.work_log_pending(limit)}
+ fn acknowledge(&self,through:i64)->Result<(),String>{self.require_writable()?;self.database.work_log_acknowledge(through)}
+}

@@ -5,7 +5,7 @@
 use crate::design::ui_scaled_px as px;
 use gpui_kit::{
     assets::IconName,
-    component::{ActiveTheme, Disableable, Icon, Sizable, button::*},
+    component::{ActiveTheme, Disableable, Icon, Sizable, button::*, spinner::Spinner},
     prelude::*,
     *,
 };
@@ -169,6 +169,36 @@ fn event_tool_status(event: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ToolState { Running, Completed, Failed, Unknown }
+fn tool_state(event: &Value) -> ToolState {
+    let detail = parsed_event_detail(event);
+    if detail["type"] == "mcpToolCall" && (!detail["error"].is_null() || detail["result"]["isError"].as_bool() == Some(true)) {
+        return ToolState::Failed;
+    }
+    match event_tool_status(event).unwrap_or_default().to_ascii_lowercase().replace(['_', '-'], "").as_str() {
+        "inprogress" | "running" | "pending" | "queued" | "started" => ToolState::Running,
+        "completed" | "succeeded" | "success" => ToolState::Completed,
+        "failed" | "error" | "cancelled" | "canceled" | "interrupted" => ToolState::Failed,
+        _ => ToolState::Unknown,
+    }
+}
+fn activity_icon(events: &[Value], fallback: IconName, cache: &PresentationCache) -> AnyElement {
+    let states: Vec<_> = events.iter().filter(|event| is_tool_event(event)).map(|event|cache.get(event).state).collect();
+    let state = if states.contains(&ToolState::Running) { ToolState::Running }
+        else if states.contains(&ToolState::Failed) { ToolState::Failed }
+        else if !states.is_empty() && states.iter().all(|state| *state == ToolState::Completed) { ToolState::Completed }
+        else { ToolState::Unknown };
+    let id = events.first().map(|event|field(event,"id")).unwrap_or_default();
+    let (name, icon) = match state {
+        ToolState::Running => ("running", Spinner::new().with_size(px(12.)).into_any_element()),
+        ToolState::Completed => ("completed", Icon::new(IconName::Check).size(px(12.)).into_any_element()),
+        ToolState::Failed => ("failed", Icon::new(IconName::CircleAlert).size(px(12.)).into_any_element()),
+        ToolState::Unknown => ("unknown", Icon::new(fallback).size(px(12.)).into_any_element()),
+    };
+    fixture_bounds(div().flex_shrink_0().child(icon),format!("run-state-{id}-{name}")).into_any_element()
+}
+
 /// Compact English intent for the latest step, without promoting incidental
 /// provider/accounting titles into tool labels.
 fn process_tool_preview(events: &[Value]) -> Option<String> {
@@ -292,7 +322,23 @@ fn grouped_tool_label(events: &[Value]) -> String {
     }
 }
 
+fn mcp_tool_label(event: &Value) -> Option<String> {
+    let detail = parsed_event_detail(event);
+    let item = detail.get("item").or_else(||detail.get("update")).unwrap_or(&detail);
+    if item["type"].as_str() != Some("mcpToolCall") { return None; }
+    fn friendly(value: &str) -> String {
+        let words = value.replace(['_', '-'], " ").split_whitespace().collect::<Vec<_>>().join(" ");
+        let mut chars=words.chars();
+        chars.next().map(|first| first.to_uppercase().collect::<String>() + chars.as_str()).unwrap_or_default()
+    }
+    let server = friendly(item["server"].as_str().unwrap_or_default());
+    let tool = friendly(item["tool"].as_str().unwrap_or_default());
+    if tool.is_empty() { return None; }
+    Some(if server.is_empty() { tool } else { format!("{server} · {tool}") })
+}
+
 fn tool_intent(event: &Value) -> String {
+    if let Some(label) = mcp_tool_label(event) { return label; }
     if event_tool_status(event).as_deref() == Some("failed") {
         return "Tool failed".to_owned();
     }
@@ -372,7 +418,6 @@ fn thinking_row(
         .flex()
         .items_center()
         .gap(px(6.))
-        .px(px(5.))
         .py(px(6.))
         .text_size(px(11.))
         .text_color(cx.theme().muted_foreground)
@@ -424,6 +469,7 @@ fn literal_detail(source: &str) -> String {
 #[derive(Default)]
 struct PresentationCache(RefCell<HashMap<String, Rc<EventPresentation>>>);
 struct EventPresentation {
+    state: ToolState,
     failed: bool,
     shell: bool,
     intent: String,
@@ -438,6 +484,7 @@ impl PresentationCache {
             return value.clone();
         }
         let value = Rc::new(EventPresentation {
+            state: tool_state(event),
             failed: event_tool_status(event).as_deref() == Some("failed"),
             shell: is_shell_event(event),
             intent: tool_intent(event),
@@ -503,6 +550,7 @@ enum DetailPresentation {
 /// the group's stable first-id anchor.
 pub struct RunActivityRow {
     service: DesktopService,
+    git_owner: Option<WeakEntity<crate::chat::ChatPane>>,
     task_id: String,
     event_id: String,
     title: String,
@@ -531,7 +579,26 @@ pub struct RunActivityRow {
     list_item: Option<(ListState, usize)>,
 }
 
+fn fixture_bounds(d: Div, name: String) -> Div {
+    #[cfg(test)] { return d.debug_selector(move ||name.clone()); }
+    #[cfg(not(test))] { let _=name; d }
+}
 impl RunActivityRow {
+    #[cfg(test)]
+    pub(crate) fn seed_fixture_detail(&mut self, detail: &str, cx: &mut Context<Self>) {
+        self.detail = detail.into();
+        self.detail_loaded = true;
+        self.next_offset = None;
+        self.presentation_cache.clear();
+        *self.detail_presentation.borrow_mut() = None;
+        cx.notify();
+    }
+    #[cfg(test)]
+    pub(crate) fn fixture_loaded_detail(&self) -> &str { &self.detail }
+    pub fn set_git_owner(&mut self, owner: WeakEntity<crate::chat::ChatPane>) {
+        self.git_owner = Some(owner);
+    }
+
     pub fn new(
         service: DesktopService,
         task_id: impl Into<String>,
@@ -549,6 +616,7 @@ impl RunActivityRow {
         let kind = field(event, "kind");
         Self {
             service,
+            git_owner: None,
             task_id,
             event_id: event_id.clone(),
             title,
@@ -651,6 +719,7 @@ impl RunActivityRow {
         let kind = field(&primary, "kind");
         Self {
             service,
+            git_owner: None,
             task_id,
             event_id,
             title,
@@ -889,6 +958,16 @@ impl RunActivityRow {
         matches!(self.mode, GroupMode::Single)
     }
 
+    /// A sole tool branch with the same events adds no information to its turn.
+    /// Mixed reasoning/tool branches and approval history keep their own structure.
+    fn repeats_only_tool_branch(&self) -> bool {
+        let [branch] = self.process_branches.as_slice() else { return false; };
+        branch.mode == GroupMode::Tool && self.process_approvals.is_empty()
+            && !branch.events.is_empty()
+            && branch.events.iter().map(|event| field(event, "id"))
+                .eq(self.events.iter().map(|event| field(event, "id")))
+    }
+
     fn toggle(&mut self, cx: &mut Context<Self>) {
         self.expanded = !self.expanded;
         self.error = None;
@@ -959,16 +1038,16 @@ impl RunActivityRow {
 }
 
 impl Render for RunActivityRow {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         match self.mode {
-            GroupMode::Single => self.render_single(cx),
+            GroupMode::Single => self.render_single(window, cx),
             GroupMode::Reasoning | GroupMode::Tool | GroupMode::Process => self.render_group(cx),
         }
     }
 }
 
 impl RunActivityRow {
-    fn render_single(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+    fn render_single(&self, window: &mut Window, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let is_reasoning = self.kind == "reasoning";
         let presentation_event = self.events.first().unwrap_or(&Value::Null);
         let presentation = self.presentation_cache.with_loaded_detail(
@@ -1025,7 +1104,6 @@ impl RunActivityRow {
         let mut row = div()
             .w_full()
             .min_w_0()
-            .px_1()
             .flex()
             .flex_col()
             .items_start()
@@ -1038,21 +1116,12 @@ impl RunActivityRow {
                     .w_full()
                     .min_w_0()
                     .justify_start()
-                    .icon(Icon::new(if expanded {
-                        IconName::ChevronDown
-                    } else {
-                        IconName::ChevronRight
-                    }))
+                    .px(px(0.))
                     .when(
                         is_reasoning || matches!(self.kind.as_str(), "tool" | "subagent"),
                         |button| {
                             button.child(
-                                Icon::new(if is_reasoning {
-                                    IconName::BookOpen
-                                } else {
-                                    IconName::Wrench
-                                })
-                                .size(px(12.)),
+                                activity_icon(&self.events, if is_reasoning { IconName::BookOpen } else { IconName::Wrench }, &self.presentation_cache),
                             )
                         },
                     )
@@ -1073,11 +1142,14 @@ impl RunActivityRow {
                             button
                         }
                     })
+                    .child(fixture_bounds(div().flex_shrink_0().child(Icon::new(if expanded { IconName::ChevronDown } else { IconName::ChevronRight }).size(px(12.))), format!("run-caret-{event_id}")))
                     .accessibility_label(action)
                     .disabled(loading)
                     .on_click(cx.listener(|row, _, _, cx| row.toggle(cx))),
             );
 
+        #[cfg(test)]
+        { row = row.debug_selector({let id=self.event_id.clone();move ||format!("run-single-{id}")}); }
         if expanded {
             let mut detail_panel = div()
                 .w_full()
@@ -1090,6 +1162,8 @@ impl RunActivityRow {
                 .flex()
                 .flex_col()
                 .gap(px(10.));
+            #[cfg(test)]
+            { detail_panel=detail_panel.debug_selector({let id=self.event_id.clone();move ||format!("run-detail-{id}")}); }
             if loading {
                 detail_panel = detail_panel.child(
                     div()
@@ -1141,7 +1215,14 @@ impl RunActivityRow {
                             }
                             match self.detail_presentation.borrow().as_ref().unwrap() {
                                 DetailPresentation::Structured(prepared) => {
-                                    tool_detail::render_prepared(prepared, &self.event_id, cx)
+                                    tool_detail::render_prepared(
+                                        prepared,
+                                        &self.event_id,
+                                        &self.task_id,
+                                        self.git_owner.clone(),
+                                        window,
+                                        cx,
+                                    )
                                 }
                                 DetailPresentation::Literal(text) => {
                                     gpui_kit::component::text::TextView::markdown(
@@ -1267,12 +1348,13 @@ impl RunActivityRow {
         let mut row = div()
             .w_full()
             .min_w_0()
-            .px_1()
             .py_1()
             .flex()
             .flex_col()
             .items_start()
             .gap(px(10.));
+        #[cfg(test)]
+        { row = row.debug_selector({let id=self.stable_first_id.clone();move ||format!("run-group-{id}")}); }
         // Group disclosures are kept lazy: each retained event id remains
         // available through its own retained row in the grouped projection.
         let anchor = self.stable_first_id.clone();
@@ -1289,12 +1371,8 @@ impl RunActivityRow {
             .w_full()
             .min_w_0()
             .justify_start()
-            .icon(Icon::new(if self.expanded {
-                IconName::ChevronDown
-            } else {
-                IconName::ChevronRight
-            }))
-            .child(Icon::new(IconName::Brain).size(px(12.)))
+            .px(px(0.))
+            .child(fixture_bounds(div().flex_shrink_0().child(activity_icon(&self.events, IconName::Brain, &self.presentation_cache)), format!("run-leading-{anchor}")))
             .child(
                 div()
                     .flex_1()
@@ -1312,6 +1390,7 @@ impl RunActivityRow {
         {
             toggle = toggle.child(time);
         }
+        toggle = toggle.child(fixture_bounds(div().flex_shrink_0().child(Icon::new(if self.expanded { IconName::ChevronDown } else { IconName::ChevronRight }).size(px(12.))), format!("run-caret-{anchor}")));
         row = row.child(
             toggle
                 .accessibility_label(format!("{action}: {summary}"))
@@ -1319,7 +1398,7 @@ impl RunActivityRow {
         );
         if self.expanded {
             if matches!(self.mode, GroupMode::Process | GroupMode::Tool)
-                && !self.process_branches.is_empty()
+                && !self.process_branches.is_empty() && !self.repeats_only_tool_branch()
             {
                 for branch in &self.process_branches {
                     let key = process_branch_key(branch);
@@ -1341,11 +1420,11 @@ impl RunActivityRow {
                     let branch_action = if branch_open { "Hide" } else { "Show" };
                     let branch_accessibility = format!("{branch_action} branch: {label}");
                     row = row.child(
-                        div()
+                        fixture_bounds(div(),format!("run-branch-{key}"))
                             .w_full()
                             .min_w_0()
-                            // The guide begins below the parent disclosure,
-                            // on its caret center; keep the child indentation.
+                            // Keep nested steps indented beneath their parent;
+                            // disclosure carets stay on the trailing edge.
                             .ml(px(7.))
                             .pl(px(5.))
                             .border_l_1()
@@ -1363,11 +1442,7 @@ impl RunActivityRow {
                                     .min_w_0()
                                     .justify_start()
                                     .accessibility_label(branch_accessibility)
-                                    .icon(Icon::new(if branch_open {
-                                        IconName::ChevronDown
-                                    } else {
-                                        IconName::ChevronRight
-                                    }))
+                                    .px(px(0.))
                                     .child(
                                         div()
                                             .flex_1()
@@ -1388,6 +1463,7 @@ impl RunActivityRow {
                                                 .child(time),
                                         )
                                     })
+                                    .child(Icon::new(if branch_open { IconName::ChevronDown } else { IconName::ChevronRight }).size(px(12.)))
                                     .on_click(cx.listener(move |row, _, _, cx| {
                                         row.toggle_process_branch(toggle_key.clone(), cx);
                                     })),
@@ -1456,6 +1532,10 @@ impl RunActivityRow {
         row.into_any_element()
     }
 }
+
+#[cfg(all(test, feature = "visual-export", feature = "performance-profiling"))]
+#[path = "activity_disclosure_tests.rs"]
+mod activity_disclosure_tests;
 
 #[cfg(test)]
 mod tests {

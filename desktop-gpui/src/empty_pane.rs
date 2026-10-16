@@ -8,7 +8,7 @@ use crate::{design, design::ui_scaled_px as px};
 use gpui_kit::{
     assets::IconName,
     component::{
-        Disableable, Icon,
+        Disableable, Icon, Sizable as _,
         button::*,
         input::{Input, InputEvent, InputState},
     },
@@ -30,6 +30,7 @@ pub enum EmptyPaneAction {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EmptyPaneEvent {
+    Close,
     Action(EmptyPaneAction),
     OpenSession(String),
 }
@@ -365,6 +366,16 @@ impl Render for EmptyPane {
             .flex_col()
             .items_center()
             .p(px(20.0))
+            .relative()
+            .pt(px(36.))
+            .child(Button::new("empty-pane-close").icon(IconName::X).small().ghost()
+                .absolute().top(px(4.)).right(px(4.))
+                .tooltip("Close new tab pane").accessibility_label("Close new tab pane")
+                .debug_selector(|| "empty-pane-close".into())
+                .on_click(cx.listener(|_, _, _, cx| {
+                    cx.stop_propagation();
+                    cx.emit(EmptyPaneEvent::Close);
+                })))
             .track_focus(&self.focus)
             .capture_key_down(cx.listener(|pane, event: &KeyDownEvent, window, cx| {
                 let modifiers = event.keystroke.modifiers;

@@ -38,11 +38,7 @@ pub(super) fn state<V: 'static>(
     (state, motion.value)
 }
 
-pub(super) fn set<V: 'static>(
-    state: &Entity<HoverState>,
-    hovered: bool,
-    cx: &mut Context<V>,
-) {
+pub(super) fn set<V: 'static>(state: &Entity<HoverState>, hovered: bool, cx: &mut Context<V>) {
     let changed = state.update(cx, |state, _| {
         if state.hovered == hovered {
             false

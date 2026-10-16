@@ -250,7 +250,7 @@ impl Session {
         if self.exited.load(Ordering::Acquire) {
             return Ok(lock(&self.metadata).clone());
         }
-        let script = r#"local wins={}; for _,w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do local b=vim.api.nvim_win_get_buf(w); table.insert(wins,{id=w,buffer=b,name=vim.api.nvim_buf_get_name(b),modified=vim.bo[b].modified,width=vim.api.nvim_win_get_width(w),height=vim.api.nvim_win_get_height(w)}) end; return vim.json.encode({layout=vim.fn.winlayout(),windows=wins,currentWindow=vim.api.nvim_get_current_win(),mode=vim.api.nvim_get_mode().mode})"#;
+        let script = r#"local wins={}; for _,w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do local b=vim.api.nvim_win_get_buf(w); table.insert(wins,{id=w,buffer=b,name=vim.api.nvim_buf_get_name(b),cwd=vim.fn.getcwd(vim.fn.win_id2win(w),0),filetype=vim.bo[b].filetype,modified=vim.bo[b].modified,width=vim.api.nvim_win_get_width(w),height=vim.api.nvim_win_get_height(w)}) end; return vim.json.encode({layout=vim.fn.winlayout(),windows=wins,currentWindow=vim.api.nvim_get_current_win(),mode=vim.api.nvim_get_mode().mode})"#;
         let value = self.request("nvim_exec_lua", vec![script.into(), array(vec![])])?;
         let text = value.as_str().ok_or("Invalid Neovim metadata response.")?;
         let metadata =
@@ -272,7 +272,7 @@ impl Session {
         }
         let s = self.clone();
         thread::spawn(move || {
-            let script = r#"local wins={}; for _,w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do local b=vim.api.nvim_win_get_buf(w); table.insert(wins,{id=w,buffer=b,name=vim.api.nvim_buf_get_name(b),modified=vim.bo[b].modified,width=vim.api.nvim_win_get_width(w),height=vim.api.nvim_win_get_height(w)}) end; return vim.json.encode({layout=vim.fn.winlayout(),windows=wins,currentWindow=vim.api.nvim_get_current_win(),mode=vim.api.nvim_get_mode().mode})"#;
+            let script = r#"local wins={}; for _,w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do local b=vim.api.nvim_win_get_buf(w); table.insert(wins,{id=w,buffer=b,name=vim.api.nvim_buf_get_name(b),cwd=vim.fn.getcwd(vim.fn.win_id2win(w),0),filetype=vim.bo[b].filetype,modified=vim.bo[b].modified,width=vim.api.nvim_win_get_width(w),height=vim.api.nvim_win_get_height(w)}) end; return vim.json.encode({layout=vim.fn.winlayout(),windows=wins,currentWindow=vim.api.nvim_get_current_win(),mode=vim.api.nvim_get_mode().mode})"#;
             let result = (|| {
                 let (id, rx) = s.enqueue("nvim_exec_lua", vec![script.into(), array(vec![])])?;
                 let reply = loop {
@@ -541,7 +541,47 @@ fn session(args: &Value) -> Result<Arc<Session>, String> {
         .cloned()
         .ok_or_else(|| "Neovim session no longer exists.".into())
 }
+// Listings are owner-local, bounded, and produced off the GPUI render thread.
+fn list_directory(path: &std::path::Path) -> Result<Value, String> {
+    let path = path
+        .canonicalize()
+        .map_err(|e| format!("Cannot open folder: {e}"))?;
+    let mut entries = Vec::new();
+    let mut truncated = false;
+    for entry in std::fs::read_dir(&path).map_err(|e| format!("Cannot read folder: {e}"))? {
+        if entries.len() == 4096 {
+            truncated = true;
+            break;
+        }
+        let entry = entry.map_err(|e| format!("Cannot read folder entry: {e}"))?;
+        let kind = entry
+            .file_type()
+            .map_err(|e| format!("Cannot inspect folder entry: {e}"))?;
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| "Folder contains a filename that is not valid UTF-8.".to_owned())?;
+        let is_directory = kind.is_dir() || (kind.is_symlink() && entry.path().is_dir());
+        entries.push(json!({"name":name,"path":entry.path(),"isDirectory":is_directory,"isSymlink":kind.is_symlink()}));
+    }
+    entries.sort_by(|a, b| {
+        b["isDirectory"]
+            .as_bool()
+            .cmp(&a["isDirectory"].as_bool())
+            .then_with(|| {
+                a["name"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_lowercase()
+                    .cmp(&b["name"].as_str().unwrap_or("").to_lowercase())
+            })
+            .then_with(|| a["name"].as_str().cmp(&b["name"].as_str()))
+    });
+    Ok(json!({"path":path,"parent":path.parent(),"entries":entries,"truncated":truncated}))
+}
 pub(crate) const COMMANDS: &[&str] = &[
+    "neovim_list_directory",
+    "neovim_open_file",
     "neovim_available",
     "open_neovim",
     "read_neovim",
@@ -576,6 +616,43 @@ pub(crate) fn invoke(command: &str, args: Value) -> Result<Value, String> {
     }
     let s = session(&args)?;
     match command {
+        "neovim_list_directory" => {
+            let path = args
+                .get("path")
+                .and_then(Value::as_str)
+                .filter(|p| !p.is_empty())
+                .unwrap_or(&s.cwd);
+            let path = PathBuf::from(path);
+            if !path.is_absolute() {
+                return Err("Folder path must be absolute.".into());
+            }
+            list_directory(&path)
+        }
+        "neovim_open_file" => {
+            let path = PathBuf::from(text(&args, "path")?);
+            if !path.is_absolute() {
+                return Err("File path must be absolute.".into());
+            }
+            let path = path
+                .canonicalize()
+                .map_err(|e| format!("Cannot open file: {e}"))?;
+            if !path.is_file() {
+                return Err("Select a regular file to open in Neovim.".into());
+            }
+            let path = path.to_str().ok_or("File path is not valid UTF-8.")?;
+            let win = number(&args, "windowId", 0)?;
+            if win == 0 {
+                return Err("Missing Neovim window.".into());
+            }
+            // Structured command arguments keep spaces, bars, quotes and Vim
+            // filename expansion characters literal. Never force modified buffers.
+            s.request("nvim_exec_lua", vec![
+                "local w,p=...; vim.api.nvim_set_current_win(w); vim.api.nvim_cmd({cmd='edit',args={p},magic={file=false,bar=false}},{}); return true".into(),
+                array(vec![win.into(), path.into()]),
+            ])?;
+            s.refresh_metadata();
+            Ok(Value::Null)
+        }
         "read_neovim" => {
             let after = number(&args, "after", 0)?;
             let gap = lock(&s.replay).gap(after);
@@ -587,7 +664,11 @@ pub(crate) fn invoke(command: &str, args: Value) -> Result<Value, String> {
                 let (cols, rows) = *lock(&s.size);
                 s.request("nvim_ui_attach", vec![cols.into(), rows.into(), options()])?;
             }
-            s.refresh_metadata();
+            // Redraw activity invalidates the layout projection. An idle read
+            // must not manufacture another Lua RPC (and worker thread).
+            if gap || lock(&s.replay).seq > after {
+                s.refresh_metadata();
+            }
             let metadata = lock(&s.metadata).clone();
             let replay = lock(&s.replay);
             let mut events = Vec::new();
@@ -602,7 +683,7 @@ pub(crate) fn invoke(command: &str, args: Value) -> Result<Value, String> {
                 events.push(json!({"seq":batch.seq,"events":batch.value}));
             }
             Ok(
-                json!({"id":s.id,"seq":seq,"latestSeq":replay.seq,"events":events,"gap":gap,"layout":metadata["layout"],"windows":metadata["windows"],"currentWindow":metadata["currentWindow"],"mode":metadata["mode"],"exited":s.exited.load(Ordering::Acquire),"error":lock(&s.error).clone()}),
+                json!({"id":s.id,"seq":seq,"latestSeq":replay.seq,"events":events,"gap":gap,"cwd":s.cwd,"layout":metadata["layout"],"windows":metadata["windows"],"currentWindow":metadata["currentWindow"],"mode":metadata["mode"],"exited":s.exited.load(Ordering::Acquire),"error":lock(&s.error).clone()}),
             )
         }
         "neovim_input" => {
@@ -757,6 +838,86 @@ mod tests {
         let mut bytes = Vec::new();
         rmpv::encode::write_value(&mut bytes, &Mp::from(1000)).unwrap();
         assert_eq!(mp_json(&Mp::Ext(1, bytes)), json!(1000));
+    }
+    #[test]
+    #[ignore = "requires installed Neovim and isolated temporary files"]
+    fn native_browser_and_window_status_preserve_editor_semantics() {
+        let dir = std::env::temp_dir().join(format!("monitter-browser-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("nested")).unwrap();
+        let dir = dir.canonicalize().unwrap();
+        let path = dir.join("literal | % #.rs");
+        std::fs::write(&path, "fn main() {}\n").unwrap();
+        std::fs::write(dir.join("other.txt"), "other\n").unwrap();
+        let opened = invoke("open_neovim", json!({"cwd":dir,"clean":true})).unwrap();
+        let id = opened["id"].as_str().unwrap();
+        let session = session(&json!({"id":id})).unwrap();
+        struct Cleanup(Arc<Session>, PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                self.0.command("qa!").ok();
+                std::fs::remove_dir_all(&self.1).ok();
+            }
+        }
+        let _cleanup = Cleanup(session.clone(), dir.clone());
+        let listing = invoke("neovim_list_directory", json!({"id":id,"path":dir})).unwrap();
+        assert_eq!(listing["entries"][0]["name"], "nested");
+        assert_eq!(listing["entries"][0]["isDirectory"], true);
+        assert_eq!(listing["truncated"], false);
+        let win = session.snapshot().unwrap()["currentWindow"]
+            .as_u64()
+            .unwrap();
+        session.command("filetype on").unwrap();
+        invoke(
+            "neovim_open_file",
+            json!({"id":id,"windowId":win,"path":path}),
+        )
+        .unwrap();
+        let status = session.snapshot().unwrap();
+        assert_eq!(status["windows"][0]["name"], path.to_str().unwrap());
+        assert_eq!(status["windows"][0]["filetype"], "rust");
+        assert_eq!(status["windows"][0]["cwd"], dir.to_str().unwrap());
+        session.command("vsplit").unwrap();
+        session.command("lcd nested").unwrap();
+        let local = session.snapshot().unwrap();
+        let active = local["currentWindow"].as_u64().unwrap();
+        for row in local["windows"].as_array().unwrap() {
+            let expected = if row["id"].as_u64() == Some(active) {
+                dir.join("nested")
+            } else {
+                dir.clone()
+            };
+            assert_eq!(row["cwd"], expected.to_str().unwrap());
+        }
+        session.command("only").unwrap();
+        session.command("set nohidden").unwrap();
+        session
+            .request(
+                "nvim_buf_set_lines",
+                vec![
+                    0.into(),
+                    0.into(),
+                    (-1).into(),
+                    false.into(),
+                    array(vec!["unsaved".into()]),
+                ],
+            )
+            .unwrap();
+        assert!(
+            invoke(
+                "neovim_open_file",
+                json!({"id":id,"windowId":active,"path":dir.join("other.txt")})
+            )
+            .unwrap_err()
+            .contains("E37")
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "fn main() {}\n");
+        assert!(
+            invoke(
+                "neovim_open_file",
+                json!({"id":id,"windowId":active,"path":dir})
+            )
+            .is_err()
+        );
     }
     #[test]
     fn rejects_invalid_arguments() {

@@ -464,3 +464,8 @@ mod tests {
         let _ = child.wait();
     }
 }
+
+#[cfg(target_os="macos")]
+pub(crate) fn work_log_process_started_at(pid:libc::pid_t)->Option<i64>{retirement_live_identity(pid).ok().flatten()}
+#[cfg(not(target_os="macos"))]
+pub(crate) fn work_log_process_started_at(_pid:libc::pid_t)->Option<i64>{None}

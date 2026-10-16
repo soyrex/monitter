@@ -163,6 +163,12 @@ pub trait Panel: gpui_base::dock::Panel {
         false
     }
 
+    /// Whether the skin draws this panel's close button. Panels with their
+    /// own close affordance can suppress it without changing dock closability.
+    fn close_button_visible(&self, _cx: &App) -> bool {
+        true
+    }
+
     /// Whether the tab group pads the panel's content when it draws it inside
     /// a tab bar.
     fn inner_padding(&self, cx: &App) -> bool {
@@ -196,6 +202,7 @@ pub trait PanelView: gpui_base::dock::PanelView {
     fn dropdown_menu(&self, menu: PopupMenu, window: &mut Window, cx: &mut App) -> PopupMenu;
     fn zoom_control(&self, cx: &App) -> Option<PanelControl>;
     fn toolbar_in_content(&self, cx: &App) -> bool;
+    fn close_button_visible(&self, _cx: &App) -> bool { true }
     fn inner_padding(&self, cx: &App) -> bool;
     fn title_bar(&self, cx: &App) -> bool;
 }
@@ -257,6 +264,10 @@ impl<T: Panel> PanelView for Entity<T> {
 
     fn toolbar_in_content(&self, cx: &App) -> bool {
         self.read(cx).toolbar_in_content(cx)
+    }
+
+    fn close_button_visible(&self, cx: &App) -> bool {
+        self.read(cx).close_button_visible(cx)
     }
 
     fn inner_padding(&self, cx: &App) -> bool {

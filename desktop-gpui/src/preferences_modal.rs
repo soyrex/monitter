@@ -24,7 +24,7 @@ pub(crate) fn workspace_blocked(cx: &App) -> bool { crate::session_lock::locked(
 
 impl Desktop {
     pub(super) fn show_preferences(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if crate::session_lock::locked(cx) || self.closing || self.preferences_open { return; }
+        if self.startup_pending || crate::session_lock::locked(cx) || self.closing || self.preferences_open { return; }
         self.preferences_previous_focus = window.focused(cx);
         self.preferences_open = true;
         cx.set_global(WorkspaceOverlayState { open: true });
@@ -46,7 +46,7 @@ impl Desktop {
         let owner = cx.weak_entity();
         let holder = window.use_keyed_state("preferences-overlay-state", cx, |_, cx| cx.new(|_| {
             let clock = FeedbackClock::new();
-            clock.borrow_mut().start(std::time::Duration::from_millis(140));
+            clock.borrow_mut().start(std::time::Duration::from_millis(120));
             PreferencesOverlay { owner, clock }
         }));
         let overlay = holder.read(cx).clone();
@@ -71,27 +71,25 @@ impl Desktop {
             // The ordered backdrop filter finishes before the card is painted,
             // so the first modal frame already has its blurred blackout.
             .child(div().id("preferences-backdrop").absolute().inset_0()
-                .bg(Background::from(rgba(0x00000045)).backdrop_blur(20.))
+                .bg(Background::from(rgba(0x00000099)).backdrop_blur(20.))
                 .on_mouse_down(MouseButton::Left, cx.listener(|view, _, window, cx| {
                     view.close_preferences(window, cx);
                     cx.stop_propagation();
                 })))
-            .child(feedback::painted(div().id("preferences-card").w(size.width * 0.9).max_w(gpui_kit::px(1200.)).h(size.height * 0.9)
+            .child(feedback::painted(div().id("preferences-card").w(size.width * 0.9).max_w(design::ui_scaled_px(1296.)).h(size.height * 0.9)
                 .debug_selector(|| "preferences-card".to_string())
                 .min_w_0().min_h_0().flex().flex_col().overflow_hidden()
                 .shadow(vec![
                     gpui_kit::BoxShadow::new(px(0.), px(18.), rgba(0x00000066).into()).blur_radius(px(48.)),
                     gpui_kit::BoxShadow::new(px(0.), px(4.), rgba(0x00000033).into()).blur_radius(px(12.)),
                 ])
-                .bg(crate::design::modal_surface_color(palette.paper)).rounded(design::ui_scaled_px(design::radius::CARD)).border_1().border_color(rgb(palette.line))
+                .bg(crate::design::modal_surface_color(palette.paper)).rounded(design::ui_scaled_px(design::radius::MODAL)).border_1().border_color(rgb(palette.line))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .child(div().flex().items_center().justify_between().px(design::ui_scaled_px(design::space::SECTION)).py(design::ui_scaled_px(design::space::INSET)).border_b_1().border_color(rgb(palette.line))
                     .child(div().font_weight(FontWeight::SEMIBOLD).child("Preferences"))
                     .child(Button::new("close-preferences").compact().label("Done").accessibility_label("Close preferences")
                         .on_click(cx.listener(|view, _, window, cx| view.close_preferences(window, cx)))))
                 .child(div().flex_1().min_h_0().min_w_0().child(content))
-                .relative()
-                .top(design::ui_scaled_px(4. * (1. - progress)))
                 .opacity(progress)
                 // GPUI fades primitives independently; suppress shadow bleed.
                 .shadow(vec![
@@ -105,38 +103,71 @@ impl Desktop {
 
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SidebarMode { Hidden, Icons, Full }
+pub enum SidebarMode {
+    Hidden,
+    Icons,
+    Full,
+}
 impl SidebarMode {
-    fn next(self) -> Self { match self { Self::Full => Self::Icons, Self::Icons => Self::Hidden, Self::Hidden => Self::Full } }
-    fn id(self) -> &'static str { match self { Self::Hidden => "hidden", Self::Icons => "icons", Self::Full => "full" } }
+    fn toggle_visibility(self) -> Self {
+        match self {
+            Self::Hidden => Self::Full,
+            Self::Full | Self::Icons => Self::Hidden,
+        }
+    }
+    fn visibility_target(self, expanded: f32, scale: u16) -> (Self, f32) {
+        let next = self.toggle_visibility();
+        (
+            next,
+            if next == Self::Hidden {
+                0.
+            } else {
+                super::expanded_sidebar_width_for_scale(expanded, scale)
+            },
+        )
+    }
+    fn id(self) -> &'static str {
+        match self {
+            Self::Hidden => "hidden",
+            Self::Icons => "resized-icons",
+            Self::Full => "full",
+        }
+    }
+}
+fn sidebar_mode_from_saved(value: Option<&str>) -> SidebarMode {
+    match value.map(str::trim) {
+        Some("hidden") => SidebarMode::Hidden,
+        Some("resized-icons") => SidebarMode::Icons,
+        // Old icons/boolean preferences could be produced by the three-state
+        // button. Only a new divider-resize token establishes compact intent.
+        _ => SidebarMode::Full,
+    }
 }
 fn load_sidebar_mode() -> SidebarMode {
-    let Some(dir) = monitter_lib::experimental_desktop::profile_dir().ok() else { return SidebarMode::Full; };
-    match std::fs::read_to_string(dir.join("sidebar-mode.v2")).ok().as_deref().map(str::trim) {
-        Some("hidden") => SidebarMode::Hidden,
-        Some("icons") => SidebarMode::Icons,
-        Some("full") => SidebarMode::Full,
-        _ => if std::fs::read(dir.join("sidebar-collapsed.v1")).is_ok_and(|bytes| bytes == b"true\n") { SidebarMode::Icons } else { SidebarMode::Full },
-    }
+    let Some(dir) = monitter_lib::experimental_desktop::profile_dir().ok() else {
+        return SidebarMode::Full;
+    };
+    let value = std::fs::read_to_string(dir.join("sidebar-mode.v2")).ok();
+    sidebar_mode_from_saved(value.as_deref())
 }
 impl Desktop {
     pub(super) fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let from = self.displayed_sidebar_width(cx);
         if !self.sidebar_motion.active() && !self.sidebar_collapsed && !self.sidebar_is_hidden() {
-            self.sidebar_expanded_width = super::expanded_sidebar_width(self.current_sidebar_width(cx));
+            self.sidebar_expanded_width = super::expanded_sidebar_width_for_scale(self.current_sidebar_width(cx),self.sidebar_scale);
         }
-        let tern = design::tile_theme() == monitter_lib::experimental_desktop::NativeTileTheme::Tern;
-        let current = if self.sidebar_hidden && tern { SidebarMode::Hidden } else if self.sidebar_collapsed { SidebarMode::Icons } else { SidebarMode::Full };
-        let next = if tern { current.next() } else if self.sidebar_collapsed { SidebarMode::Full } else { SidebarMode::Icons };
+        let current = if self.sidebar_hidden { SidebarMode::Hidden } else if self.sidebar_collapsed { SidebarMode::Icons } else { SidebarMode::Full };
+        let (next,target) = current.visibility_target(self.sidebar_expanded_width,self.sidebar_scale);
         self.sidebar_motion_compact = self.sidebar_collapsed;
         self.sidebar_hidden = next == SidebarMode::Hidden;
-        self.sidebar_collapsed = next == SidebarMode::Icons;
+        // The button only changes visibility. Showing restores the last full
+        // width; compact presentation is entered solely by a divider gesture.
+        self.sidebar_collapsed = false;
         if self.sidebar_collapsed || (self.sidebar_is_hidden() && self.sidebar_motion_compact) { crate::shell::set_task_markers_visible(false, self.sidebar_view, cx); }
         if self.sidebar_is_hidden() && self.sidebar_focus.contains_focused(window, cx) {
             window.focus(&self.sidebar_toggle_focus, cx);
         }
         save_sidebar_mode(next);
-        let target = if self.sidebar_is_hidden() { 0. } else if self.sidebar_collapsed { design::compact_sidebar_width_design(self.sidebar_scale) } else { super::expanded_sidebar_width(self.sidebar_expanded_width) };
         self.start_sidebar_motion(from, target, window, cx);
         cx.notify();
     }
@@ -160,11 +191,38 @@ fn save_sidebar_mode(mode: SidebarMode) {
 }
 #[cfg(test)]
 mod sidebar_mode_tests {
-    use super::SidebarMode;
+    use super::{sidebar_mode_from_saved, SidebarMode};
     #[test]
-    fn tern_sidebar_cycle_has_a_reachable_hidden_state_and_restore_path() {
-        assert_eq!(SidebarMode::Full.next(), SidebarMode::Icons);
-        assert_eq!(SidebarMode::Icons.next(), SidebarMode::Hidden);
-        assert_eq!(SidebarMode::Hidden.next(), SidebarMode::Full);
+    fn sidebar_only_restores_icons_from_a_confirmed_divider_resize_token() {
+        assert_eq!(sidebar_mode_from_saved(Some("icons")), SidebarMode::Full);
+        assert_eq!(sidebar_mode_from_saved(None), SidebarMode::Full);
+        assert_eq!(
+            sidebar_mode_from_saved(Some("resized-icons\n")),
+            SidebarMode::Icons
+        );
+        assert_eq!(sidebar_mode_from_saved(Some("hidden")), SidebarMode::Hidden);
+        assert_eq!(SidebarMode::Icons.id(), "resized-icons");
+    }
+    #[test]
+    fn sidebar_button_only_toggles_visible_and_hidden_and_restores_full_width_mode() {
+        assert_eq!(SidebarMode::Full.toggle_visibility(), SidebarMode::Hidden);
+        assert_eq!(SidebarMode::Icons.toggle_visibility(), SidebarMode::Hidden);
+        assert_eq!(SidebarMode::Hidden.toggle_visibility(), SidebarMode::Full);
+        assert_eq!(
+            SidebarMode::Full.toggle_visibility().toggle_visibility(),
+            SidebarMode::Full
+        );
+        for scale in [100, 150] {
+            let (off, width) = SidebarMode::Full.visibility_target(278., scale);
+            assert_eq!((off, width), (SidebarMode::Hidden, 0.));
+            assert_eq!(
+                off.visibility_target(278., scale),
+                (SidebarMode::Full, 278.)
+            );
+            assert_eq!(
+                SidebarMode::Icons.visibility_target(278., scale),
+                (SidebarMode::Hidden, 0.)
+            );
+        }
     }
 }

@@ -1,4 +1,4 @@
-//! Compact durable transcript boundaries, matching TaskTranscript.svelte.
+//! Compact system cards for durable context/settings/fork boundaries.
 use crate::design::{self, ui_scaled_px as px};
 use gpui_kit::{prelude::*, *};
 use serde_json::Value;
@@ -35,38 +35,30 @@ pub(super) fn render(
         .as_i64()
         .and_then(crate::timestamps::local_datetime)
         .map(|time| time.format("%-I:%M %P").to_string());
-    let visible = time
+    let visible = time.as_ref()
         .map(|time| format!("{time} · {label}"))
-        .unwrap_or(label);
-    let ratio = settings["interfaceFontSize"]
-        .as_f64()
-        .unwrap_or(14.)
-        .clamp(8., 32.) as f32
-        / 14.;
-    Some(
-        div()
-            .id(format!("system-divider-{}", message["id"].as_str().unwrap_or("notice")))
-            .w_full()
-            .min_w_0()
-            .flex()
-            .items_center()
-            .gap(px(10.))
-            .my(px(5.))
-            .role(Role::Label)
-            .aria_label(visible.clone())
-            .child(div().h(px(1.)).flex_1().bg(rgb(palette.line)))
-            .child(
-                div()
-                    .min_w_0()
-                    .max_w(relative(0.85))
-                    .text_size(px(9. * ratio))
-                    .font_family(design::FONT_MONO)
-                    .text_color(rgb(palette.muted))
-                    .child(visible.to_uppercase()),
-            )
-            .child(div().h(px(1.)).flex_1().bg(rgb(palette.line)))
-            .into_any_element(),
-    )
+        .unwrap_or_else(|| label.clone());
+    let ratio = settings["interfaceFontSize"].as_f64().unwrap_or(14.).clamp(8., 32.) as f32 / 14.;
+    let colours = super::message_presentation::neutral_colours(palette);
+    let id = message["id"].as_str().unwrap_or("notice").to_owned();
+    let mut card = div().id(format!("system-notice-{id}"))
+        .w_full().min_w_0().p(px(10.)).rounded_md()
+        .opacity(0.6).hover(|style| style.opacity(1.))
+        .border_1().border_color(design::surface_color(colours.border))
+        .bg(crate::surface_blend::raised_background(
+            crate::surface_blend::Area::Bubbles, colours.background,
+        ))
+        .flex().flex_col().gap(px(4.))
+        .role(Role::Label).aria_label(format!("System · {visible}"))
+        .child(div().w_full().min_w_0().flex().items_center().gap(px(8.))
+            .text_size(px(10. * ratio)).text_color(rgb(colours.muted))
+            .child(div().font_weight(FontWeight::SEMIBOLD).child("System"))
+            .children(time.map(|time| div().ml_auto().font_family(design::FONT_MONO).child(time))))
+        .child(div().min_w_0().text_size(px(11. * ratio))
+            .text_color(rgb(colours.ink)).child(label));
+    #[cfg(test)]
+    { card = card.debug_selector(move || format!("system-notice-{id}")); }
+    Some(card.into_any_element())
 }
 
 #[cfg(test)]

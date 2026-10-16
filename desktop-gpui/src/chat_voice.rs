@@ -55,7 +55,7 @@ enum VoiceState {
 pub(crate) struct VoiceComposer {
     service: DesktopService,
     task_id: String,
-    draft: String,
+    draft: SharedString,
     engine: String,
     state: VoiceState,
     capture: Option<native_voice_capture::NativeVoiceCapture>,
@@ -70,7 +70,7 @@ impl VoiceComposer {
         Self {
             service,
             task_id: String::new(),
-            draft: String::new(),
+            draft: SharedString::default(),
             engine: "whisper".into(),
             state: VoiceState::Idle,
             capture: None,
@@ -79,12 +79,12 @@ impl VoiceComposer {
         }
     }
 
-    /// Draft changes do not notify: the parent already redraws for editor
-    /// changes. Task changes invalidate permission, recording and replies.
+    /// Share the native editor value without copying the whole draft per key.
+    /// Draft changes do not notify; task changes invalidate recording and replies.
     pub(crate) fn set_context(
         &mut self,
         task_id: impl Into<String>,
-        draft: impl Into<String>,
+        draft: impl Into<SharedString>,
         cx: &mut Context<Self>,
     ) {
         let task_id = task_id.into();
@@ -145,7 +145,7 @@ impl VoiceComposer {
         // Freeze attribution at the Record click, before macOS can show its
         // permission prompt and the user can edit the composer.
         let task_id = self.task_id.clone();
-        let draft = self.draft.clone();
+        let draft = self.draft.to_string();
         match native_voice_capture::request_microphone_permission() {
             Ok(receiver) => {
                 self.generation = self.generation.wrapping_add(1);

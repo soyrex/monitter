@@ -188,6 +188,9 @@ export interface CommandArgs {
   "save_project": {
   project: Project;
   };
+  "merge_task_worktree": {
+  taskId: string;
+  };
   "delete_project": {
   id: string;
   };
@@ -195,6 +198,14 @@ export interface CommandArgs {
   projectId: string;
   text: string;
   requestId: string;
+  };
+  "read_project_build_queue": {
+  projectId: string;
+  };
+  "recover_project_build": {
+  buildRunId: string;
+  processStopped: boolean;
+  summary: string;
   };
   "set_task_project": {
   taskId: string;
@@ -472,8 +483,11 @@ export interface CommandResults {
   "fork_task": Task;
   "choose_local_folder": string | null;
   "save_project": Snapshot;
+  "merge_task_worktree": Snapshot;
   "delete_project": Snapshot;
   "post_project_board_note": Snapshot;
+  "read_project_build_queue": JsonValue;
+  "recover_project_build": JsonValue;
   "set_task_project": Snapshot;
   "rename_task": Snapshot;
   "autoname": Snapshot;

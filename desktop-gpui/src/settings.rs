@@ -37,7 +37,7 @@ pub(super) fn settings_card(title: &str, description: &str, palette: Palette) ->
     let selector = format!("settings-card-{title}");
     div().debug_selector(move || selector).w_full().min_w_0().flex_shrink_0().flex().flex_col().gap(design::ui_scaled_px(14.))
         .p(design::ui_scaled_px(18.)).border_1().border_color(rgb(palette.line))
-        .rounded(design::ui_scaled_px(10.)).bg(design::surface_color(palette.panel))
+        .rounded(design::ui_scaled_px(design::radius::CARD)).bg(design::surface_color(palette.panel))
         .child(div().flex().flex_col().gap(design::ui_scaled_px(4.))
             .child(div().text_size(crate::settings::settings_text_size(1.)).font_weight(FontWeight::SEMIBOLD).child(title.to_owned()))
             .child(settings_hint(description.to_owned(), palette)))
@@ -486,6 +486,7 @@ impl Desktop {
                 } else { base }
             } else { base }
         };
+        crate::surface_blend::set_theme_dark(palette.dark);
         palette.line = blend_line(
             palette.paper,
             palette.line,
@@ -565,6 +566,8 @@ impl Desktop {
                 theme.colors.primary_active = rgb(palette.accent).into();
                 theme.colors.background = design::surface_color(palette.paper).into();
                 theme.colors.foreground = rgb(palette.ink).into();
+                // Shared by native Input/Textarea and selectable transcript TextViews.
+                theme.colors.selection = design::text_selection_color(palette).into();
                 theme.colors.border = rgb(palette.line).into();
                 theme.colors.input = design::surface_color(palette.card).into();
                 theme.colors.sidebar = design::surface_color(palette.sidebar).into();
@@ -641,9 +644,10 @@ impl Desktop {
         self.dock.update(cx, |dock, cx| {
             dock.set_pane_appearance(settings, palette, cx)
         });
-        if crate::activity_effects::sync(&self.snapshot, palette, cx) {
+        if crate::activity_effects::sync_cached(&self.snapshot, palette, cx) {
             self.dock.update(cx, |dock, cx| dock.refresh_activity(cx));
         }
+        self.publish_report_theme(palette, cx);
         palette
     }
     pub(super) fn patch_settings(&mut self, patch: Value, cx: &mut Context<Self>) {
@@ -1012,7 +1016,7 @@ impl Desktop {
             .is_some_and(|state| state.lan.is_none())
         {
             if let Some(service) = self.service.clone() {
-                let lan = cx.new(|cx| lan_settings::LanSettingsPane::new(service, cx));
+                let lan = cx.new(|cx| lan_settings::LanSettingsPane::new(service, window, cx));
                 self.native_settings.as_mut().unwrap().lan = Some(lan);
             }
         }
@@ -1494,7 +1498,7 @@ mod modal_layout_tests {
     }
 
     #[gpui_kit::test]
-    fn settings_modal_navigation_renders_rich_controls_and_stays_in_dialog(cx: &mut TestAppContext) {
+    fn design_system_settings_modal_navigation_renders_rich_controls_and_stays_in_dialog(cx: &mut TestAppContext) {
         cx.update(|cx| gpui_kit::init(cx));
         let mut desktop_entity=None;
         let (_, visual)=cx.add_window_view(|window,cx| {
@@ -1566,7 +1570,7 @@ mod modal_layout_tests {
         visual.simulate_resize(size(gpui_kit::px(1800.),gpui_kit::px(900.)));
         visual.update(|window,cx| window.draw(cx).clear(cx));
         let card=visual.debug_bounds("preferences-card").expect("modal card is present");
-        assert_eq!(card.size.width,gpui_kit::px(1200.));
+        assert_eq!(card.size.width,(gpui_kit::px(1800.) * 0.9).min(design::ui_scaled_px(1296.)));
         assert_eq!(card.center().x,gpui_kit::px(900.));
         visual.simulate_click(gpui_kit::point(gpui_kit::px(20.),gpui_kit::px(450.)),Default::default());
         visual.read(|cx| assert!(!desktop.read(cx).preferences_open,"outside click dismisses the modal"));

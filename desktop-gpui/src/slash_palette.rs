@@ -10,6 +10,7 @@
 use crate::design::ui_scaled_px as px;
 use futures::channel::oneshot;
 use gpui_kit::{prelude::*, *};
+use gpui_kit::component::{ActiveTheme as _, ThemeStyled as _};
 use monitter_lib::experimental_desktop::DesktopService;
 use serde_json::{Value, json};
 use std::{
@@ -143,7 +144,7 @@ pub struct SlashPalette {
     revision: String,
     task_id: String,
     generation: u64,
-    input: String,
+    input: SharedString,
     open: bool,
     items: Vec<SlashPaletteItem>,
     visible: Vec<usize>,
@@ -168,7 +169,7 @@ impl SlashPalette {
             revision: String::new(),
             task_id: String::new(),
             generation: 0,
-            input: String::new(),
+            input: SharedString::default(),
             open: false,
             items: Vec::new(),
             visible: Vec::new(),
@@ -235,15 +236,16 @@ impl SlashPalette {
     /// when the input contains a slash command token at its start.
     /// Explicit submission checks the native editor source. Preserve selected
     /// suggestions and dismissed state when the cached draft already matches.
-    pub fn sync_input(&mut self, input: impl Into<String>, cx: &mut Context<Self>) {
+    pub fn sync_input(&mut self, input: impl Into<SharedString>, cx: &mut Context<Self>) {
         let input = input.into();
         if self.input != input { self.set_input(input, cx); }
     }
-    pub fn set_input(&mut self, input: impl Into<String>, cx: &mut Context<Self>) {
+    pub fn set_input(&mut self, input: impl Into<SharedString>, cx: &mut Context<Self>) {
         let input = input.into();
-        if self.input != input {
-            self.error = None;
-        }
+        if self.input == input { return; }
+        let was_open = self.open;
+        let had_error = self.error.is_some();
+        self.error = None;
         self.input = input;
         self.open = is_slash_input(&self.input);
         if self.open {
@@ -253,7 +255,7 @@ impl SlashPalette {
         } else {
             self.selected = None;
             self.visible.clear();
-            cx.notify();
+            if was_open || had_error { cx.notify(); }
         }
     }
 
@@ -300,7 +302,7 @@ impl SlashPalette {
             return false;
         }
         if let Some(item) = resolve_input(&self.items, &self.input) {
-            let input = self.input.clone();
+            let input = self.input.to_string();
             self.open = false;
             self.visible.clear();
             self.selected = None;
@@ -404,7 +406,6 @@ impl SlashPalette {
             .unwrap_or(crate::design::INTERFACE_FONT_SIZE as f64)
             .clamp(8., 32.) as f32
             / crate::design::INTERFACE_FONT_SIZE;
-        let panel = rgb(palette.panel).opacity(0.94);
         let active_background = rgb(mix_rgb(palette.panel, palette.accent, 0.13));
         let entries = self.items.clone();
         let visible = self.visible.clone();
@@ -419,37 +420,18 @@ impl SlashPalette {
             .overflow_hidden()
             .flex()
             .flex_col()
-            .rounded_t(px(10.))
+            .popover_style(cx)
+            .rounded_t(cx.theme().radius)
             .rounded_bl(px(0.))
             .rounded_br(px(0.))
             .mb(-px(10.))
-            .border_1()
-            .border_color(rgb(palette.line))
-            .text_color(rgb(palette.ink))
-            .font_family(crate::design::FONT_SANS)
-            .bg(panel);
+            .font_family(cx.theme().font_family.clone());
 
-        let mut header = div()
-            .w_full()
-            .flex()
-            .items_center()
-            .gap(px(7.))
-            .px(px(11.))
-            .pt(px(9.))
-            .pb(px(7.))
-            .text_color(rgb(palette.muted))
-            .font_family(crate::design::FONT_MONO)
-            .text_size(px(10. * font_ratio))
-            .child("COMMANDS");
-        if self.loading {
-            header = header.child(
-                div()
-                    .ml_auto()
-                    .text_size(px(10. * font_ratio))
-                    .child("Loading…"),
-            );
-        }
-        menu = menu.child(header);
+        menu = menu.child(gpui_kit::component::popup_header(
+            "Commands".into(),
+            if self.loading { "Loading available commands…" } else { "Choose a command for this chat." }.into(),
+            cx,
+        ));
 
         let mut options = div()
             .id("slash-command-options")
@@ -758,7 +740,7 @@ impl SlashPalette {
         else {
             return;
         };
-        let input = self.input.clone();
+        let input = self.input.to_string();
         self.open = false;
         self.visible.clear();
         self.selected = None;

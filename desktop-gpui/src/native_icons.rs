@@ -1,4 +1,4 @@
-//! Extend the standard Kit assets with only the icons used by this desktop.
+//! Embed the full bundled catalogue for the searchable workspace icon picker.
 use gpui_kit::{AssetSource, SharedString};
 use std::borrow::Cow;
 gpui_kit::assets::icon_assets!(
@@ -47,7 +47,8 @@ gpui_kit::assets::icon_assets!(
         Users,
         BadgeCheck,
         Wifi,
-        ShieldCheck
+        ShieldCheck,
+        Bell
     ]
 );
 pub struct DesktopIcons;
@@ -56,10 +57,10 @@ impl AssetSource for DesktopIcons {
         if let Some(bytes) = ExtraIcons.load(path)? {
             return Ok(Some(bytes));
         }
-        gpui_kit::assets::Assets.load(path)
+        gpui_kit::assets::AllAssets.load(path)
     }
     fn list(&self, path: &str) -> gpui_kit::Result<Vec<SharedString>> {
-        let mut paths = gpui_kit::assets::Assets.list(path)?;
+        let mut paths = gpui_kit::assets::AllAssets.list(path)?;
         paths.extend(ExtraIcons.list(path)?);
         paths.sort();
         paths.dedup();
@@ -73,6 +74,7 @@ mod tests {
     #[::core::prelude::v1::test]
     fn composer_and_reader_icons_resolve_to_bundled_svg_assets() {
         for icon in [
+            gpui_kit::assets::IconName::Bell,
             gpui_kit::assets::IconName::X,
             gpui_kit::assets::IconName::FileText,
             gpui_kit::assets::IconName::MessageSquare,
@@ -118,6 +120,18 @@ mod tests {
                 std::str::from_utf8(&bytes).unwrap().contains("<svg"),
                 "{path}"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod workspace_catalogue_asset_tests {
+    use super::*;
+    #[test]
+    fn every_workspace_picker_icon_resolves_to_bundled_svg() {
+        for icon in gpui_kit::assets::IconName::ALL.iter().copied() {
+            let bytes = DesktopIcons.load(icon.path().as_ref()).unwrap().unwrap();
+            assert!(!bytes.is_empty(), "{icon:?}");
         }
     }
 }

@@ -11,7 +11,10 @@ use gpui_kit::{
     prelude::*,
     *,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+#[path = "palette_search.rs"]
+mod palette_search;
+use palette_search::PaletteSearch;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PaletteMode {
@@ -56,6 +59,8 @@ pub struct PaletteEntry {
     pub subtitle: String,
     pub kind: EntryKind,
     pub keywords: String,
+    pub search_text: String,
+    pub open_priority: u8,
     pub disabled: bool,
     pub checked: Option<bool>,
     pub keyboard_hint: Option<String>,
@@ -120,7 +125,9 @@ impl PaletteCategory {
     }
     pub fn includes_entry(self, entry: &PaletteEntry) -> bool {
         if self == Self::Panes {
-            entry.kind == EntryKind::Pane || entry.id.starts_with("pane:")
+            entry.kind == EntryKind::Pane
+                || entry.id.starts_with("pane:")
+                || entry.open_priority < 2
         } else {
             self.includes(entry.kind)
         }
@@ -211,15 +218,11 @@ fn match_score(entry: &PaletteEntry, query: &str) -> Option<u8> {
 fn matches(entry: &PaletteEntry, query: &str) -> bool {
     match_score(entry, query).is_some()
 }
+#[cfg(test)]
 fn ranked_entries(entries: &[PaletteEntry], category: PaletteCategory, query: &str) -> Vec<usize> {
-    let mut ranked: Vec<_> = entries
-        .iter()
-        .enumerate()
-        .filter(|(_, entry)| category.includes_entry(entry))
-        .filter_map(|(index, entry)| match_score(entry, query).map(|score| (score, index)))
-        .collect();
-    ranked.sort_unstable();
-    ranked.into_iter().map(|(_, index)| index).collect()
+    let mut search = PaletteSearch::default();
+    search.update(entries);
+    search.ranked(entries, category, query)
 }
 fn moved_selection(
     entries: &[PaletteEntry],
@@ -258,6 +261,9 @@ fn moved_selection(
 pub struct CommandPalette {
     query: Entity<InputState>,
     entries: Vec<PaletteEntry>,
+    search: PaletteSearch,
+    generation: u64,
+    async_content: HashMap<String, String>,
     visible: Vec<usize>,
     selected: Option<usize>,
     mode: PaletteMode,
@@ -283,6 +289,7 @@ impl CommandPalette {
             window,
             |palette, _, event, window, cx| match event {
                 InputEvent::Change => {
+                    palette.selected = None;
                     palette.refilter(cx);
                 }
                 InputEvent::PressEnter {
@@ -299,6 +306,9 @@ impl CommandPalette {
         Self {
             query,
             entries: vec![],
+            search: PaletteSearch::default(),
+            generation: 0,
+            async_content: HashMap::new(),
             visible: vec![],
             selected: None,
             mode: PaletteMode::Switch,
@@ -324,7 +334,10 @@ impl CommandPalette {
             self.previous_focus = window.focused(cx);
         }
         self.open = true;
+        self.generation = self.generation.wrapping_add(1);
+        self.async_content.clear();
         self.mode = mode;
+        self.search.update(&entries);
         self.entries = entries;
         self.selected = None;
         self.refilter(cx);
@@ -336,7 +349,7 @@ impl CommandPalette {
     /// The root must revalidate the selected ID before executing any authority.
     pub fn set_entries(
         &mut self,
-        entries: Vec<PaletteEntry>,
+        mut entries: Vec<PaletteEntry>,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
         validate_entries(&entries)?;
@@ -344,11 +357,51 @@ impl CommandPalette {
             .selected
             .and_then(|index| self.entries.get(index))
             .map(|entry| entry.id.clone());
+        self.async_content
+            .retain(|id, _| entries.iter().any(|entry| &entry.id == id));
+        for entry in &mut entries {
+            if let Some(text) = self.async_content.get(&entry.id) {
+                entry.search_text.clone_from(text);
+            }
+        }
+        self.search.update(&entries);
         self.entries = entries;
         self.selected =
             selected.and_then(|id| self.entries.iter().position(|entry| entry.id == id));
         self.refilter(cx);
         Ok(())
+    }
+    /// Identifies this opening so late browser snapshots cannot overwrite a newer catalog.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+    pub fn set_search_text(
+        &mut self,
+        id: &str,
+        generation: u64,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.open || generation != self.generation {
+            return;
+        }
+        let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id) else {
+            return;
+        };
+        self.async_content.insert(id.to_owned(), text.clone());
+        if entry.search_text == text {
+            return;
+        }
+        entry.search_text = text;
+        let followed_top = self.selected == self.visible.first().copied();
+        self.search.update(&self.entries);
+        // An asynchronously discovered pane should become the default result,
+        // while a selection moved further down the list remains stable.
+        if followed_top {
+            self.selected = None;
+        }
+        self.refilter(cx);
+        cx.notify();
     }
     pub fn is_open(&self) -> bool {
         self.open
@@ -388,7 +441,7 @@ impl CommandPalette {
     }
     fn refilter(&mut self, cx: &mut Context<Self>) {
         let query = self.query.read(cx).value().to_string();
-        self.visible = ranked_entries(&self.entries, self.category, &query);
+        self.visible = self.search.ranked(&self.entries, self.category, &query);
         if !self
             .selected
             .is_some_and(|index| self.visible.contains(&index) && !self.entries[index].disabled)
@@ -468,7 +521,24 @@ impl Render for CommandPalette {
             return div().into_any_element();
         }
         let weak = cx.weak_entity();
-        let entries = self.entries.clone();
+        // Rows need presentation metadata only; content snapshots can be large.
+        let entries: Vec<_> = self
+            .entries
+            .iter()
+            .map(|entry| PaletteEntry {
+                id: entry.id.clone(),
+                label: entry.label.clone(),
+                subtitle: entry.subtitle.clone(),
+                kind: entry.kind,
+                keywords: String::new(),
+                search_text: String::new(),
+                open_priority: entry.open_priority,
+                disabled: entry.disabled,
+                checked: entry.checked,
+                keyboard_hint: entry.keyboard_hint.clone(),
+            })
+            .collect();
+        let snippets = self.search.snippets().clone();
         let visible = self.visible.clone();
         let selected = self.selected;
         let background = cx.theme().background;
@@ -542,9 +612,13 @@ impl Render for CommandPalette {
                                         .text_color(muted)
                                         .text_ellipsis()
                                         .child(format!(
-                                            "{} · {}{}",
+                                            "{} · {}{}{}",
                                             entry.kind.label(),
                                             entry.subtitle,
+                                            snippets
+                                                .get(&entry.id)
+                                                .map(|snippet| format!(" · {snippet}"))
+                                                .unwrap_or_default(),
                                             if entry.disabled {
                                                 " · unavailable"
                                             } else {
@@ -755,6 +829,8 @@ mod tests {
             subtitle: "Local agent".into(),
             kind: EntryKind::Task,
             keywords: "codex work".into(),
+            search_text: String::new(),
+            open_priority: 2,
             disabled,
             checked: None,
             keyboard_hint: None,
@@ -841,6 +917,108 @@ mod tests {
             ranked_entries(&entries, PaletteCategory::Terminals, ""),
             vec![0, 1]
         );
+    }
+
+    #[gpui_kit::test]
+    fn browser_snapshots_are_scoped_to_opening_and_survive_catalog_refresh(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let (palette, cx) = cx.add_window_view(|window, cx| CommandPalette::new(window, cx));
+        cx.update(|window, cx| {
+            palette.update(cx, |palette, cx| {
+                let catalog = vec![entry("browser", "Browser", false)];
+                palette
+                    .open(PaletteMode::Switch, catalog.clone(), window, cx)
+                    .unwrap();
+                let first = palette.generation();
+                palette.set_search_text("browser", first, "snapshotneedle".into(), cx);
+                assert_eq!(palette.entries[0].search_text, "snapshotneedle");
+                palette.set_entries(catalog.clone(), cx).unwrap();
+                assert_eq!(palette.entries[0].search_text, "snapshotneedle");
+                assert_eq!(
+                    palette
+                        .search
+                        .ranked(&palette.entries, PaletteCategory::All, "snapshotneedle"),
+                    vec![0]
+                );
+                palette
+                    .open(PaletteMode::Switch, catalog.clone(), window, cx)
+                    .unwrap();
+                let second = palette.generation();
+                assert_ne!(first, second);
+                palette.set_search_text("browser", first, "staleafterreopen".into(), cx);
+                assert!(palette.entries[0].search_text.is_empty());
+                palette.set_search_text("browser", second, "currentneedle".into(), cx);
+                palette.close(window, cx);
+                palette.set_search_text("browser", second, "staleafterclose".into(), cx);
+                assert_eq!(palette.entries[0].search_text, "currentneedle");
+                palette
+                    .open(PaletteMode::Switch, catalog.clone(), window, cx)
+                    .unwrap();
+                let third = palette.generation();
+                palette.set_search_text("browser", third, "removedneedle".into(), cx);
+                palette.set_entries(vec![], cx).unwrap();
+                palette.set_search_text("browser", third, "missingneedle".into(), cx);
+                assert!(palette.entries.is_empty());
+                assert!(palette.async_content.is_empty());
+                palette.set_entries(catalog, cx).unwrap();
+                assert!(palette.entries[0].search_text.is_empty());
+                assert!(
+                    palette
+                        .search
+                        .ranked(&palette.entries, PaletteCategory::All, "removedneedle")
+                        .is_empty()
+                );
+            });
+        });
+    }
+
+    #[gpui_kit::test]
+    fn changing_query_selects_best_match_instead_of_previous_matching_row(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (palette, cx) = cx.add_window_view(|window, cx| CommandPalette::new(window, cx));
+        cx.update(|window, cx| {
+            palette.update(cx, |palette, cx| {
+                palette
+                    .open(
+                        PaletteMode::Switch,
+                        vec![
+                            entry("first", "Alpha needle", false),
+                            entry("best", "Needle", false),
+                        ],
+                        window,
+                        cx,
+                    )
+                    .unwrap();
+                palette.query.update(cx, |input, cx| {
+                    input.set_value("alpha", window, cx);
+                    // Programmatic set_value deliberately does not emit Change.
+                    cx.emit(super::InputEvent::Change);
+                });
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            palette.update(cx, |palette, cx| {
+                assert_eq!(palette.selected, Some(0));
+                palette.query.update(cx, |input, cx| {
+                    input.set_value("needle", window, cx);
+                    cx.emit(super::InputEvent::Change);
+                });
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            palette.update(cx, |palette, cx| {
+                assert_eq!(palette.visible, vec![1, 0]);
+                assert_eq!(palette.selected, Some(1));
+                // A background refresh still preserves an explicit lower-ranked selection.
+                palette.selected = Some(0);
+                palette.set_entries(palette.entries.clone(), cx).unwrap();
+                assert_eq!(palette.selected, Some(0));
+            });
+        });
     }
 
     #[gpui_kit::test]

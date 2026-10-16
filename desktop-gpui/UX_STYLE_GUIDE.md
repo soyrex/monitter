@@ -52,7 +52,7 @@ of clipping the second line of metadata.
 | --- | --- |
 | Chat transcript | 20 side gutters, 10 top/bottom; equal 10 gaps for bubbles and activity trees |
 | Message card | 10 padding; 5 between identity metadata and text |
-| Composer | 10 internal padding; 5 between input controls; normal outer inset 10; 5 corner radius, context meter inside curved outline |
+| Composer | 10 internal padding; 5 between input controls; normal outer inset 10; 8 corner radius, context meter inside curved outline |
 | Pane header | 15 horizontal inset; 10 between identity and actions |
 | Sidebar sections | 10 list inset; 5 within related rows; 20 between sections; provider tile, two text lines, quiet trailing time/status |
 | Sidebar header | Center the optical wordmark in both axes; view-tab bottom aligns with the adjacent dock strip plus pane header |
@@ -93,8 +93,9 @@ contrast. Decorative backgrounds do not replace text labels or accessible names.
 
 | Token | Value | Role |
 | --- | ---: | --- |
-| `radius::CONTROL` | 5 | Composer, small menu/control containers |
-| `radius::CARD` | 10 | Message cards, form cards |
+| `radius::CONTROL` | 8 | Composer, small menu/control containers |
+| `radius::CARD` | 12 | Message cards, form cards |
+| `radius::MODAL` | 14 | Floating preferences and edit surfaces |
 
 Keep Tauri's directional 3px message corner as an intentional exception. Native
 Modern tab curves and OS window corners retain their established geometry.
@@ -108,6 +109,16 @@ paper/sidebar/panel/soft surfaces. Bubble outlines use the same alpha as their
 background surfaces. Modals and menus use one quarter of the configured
 transparency, over a strongly blurred capture of the actual underlying scene.
 Dark menus deepen the panel tint to preserve copy contrast.
+All popup shells use `ThemeStyled::popover_style`: the model picker's visible
+theme border together with the shared ambient/drop shadow, theme control
+radius, blur, and configured interface font. The border is painted as a crisp
+1px shadow ring, so do not add a second outline. Rich model selection uses this
+same shell while owning its internal padding. Standard Popover/HoverCard hosts
+own their outer padding; content must not duplicate it. Slash suggestions keep
+their composer-attached bottom edge but share the popup surface and typography.
+Popup headers use a concise title, a muted explanatory subtitle, and one
+full-width divider before the content. Use the shared `.header(title, subtitle)`
+API; keep the divider outside body padding and action-list scrolling.
 Transparent menus also blur underlying in-app text; capture once before opening,
 share it across nested popups, and release it after the last popup closes. Native
 window vibrancy blurs the desktop behind translucent panes.
@@ -312,7 +323,7 @@ layout containers; it does not establish complete form-behavior parity.
 
 The native extensions subpanel already includes checkbox/transport/import editor
 patterns. Dedicated numeric/color/filesystem picker widgets remain a Tauri parity
-gap. Native controls inherit shared themed 5px control and 10px large/card radii;
+gap. Native controls inherit shared themed 8px control and 12px large/card radii;
 component-owned menu/tab geometry is deliberately retained.
 
 ## Adoption and review
@@ -357,3 +368,62 @@ active workspace and each layout survive relaunch through the private local
 workspace store; existing backend preference IPC carries only the active layout.
 Switching hides retained panes and never closes agent runs or server-owned PTYs.
 Tasks and drafts remain globally available from the sidebar.
+
+
+## Design system reference — structural adoption (15 October 2026)
+
+Reference: https://claude.ai/artifact/N7Hcb1Vmu6PSMakteAoaoB
+Prioritize the Preferences & modals, Forms & controls, Work Plan and Build Queue
+boards. Retain real backend state and existing save/permission semantics.
+
+- Widget silhouettes: 8 logical px control radius, 12px card radius, 14px floating
+  modal radius; pills remain fully rounded. Apply interface scaling once. Use
+  quiet hairline borders, themed raised fills and compact 28–32px controls.
+- Preferences retain grouped navigation, global search, category title and
+  description, and setting-group cards. Their large shell caps at 1296px,
+  fades in over 120ms without translation, and uses a 60% black blurred scrim.
+- Workspace edits use a 440px single-column surface that can shrink to fit.
+  One divided footer holds Remove workspace on the left and Cancel then Save
+  on the right. Existing picker draft preservation and save semantics remain.
+- Work Plan uses separated 5px progress segments and a 16px state icon beside
+  each step, with the explicit state label on the right. Preserve blocked and
+  skipped states rather than interpreting them as successful completion.
+- Build Queue uses compact title/status/time headlines, mono metadata, a
+  combined-request chip and reported exit code. A two-line summary expands
+  through a quiet 28px Details button into a raised label/value grid with the
+  complete original report. Never infer structured build facts from prose.
+- Expired leases remain reserved and visibly need attention. Only a currently
+  leased running record receives the live spinner; no output stream is invented.
+
+The reference's sample data, speculative destructive copy, generated-token
+pipeline and inferred duration/disk/build metrics are proposals, not backend
+facts or new execution authority.
+
+
+### Agent exchange markers (updated reference)
+
+Agent Exchange is a distinct transcript tier: collapsed exchange rows use no
+card fill or border, a 28px line, grey participant/status copy, mono time and a
+small agent-blue direction diagram. The hollow endpoint denotes the peer and
+the filled endpoint this pane; use a dashed connector for recorded in-flight
+states and a solid connector for terminal states. Unknown provenance stays
+explicitly unknown. Failures retain a red icon and readable state label.
+
+The whole row toggles an expanded flow with a restrained blue wash and edge.
+Only recorded events and timestamps may become steps; request, reply, error
+and attachment content remain available. Human/assistant messages, system
+notices and tool turns keep their own presentation.
+
+Adjacent exchanges with the same proven peer and a total span of at most one
+minute collapse to one marker with a distinct-exchange count. Lifecycle events
+for one collaboration do not inflate that count. Unknown identities, intervening
+messages or turns, and day boundaries end a run. Every member remains available
+in the expanded flow, including its direction, recorded time and original
+content. Use the authoritative transcript projection and the first retained
+member identity for the list key; never hide zero-height source rows. Appending
+a member must retain the existing disclosure and scroll anchor. While reading
+away from the live tail, retain existing group boundaries so an older page
+cannot insert content inside the visible expanded row. Regroup at the live tail.
+
+The grouped projection is integrated in the native desktop. Retain source
+identity and the off-tail boundary behavior when extending it.

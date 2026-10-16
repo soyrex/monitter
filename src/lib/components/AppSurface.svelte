@@ -4049,6 +4049,7 @@
     projectDraft = {
       id: project?.id ?? '', name: project?.name ?? '', description: project?.description ?? '', icon: project?.icon ?? 'folder', color: project?.color ?? '#3f9d6a',
       boardGuidanceText: project?.boardGuidanceText ?? null,
+      buildManagementEnabled: project?.buildManagementEnabled ?? false,
       workspaces: (snapshot?.hosts ?? []).map(host => ({hostId: host.id, cwd: project?.workspaces.find(workspace=>workspace.hostId===host.id)?.cwd ?? ''})),
     };
     modal = 'project';
@@ -6007,6 +6008,8 @@
   {#if projectDraft}<form class="form" onsubmit={event=>{event.preventDefault();void saveProject();}}>
     <label>Name<input data-autofocus required bind:value={projectDraft.name} placeholder="Project name" /></label>
     <label>Description<input bind:value={projectDraft.description} placeholder="What you're working on together" /></label>
+    <label class="check-row"><input type="checkbox" checked={projectDraft.buildManagementEnabled === true} disabled={busy} aria-describedby="project-build-management-help" onchange={event => { if (projectDraft) projectDraft.buildManagementEnabled = event.currentTarget.checked; }} /> Enable build management</label>
+    <p id="project-build-management-help" class="modal-copy">Agents coordinate build requests, combine compatible ready changes and take turns using the build queue. They reuse useful artifacts and prune old builds and caches when disk space is low.</p>
     <label>Project-specific agent guidance<textarea maxlength="8000" rows="5" aria-label="Project-specific agent guidance" bind:value={projectDraft.boardGuidanceText} placeholder="Leave blank to use the default guidance."></textarea></label>
     <p class="modal-copy">{Array.from(projectDraft.boardGuidanceText ?? '').length}/8000 characters. This replaces the default for this project. Blank inherits Settings, then Monitter's built-in wording. Guidance is context and does not grant permission.</p>
     <fieldset class="project-identity"><legend>Project icon</legend><div class="project-icon-options">{#each projectIcons as option}{@const Icon = option.icon}<button type="button" class:selected={projectDraft.icon===option.id} aria-label={option.label} title={option.label} style={`--project-colour:${projectDraft.color}`} onclick={()=>projectDraft={...projectDraft!,icon:option.id}}><Icon size={17}/></button>{/each}</div></fieldset>

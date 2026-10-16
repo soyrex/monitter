@@ -7,7 +7,7 @@ use gpui_kit::component::{
     popover::Popover,
     slider::{Slider, SliderEvent, SliderState, SliderValue},
     switch::Switch,
-    ActiveTheme as _, Selectable as _, h_flex, v_flex,
+    ActiveTheme as _, Selectable as _, ThemeStyled as _, h_flex, v_flex,
 };
 use gpui_kit::assets::IconName;
 
@@ -47,21 +47,6 @@ fn popup_note(text: String, font_ratio: f32) -> PopupMenuItem {
     .disabled(true)
 }
 
-fn popup_heading(text: &'static str, font_ratio: f32) -> PopupMenuItem {
-    PopupMenuItem::element(move |_, cx| {
-        div()
-            .w_full()
-            .py(popup_px(design::space::TIGHT))
-            .font_family(cx.theme().font_family.clone())
-            .text_size(popup_px(12. * font_ratio))
-            .line_height(popup_px(16. * font_ratio))
-            .font_weight(FontWeight::SEMIBOLD)
-            .text_color(cx.theme().foreground)
-            .child(text)
-    })
-    .accessibility_label(text)
-    .disabled(true)
-}
 
 fn model_note(text: impl Into<String>, font_ratio: f32, cx: &Context<ModelPopupState>) -> AnyElement {
     let text = text.into();
@@ -126,19 +111,29 @@ fn rich_menu_item(
             label = label.child(detail);
         }
         h_flex()
+            .debug_selector({ let title = title.clone(); move || format!("permission-choice-{title}") })
             .w_full()
             .min_w_0()
             .min_h(popup_px(if description.trim().is_empty() {
-                30.
+                38.
             } else {
-                44.
+                52.
             }))
             .items_center()
+            .py(popup_px(design::space::TIGHT))
             .child(label)
     })
     .accessibility_label(accessibility_label)
     .checked(selected)
     .disabled(disabled)
+}
+
+fn permission_choice_icon(level: &str) -> &'static [u8] {
+    match level {
+        "read-only" => icon_assets::Eye.1,
+        "auto-approve-edits" => icon_assets::Pencil.1,
+        _ => icon_assets::ShieldCheck.1,
+    }
 }
 
 pub(super) fn permissions_menu(
@@ -166,7 +161,7 @@ pub(super) fn permissions_menu(
                 .and_then(|agent| agent.get("acp").cloned())
         })
         .unwrap_or(Value::Null);
-    let sandbox = task
+    let sandbox = pane.model_save.sandbox.as_ref().unwrap_or(&task)
         .get("sandbox")
         .and_then(Value::as_str)
         .unwrap_or("harness-configured");
@@ -205,13 +200,10 @@ pub(super) fn permissions_menu(
                 .max_w(popup_px(300.))
                 .max_h(popup_px(440.))
                 .scrollable(true)
-                .item(popup_heading("Access permissions", font_ratio));
-            if disabled || applies_next {
-                menu = menu.item(popup_note(if disabled {
-                    "Available after this run finishes.".to_owned()
-                } else {
-                    "Applies to the next turn.".to_owned()
-                }, font_ratio));
+                .check_side(gpui_kit::component::Side::Right)
+                .header("Access permissions", if applies_next { "Applies to the next turn." } else { "" });
+            if disabled {
+                menu = menu.item(popup_note("Available after this run finishes.".to_owned(), font_ratio));
             }
             for (level, supported, stored) in choices.iter().cloned() {
                 let chosen = selected == level;
@@ -241,6 +233,7 @@ pub(super) fn permissions_menu(
                         false,
                         font_ratio,
                     )
+                    .icon(Icon::default().data(permission_choice_icon(&level)).with_size(popup_px(16.)))
                     .on_click(move |_, _, cx| {
                         let entity = row_entity.clone();
                         let task = row_task.clone();
@@ -270,6 +263,7 @@ fn interface_font_ratio(snapshot: &Value) -> f32 {
 #[derive(Clone, PartialEq)]
 struct ModelPickerProps {
     task_id: String,
+    open_generation: u64,
     font_ratio: f32,
     saving: bool,
     save_error: Option<String>,
@@ -278,8 +272,6 @@ struct ModelPickerProps {
     loading: bool,
     error: Option<String>,
     disabled: bool,
-    applies_next_turn: bool,
-    jev: String,
 }
 
 struct ModelPopupState {
@@ -319,9 +311,15 @@ impl ModelPopupState {
         state
     }
 
-    fn set_props(&mut self, props: ModelPickerProps, cx: &mut Context<Self>) {
+    fn set_props(&mut self, props: ModelPickerProps, window: &mut Window, cx: &mut Context<Self>) {
         if self.props == props {
             return;
+        }
+        let hide_search = self.props.catalog != props.catalog
+            && props.catalog.as_ref().and_then(|catalog| catalog["models"].as_array())
+                .is_some_and(|models| models.len() <= 5);
+        if hide_search || self.props.open_generation != props.open_generation {
+            self.search.update(cx, |search, cx| search.set_value("", window, cx));
         }
         self.props = props;
         self.sync_effort_slider(cx);
@@ -432,7 +430,7 @@ impl ModelPopupState {
                 .and_then(|model| model.get("reasoningEfforts"))
                 .and_then(Value::as_array)
                 .is_some_and(|levels| levels.iter().any(|candidate| candidate.get("id").and_then(Value::as_str) == Some(id)));
-            if pane.task_id == task_id && expected_task == task_id && !pane.disabled()
+            if pane.task_id == task_id && expected_task == task_id && !pane.model_disabled()
                 && current.get("model").and_then(Value::as_str) == Some(expected_model.as_str())
                 && still_supported
             {
@@ -457,7 +455,7 @@ impl ModelPopupState {
                 .and_then(|model| model.get("supportsFast"))
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            if pane.task_id == task_id && !pane.disabled() && supported
+            if pane.task_id == task_id && !pane.model_disabled() && supported
                 && settings.get("model").and_then(Value::as_str) == Some(expected_model.as_str())
             {
                 let mut next = settings;
@@ -488,7 +486,7 @@ impl ModelPopupState {
             };
             if !supports_effort { effort = Value::Null; }
             let fast = if supports_fast { current.get("fastMode").cloned().unwrap_or(Value::Null) } else { Value::Null };
-            if pane.task_id == task_id && !pane.disabled() {
+            if pane.task_id == task_id && !pane.model_disabled() {
                 pane.model_menu_open = false;
                 pane.save_model(json!({"model":id,"reasoningEffort":effort,"fastMode":fast}), cx);
             }
@@ -508,7 +506,7 @@ impl ModelPopupState {
 }
 
 impl Render for ModelPopupState {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let props = self.props.clone();
         let font_ratio = props.font_ratio;
         let models = self.models();
@@ -544,21 +542,23 @@ impl Render for ModelPopupState {
         let font_family = cx.theme().font_family.clone();
         let mut content = v_flex()
             .id("composer-model-picker")
+            .debug_selector(|| "composer-model-picker".into())
             .w(popup_px(360.))
-            .max_h(popup_px(520.))
-            .overflow_y_scroll()
-            .gap_y(popup_px(design::space::GROUP))
+            // Scroll containers have no intrinsic minimum height. Give the
+            // nested native popover flex wrappers a definite viewport extent.
+            .h(popup_px(520.).min((window.viewport_size().height - popup_px(64.)).max(popup_px(1.))))
+            .flex_shrink_0()
+            .overflow_hidden()
+            .gap_y(popup_px(design::space::TIGHT))
             .p(popup_px(design::space::INSET))
-            .rounded(popup_px(design::radius::CARD))
-            .border_1()
-            .border_color(cx.theme().border)
-            .bg(gpui_kit::Background::from(cx.theme().popover).backdrop_blur(20.))
-            .text_color(cx.theme().popover_foreground)
+            .popover_style(cx)
             .font_family(font_family)
             .text_size(popup_px(12. * font_ratio))
             .child(
                 h_flex()
+                    .debug_selector(|| "model-picker-toolbar".into())
                     .w_full()
+                    .flex_shrink_0()
                     .items_center()
                     .gap_x(popup_px(design::space::TIGHT))
                     .child(
@@ -566,7 +566,7 @@ impl Render for ModelPopupState {
                             .flex_1()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_size(popup_px(14. * font_ratio))
-                            .child("Model"),
+                            .child("Available models"),
                     )
                     .child(
                         Button::new("model-picker-refresh")
@@ -574,7 +574,7 @@ impl Render for ModelPopupState {
                             .ghost()
                             .icon(Icon::new(IconName::RefreshCw))
                             .accessibility_label("Refresh models")
-                            .disabled(props.loading || props.disabled || props.saving)
+                            .disabled(props.loading || props.disabled)
                             .on_click({
                                 let pane = pane.clone();
                                 let task = props.task_id.clone();
@@ -603,21 +603,12 @@ impl Render for ModelPopupState {
             );
 
         if props.disabled && !props.saving {
-            content = content.child(model_note("Available after this run finishes.", font_ratio, cx));
-        } else if props.applies_next_turn {
-            content = content.child(model_note("Applies to the next turn.", font_ratio, cx));
+            content = content.child(model_note("Model settings are unavailable for this chat.", font_ratio, cx));
         } else if props.loading && props.catalog.is_none() {
             content = content.child(model_note("Reading harness models…", font_ratio, cx));
         }
-        if props.jev != "off" {
-            content = content.child(model_note(if props.jev == "safe_auto" {
-                "Jev routing · automatic when confidence is sufficient".to_owned()
-            } else {
-                "Jev routing · model recommendation".to_owned()
-            }, font_ratio, cx)).child(model_note("Jev can affect model selection for new chats. It never changes permissions.", font_ratio, cx));
-        }
         if props.saving {
-            content = content.child(model_note("Saving model settings…", font_ratio, cx));
+            content = content.child(model_note(format!("Model change queued · {}", props.settings["model"].as_str().filter(|model| !model.is_empty()).unwrap_or("Harness default")), font_ratio, cx));
         }
         if let Some(error) = props.save_error.as_ref() {
             content = content.child(model_note(format!("Could not save model settings: {error}"), font_ratio, cx));
@@ -636,7 +627,8 @@ impl Render for ModelPopupState {
         }
 
         if models.len() > 5 {
-            content = content.child(Input::new(&self.search).text_size(popup_px(12. * font_ratio)).aria_label("Find a model"));
+            content = content.child(div().flex_shrink_0().debug_selector(|| "model-picker-search".into())
+                .child(Input::new(&self.search).text_size(popup_px(12. * font_ratio)).aria_label("Find a model")));
         }
         let visible_models_empty = visible_models.is_empty();
         let model_rows = visible_models.iter().cloned().map(|model| {
@@ -667,7 +659,8 @@ impl Render for ModelPopupState {
                 }
             );
             let popup_state = popup_state.clone();
-            Button::new(SharedString::from(format!("model-choice-{id}")))
+            let row_selector = format!("model-choice-{id}");
+            div().w_full().flex_shrink_0().debug_selector(move || row_selector.clone()).child(Button::new(SharedString::from(format!("model-choice-{id}")))
                 .ghost()
                 .text_size(popup_px(12. * font_ratio))
                 .w_full()
@@ -678,7 +671,7 @@ impl Render for ModelPopupState {
                 .role(Role::RadioButton)
                 .selected(chosen)
                 .accessibility_label(accessible)
-                .disabled(props.disabled || props.saving)
+                .disabled(props.disabled)
                 .child(
                     h_flex()
                         .w_full()
@@ -721,7 +714,7 @@ impl Render for ModelPopupState {
                     popup_state.update(cx, |state, cx| {
                         state.choose_model(id.clone(), cx);
                     });
-                })
+                }))
         });
 
         if props.catalog.is_some() && models.is_empty() {
@@ -737,9 +730,11 @@ impl Render for ModelPopupState {
             content = content.child(
                 div()
                     .id("model-picker-model-list")
+                    .debug_selector(|| "model-picker-model-list".into())
                     .role(Role::RadioGroup)
                     .aria_label("Available models")
-                    .max_h(popup_px(245.))
+                    .flex_1()
+                    .min_h_0()
                     .overflow_y_scroll()
                     .flex()
                     .flex_col()
@@ -764,10 +759,11 @@ impl Render for ModelPopupState {
             content = content.child(
                 v_flex()
                     .w_full()
+                    .flex_shrink_0()
                     .gap_y(popup_px(design::space::TIGHT))
                     .border_t_1()
                     .border_color(cx.theme().border)
-                    .pt(popup_px(design::space::SECTION))
+                    .pt(popup_px(design::space::TIGHT))
                     .child(
                         h_flex()
                             .w_full()
@@ -776,12 +772,14 @@ impl Render for ModelPopupState {
                             .child(div().font_weight(FontWeight::SEMIBOLD).child(effort_label)),
                     )
                     .when_some(self.effort_slider.as_ref(), |section, slider| {
-                        section.child(Slider::new(slider).disabled(props.disabled || props.saving || efforts.len() < 2))
+                        section.child(Slider::new(slider).disabled(props.disabled || efforts.len() < 2))
                     })
                     .when(!effort_description.is_empty(), |section| {
                         section.child(
                             div()
                                 .text_color(cx.theme().muted_foreground)
+                                .text_size(popup_px(11. * font_ratio))
+                                .line_height(popup_px(15. * font_ratio))
                                 .whitespace_normal()
                                 .child(effort_description),
                         )
@@ -806,6 +804,7 @@ impl Render for ModelPopupState {
             content = content.child(
                 h_flex()
                     .w_full()
+                    .flex_shrink_0()
                     .items_center()
                     .justify_between()
                     .gap_x(popup_px(design::space::GROUP))
@@ -814,18 +813,13 @@ impl Render for ModelPopupState {
                             .flex_1()
                             .gap_y(popup_px(design::space::TIGHT))
                             .child(div().font_weight(FontWeight::MEDIUM).child("Fast mode"))
-                            .child(
-                                div()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .whitespace_normal()
-                                    .child(fast_description),
-                            ),
                     )
                     .child(
                         Switch::new(SharedString::from(format!("fast-mode-{}", props.task_id)))
                             .checked(props.settings.get("fastMode").and_then(Value::as_bool) == Some(true))
-                            .disabled(props.disabled || props.saving)
+                            .disabled(props.disabled)
                             .accessibility_label("Fast mode")
+                            .tooltip(fast_description)
                             .on_change(move |enabled, _, cx| {
                                 popup_state.update(cx, |state, state_cx| state.save_fast_mode(*enabled, state_cx));
                             }),
@@ -842,17 +836,19 @@ impl Render for ModelPopupState {
             let popup_state = popup_state.clone();
             content = content.child(
                 Button::new("model-picker-reset-defaults")
+                    .flex_shrink_0()
+                    .compact()
                     .text()
                     .text_size(popup_px(11. * font_ratio))
                     .label("Use harness defaults")
-                    .disabled(props.disabled || props.saving)
+                    .disabled(props.disabled)
                     .accessibility_label("Use harness defaults")
                     .on_click(move |_, _, cx| {
                         popup_state.update(cx, |state, cx| {
                             let pane = state.pane.clone();
                             let task = state.props.task_id.clone();
                             pane.update(cx, |pane, cx| {
-                                if pane.task_id == task && !pane.disabled()
+                                if pane.task_id == task && !pane.model_disabled()
                                     && pane.selected_task().is_some_and(|task| {
                                         pane.selected_settings(&task).get("model")
                                             .and_then(Value::as_str).is_some_and(|id| !id.is_empty())
@@ -885,20 +881,15 @@ pub(super) fn model_menu(
     let task_id = pane.task_id.clone();
     let props = ModelPickerProps {
         task_id: pane.task_id.clone(),
+        open_generation: pane.model_menu_open_generation,
         font_ratio: interface_font_ratio(&pane.snapshot),
-        saving: pane.saving,
-        save_error: pane.save_error.clone(),
+        saving: pane.model_save.desired.is_some(),
+        save_error: pane.model_save.error.clone().or_else(|| pane.save_error.clone()),
         catalog: pane.catalog.clone(),
         settings: pane.selected_settings(&task),
         loading: pane.catalog_loading,
         error: pane.catalog_error.clone(),
-        disabled: pane.disabled(),
-        applies_next_turn: task.get("status").and_then(Value::as_str) == Some("running")
-            && task.get("provider").and_then(Value::as_str) == Some("codex"),
-        jev: pane
-            .selected_agent(&task)
-            .and_then(|agent| agent.get("jevRouting").and_then(Value::as_str).map(str::to_owned))
-            .unwrap_or_else(|| "off".to_owned()),
+        disabled: pane.model_disabled(),
     };
     let is_open = pane.model_menu_open;
     let entity = cx.entity();
@@ -915,8 +906,7 @@ pub(super) fn model_menu(
                 let entity = entity.clone();
                 let _ = entity.update(cx, |pane, cx| {
                     if pane.task_id == task_id {
-                        pane.model_menu_open = *open;
-                        cx.notify();
+                        pane.set_model_picker_open(*open, cx);
                     }
                 });
             }
@@ -932,7 +922,7 @@ pub(super) fn model_menu(
                 cx,
                 move |window, panel_cx| ModelPopupState::new(factory_props, factory_pane, window, panel_cx),
             );
-            panel.update(cx, |state, panel_cx| state.set_props(props, panel_cx));
+            panel.update(cx, |state, panel_cx| state.set_props(props, window, panel_cx));
             panel
         })
         .into_any_element()
@@ -940,7 +930,21 @@ pub(super) fn model_menu(
 
 #[cfg(test)]
 mod effort_slider_tests {
-    use super::{effort_slider_state, interface_font_ratio};
+    use ::core::prelude::v1::test;
+    use super::{effort_slider_state, interface_font_ratio, permission_choice_icon};
+
+    #[test]
+    fn permission_choices_use_distinct_native_svg_icons() {
+        let read = permission_choice_icon("read-only");
+        let edit = permission_choice_icon("auto-approve-edits");
+        let full = permission_choice_icon("full-access");
+        assert_ne!(read, edit);
+        assert_ne!(edit, full);
+        assert_ne!(read, full);
+        for icon in [read, edit, full] {
+            assert!(std::str::from_utf8(icon).unwrap().contains("<svg"));
+        }
+    }
 
     #[test]
     fn menu_font_tracks_interface_settings_with_default_and_bounds() {
@@ -968,4 +972,190 @@ mod effort_slider_tests {
         assert_eq!(state.value(), SliderValue::Single(1.));
         assert_eq!(state.step_value(), 1.);
     }
+}
+
+#[cfg(all(test, feature = "visual-export"))]
+mod native_model_popup_tests {
+    use ::core::prelude::v1::test;
+    use super::{model_menu, permissions_menu, ComposerFooterPane};
+    use gpui::InteractiveElement as _;
+    use gpui_kit::{AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _, TestAppContext, Window, div, px, size};
+    use gpui_kit::component::button::{Button, ButtonVariants as _};
+    use monitter_lib::experimental_desktop::DesktopService;
+    use serde_json::json;
+
+    struct BottomComposer { pane: Entity<ComposerFooterPane> }
+    impl Render for BottomComposer {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let palette = crate::design::palette(&json!({"theme":"dark"}), gpui_kit::WindowAppearance::Dark);
+            let menu = self.pane.update(cx, |pane, cx| model_menu(pane, Button::new("fixture-model-trigger").label("Model"), palette, window, cx));
+            div().size_full().flex().flex_col().justify_end().items_end().p(px(16.))
+                .child(div().debug_selector(|| "bottom-composer-trigger".into()).child(menu))
+        }
+    }
+    #[gpui_kit::test]
+    fn model_popup_bottom_composer_retains_usable_viewport_and_search(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let pane_slot = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let slot = pane_slot.clone();
+        let (_, visual) = cx.add_window_view(move |window, cx| {
+            let pane = cx.new(|_| ComposerFooterPane {
+                service: DesktopService::disconnected_for_ui_fixture(),
+                snapshot: json!({"settings":{"interfaceFontSize":14},"tasks":[{"id":"popup-task","provider":"codex","status":"idle","archived":false,"model":"model-0"}],"agents":[]}),
+                task_id: "popup-task".into(), context_cleared_at: None,
+                catalog: Some(json!({"current":{"model":"model-0"},"models":(0..8).map(|index| json!({"id":format!("model-{index}"),"name":format!("Model {index}"),"description":"A model supplied by the loaded catalog.","supportsFast":true,"reasoningEfforts":[{"id":"low","name":"Low","description":"Fast reasoning for straightforward tasks."},{"id":"high","name":"High","description":"More reasoning for difficult tasks."}]})).collect::<Vec<_>>()})),
+                usage_overview: None, catalog_loading: false, usage_loading: false, saving: false, model_save: Default::default(), model_save_queues: Default::default(), busy: false,
+                catalog_error: None, usage_error: None, save_error: None, model_menu_open: false, model_menu_open_generation: 0,
+                catalog_generation: 0, usage_refresh: Default::default(), usage_clock: std::time::Instant::now(), save_generation: 0,
+                observed_task_marker: None, composed_palette: None, available_width_design: None, retained_height: None,
+            });
+            *slot.borrow_mut() = Some(pane.clone());
+            let harness = cx.new(|_| BottomComposer { pane });
+            gpui_kit::component::Root::new(harness, window, cx)
+        });
+        visual.simulate_resize(size(px(1000.), px(800.)));
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        let trigger = visual.debug_bounds("bottom-composer-trigger").unwrap();
+        assert!(trigger.top() > px(700.));
+        visual.simulate_click(trigger.center(), Default::default());
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        let panel = visual.debug_bounds("composer-model-picker").expect("full retained popover opened");
+        assert!(panel.size.height >= px(400.), "popup collapsed: {panel:?}");
+        assert!(panel.top() >= px(0.) && panel.bottom() <= px(800.));
+        assert!(visual.debug_bounds("model-picker-header").is_none(), "redundant title block removed");
+        let toolbar = visual.debug_bounds("model-picker-toolbar").expect("model toolbar visible");
+        assert!(toolbar.top() >= panel.top() && toolbar.bottom() <= panel.bottom());
+        let search = visual.debug_bounds("model-picker-search").expect("search visible");
+        let list = visual.debug_bounds("model-picker-model-list").expect("models visible");
+        let first = visual.debug_bounds("model-choice-model-0").expect("first model hitbox");
+        assert!(search.size.height >= px(24.) && search.top() >= panel.top() && search.bottom() <= panel.bottom());
+        assert!(list.size.height > panel.size.height * 0.5 && list.bottom() <= panel.bottom(),
+            "models should occupy most of the menu: list={list:?}, panel={panel:?}");
+        assert!(first.size.height >= px(44.) && first.bottom() <= list.bottom());
+        let first_top = first.top();
+        visual.simulate_event(gpui_kit::ScrollWheelEvent {
+            position: list.center(),
+            delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-180.))),
+            ..Default::default()
+        });
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        let shifted = visual.debug_bounds("model-choice-model-0").expect("retained first model");
+        assert!(shifted.top() < first_top, "model list must scroll independently");
+        assert_eq!(visual.debug_bounds("model-picker-toolbar").unwrap(), toolbar,
+            "scrolling model choices must keep controls in place");
+        visual.simulate_click(search.center(), Default::default());
+        visual.simulate_input("Model 7");
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(visual.debug_bounds("model-choice-model-0").is_none());
+        assert!(visual.debug_bounds("model-choice-model-7").is_some());
+        // Native close/reopen must start with all choices, while a refresh in
+        // the same opening continues to preserve a usable search query.
+        visual.simulate_click(gpui::point(px(10.), px(10.)), Default::default());
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        let trigger = visual.debug_bounds("bottom-composer-trigger").expect("trigger rendered");
+        visual.simulate_click(trigger.center(), Default::default());
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        for selector in ["model-choice-model-0", "model-choice-model-1", "model-choice-model-2", "model-choice-model-3", "model-choice-model-4", "model-choice-model-5", "model-choice-model-6", "model-choice-model-7"] {
+            assert!(visual.debug_bounds(selector).is_some(),
+                "new opening resets search for {selector}");
+        }
+        let search = visual.debug_bounds("model-picker-search").expect("search remains available");
+        visual.simulate_click(search.center(), Default::default());
+        visual.simulate_input("Model 7");
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(visual.debug_bounds("model-choice-model-0").is_none());
+        visual.simulate_resize(size(px(650.), px(460.)));
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        let small = visual.debug_bounds("composer-model-picker").unwrap();
+        assert!(small.size.height > px(250.) && small.size.height <= px(396.), "{small:?}");
+        assert!(small.top() >= px(0.) && small.bottom() <= px(460.));
+        let pane = pane_slot.borrow().clone().expect("fixture pane");
+        let generation = pane.read_with(visual, |pane, _| pane.catalog_generation);
+        assert_eq!(generation, 2, "each opening revalidates once");
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(pane.read_with(visual, |pane, _| pane.catalog_generation), generation,
+            "ordinary renders cannot refetch the catalog");
+        pane.update(visual, |pane, cx| {
+            pane.catalog = Some(json!({"current":{"model":"model-0"},"models":(0..3).map(|index|
+                json!({"id":format!("model-{index}"),"name":format!("Model {index}"),"description":"Refreshed catalog."})).collect::<Vec<_>>()}));
+            cx.notify();
+        });
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(visual.debug_bounds("model-picker-search").is_none(), "small catalogs hide search");
+        for selector in ["model-choice-model-0", "model-choice-model-1", "model-choice-model-2"] {
+            assert!(visual.debug_bounds(selector).is_some(),
+                "hidden old search must not exclude refreshed {selector}");
+        }
+        pane.read_with(visual, |pane, _| {
+            assert_eq!(pane.snapshot["tasks"][0]["model"], "model-0");
+            assert_eq!(pane.save_generation, 0, "refresh cannot save model settings");
+            assert!(!pane.saving);
+        });
+    }
+    struct BottomPermissions { pane: Entity<ComposerFooterPane> }
+    impl Render for BottomPermissions {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let palette = crate::design::palette(&json!({"theme":"dark"}), gpui_kit::WindowAppearance::Dark);
+            let menu = self.pane.update(cx, |pane, cx| permissions_menu(pane, Button::new("fixture-permissions-trigger").label("Read only"), palette, window, cx));
+            div().size_full().flex().flex_col().justify_end().items_end().p(px(16.))
+                .child(div().debug_selector(|| "bottom-permissions-trigger".into()).child(menu))
+        }
+    }
+    #[gpui_kit::test]
+    fn permissions_popup_native_rows_keep_icons_and_trailing_check_with_header_note(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let mut retained = None;
+        let (_, visual) = cx.add_window_view(|window, cx| {
+            let pane = cx.new(|_| ComposerFooterPane {
+                service: DesktopService::disconnected_for_ui_fixture(),
+                snapshot: json!({"settings":{"interfaceFontSize":14},"tasks":[{"id":"permission-task","provider":"codex","status":"running","archived":false,"sandbox":"read-only"}],"agents":[]}),
+                task_id: "permission-task".into(), context_cleared_at: None, catalog: None, usage_overview: None,
+                catalog_loading: false, usage_loading: false, saving: false, model_save: Default::default(), model_save_queues: Default::default(), busy: false,
+                catalog_error: None, usage_error: None, save_error: None, model_menu_open: false, model_menu_open_generation: 0,
+                catalog_generation: 0, usage_refresh: Default::default(), usage_clock: std::time::Instant::now(), save_generation: 0,
+                observed_task_marker: None, composed_palette: None, available_width_design: None, retained_height: None,
+            });
+            retained = Some(pane.clone());
+            let fixture = cx.new(|_| BottomPermissions { pane });
+            gpui_kit::component::Root::new(fixture, window, cx)
+        });
+        visual.simulate_resize(size(px(1000.), px(800.)));
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        let trigger = visual.debug_bounds("bottom-permissions-trigger").unwrap();
+        visual.simulate_click(trigger.center(), Default::default());
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        let heading = visual.debug_bounds("popup-header-title-Access permissions").expect("real menu heading");
+        let note = visual.debug_bounds("popup-header-subtitle-Access permissions").expect("next-turn subtitle");
+        assert!(note.size.height > px(10.));
+        assert!(note.top() >= heading.bottom() && note.top() - heading.bottom() <= px(8.));
+        let read = visual.debug_bounds("permission-choice-Read only").unwrap();
+        let edit = visual.debug_bounds("permission-choice-Auto-approve edits").unwrap();
+        let full = visual.debug_bounds("permission-choice-Full access").unwrap();
+        assert!(read.top() > note.bottom());
+        for row in [read, edit, full] { assert!(row.size.height >= crate::design::ui_scaled_px(52.)); }
+        assert!(edit.top() > read.bottom() && full.top() > edit.bottom());
+        let selected_slot = visual.debug_bounds("popup-menu-element-row-0").unwrap();
+        let unselected_slot = visual.debug_bounds("popup-menu-element-row-1").unwrap();
+        // Native leading icon slots survive selection; only the checked row
+        // reserves space after its content for the right-side check glyph.
+        assert!(read.left() - selected_slot.left() >= px(10.));
+        assert!(edit.left() - unselected_slot.left() >= px(10.));
+        assert!(selected_slot.right() - read.right() >= px(10.));
+        assert!(unselected_slot.right() - edit.right() < px(10.));
+        visual.read(|cx| {
+            let pane = retained.as_ref().unwrap().read(cx);
+            assert_eq!(pane.snapshot["tasks"][0]["sandbox"], "read-only");
+            assert!(!pane.saving && pane.save_generation == 0, "opening never sends permission writes");
+        });
+    }
+
 }

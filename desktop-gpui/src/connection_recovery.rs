@@ -1,17 +1,29 @@
 //! Confirm lost acknowledgements using authority reads; never replay a mutation.
 use serde_json::Value;
 
+pub const RECONNECT_EXHAUSTED: &str = "Could not reconnect. Your draft is kept; check the chat after reconnecting before trying again.";
+/// Read-only acknowledgement recovery tolerates a brief backend restart.
+pub const READ_RETRY_DELAYS_MS: [u64; 8] = [0, 150, 450, 1_000, 2_000, 4_000, 8_000, 8_000];
+
 pub fn transient(error: &str) -> bool {
-    matches!(error,
+    error == RECONNECT_EXHAUSTED || matches!(error,
         "Private IPC connection lost; delivery may be ambiguous. Refresh state before retrying a mutation."
         | "Private IPC response incomplete; delivery may be ambiguous. Refresh state before retrying a mutation."
         | "Private IPC connection unavailable. Reconnect and try again."
+        | "Private IPC replay capacity is temporarily full; no command was dispatched."
+        | "Private IPC replay receipt expired or backend changed. Refresh state before retrying."
+        | "Private IPC replay reservation expired; no command was dispatched."
+        | "Private IPC command completed but its replay receipt is too large. Refresh state before retrying."
+        | "Private IPC command remains in flight. Refresh state before retrying."
         | "Private IPC is temporarily unavailable after 3 attempts. Refresh or reconnect, then try again.")
 }
 
-/// Transport interruptions recover quietly; semantic and uncertain mutation errors stay visible.
+/// Transport recovery stays quiet; backend validation and authentication errors stay visible.
 pub fn visible_error(error: &str) -> Option<&str> {
-    (!transient(error) && error != "Could not reconnect to Monitter. Your agents may still be running; try again shortly.").then_some(error)
+    (!transient(error) && !matches!(error,
+        "Could not reconnect to Monitter. Your agents may still be running; try again shortly."
+        | "Reconnected, but could not confirm the change. Check the chat before trying again. Your draft is kept."
+    )).then_some(error)
 }
 
 fn rows<'a>(snapshot: &'a Value, key: &str) -> impl Iterator<Item = &'a Value> {
@@ -63,7 +75,12 @@ mod tests {
         assert!(visible_error("Private IPC connection lost; delivery may be ambiguous. Refresh state before retrying a mutation.").is_none());
         assert!(visible_error("Private IPC connection unavailable. Reconnect and try again.").is_none());
         assert!(visible_error("Could not reconnect to Monitter. Your agents may still be running; try again shortly.").is_none());
-        for error in ["Private IPC connection lost inside a backend validation error", "Reconnected, but could not confirm the change. Check the chat before trying again. Your draft is kept.", "Task is active"] {
+        assert!(visible_error(RECONNECT_EXHAUSTED).is_none());
+        assert!(visible_error("Private IPC command completed but its replay receipt is too large. Refresh state before retrying.").is_none());
+        assert!(visible_error("Private IPC replay capacity is temporarily full; no command was dispatched.").is_none());
+        assert!(transient(RECONNECT_EXHAUSTED));
+        assert!(visible_error("Reconnected, but could not confirm the change. Check the chat before trying again. Your draft is kept.").is_none());
+        for error in ["Private IPC connection lost inside a backend validation error", "Task is active", "Authentication required", "Attachment no longer exists", "Could not reconnect while validating this draft"] {
             assert_eq!(visible_error(error), Some(error));
         }
     }

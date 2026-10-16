@@ -26,6 +26,7 @@ pub fn install(cx: &mut App) {
         KeyBinding::new("alt-cmd-h", HideOthers, None),
         KeyBinding::new("cmd-m", Minimize, None),
         KeyBinding::new("ctrl-cmd-f", Fullscreen, None),
+        KeyBinding::new("cmd-enter", Fullscreen, None),
     ]);
     cx.on_action(|_: &HideApp, cx| cx.hide());
     cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
@@ -42,7 +43,13 @@ pub fn install(cx: &mut App) {
     });
     cx.on_action(|_: &Fullscreen, cx| {
         if let Some(window) = cx.active_window() {
-            let _ = window.update(cx, |_, window, _| window.toggle_fullscreen());
+            // Keyboard actions run while their window is on GPUI's update
+            // stack. Re-entering it here fails; defer until dispatch finishes.
+            cx.defer(move |cx| {
+                if let Err(error) = window.update(cx, |_, window, _| window.toggle_fullscreen()) {
+                    eprintln!("Cannot toggle fullscreen: {error}");
+                }
+            });
         }
     });
     cx.set_menus([

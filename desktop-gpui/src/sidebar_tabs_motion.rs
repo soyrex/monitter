@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 pub struct SidebarTabsMotion {
     index: Option<usize>,
     generation: u64,
+    animate: bool,
     direction: f32,
     last_wheel: Option<Instant>,
     horizontal: f32,
@@ -17,9 +18,19 @@ impl SidebarTabsMotion {
             if previous != index {
                 self.direction = if index > previous { 1. } else { -1. };
                 self.generation += 1;
+                self.animate = true;
             }
         }
         self.index = Some(index);
+    }
+    /// Restore the selected body without treating it as a user tab gesture.
+    /// Preserve generation so the next gesture gets a fresh animation identity.
+    pub fn settle(&mut self, index: usize) {
+        self.index = Some(index);
+        self.animate = false;
+        self.horizontal = 0.;
+        self.last_wheel = None;
+        self.latched = false;
     }
     /// One change per wheel sequence, including momentum. Vertical scrolling
     /// never contributes to the threshold and is never consumed by this state.
@@ -59,7 +70,7 @@ impl SidebarTabsMotion {
             .min_w_0()
             .w_full()
             .child(body);
-        if reduced || self.generation == 0 {
+        if reduced || !self.animate {
             return body.into_any_element();
         }
         let direction = self.direction;
@@ -102,5 +113,31 @@ mod tests {
         let generation = state.generation;
         state.observe(1);
         assert_eq!(state.generation, generation);
+    }
+    #[::core::prelude::v1::test]
+    fn restoring_tab_cancels_motion_and_next_gesture_uses_a_new_identity() {
+        let mut state = SidebarTabsMotion::default();
+        state.observe(0);
+        state.observe(1);
+        assert!(state.animate);
+        let generation = state.generation;
+        state.settle(3);
+        state.observe(3);
+        assert!(!state.animate);
+        assert_eq!(state.generation, generation);
+        state.observe(2);
+        assert!(state.animate);
+        assert_eq!(state.generation, generation + 1);
+        assert_eq!(state.direction, -1.);
+    }
+    #[::core::prelude::v1::test]
+    fn restoring_tab_discards_outgoing_wheel_momentum() {
+        let mut state = SidebarTabsMotion::default();
+        let now = Instant::now();
+        state.observe(0);
+        assert_eq!(state.wheel(-50., 0., 4, now), Some(1));
+        state.settle(2);
+        assert_eq!(state.wheel(-20., 0., 4, now), None);
+        assert_eq!(state.wheel(-25., 0., 4, now), Some(3));
     }
 }

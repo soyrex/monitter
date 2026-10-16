@@ -24,6 +24,15 @@ pub enum DetailTab {
 }
 
 impl DetailTab {
+    pub(crate) fn index(self) -> usize {
+        match self {
+            Self::Details => 0,
+            Self::Timeline => 1,
+            Self::Approvals => 2,
+            Self::Subagents => 3,
+        }
+    }
+
     fn icon(self) -> &'static [u8] {
         match self {
             Self::Details => icon_assets::FileText.1,
@@ -73,8 +82,7 @@ where
     };
     let modern = settings["tabStyle"] == "modern";
     let on_select = Rc::new(on_select);
-    let tab_order = [DetailTab::Details, DetailTab::Timeline, DetailTab::Approvals, DetailTab::Subagents];
-    motion.borrow_mut().observe(tab_order.iter().position(|tab| *tab == active).unwrap_or(0));
+    motion.borrow_mut().observe(active.index());
     let body = motion.borrow().body(pane_id, body, cx.reduce_motion(), false);
     let wheel_select = on_select.clone();
     let mut tabs = div()
@@ -225,12 +233,13 @@ where
         .flex_col()
         .overflow_hidden()
         .border_l_1()
-        .border_color(rgb(palette.line))
-            .border_blend_mode(crate::surface_blend::separator_mode())
-        .bg(crate::surface_blend::background(
-            crate::surface_blend::Area::Sidebar,
-            palette.sidebar,
-        ))
+        .border_color(if design::tile_theme() == monitter_lib::experimental_desktop::NativeTileTheme::Tern {
+            design::tile_border_color(palette)
+        } else { rgb(palette.line) })
+        .border_blend_mode(if design::tile_theme() == monitter_lib::experimental_desktop::NativeTileTheme::Tern {
+            0
+        } else { crate::surface_blend::separator_mode() })
+        .bg(crate::surface_blend::secondary_sidebar_background(palette.dark))
         .text_color(rgb(palette.ink))
         .child(ScrollEdgeFade::new(tabs, tab_scroll, Axis::Horizontal, gpui_kit::px(20.)))
         .child(ScrollEdgeFade::new(
@@ -269,12 +278,13 @@ where
         .flex_col()
         .overflow_hidden()
         .border_l_1()
-        .border_color(rgb(palette.line))
-            .border_blend_mode(crate::surface_blend::separator_mode())
-        .bg(crate::surface_blend::background(
-            crate::surface_blend::Area::Sidebar,
-            palette.sidebar,
-        ))
+        .border_color(if design::tile_theme() == monitter_lib::experimental_desktop::NativeTileTheme::Tern {
+            design::tile_border_color(palette)
+        } else { rgb(palette.line) })
+        .border_blend_mode(if design::tile_theme() == monitter_lib::experimental_desktop::NativeTileTheme::Tern {
+            0
+        } else { crate::surface_blend::separator_mode() })
+        .bg(crate::surface_blend::secondary_sidebar_background(palette.dark))
         .text_color(rgb(palette.ink))
         .child(
             div()
@@ -322,6 +332,15 @@ impl Default for RailMotion {
     }
 }
 impl RailMotion {
+    /// Restoring layout or revealing a retained pane installs its final state.
+    /// Keep subsequent explicit open/close changes eligible for interpolation.
+    pub fn settle(&mut self, present: bool) {
+        let target = if present { 1. } else { 0. };
+        self.from = target;
+        self.target = target;
+        self.duration = std::time::Duration::ZERO;
+    }
+
     pub fn running(&self) -> bool {
         !self.duration.is_zero() && self.started.elapsed() < self.duration
     }
@@ -332,7 +351,7 @@ impl RailMotion {
         let mut progress = self.from + (self.target - self.from) * (1. - (1. - t).powi(3));
         let target = if present { 1. } else { 0. };
         if reduced {
-            self.from = target; self.target = target; self.duration = std::time::Duration::ZERO;
+            self.settle(present);
             return (target, false);
         }
         if self.target != target {
@@ -342,5 +361,34 @@ impl RailMotion {
         let running = self.duration > std::time::Duration::ZERO && now.saturating_duration_since(self.started) < self.duration;
         if !running { progress = target; }
         (progress, running)
+    }
+}
+
+#[cfg(test)]
+mod motion_tests {
+    use super::RailMotion;
+
+    #[::core::prelude::v1::test]
+    fn restored_rail_is_final_immediately_and_manual_toggle_still_animates() {
+        let mut motion = RailMotion::default();
+        motion.settle(true);
+        assert_eq!(motion.sample(true, false), (1., false));
+        assert!(!motion.running());
+        assert_eq!(motion.sample(false, false), (1., true));
+        motion.settle(false);
+        assert_eq!(motion.sample(false, false), (0., false));
+        assert!(!motion.running());
+        assert_eq!(motion.sample(true, false), (0., true));
+    }
+
+    #[::core::prelude::v1::test]
+    fn restore_cancels_an_in_flight_transition_in_both_directions() {
+        let mut motion = RailMotion::default();
+        assert!(motion.sample(true, false).1);
+        motion.settle(true);
+        assert_eq!(motion.sample(true, false), (1., false));
+        assert!(motion.sample(false, false).1);
+        motion.settle(false);
+        assert_eq!(motion.sample(false, false), (0., false));
     }
 }

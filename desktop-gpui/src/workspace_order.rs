@@ -27,7 +27,7 @@ mod tests {
     fn fixture() -> NativeWorkspaceSet {
         NativeWorkspaceSet { active_id: "b".into(), items: ["a", "b", "c"].into_iter().map(|id| NativeWorkspace {
             id: id.into(), name: id.into(), icon: "folder".into(), color: "#38BFD2".into(),
-            layout: Some(serde_json::json!({"pane":id})),
+            url: None, layout: Some(serde_json::json!({"pane":id})),
         }).collect() }
     }
     #[test]

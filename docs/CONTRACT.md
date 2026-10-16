@@ -5,6 +5,37 @@ Canonical TS data shapes: `src/lib/types.ts`. Rust serde fields use camelCase.
 All timestamps are Unix milliseconds. IDs are UUID strings. Optional task links use null.
 No fake conversations, progress, token counts, host connections or model replies in the shipped app.
 
+### Report stylesheet snapshots
+
+The collaboration MCP exposes read-only `get_report_styles({})` and the
+`monitter://reports/theme.css` resource through `resources/list` and
+`resources/read`. All resource reads/discovery reuse the authorized
+`get_report_styles` handler: the originating task must be running and its
+agent must have collaboration enabled. Read-only task sandboxes are supported.
+No MCP method accepts a caller identity or publishes a theme.
+
+The owner-local native IPC method `publish_report_theme({theme})` accepts the
+public `report_styles::ReportTheme` DTO with camelCase fields `dark`, `accent`,
+`paper`, `sidebar`, `panel`, `line`, `soft`, `code`, `ink`, `muted`, `fontFamily`,
+`monoFontFamily`, and `fontSize`. Colours are RGB integers at most `0xffffff`;
+font names are nonblank, bounded to 256 bytes without control characters and
+escaped for CSS/embedded HTML; font size is finite, 6–64 CSS pixels (including the 6.4px minimum scaled native font). This typed
+publication method is absent from invoke, LAN/mobile commands and MCP writes.
+The service keeps its latest validated theme and Unix-millisecond capture time
+in process memory only. After server restart and before GUI publication,
+stylesheet reads return a clear unavailable error instead of a fallback theme.
+
+The tool returns `version:1`, `capturedAt`, `theme`, `css`, `starterHtml`, and
+`usage`. CSS prepends scoped `.monitter-report` colour/font custom properties
+to the bundled responsive `report.css`. The starter includes a viewport tag
+and semantic framing with `report-container`, `report-header`, and
+`report-footer`. Optional `report-layout`, `report-sidebar`, and `report-toc`
+classes provide fixed desktop contents navigation that becomes wrapping pills
+below 64rem and is omitted from print; the default starter stays single-column.
+Published fonts use local/system fallbacks, without external
+font requests. Saved HTML retains this captured appearance; it does not
+subscribe to later theme changes. See `docs/report-styles.md` for agent usage.
+
 ### Experimental GPUI desktop adapter
 
 The read-only private method `read_idle_runtime_status` returns `idleTimeoutMs`
@@ -85,7 +116,7 @@ Named GPUI workspace presentation is stored in private device-local
 `named-workspaces.sqlite3`, using transactional revision guards and a 512 KiB
 payload limit. It stores the local `tileTheme` choice and a workspace set with `activeId` and 1–24 items with unique UUID IDs,
 nonblank names up to 80 characters without control characters, `#RRGGBB` colours,
-`folder|code|terminal|globe|sparkles` icons, and validated native dock layouts.
+legacy `folder|code|terminal|globe|sparkles` or explicit bundled `lucide:<name>` icon keys, optional credential-free HTTP(S) `url` (at most 8192 bytes), and validated native dock layouts. The URL is device-local presentation metadata; its declared site icon (with origin favicon fallback) is fetched without browser cookies or credentials, with bounded bytes/time, cached in memory, and falls back to the chosen project-coloured icon. Older rows omit `url`.
 Missing local data migrates the prior single layout (or legacy backend workspace
 metadata). The GUI sends only the active layout through existing native
 preference IPC; it omits `workspaces` and `appearance.tileTheme` so a running older backend stays compatible. Default Monitter DTOs omit the appearance field for older readers.
@@ -355,6 +386,32 @@ reconnection and a new authoritative snapshot.
 - `list_codex_accounts {}` -> `{ home: string, label: string }[]`.
   Owner desktop/LAN only. Lists existing local Codex home directories and saved selections;
   discovery does not read credentials, log in, start a harness or query plan entitlements.
+- `read_admin_activity {}` -> `{ entries: AdminActivityEntry[] }`.
+  Native GPUI owner-local only; unavailable to LAN/shared callers. Read-only and
+  safe to retry after transport reconnection. Entries are newest-created first,
+  process-local, and reset when the backend exits; they are never stored in the
+  ordinary task transcript. Each entry has `id`, `purpose` (`autoname`,
+  `notification_summary`, or `admin_turn`), `taskId` (origin chat ID or null),
+  `paneTitle` (origin title or null), `model` (labelled configured model or null),
+  `status` (`queued`, `running`, `succeeded`, `failed`, or `timeout`), `createdAt`,
+  nullable `startedAt`/`finishedAt` (Unix milliseconds), and `detail`.
+  Queue time precedes the existing broker deadline; running starts immediately
+  before sending on the selected hidden resident task. Success means a generated
+  response was returned, not that the caller validated/applied it. Response
+  details are capped at 2,048 characters, plus an optional ellipsis; prompts are
+  never logged, and recognized sensitive source/output suppresses response text.
+  Failure details use controlled categories rather than raw provider errors.
+  At most 200 records are retained. Only terminal records may be evicted; if all
+  records are active, further admission is rejected until one finishes.
+- `summarize_notification { taskId: string, messageId: string }` ->
+  `{ taskId: string, messageId: string, summary: string, source: "admin" | "excerpt" }`.
+  Native GPUI owner-local only; unavailable to LAN/shared callers. Validates a
+  finalized assistant message in a visible ordinary chat, then asks the existing
+  resident Monitter Admin broker for one outcome sentence of at most 60 words.
+  Unconfigured/unavailable Admin or invalid generated text falls back to an
+  excerpt of the actual final message. The transcript remains unchanged. The
+  native inbox attempts once per long (>120 characters) unread final message identity in its session,
+  ignores stale summary responses, and expands to the complete original message.
 - `save_project { project: Project }` -> Snapshot (empty id creates)
 - `delete_project { id: string }` -> Snapshot (unassign chats; preserve their history and runtime)
 - `post_project_board_note { projectId: string, text: string, requestId: string }` -> Snapshot.
@@ -459,16 +516,24 @@ reconnection and a new authoritative snapshot.
   five-minute in-process cache distinguishes launcher, host and folder; `refresh` bypasses it. A harness that advertises
   no catalog reports that limitation visibly. Task targets use the live ACP session when present.
 - `set_task_model_settings { taskId: string, settings: ModelSettings }` -> Snapshot
-  Codex tasks may be running: the new model, reasoning effort, and Fast mode are written to the
-  task snapshot and applied on the next `turn/start`. Other harnesses keep the existing
-  "reject while running" rule because their model/sandbox flags are baked into the launch
-  command and need a process restart to apply. Archived tasks still reject.
+  All nonarchived tasks accept validated desired model, reasoning effort, and Fast mode changes
+  while running. The active turn continues unchanged; the latest saved choice applies at the next
+  supported turn or launch boundary. Selection reuses an already-advertised cached catalog without
+  reprobe; explicit catalog refresh remains available. Retrying an unchanged choice skips catalog
+  discovery and adds no duplicate settings divider or task timestamp update. Archived tasks still reject.
+  Local launch-bound resident sessions apply changed settings at the next explicit user turn by
+  safely retiring the idle owner, then resuming its saved provider session with the latest model.
+  Active work, pending approvals, unknown process descendants, and unverified/remote ownership
+  prevent that retirement; settings remain saved and the next send reports the pending boundary.
+  Model saves and the next-turn claim are serialized separately from other setting mutations.
+  This model-only behavior does not change sandbox or permission mutation rules.
 - `set_task_sandbox { taskId: string, sandbox: Sandbox }` -> Snapshot
   Codex tasks may be running: the new sandbox is written to the task snapshot and applied to
   the next `turn/start` as a fresh `approvalPolicy` + `sandboxPolicy`. Other harnesses and
   archived tasks still reject.
 - `rename_task { id: string, title: string }` -> Snapshot
 - `autoname { target: { taskId?: string, channelId?: string, terminalId?: string, content?: string } }` -> Snapshot (routed through the resident Monitter Admin turn; see Internal agent)
+  The experimental GPUI private IPC adapter returns only the updated task title for a `taskId` target and refreshes the snapshot separately; the Tauri command contract remains Snapshot.
 - `set_task_archived { taskId: string, archived: boolean }` -> Snapshot (reject running; preserve all history)
 - `get_task_goal { taskId: string }` -> Goal | null (read-only Codex app-server lookup; version-dependent)
   A completed Codex turn is not proof that its persisted goal or native children
@@ -897,9 +962,21 @@ Cmd/Ctrl+minus adjust the active viewer by five percentage points within 80–20
 the browser's own page-zoom command.
 Cmd+Option+= on macOS and Ctrl+Alt+= on Windows/Linux balance every open pane to the same area while
 preserving the current split arrangement. The same action is available as Balance panes in Controls.
-Cmd/Ctrl+Shift+arrow moves the selected tab into the pane in that direction. If no pane exists there,
-it creates a split and keeps the empty source pane. Cmd/Ctrl+Option/Alt+Left/Right selects the adjacent
-tab, crossing a pane boundary when needed; Up/Down focuses the pane above or below.
+In the GPUI desktop, Cmd+Ctrl+arrow on macOS moves the focused pane in that direction.
+A tab in a group becomes a separate sibling beside its source, borrowing space proportionally
+from the whole dock region. A standalone pane moves beyond its directional neighbor without
+merging tabs, retaining pane proportions; movement at the outer boundary is a no-op.
+Cmd+Shift+Left/Up and Cmd+[ select the previous named workspace; Cmd+Shift+Right/Down and
+Cmd+] select the next, wrapping through the visible workspace order and preserving drafts/layouts.
+Cmd+1 through Cmd+9 select the corresponding named workspace in visible tab order; missing
+positions do nothing. Cmd+Ctrl+F and Cmd+Enter toggle fullscreen in the GPUI desktop.
+While Command is held, the first nine workspace icons show their position in small overlaid
+number pills, fading in and out without shifting the tabs.
+Named workspace layouts retain client-local `focusedPaneId` metadata and restore focus after
+pane restoration; removed targets fall back to the first active pane.
+Cmd/Ctrl+Option/Alt+Left/Right selects the adjacent tab, crossing a pane boundary when needed;
+Up/Down focuses the pane above or below. The legacy Svelte client retains Cmd/Ctrl+Shift+arrow
+for directional tab movement.
 Activity toggles filter both inline blocks and run detail without deleting captured events.
 Cancelling a running task writes a durable system transcript record, `You cancelled this run.`,
 and a matching diagnostic status event. The transcript record appears inline in the owning
@@ -910,7 +987,11 @@ Only reasoning summaries emitted by the harness can be rendered; missing reasoni
 Consecutive reasoning events for the same chat render inside one expandable reasoning bubble. Messages,
 tool activity, approvals, and task boundaries split that group; stored events remain unchanged.
 Enter-to-send applies to tasks and channels. Shift+Enter always inserts a newline; IME composition
-never submits a message. With Enter-to-send off, Cmd/Ctrl+Enter submits instead.
+never submits a message. With Enter-to-send off, the GPUI desktop uses the Send button;
+Cmd+Enter toggles fullscreen. The legacy Svelte client retains Cmd/Ctrl+Enter to submit.
+In GPUI, Subagents, Agent map and Work Plan sit below the input inside the scrolling composer
+stack, so they leave the visible pane with the composer. When the composer is below the pane,
+the transcript alpha fade ends at the visible pane bottom rather than its unclipped layout edge.
 
 Open task tabs live in the window header. Closing a tab preserves the task and its draft; reopening
 from the sidebar restores it. Tab selection is window UI state, separate from persisted task history.
@@ -1489,7 +1570,14 @@ The same Rust catalogue supplies the native harness tool allowlists:
   selection `source` (`explicit`, `jev`, or `configured_default`) and a bounded reason. A null
   resolved model means the harness's native default is retained; it is not a claimed model turn.
   Routed subagent sessions also expose the child task's configured model and effort.
-- `send_message`: send a brief to a peer, optionally using a directly connected collaboration chat.
+- `send_message`: send a brief to a peer. An explicit `task_id` may address an unarchived
+  chat belonging to the collaboration-enabled recipient profile, including an independent chat
+  using the sender's own profile. Independent chats must share the same non-null project ID;
+  existing directly connected collaboration chats remain eligible across projects. The sender and
+  recipient task IDs must differ. Messaging the same profile requires an explicit `task_id`.
+  Profile eligibility, request deduplication, delivery limits, and delegation cycle guards remain
+  enforced. Running recipients receive the brief through their existing inbox, without a second
+  concurrent turn.
 - `get_task_result`, `wait_for_task`: read the actual result and incoming peer messages.
 - `list_messages`: deliver queued messages to this active turn and return its durable inbox.
 - `cancel_delegation`: cancel an active delegation owned by this task.
@@ -1515,9 +1603,15 @@ retains an explicit low-confidence local fallback. Email and model output remain
 
 Repeated writes with the same caller task and request ID return the same delivery; changing its
 recipient or message is rejected. A sender cannot address arbitrary existing chats or cancel another
-agent's unrelated task. New task creation rejects self/ancestor cycles, more than four ancestor
-levels, more than 24 requests per task or 64 per root chain. At most four collaboration runs dispatch
-concurrently. Native session writer protections still apply; busy recipients remain queued.
+agent's unrelated task. Each Monitter turn permits 10 newly accepted outgoing requests total
+across `send_message` and `delegate_task`. Exact retries with the same request ID consume no
+additional slot, and invalid requests consume none. The allowance resets on the next Monitter
+run ID, including a new turn on a resident transport; inbox delivery, live steering, tool calls,
+and task timestamp changes do not reset it. Historical completed/failed deliveries impose no
+lifetime cap. The counter is runtime-only because backend recovery interrupts active turns.
+New task creation still rejects self/ancestor cycles and more than four ancestor levels;
+targeted replies to existing chats remain available at that depth. At most four collaboration
+runs dispatch concurrently. Native session writer protections still apply; busy recipients remain queued.
 
 Incoming peer messages become visible to an active recipient in `incoming_messages` during result
 or inbox reads. This acknowledges delivery to that turn and prevents a second automatic delivery turn.
@@ -1567,16 +1661,37 @@ A repository status returns `{ repository: true, root, branch, files, truncated 
 null for detached HEAD. Each file has its repository-relative `path`, nullable `originalPath` for
 a rename/copy, `indexStatus`, `worktreeStatus`, and `untracked`; a file can carry both index and
 worktree changes. Status comes from NUL-delimited porcelain output and is bounded; `truncated`
-means the returned list is incomplete.
+means the returned list is incomplete. Changes-pane and composer change-summary requests may include
+`includeStats: true` on `get_task_git_status`; initial repository discovery skips this work.
+The composer requests line totals only after successful task-scoped repository detection,
+using its existing single worker and refresh budget. Unavailable counts remain unknown;
+the rail represents only reported staged and unstaged text changes.
+Each file can then include `stagedStats` and `unstagedStats`, each shaped as
+`{ additions: number | null, deletions: number | null }`. Both counts are null for
+binary files; absent metadata means unavailable or not requested, never zero.
+Untracked files have no statistics until their diff is requested. Statistics use
+at most two bounded NUL-delimited numstat commands for the repository, including
+rename destinations and filenames with tabs/spaces; no per-file processes run.
+An output cap also sets `truncated`, and incomplete records are discarded.
 
 A diff requires one exact path returned by current status and an explicit `staged`, `unstaged`, or
-`untracked` scope. The response is `{ repository, path, scope, text, truncated, binary }`.
+`untracked` scope. An optional `contextLines` integer defaults to 3 and accepts
+0 through 1000 inclusive; larger values are rejected. Expanded context uses the
+same output/time bounds and read-only path checks for all scopes. The response is `{ repository, path, scope, text, truncated, binary }`.
 Untracked previews use a read-only no-index diff. Binary and oversized results are labelled rather
 than expanded indefinitely. Git runs with optional locks disabled and external diff/textconv
 disabled. Local and SSH execution use argument-safe invocation; the backend never stages, writes,
 reverts, commits, fetches, changes authentication or runs a shell built from UI input.
 
 ## Archived permanent deletion
+
+The local GPUI desktop command `summarize_archived_task { taskId }` is an on-demand, read-only
+request for an archived chat. It selects the last ten saved nonempty messages (or fewer if the
+chat is shorter), bounds each message to 1,500 characters, and sends them to the configured
+resident Monitter Admin. It returns `{ taskId, summary, messageCount }`. Internal chats and
+unarchived tasks are rejected. The request runs only when the archive pane's info control is
+opened; a failed or unavailable Admin request appears as an error rather than a fabricated
+summary. The command is owner-local and is not available on the LAN or shared clients.
 
 `preview_task_deletion(taskId)` returns `{ supported, reason, files }`. It is a read-only preview of
 verified native session files. `delete_archived_task(taskId, removeNativeFiles)` permanently removes
@@ -1990,6 +2105,17 @@ Settings edits and command-palette preference changes use a shared queue that me
 into the latest saved settings. Failed saves remain visible; switching tabs preserves the settings
 page's local state and the chat's unsent draft.
 
+`Settings.autoApproveMonitterMcp` defaults to `true` and controls automatic
+approval of the built-in Monitter MCP tools in Codex and Claude. When disabled,
+those harnesses use their usual approval policy, including existing user grants. The setting takes effect
+when a harness launches or resumes after its previous process has retired; an
+already-running process keeps the policy it launched with. It does not approve
+host terminal execution or `install_shared_skill`, change other MCP servers, or
+change ACP's provider-owned approval policy. Existing user grants and the agent's
+YOLO mode remain governed by their existing controls. Clients must treat a
+missing key as an older backend and disable the control while explaining that a
+backend update is required.
+
 Profile contains an autosaved Your name field (`Settings.userName`). It defaults to
 an empty string for new and older stores: Monitter never guesses a name. Names may
 contain at most 80 Unicode code points and no control characters; the UI trims
@@ -1999,7 +2125,7 @@ display context only, not authentication, permission or shared-operator authorit
 
 Conversation display: `Settings.tintUserMessages` defaults to false for existing and new installs. When enabled, user bubbles in direct chats and channels use a subtle accent tint; message content and agent replies are unchanged.
 
-`Settings.activityAnimation` is an owner preference shared by desktop, LAN, and paired mobile views. It defaults to `"sparkles"`; `"grid"` selects a pulsating accent grid and `"matrix"` selects a changing-letter stream. It only affects decorative indicators for running tasks. Existing or unknown settings values are rejected on save, while the motion preference and operating-system reduced-motion setting continue to limit animation.
+`Settings.activityAnimation` is an owner preference shared by desktop, LAN, and paired mobile views. It selects one effect at a time and defaults to `"sparkles"`; `"liquid"` selects a softly blurred accent wave along the bottom of the pane, `"grid"` selects a pulsating accent grid, and `"matrix"` selects a changing-letter stream. It only affects decorative indicators for running tasks. Existing or unknown settings values are rejected on save, while the motion preference and operating-system reduced-motion setting continue to limit animation.
 
 
 `autoname { target: { taskId?: string, channelId?: string, terminalId?: string, content?: string } }` returns Snapshot. Exactly one target is required; terminal text comes from a bounded, control-sequence-scrubbed client buffer. Chat/channel context uses the last 12 messages, bounded to 12,000 characters. The naming request is a blocking resident turn on the resident Monitter Admin agent: `Service::send_admin_turn(prompt)` → `AdminTurnBroker` → the saved Codex app-server / Claude stream-json / ACP transport selected by the admin's configured provider. The admin's configured provider, model, host, cwd, and sandbox are used exactly as saved — there is no Spark/Luna/Mini mini-model selection, no provider fallback, and no automatic retry. Execution is bounded to 45 seconds after a pool slot is acquired; on expiry the owned resident control is terminated. Up to three admin requests run on separate hidden chats. Additional callers queue silently in FIFO order, with no capacity error and no execution timeout while waiting. Every completion, failure, or timeout releases its slot for the next caller. Shutdown wakes pending callers without replaying their requests. Internal prompts, replies, and request IDs are runtime-only and never enter `Snapshot.messages`, `RunEvent`s, `get_task_events` pages, compact LAN snapshots, or shared/visitor projections. The saved native session id on the internal task is persisted so a restart resumes the saved native session; an interrupted, timed-out, or failed request is never replayed. Titles are bounded to 60 characters. Terminal names update the existing session and are refreshed into the tab runtime. The final target mutation is reported through `monitter:changed` exactly as for ordinary renames. Use /rename in chat or find Auto-name current pane in the Controls palette (Cmd-P on macOS) for a terminal; the shell never receives the command.
@@ -2412,10 +2538,44 @@ Mounted dialogs (including Usage and Process metrics) suspend native browser
 overlays through their exit animation, then reveal the same live pages.
 
 
+### Experimental GPUI scoped startup and history
+
+Authenticated private desktop IPC exposes `read_native_ui_changes { revision?,
+messageTaskIds: string[] }` through `DesktopService::read_native_ui_changes`.
+It returns the existing `UiDeltaResponse` shape and uses the same committed
+revision, journal expiry and structural-reset rules as `read_ui_changes`.
+The canonical desktop/mobile/LAN methods and durable model remain unchanged.
+
+A full native snapshot contains every task's metadata and compact activity, but
+includes at most the latest 64 messages per requested task ID. An empty scope
+returns no task messages; duplicate and unknown IDs add no messages. Channel
+tails and subagent transcripts retain their existing projection semantics.
+Incremental deltas still include every changed task message and explicit
+deletion, preserving background activity. Attachment `previewDataUrl` is null
+for changed messages outside `messageTaskIds`; requested tasks retain their
+previews. Other message and attachment fields are preserved. This only projects
+the response and never strips previews from durable history or message pages.
+
+Changing the requested scope does not advance the revision or itself return
+previously omitted history. The GUI explicitly hydrates newly visible panes
+with the latest `read_task_messages { taskId, beforeId: null, limit: 64 }` page
+and pages older rows through existing message-ID cursors. A full reset
+invalidates loaded pages; clients discard them, use the included scoped tails,
+and explicitly hydrate any remaining visible task history. A hidden task's
+incremental rows do not establish that its historical page is loaded.
+
+An updated GUI attached to an older persistent backend falls back to
+`read_ui_changes` only for the exact legacy unknown-private-method response.
+It accepts that backend's larger legacy payload without restarting the server
+or its agent sessions. The GUI caches the unavailable capability across cloned
+facades for that server instance; reconnecting to a new instance probes again.
+Authentication, transport and other semantic errors
+remain errors and do not trigger fallback.
+
 ### Experimental GPUI owner LAN controls
 
 The isolated GPUI host exposes typed private-IPC `DesktopService::read_lan_status`,
-`start_lan`, and `stop_lan` methods only to its native owner UI. They are not JSON
+`start_lan`, `stop_lan`, and `set_lan_access_code({code})` methods only to its native owner UI. They are not JSON
 commands and add no mobile, LAN, or relay authority. The backend starts the browser
 listener automatically on all IPv4 interfaces, including LAN and Tailscale, using
 ports 19436/19437. The host/peer and local certificate checks accept Tailscale
@@ -2426,7 +2586,13 @@ Automatic and explicit starts always require the
 existing access code, origin/host validation and authentication rate limiting;
 the ordinary desktop server's authentication default remains unchanged. Status
 includes the installation-local URLs, owner-only access code, CA fingerprint and
-errors. Access codes are not copied into Snapshot, preferences or logs. Stopping
+errors. The owner can save exactly six ASCII digits (including leading zeroes) in Settings.
+The chosen code is stored atomically in the isolated profile’s owner-only (0600)
+`lan-access-code` file and reused at each listener startup. Invalid or non-private
+saved files fail closed. Saving updates the live listener without restarting the
+backend or agent sessions; old credentials stop working for new connections.
+Without a saved code, starts retain random-code behavior. Access codes are not
+copied into Snapshot, general preferences or logs. Stopping
 releases the listener through its existing lifecycle; explicit backend-server
 shutdown also stops it. Closing the GUI leaves the listener running.
 
@@ -2491,3 +2657,229 @@ Native Neovim panes use private GPUI same-user backend IPC documented in
 redraw replay; native clients own presentation and dock navigation. These
 commands are not exposed through the Tauri/LAN/mobile/shared-client bridge and
 add no fields to the shared TypeScript task/agent contract.
+
+The private Neovim redraw snapshot includes session `cwd` and each window's effective `cwd` and detected `filetype` for the native footer. These additive fields do not change LAN/mobile commands.
+
+### Opt-in project build management
+
+`Project.buildManagementEnabled` defaults to false. Owner snapshots persist
+`buildRequests` and `buildRuns`; shared visitors must omit these private records.
+Requests record id/projectId/taskId/agentId/hostId/requestId/title/command/cwd/
+targetKey/status/buildRunId/createdAt/updatedAt. Status is planned, ready, running,
+succeeded, failed or cancelled. Runs record id/projectId/ownerTaskId/hostId/
+requestIds/command/cwd/targetKey/status/summary/exitCode/createdAt/updatedAt/
+leaseExpiresAt, with running or terminal statuses. These are agent-reported
+coordination records, not proof of process execution or successful installation.
+
+Task-granted MCP exposes `build_queue_list`, `build_request` (request_id, title,
+command, cwd, target_key), `build_request_update` (build_request_id, status),
+`build_claim` (request_ids), `build_heartbeat` (build_run_id), and `build_complete`
+(build_run_id, status, summary, optional exit_code). Caller identity is never a
+parameter. New work requires enabled project and running collaboration task.
+Only request owners change readiness. Claim includes the caller's ready work;
+every selected ready request must match host, exact command, absolute cwd and
+explicit shared resource target_key. Claim is atomic; one running reservation
+per project or target_key, including expired leases. No tool executes commands.
+Completion requires run ownership; succeeded requires observed exit_code zero
+and verification summary. Disabled projects still allow reads, heartbeat and
+completion so existing reservations can clear.
+
+In GPUI, submitted slash RPC commands clear the native composer and persisted
+draft immediately after their worker starts. Missing backend or worker-start
+failure keeps the draft; later command errors remain visible. Completion never
+clears text typed while the RPC was pending, including an identical new command.
+
+`/clear` and `/new` retain the task/project identity, durable build requests,
+run reservations and shared cache target keys. The next ordinary turn reinjects
+fresh build guidance plus a separate task-owned intent section, prioritizing
+running, ready and planned work before completed history so peer activity cannot
+push this chat's pending work out of the recent-project window. It includes the
+current task ID, exact command/cwd/targetKey, request/run ownership, current
+project reservations even when peer-owned or expired, and bounded omission counts. Queue payloads remain untrusted coordination data; clearing
+context never changes readiness, grants a claim or releases a reservation.
+
+Native owner-only `read_project_build_queue(projectId)` returns projectId,
+enabled, requests and runs. `recover_project_build(buildRunId, processStopped,
+summary)` releases only a running expired lease after explicit owner confirmation
+that its process stopped, recording failed with prior execution outcome unknown.
+Lease expiry alone never frees a potentially active resource. Heartbeat extends
+fifteen minutes. On enqueue, oldest terminal history is pruned to 500 completed runs and 1000
+terminal requests per project; planned, ready and running records are preserved.
+The 2000-request cap applies when live work fills the queue. Stable request_id
+retries replay identical retained requests only; pruned IDs have no replay guarantee.
+Claims include the oldest ready request in the project (planned work never blocks
+ready work), preventing newer incompatible requests from bypassing the queue.
+
+Enabled project instructions enter every normal turn, including existing chats
+on their next turn; changing the toggle does not interrupt an active provider
+turn. Agents register before compilation, coordinate compatible ready peers
+without waiting indefinitely for unready work, check disk space, reuse warm
+incremental caches, retain useful artifacts, and prune superseded artifacts or
+regenerable caches under pressure within their owned resource. Active builds,
+source/user data, live sessions and required rollback copies stay protected.
+
+### Agent-requested native browser tabs
+
+The grant-scoped collaboration MCP exposes `browser_open { request_id, url, title? }` to running tasks with collaboration enabled on the GPUI backend. `request_id` is a stable retry key (1–128 bytes); optional title is 1–240 bytes, with no control characters. Targets are credential-free HTTP(S), absolute existing local .html/.htm paths, or local file URIs. Local files canonicalize to regular HTML files; URL encoding preserves spaces and URI fragments. Remote tasks must supply HTTP(S) URLs.
+
+Success returns `{ status: "queued", id, url }`; this does not prove opening or rendering. Same task/request ID returns the same receipt; changing target/title rejects the retry. The runtime queue holds at most 64 receipts. Pending requests expire after 30 minutes, acknowledged receipts 30 minutes from first acknowledgement. At capacity, acknowledged receipts may be evicted; 64 pending requests reject additions. Restart does not replay requests.
+
+Private owner IPC provides `read_browser_open_requests {}` and `ack_browser_open_request { id }`, without Snapshot or LAN commands. The GUI consumes pending requests into new native tabs, shows opening errors, and acknowledges handled requests. Web content gets no Monitter IPC. Local HTML uses WKWebView read access to its containing directory for relative assets. Saved file metadata validates syntax; explicit reopening validates existence. GPUI chat HTTP(S), file URI and absolute HTML Markdown links open new browser panes split to the right of the originating chat, keeping it visible. MCP browser_open uses the same split placement, falling back to the focused pane when the originating chat is not mounted.
+
+### Backend owner restart
+
+The GPUI backend menu alone can request a typed `RestartMode::Wait` or
+`RestartMode::Force`, poll readiness, cancel, and list active agents lazily.
+These are in-process `DesktopServer` methods; no IPC or LAN command grants
+restart authority. The fence shares the state writer lock with accepted turn,
+queue dispatch and native run reservation. Running turns may finish while new
+turns pause; idle resident transports do not count as active agents. Cancel
+reopens admissions and dispatches saved queues.
+
+Force saves the exact running/accepted task IDs to a synced private restart
+journal before replacement. Startup consumes a durable receipt before normal
+queue/scheduler dispatch and resumes only those IDs through ordinary task
+continuation. A missing native session produces a visible task error. A consumed
+receipt is never replayed automatically after another crash, avoiding duplicate
+provider turns; receipts remain in the private profile for diagnosis.
+
+Before replacing the executable, the owner calls `prepare_replacement` off the
+UI thread. It fences all remaining reservations, cancels the exact registered
+transports, and waits up to 15 seconds for their owning readers to reap and
+release them, including late startup owners. Wait mode must first drain active
+turns. Failure preserves the restart journal and reports blocked teardown;
+replacement must not proceed. This method is also absent from IPC and LAN.
+
+### Quiet private-IPC recovery and queued composer controls
+
+Transient private-IPC failures are internal reconnect/reconciliation state, not
+chat transcript entries or pink error banners. Exact transport/receipt recovery
+messages are filtered at the native chat, footer and startup presentation paths;
+real validation, authentication and unsupported-capability errors remain visible.
+Reads and pre-dispatch failures retry with bounded backoff. Unknown mutation
+outcomes are never resolved by blindly issuing a new mutation.
+
+The private v1 framing and existing request/response structs remain unchanged.
+New clients reserve a server-issued ticket using `reserve_replay {method,args}`
+before executing a mutation with `execute_replay {ticket}`. Reconnect attempts
+retain the ticket/request identity; concurrent executions share one result.
+The same owner-only method dispatcher and permissions apply to the reserved
+target. Tickets do not confer additional command or approval authority.
+Receipts are backend-instance-local, limited to 64 entries/16 MiB argument data,
+with 256 KiB cached-result limits and ten-minute retention. Running entries are
+not evicted. Missing/expired/evicted tickets cannot dispatch again; large lost
+responses require authority-read reconciliation. On an older server's exact
+unknown-method response the client retains conservative legacy behavior. A
+backend-instance change fences old requests instead of replaying them.
+
+Model and access selectors accept supported choices while the pane is busy.
+Desired state is task-scoped, reflected immediately and coalesced to the latest
+choice. A per-task worker serializes model/access setters and reconciles lost
+acknowledgements. Models are stored for the next turn; permission changes that
+the harness cannot apply during a run stay queued until idle. Unsupported modes
+are still unavailable; selecting access does not invent a new harness capability.
+Pending settings are client-local intent, not proof of applied runtime state.
+
+Stop remains clickable while starting or awaiting another command. Its intent
+is coalesced per original task and dispatched before further ordinary pane
+commands once the current acknowledgement completes. The Working pill displays
+`Stop queued…` while pending. Repeated clicks do not dispatch duplicate cancels,
+and an already-finished task satisfies Stop without an error banner.
+
+### Owner-local batch pane naming
+
+`rename_all({targets: [{taskId?: string, channelId?: string}]})` is available only
+through owner-local experimental desktop invoke and returns the full Snapshot.
+Each target identifies exactly one chat or channel; terminals are unsupported.
+The client supplies open workspace panes explicitly. The service never searches
+hidden chats and skips archived/internal chats and empty panes. Like explicit
+single-pane naming, this owner action sends the selected recent message context
+to the configured services. More than 32 targets or 48 KiB of serialized context fails visibly.
+Message text uses an adaptive batch budget (up to the last 1,500 UTF-8 bytes
+per message, reduced to fit the batch limit) with an explicit truncation
+marker; full local context is retained for stale checks. Current title and the
+last five saved messages per candidate are sent in ONE
+batched Jev typed Noul request. Only rename probabilities >= 0.85
+are selected; errors have no fallback. If any are selected, ONE resident Admin
+turn requests a strict JSON array of `{key,title}` records. Every selected key
+must occur exactly once; unknown keys, extra fields, malformed JSON and invalid
+1–60 character titles reject the batch before mutation. Concurrently changed
+pane titles or last-five-message context are skipped when applying names.
+Model inputs are untrusted source data and request no tools or actions. No
+selected panes means no Admin turn. This command is absent from LAN/mobile/shared
+dispatch.
+
+## Private Work Logs
+
+Collection is off by default and prospective. The backend stores bounded semantic
+records and usage in its primary transactional outbox, then commits an independent
+private `work-log.sqlite3` with FULL synchronous WAL before acknowledgement.
+Primary schema v3 adds only Work Log metadata/outbox tables. Pause freezes observed
+time and conversation text; resume keeps the actual run ID with a new context
+reference. No paused interval or historical working time is inferred.
+
+Native owner IPC `work_log_owner` takes `operation` and `args`. Operations are
+`settings`, `configure`, `health`, `query`, `summary`, `flush`, `deleteHistory`,
+`grants`, `setGrants`, `export`, `exportStatus`, and `cancelExport`. This surface
+is absent from LAN/mobile/shared command allowlists. Queries use camelCase typed
+filters, keyset pagination and explicit coverage. Exports create a new private
+local JSON/CSV file atomically; cancellation removes owned partial files.
+
+Agent tools `work_log_query`, `work_log_read_context` and `work_log_report` use
+the actual authenticated running task and separate explicit owner grants. Opaque
+context references confer no access. Every page rechecks caller identity and
+permission. Context resolves retained canonical user/assistant history, never
+system instructions or native transcript files. Large messages use UTF-8 chunks
+with `textOffsetBytes` and `textComplete`; callers follow the supplied cursor and
+concatenate pieces by message ID and byte offset. Deleted/unrecorded history is
+explicitly unavailable. Agent descriptions remain untrusted assertions.
+
+Resource collection persists only numeric observations with verified process
+identity; remote workloads and missing counters stay unavailable. Default
+retention is 30 days raw, 365 days minute buckets, hourly thereafter. Semantic
+history/usage persists until explicit private-history deletion. Soft/hard store
+budgets are 1/2 GiB including WAL; bounded loss and collector failure are visible.
+
+### Per-pane local Git worktrees
+
+`Project.agentWorktreesEnabled` defaults to false. When enabled, newly created
+local project chats (including new collaboration recipients and forks) get a
+unique linked Git worktree and `monitter/pane-<task UUID>` branch at the current
+committed project HEAD. Existing chats and native sessions are never moved.
+The base must be a clean Git checkout on a branch; an invalid, dirty, detached,
+or SSH workspace fails visibly rather than silently sharing its directory.
+`Task.agentWorktree` records `root`, `path`, `branch`, `baseCommit`, and
+`targetBranch`; `Task.cwd` pins the pane's working directory across resumes.
+Old snapshots deserialize the new fields as false/null. Worktrees and branches
+are retained after merge, archive, or deletion; Monitter never silently removes
+uncommitted work. Git ignored caches/dependencies are not copied into worktrees.
+
+Owner-local `merge_task_worktree {taskId}` returns Snapshot. It merges committed
+pane changes into the captured project branch; it never pushes. The owner must
+stop agents using that repository and clear this pane's queued sends first.
+Both source and destination must be clean, remain on their recorded branches,
+and belong to the same Git common directory. The saved destination must still
+match the project workspace; repointed or reassigned projects require manual review. A shared lock serializes Monitter
+merges; `git merge-tree --write-tree` detects conflicts without touching the
+project checkout. Conflicts remain in the pane for manual resolution and commit.
+Successful merges use Git's ordinary fast-forward/merge semantics without hooks.
+A lock left by a crashed merger requires inspection; it is never auto-stolen.
+The command is native-owner only, not LAN/shared visitor access.
+Build outputs are still shared resources: worktree isolation does not bypass
+build_request/build_claim or change the shared build-cache target key.
+
+Git diff responses include `contextLines`, the applied context count. Legacy servers omit it. Clients must require this acknowledgement before treating an expanded-context request as fulfilled; omission preserves the expansion control and shows an unsupported-backend notice.
+
+
+### Concise agent progress
+
+The grant-scoped collaboration MCP `progress_update({summary})` replaces the caller's current compact status. Summary is one nonempty line of at most 160 Unicode characters; control characters and caller/task/run identity arguments are rejected. The backend derives task and current run identity from its grant, requires a running task, and rechecks the turn before persistence. Exact repeats are no-ops. One `agent_progress` diagnostic event per task (opaque stable ID `agent-progress:{task UUID}`) is replaced through the indexed history update path and persists through SQLite; no chat message, checklist item, permission or completion state is created. Its title is the summary and its JSON detail records the observed run ID. Normal transcript projection excludes this telemetry. The native running control displays the latest task-scoped summary, discarding status older than the latest user message; Starting and Stop queued take precedence, and terminal tasks hide the running control.
+
+Standard agent instructions and MCP initialization guidance direct agents to use concise progress at meaningful milestones instead of routine chat narration. Questions, decisions, material blockers needing user input and the final verified result remain chat messages. If the tool is unavailable, agents continue quietly. Existing provider sessions retain their original stored system prompt; refreshed MCP initialization supplies the same guidance when they reconnect.
+
+
+### Tool call activity lifecycle
+
+Codex `mcpToolCall`, `commandExecution`, and `fileChange` started/completed notifications with the same provider item ID update one diagnostic `RunEvent` within a task and run. Its opaque UUID and original timestamp remain stable; the latest full provider payload replaces the previous detail, including in persisted/cold history. A later running replay cannot replace an observed terminal result. Different provider item IDs and later runs remain separate, even if tool names or arguments match. Notifications without a recognized lifecycle identity retain ordinary append behavior. This does not merge separate MCP requests or change their execution/accounting.
+
+The native activity row uses the MCP server and a readable tool name in its summary. Explicit running status uses a spinner, observed completion a tick, and failure/cancellation an alert; unknown status retains its type icon. Disclosure carets sit at the right edge and root activity icons align with the transcript/avatar column. Existing saved duplicate rows are retained; no history migration or backend restart is performed by this UI change.

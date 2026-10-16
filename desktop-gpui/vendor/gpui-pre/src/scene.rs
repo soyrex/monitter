@@ -252,7 +252,7 @@ impl Primitive {
             Primitive::Underline(underline) => &underline.bounds,
             Primitive::MonochromeSprite(sprite) => &sprite.bounds,
             Primitive::SubpixelSprite(sprite) => &sprite.bounds,
-            Primitive::PolychromeSprite(sprite) => &sprite.bounds,
+            Primitive::PolychromeSprite(sprite) => &sprite.transformed_bounds,
             Primitive::Surface(surface) => &surface.bounds,
         }
     }
@@ -699,6 +699,32 @@ impl TransformationMatrix {
         }
     }
 
+    /// Axis-aligned bounds of all four transformed corners, used for scene ordering and culling.
+    pub fn transform_bounds(&self, bounds: Bounds<ScaledPixels>) -> Bounds<ScaledPixels> {
+        if *self == Self::unit() {
+            return bounds;
+        }
+        let corners = [bounds.origin, bounds.top_right(), bounds.bottom_right(), bounds.bottom_left()];
+        let mut min_x = f32::INFINITY;
+        let mut min_y = f32::INFINITY;
+        let mut max_x = f32::NEG_INFINITY;
+        let mut max_y = f32::NEG_INFINITY;
+        for corner in corners {
+            let x = self.translation[0] + self.rotation_scale[0][0] * corner.x.0
+                + self.rotation_scale[0][1] * corner.y.0;
+            let y = self.translation[1] + self.rotation_scale[1][0] * corner.x.0
+                + self.rotation_scale[1][1] * corner.y.0;
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
+        }
+        Bounds::from_corners(
+            point(ScaledPixels(min_x), ScaledPixels(min_y)),
+            point(ScaledPixels(max_x), ScaledPixels(max_y)),
+        )
+    }
+
     /// Apply transformation to a point, mainly useful for debugging
     pub fn apply(&self, point: Point<Pixels>) -> Point<Pixels> {
         let input = [point.x.0, point.y.0];
@@ -768,6 +794,8 @@ pub struct PolychromeSprite {
     pub content_mask: ContentMask<ScaledPixels>,
     pub corner_radii: Corners<ScaledPixels>,
     pub tile: AtlasTile,
+    pub transformation: TransformationMatrix,
+    pub transformed_bounds: Bounds<ScaledPixels>,
 }
 
 impl From<PolychromeSprite> for Primitive {

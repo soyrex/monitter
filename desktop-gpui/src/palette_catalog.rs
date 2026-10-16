@@ -19,8 +19,17 @@ fn entry(
         checked,
         keywords: String::new(),
         keyboard_hint: None,
+        search_text: String::new(),
+        open_priority: 2,
     }
 }
+#[cfg(target_os = "macos")]
+const WINDOW_CENTER_PRESETS: &[(&str, u8, u8)] = &[
+    ("window-center-80-70", 80, 70),
+    ("window-center-85-75", 85, 75),
+    ("window-center-90-80", 90, 80),
+    ("window-center-95-85", 95, 85),
+];
 const TOGGLES: &[(&str, &str, &str, bool)] = &[
     ("tools", "Show tool activity", "showToolActivity", true),
     (
@@ -91,6 +100,7 @@ const CREATION_COMMANDS: &[(&str, &str)] = &[
     ("new-task", "New chat"),
     ("new-terminal", "New terminal"),
     ("new-neovim", "New Neovim pane"),
+    ("neovim-files", "Show Neovim files"),
     ("new-agent", "New agent"),
     ("new-channel", "New channel"),
     ("new-project", "New project"),
@@ -111,10 +121,133 @@ fn toggle_patch(id: &str, settings: &Value) -> Option<Value> {
     let (_, _, key, default) = TOGGLES.iter().find(|(key, _, _, _)| *key == id)?;
     Some(json!({*key:!settings[*key].as_bool().unwrap_or(*default)}))
 }
+// Content is collected when opening/refreshing the palette, never on a keystroke.
+const SEARCH_TEXT_LIMIT: usize = 512 * 1024;
+fn append_search_text(output: &mut String, text: &str) {
+    let available = SEARCH_TEXT_LIMIT.saturating_sub(output.len());
+    let mut end = text.len().min(available);
+    while !text.is_char_boundary(end) { end -= 1; }
+    output.push_str(&text[..end]);
+    if output.len() < SEARCH_TEXT_LIMIT { output.push('\n'); }
+}
+/// The live layout supersedes its saved workspace copy. Retained pane entities
+/// alone are not evidence that a chat is still open.
+fn rename_all_targets(view: &Desktop, cx: &App) -> Vec<Value> {
+    let mut layouts = Vec::new();
+    if let Ok(layout) = view.dock.read(cx).serialize(cx) { layouts.push(layout); }
+    if let Some(set) = &view.named_workspaces {
+        layouts.extend(set.items.iter().filter(|w| w.id != set.active_id)
+            .filter_map(|w| w.layout.clone()));
+    }
+    rename_all_chat_targets(layouts.iter().flat_map(|layout|
+        docking::DockWorkspace::saved_ids(layout).unwrap_or_default()), &view.snapshot)
+}
+fn rename_all_chat_targets(ids: impl IntoIterator<Item = String>, snapshot: &Value) -> Vec<Value> {
+    let internal = crate::workspace_visibility::internal_task_ids(snapshot);
+    let mut seen = std::collections::HashSet::new();
+    ids.into_iter().filter_map(|pane| {
+        let id = pane.strip_prefix("chat:")?;
+        if id.is_empty() || internal.contains(id) || !seen.insert(id.to_owned()) { return None; }
+        let task = snapshot["tasks"].as_array()?.iter().find(|task| task["id"].as_str() == Some(id))?;
+        if task["archived"].as_bool() == Some(true) { return None; }
+        Some(json!({"taskId":id}))
+    }).collect()
+}
+fn open_pane_entries(view: &Desktop, cx: &App) -> Vec<E> {
+    let mut panes = Vec::new();
+    let active = view.named_workspaces.as_ref().map(|set| set.active_id.as_str()).unwrap_or("");
+    let active_name = view.named_workspaces.as_ref().and_then(|set| set.items.iter().find(|w| w.id == active)).map(|w| w.name.as_str()).unwrap_or("Current workspace");
+    let mut layouts = Vec::new();
+    if let Ok(layout) = view.dock.read(cx).serialize(cx) {
+        layouts.push((String::new(), active_name.to_owned(), layout));
+    }
+    if let Some(set) = &view.named_workspaces {
+        for workspace in &set.items {
+            if workspace.id != active {
+                if let Some(layout) = &workspace.layout { layouts.push((workspace.id.clone(), workspace.name.clone(), layout.clone())); }
+            }
+        }
+    }
+    let browsers = view.browser.as_ref().map(|b| b.read(cx).metadata_snapshot(cx));
+    let chats = view.chat_panes.borrow();
+    for (workspace, workspace_name, layout) in layouts {
+        for id in docking::DockWorkspace::saved_ids(&layout).unwrap_or_default() {
+            let mut label = view.dock.read(cx).pane_title(&id, cx).map(|s| s.to_string()).unwrap_or_else(|| id.clone());
+            let mut text = String::new();
+            let mut keywords = String::new();
+            let kind = if let Some(task_id) = id.strip_prefix("chat:") {
+                if let Some(task) = view.snapshot["tasks"].as_array().and_then(|tasks| tasks.iter().find(|t| t["id"].as_str() == Some(task_id))) {
+                    label = field(task, "title");
+                    let agent_name = view.snapshot["agents"].as_array()
+                        .and_then(|agents| task["agentId"].as_str().and_then(|id| agents.iter().find(|agent| agent["id"].as_str() == Some(id))))
+                        .map(|agent| field(agent, "name"))
+                        .unwrap_or_default();
+                    keywords = format!("{} {} {} {} {}", field(task, "provider"), field(task, "model"), field(task, "cwd"), agent_name, field(task, "archivedAgentName"));
+                }
+                if let Some(transcript) = chats.get(task_id).and_then(|chat| chat.read(cx).transcripts.get(task_id)) {
+                    for message in transcript.messages.iter().rev() {
+                        append_search_text(&mut text, message["text"].as_str().unwrap_or(""));
+                        if text.len() >= SEARCH_TEXT_LIMIT { break; }
+                    }
+                } else if let Some(messages) = view.snapshot["messages"].as_array() {
+                    for message in messages.iter().rev().filter(|m| m["taskId"].as_str() == Some(task_id)) {
+                        append_search_text(&mut text, message["text"].as_str().unwrap_or(""));
+                        if text.len() >= SEARCH_TEXT_LIMIT { break; }
+                    }
+                }
+                K::Task
+            } else if let Some(session) = id.strip_prefix("terminal:") {
+                if let Some(metadata) = view.palette_terminal_sessions.iter().find(|row| row["id"].as_str() == Some(session)) {
+                    keywords = format!("{} {}", field(metadata, "title"), field(metadata, "cwd"));
+                }
+                for pane in view.terminal.iter().chain(view.terminal_panes.values()) {
+                    if let Some(metadata) = pane.read(cx).palette_sessions().iter().find(|row| row["id"].as_str() == Some(session)) {
+                        keywords = format!("{} {}", field(metadata, "title"), field(metadata, "cwd"));
+                    }
+                    let content = pane.read(cx).palette_search_text(session);
+                    if !content.is_empty() { text = content; break; }
+                }
+                K::Terminal
+            } else if let Some((session, win)) = neovim_workspace::parse_id(&id) {
+                if let Some(session) = view.neovim_sessions.get(session) { text = session.read(cx).palette_search_text(win); }
+                K::Pane
+            } else if let Some(browser_id) = id.strip_prefix("browser:").and_then(|id| id.parse::<u64>().ok()) {
+                if let Some(tab) = browsers.as_ref().and_then(|metadata| metadata.tabs.iter().find(|tab| tab.id == browser_id)) {
+                    label = tab.title.clone();
+                    keywords = format!("{} {}", tab.actual_url.as_deref().unwrap_or_default(), tab.requested_url);
+                    append_search_text(&mut text, tab.actual_url.as_deref().unwrap_or(&tab.requested_url));
+                }
+                K::Pane
+            } else { K::Pane };
+            let row_id = if workspace.is_empty() { format!("pane:{id}") } else { format!("workspace-pane:{workspace}:{id}") };
+            let mut row = entry(row_id, if label.trim().is_empty() { id } else { label }, format!("Open · {workspace_name}"), kind, view.preferences_restore || view.preferences_restoring, None);
+            row.keywords = keywords;
+            row.search_text = text;
+            row.open_priority = if workspace.is_empty() { 0 } else { 1 };
+            panes.push(row);
+        }
+    }
+    panes
+}
 pub(super) fn entries(view: &Desktop, cx: &App) -> Vec<E> {
     let blocked = view.busy || view.service.is_none();
     let settings = &view.snapshot["settings"];
     let mut result = vec![];
+    result.push(entry(
+        "rename-all", "Rename all chat panes",
+        "Check open chats across workspaces with Jev; name changed topics in one admin request",
+        K::Command,
+        blocked || view.preferences_restore || view.preferences_restoring || rename_all_targets(view, cx).is_empty(),
+        None,
+    ));
+    #[cfg(target_os = "macos")]
+    for (id, width, height) in WINDOW_CENTER_PRESETS {
+        result.push(entry(
+            *id, format!("Window: Center at {width}% × {height}%"),
+            "Resize and center on the current screen, excluding the Dock and menu bar",
+            K::Command, false, None,
+        ));
+    }
     for (id, label, _) in Desktop::palette_routes() {
         result.push(entry(
             format!("route:{id}"),
@@ -199,32 +332,17 @@ pub(super) fn entries(view: &Desktop, cx: &App) -> Vec<E> {
             None,
         ));
     }
-    if let Ok(layout) = view.dock.read(cx).serialize(cx) {
-        if let Ok(ids) = docking::DockWorkspace::saved_ids(&layout) {
-            for id in ids {
-                let kind = if id.starts_with("terminal:") {
-                    K::Terminal
-                } else {
-                    K::Pane
-                };
-                let label = view
-                    .dock
-                    .read(cx)
-                    .pane_title(&id, cx)
-                    .map(|title| title.to_string())
-                    .filter(|title| !title.trim().is_empty())
-                    .unwrap_or_else(|| id.clone());
-                result.push(entry(
-                    format!("pane:{id}"),
-                    label,
-                    "Focus open native pane",
-                    kind,
-                    false,
-                    None,
-                ));
-            }
-        }
-    }
+    let open_panes = open_pane_entries(view, cx);
+    let open_tasks: HashSet<_> = open_panes.iter().filter_map(|row| {
+        row.id.strip_prefix("pane:chat:").map(str::to_owned)
+            .or_else(|| row.id.strip_prefix("workspace-pane:")?.split_once(":")?.1.strip_prefix("chat:").map(str::to_owned))
+    }).collect();
+    result.retain(|row| !row.id.strip_prefix("task:").is_some_and(|id| open_tasks.contains(id)));
+    let open_terminals: HashSet<_> = open_panes.iter().filter_map(|row| {
+        row.id.strip_prefix("pane:terminal:").map(str::to_owned)
+            .or_else(|| row.id.strip_prefix("workspace-pane:")?.split_once(':')?.1.strip_prefix("terminal:").map(str::to_owned))
+    }).collect();
+    result.extend(open_panes);
     let mut sessions = std::collections::BTreeMap::new();
     for session in &view.palette_terminal_sessions {
         sessions.insert(field(session, "id"), session.clone());
@@ -235,7 +353,7 @@ pub(super) fn entries(view: &Desktop, cx: &App) -> Vec<E> {
         }
     }
     for (id, session) in sessions {
-        if !id.is_empty() {
+        if !id.is_empty() && !open_terminals.contains(&id) {
             result.push(entry(
                 format!("terminal:{id}"),
                 field(&session, "title"),
@@ -533,7 +651,7 @@ impl Desktop {
         }
         self.show_preferences(window, cx);
     }
-    fn palette_channels(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn palette_channels(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.switch_surface(Sidebar::Channels, window, cx);
         if self.channels.is_none() {
             if let Some(service) = self.service.clone() {
@@ -580,10 +698,19 @@ impl Desktop {
         cx: &mut Context<Self>,
     ) -> bool {
         let id = row.id.as_str();
+        if let Some((workspace, pane)) = id.strip_prefix("workspace-pane:").and_then(|id| id.split_once(':')) {
+            if let Some(item) = self.named_workspaces.as_mut().and_then(|set| set.items.iter_mut().find(|item| item.id == workspace)) {
+                if let Some(layout) = &mut item.layout {
+                    crate::workspace_visibility::remember_focus(layout, Some(pane));
+                }
+            }
+            self.switch_named_workspace(workspace.to_owned(), window, cx);
+            return true;
+        }
         if let Some(pane) = id.strip_prefix("pane:") {
             self.dock.update(cx, |dock, cx| {
                 dock.set_shown(true, window, cx);
-                dock.focus(pane, window, cx)
+                dock.reveal_and_focus(pane, window, cx)
             });
             return true;
         }
@@ -660,6 +787,14 @@ impl Desktop {
             }
             if let Some(pane) = &self.agent_editor {
                 pane.update(cx, |pane, cx| pane.select_agent(agent, window, cx));
+            }
+            return true;
+        }
+        #[cfg(target_os = "macos")]
+        if let Some((_, width, height)) = WINDOW_CENTER_PRESETS.iter().find(|(key, _, _)| *key == id) {
+            if let Err(error) = window_state::center_at_percent(window, *width, *height, cx) {
+                self.error = Some(error);
+                cx.notify();
             }
             return true;
         }
@@ -801,18 +936,16 @@ impl Desktop {
                 }
             }
             "new-task" => self.open_chat_draft(None, window, cx),
+            "neovim-files" => {
+                if let Err(error) = self.show_neovim_files(window, cx) { self.error = Some(error); }
+            }
             "new-neovim" => {
                 if let Err(error) = self.open_neovim_pane(None, window, cx) {
                     self.error = Some(error);
                 }
             }
             "new-terminal" => {
-                let pane = self.dock.update(cx, |dock, cx| {
-                    let group = dock
-                        .focused_group_node(window, cx)
-                        .ok_or("No focused native pane.")?;
-                    dock.add_empty_tab(group, window, cx)
-                });
+                let pane = self.dock.update(cx, |dock, cx| dock.add_focused_empty_tab(window, cx));
                 match pane {
                     Ok(pane) => {
                         if let Err(error) = self.empty_pane_action(
@@ -888,6 +1021,12 @@ impl Desktop {
                     (opacity + if id.ends_with("down") { -0.05 } else { 0.05 }).clamp(0.1, 0.9);
                 self.patch_settings(json!({"inactivePaneOpacity":(next*100.).round()/100.}), cx);
             }
+            "rename-all" => {
+                let targets = rename_all_targets(self, cx);
+                if !targets.is_empty() {
+                    self.command("rename_all", json!({"targets":targets}), cx);
+                }
+            }
             "stop" | "archive" | "autoname" => {
                 if let Some(task) = self.selected.clone() {
                     match id {
@@ -912,6 +1051,16 @@ impl Desktop {
 mod tests {
     use super::*;
     #[::core::prelude::v1::test]
+    fn rename_all_chat_targets_deduplicate_and_exclude_private_closed_or_nonchat_panes() {
+        let snapshot = json!({"agents":[{"id":"admin","internal":true},{"id":"worker"}],
+            "tasks":[{"id":"a","agentId":"worker"},{"id":"b","agentId":"worker"},
+                {"id":"old","archived":true},{"id":"hidden","agentId":"admin"},
+                {"id":"closed","agentId":"worker"}]});
+        let ids = ["chat:a","terminal:x","chat:a","chat:old","chat:hidden","browser:1",
+            "chat:missing","chat:","chat:b"].map(str::to_owned);
+        assert_eq!(rename_all_chat_targets(ids, &snapshot), vec![json!({"taskId":"a"}),json!({"taskId":"b"})]);
+    }
+    #[::core::prelude::v1::test]
     fn palette_static_creation_layout_settings_and_toggle_inventory_is_complete_unique() {
         let mut ids = std::collections::HashSet::new();
         for &(id, _) in CREATION_COMMANDS {
@@ -934,6 +1083,7 @@ mod tests {
             "new-project",
             "new-browser",
             "new-neovim",
+            "neovim-files",
             "balance-panes",
             "archived",
             "layout:single",

@@ -223,6 +223,8 @@ pub(super) struct ChatAttachments {
     interface_font_ratio: f32,
     error: Option<String>,
     notice: Option<String>,
+    paste_wait_notice: Option<std::time::Instant>,
+    paste_wait_timer: Option<Task<()>>,
 }
 impl EventEmitter<AttachmentEvent> for ChatAttachments {}
 impl ChatAttachments {
@@ -241,6 +243,8 @@ impl ChatAttachments {
             interface_font_ratio: 1.,
             error: None,
             notice: None,
+            paste_wait_notice: None,
+            paste_wait_timer: None,
         }
     }
     pub(super) fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
@@ -413,6 +417,8 @@ impl ChatAttachments {
         if self.scope != scope {
             self.scope = scope;
             self.generation = self.generation.wrapping_add(1);
+            self.paste_wait_notice = None;
+            self.paste_wait_timer = None;
             self.drafts.clear();
             self.entrances.clear();
             self.touched = true;
@@ -516,6 +522,31 @@ impl ChatAttachments {
         cx.emit(AttachmentEvent::Changed);
         cx.notify();
     }
+    fn show_paste_wait_notice(&mut self, cx: &mut Context<Self>) {
+        let started = std::time::Instant::now();
+        self.paste_wait_notice = Some(started);
+        let executor = cx.background_executor().clone();
+        // Keep expiry independent of rendering: a hidden or idle pane must
+        // not retain the warning until another user action.
+        self.paste_wait_timer = Some(cx.spawn(async move |view, cx| {
+            loop {
+                let elapsed = started.elapsed().as_millis() as u64;
+                let delay = if elapsed < 180 { 16 }
+                    else if elapsed < 3180 { 3180 - elapsed }
+                    else { 16 };
+                executor.timer(std::time::Duration::from_millis(delay)).await;
+                let finished = started.elapsed() >= std::time::Duration::from_millis(3360);
+                let updated = view.update(cx, |view, cx| {
+                    if view.paste_wait_notice != Some(started) { return false; }
+                    if finished { view.paste_wait_notice = None; }
+                    cx.notify();
+                    true
+                });
+                if finished || !matches!(updated, Ok(true)) { break; }
+            }
+        }));
+        self.changed(cx);
+    }
     /// Consume native image paste payloads; ordinary text keeps the input's
     /// default paste behavior. Encoding and registration run away from the UI.
     pub(super) fn paste(&mut self, item: &ClipboardItem, cx: &mut Context<Self>) -> bool {
@@ -526,10 +557,7 @@ impl ChatAttachments {
             return false;
         };
         if self.pending {
-            self.error = Some(
-                "Wait for the current attachment to finish before pasting another image.".into(),
-            );
-            self.changed(cx);
+            self.show_paste_wait_notice(cx);
             return true;
         }
         if !self.can_choose() || self.task_id.is_empty() {
@@ -857,6 +885,19 @@ impl Render for ChatAttachments {
         }
         if let Some(notice) = &self.notice {
             panel = panel.child(notice.clone());
+        }
+        if let Some(started) = self.paste_wait_notice {
+            let elapsed = started.elapsed().as_secs_f32();
+            let opacity = if cx.reduce_motion() || !crate::native_motion::motion_allowed() { 1. }
+                else if elapsed < 0.18 { (elapsed / 0.18).clamp(0., 1.) }
+                else { ((3.36 - elapsed) / 0.18).clamp(0., 1.) };
+            panel = panel.child(div().id("attachment-paste-wait-notice")
+                .px(px(8.)).py(px(5.)).rounded(px(6.))
+                .border_1().border_color(crate::design::surface_color(palette.line))
+                .bg(crate::design::surface_color(palette.soft))
+                .text_size(px(11. * font_ratio)).text_color(rgb(palette.muted))
+                .opacity(opacity)
+                .child("Wait for the current attachment to finish before pasting another image."));
         }
         panel
     }

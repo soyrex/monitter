@@ -27,6 +27,7 @@ entries![
     ("interface", "Interface scale", "Resize text and controls for this desktop.", "zoom sizing"),
     ("interface", "Reduce motion", "Motion: System, Subtle, On or Off animations.", "animation accessibility"),
     ("interface", "Interface density", "Height and spacing of tabs, sidebars and panes.", "tight normal spacious"),
+    ("interface", "Auto Size Panes", "Keep split panes evenly sized when adding panes; divider resizing turns this off.", "automatic balance rebalance split resize dividers sizing"),
     ("interface", "Tabs", "Tab style, close buttons and auto hide tabs.", "tab strip"),
     ("interface", "Pane appearance", "Highlight active panes and dim inactive panes.", "opacity border"),
     ("typography", "Font size", "Interface, chat and terminal font sizes.", "fonts text px"),
@@ -48,6 +49,7 @@ entries![
     ("accounts", "Harness accounts", "Local harness accounts available to agents.", "authentication login codex"),
     ("collaboration", "Agent delegation", "Collaboration settings for agents.", "team"),
     ("collaboration", "Enable project boards", "Private coordination notes shown as channels.", "collaboration"),
+    ("collaboration", "Automatically approve Monitter tools", "Approve the built-in Monitter MCP tools without harness prompts in Codex and Claude.", "mcp tools approvals permissions codex claude"),
     ("collaboration", "Default agent guidance", "Default project-board guidance and instructions.", "coordination notes"),
     ("extensions", "MCP servers", "Tools and servers available to agents.", "plugins extensions command url"),
     ("extensions", "Skills & plugins", "Instructions and extensions available to agents.", "mcp"),
@@ -69,6 +71,7 @@ pub(super) fn card_title(label: &'static str) -> &'static str {
         "Default to steering busy agents" => "Busy agents",
         "Show tool activity" | "Compress tool calls" | "Tint my messages" | "Show reasoning summaries" => "Conversation activity",
         "Enable project boards" | "Default agent guidance" => "Project boards",
+        "Automatically approve Monitter tools" => "Monitter MCP approvals",
         other => other,
     }
 }

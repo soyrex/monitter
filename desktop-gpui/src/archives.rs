@@ -2,8 +2,9 @@
 //! Deletion eligibility and native-file cleanup are always revalidated by Service.
 use crate::design::ui_scaled_px as px;
 use gpui_kit::{
+    assets::IconName,
     component::{
-        Disableable,
+        ActiveTheme, Icon, Disableable,
         button::*,
         checkbox::Checkbox,
         input::{Input, InputEvent, InputState},
@@ -14,6 +15,7 @@ use gpui_kit::{
 use monitter_lib::experimental_desktop::DesktopService;
 use serde_json::{Value, json};
 use std::collections::HashMap;
+use std::time::Duration;
 
 pub enum ArchiveEvent {
     Refresh,
@@ -36,6 +38,13 @@ fn rows(value: &Value, key: &str) -> Vec<Value> {
         .unwrap_or_default()
 }
 
+fn interface_font_size(settings: &Value) -> Pixels {
+    px(settings["interfaceFontSize"]
+        .as_f64()
+        .unwrap_or(14.)
+        .clamp(8., 32.) as f32)
+}
+
 pub struct ArchivedChatsPane {
     service: DesktopService,
     snapshot: Value,
@@ -45,6 +54,10 @@ pub struct ArchivedChatsPane {
     pending_delete: Option<Value>,
     preview: Option<Value>,
     preview_loading: bool,
+    expanded_summary: Option<String>,
+    summary: Option<Result<String, String>>,
+    summary_loading: bool,
+    summary_request: u64,
     remove_native_files: bool,
     busy: bool,
     error: Option<String>,
@@ -76,6 +89,10 @@ impl ArchivedChatsPane {
             pending_delete: None,
             preview: None,
             preview_loading: false,
+            expanded_summary: None,
+            summary: None,
+            summary_loading: false,
+            summary_request: 0,
             remove_native_files: false,
             busy: false,
             error: None,
@@ -90,6 +107,12 @@ impl ArchivedChatsPane {
         self.snapshot = snapshot.clone();
         self.rebuild_rows(cx);
         self.retain_pending_delete();
+        if self.expanded_summary.as_ref().is_some_and(|id| !self.tasks.iter().any(|task| field(task, "id") == *id)) {
+            self.expanded_summary = None;
+            self.summary = None;
+            self.summary_loading = false;
+            self.summary_request += 1;
+        }
         cx.notify();
     }
 
@@ -100,6 +123,10 @@ impl ArchivedChatsPane {
         self.pending_delete = None;
         self.preview = None;
         self.preview_loading = false;
+        self.expanded_summary = None;
+        self.summary = None;
+        self.summary_loading = false;
+        self.summary_request += 1;
         self.remove_native_files = false;
         self.error = None;
         self.query
@@ -176,6 +203,45 @@ impl ArchivedChatsPane {
             None,
             cx,
         );
+    }
+
+    fn toggle_summary(&mut self, task_id: String, cx: &mut Context<Self>) {
+        let previous = self.expanded_summary.clone();
+        self.summary_request += 1;
+        if self.expanded_summary.as_deref() == Some(task_id.as_str()) {
+            self.expanded_summary = None;
+            self.summary = None;
+            self.summary_loading = false;
+        } else {
+            self.expanded_summary = Some(task_id.clone());
+            self.summary = None;
+            self.summary_loading = true;
+            let request = self.summary_request;
+            let service = self.service.clone();
+            let requested_id = task_id.clone();
+            let worker = cx.background_executor().spawn(async move {
+                service.invoke("summarize_archived_task", json!({"taskId": requested_id}))
+            });
+            cx.spawn(async move |pane, cx| {
+                let result = worker.await;
+                let _ = pane.update(cx, |pane, cx| {
+                    if pane.summary_request != request { return; }
+                    pane.summary_loading = false;
+                    pane.summary = Some(result.and_then(|value| value["summary"].as_str()
+                        .map(str::to_owned).ok_or_else(|| "Backend returned an invalid archive summary.".to_owned())));
+                    if let Some(index) = pane.tasks.iter().position(|task| pane.expanded_summary.as_deref() == Some(field(task, "id").as_str())) {
+                        pane.list.remeasure_items(index..index + 1);
+                    }
+                    cx.notify();
+                });
+            }).detach();
+        }
+        for id in [previous.as_deref(), self.expanded_summary.as_deref()].into_iter().flatten() {
+            if let Some(index) = self.tasks.iter().position(|task| field(task, "id") == id) {
+                self.list.remeasure_items(index..index + 1);
+            }
+        }
+        cx.notify();
     }
 
     fn begin_delete(&mut self, task_id: String, cx: &mut Context<Self>) {
@@ -299,6 +365,7 @@ impl ArchivedChatsPane {
 impl Render for ArchivedChatsPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = crate::design::palette(&self.snapshot["settings"], window.appearance());
+        let font_size = interface_font_size(&self.snapshot["settings"]);
         let agents: HashMap<String, Value> = rows(&self.snapshot, "agents")
             .into_iter()
             .map(|agent| (field(&agent, "id"), agent))
@@ -311,37 +378,67 @@ impl Render for ArchivedChatsPane {
             .size_full()
             .flex()
             .flex_col()
-            .gap_3()
-            .p_4()
             .bg(crate::design::surface_color(palette.paper))
             .text_color(rgb(palette.ink))
+            .text_size(font_size)
+            .font_family(cx.theme().font_family.clone())
             .child(
                 div()
-                    .text_lg()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child("Archived chats"),
+                    .h(px(42.))
+                    .flex_shrink_0()
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .px(px(13.))
+                    .border_b_1()
+                    .border_color(rgb(palette.line))
+                    .border_blend_mode(crate::surface_blend::separator_mode())
+                    .child(Icon::new(IconName::Archive).size(px(22.)))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(font_size)
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("Archived chats"),
+                    ),
             )
-            .child(Input::new(&self.query));
+            .child(
+                div()
+                    .w_full()
+                    .flex_shrink_0()
+                    .px(px(13.))
+                    .py(px(10.))
+                    .border_b_1()
+                    .border_color(rgb(palette.line))
+                    .border_blend_mode(crate::surface_blend::separator_mode())
+                    .child(Input::new(&self.query)),
+            );
         if let Some(error) = &self.error {
-            root = root.child(div().text_color(rgb(0xdc2626)).child(error.clone()));
+            root = root.child(div().px(px(13.)).py(px(8.)).text_color(rgb(0xdc2626)).child(error.clone()));
         }
         if let Some(task) = &self.pending_delete {
             let title = field(task, "title");
             let provider = field(task, "provider");
             let native_session = field(task, "nativeSessionId");
             let mut confirm = div()
+                .w_full()
                 .flex()
                 .flex_col()
-                .gap_2()
-                .p_3()
-                .rounded_md()
+                .gap(px(10.))
+                .p(px(12.))
+                .rounded(px(10.))
+                .border_1()
+                .border_color(rgb(palette.line))
                 .bg(crate::design::surface_color(palette.card))
                 .child(
                     div()
+                        .text_size(font_size)
                         .font_weight(FontWeight::SEMIBOLD)
                         .child(format!("Permanently delete ‘{title}’?")),
                 )
-                .child(div().text_color(rgb(palette.muted)).child(format!(
+                .child(div().text_size(font_size).text_color(rgb(palette.muted)).child(format!(
                     "{provider} · {}",
                     hosts.get(&field(task, "hostId"))
                         .map(|host| field(host, "name"))
@@ -350,11 +447,12 @@ impl Render for ArchivedChatsPane {
                 )))
                 .child("This removes the saved Monitter chat and transcript.");
             if !native_session.is_empty() {
-                confirm = confirm.child(div().text_sm().child(native_session));
+                confirm = confirm.child(div().text_size(font_size).child(native_session));
             }
             if self.preview_loading {
                 confirm = confirm.child(
                     div()
+                        .text_size(font_size)
                         .text_color(rgb(palette.muted))
                         .child("Checking native session files…"),
                 );
@@ -375,13 +473,13 @@ impl Render for ArchivedChatsPane {
                         for file in files {
                             confirm = confirm.child(
                                 div()
-                                    .text_xs()
+                                    .text_size(font_size)
                                     .child(file.as_str().unwrap_or_default().to_owned()),
                             );
                         }
                     }
                 } else {
-                    confirm = confirm.child(div().text_color(rgb(palette.muted)).child(format!(
+                    confirm = confirm.child(div().text_size(font_size).text_color(rgb(palette.muted)).child(format!(
                         "Native session files will be kept: {}",
                         field(preview, "reason")
                     )));
@@ -389,11 +487,14 @@ impl Render for ArchivedChatsPane {
             }
             confirm = confirm.child(
                 div()
+                    .w_full()
                     .flex()
+                    .justify_end()
                     .gap_2()
                     .child(
                         Button::new("archived-delete-cancel")
                             .label("Cancel")
+                            .text_size(font_size)
                             .disabled(self.busy)
                             .on_click(cx.listener(|pane, _, _, cx| pane.cancel_delete(cx))),
                     )
@@ -404,18 +505,23 @@ impl Render for ArchivedChatsPane {
                             } else {
                                 "Delete permanently"
                             })
+                            .text_size(font_size)
                             .with_variant(ButtonVariant::Danger)
                             .disabled(self.busy || self.preview_loading)
                             .on_click(cx.listener(|pane, _, _, cx| pane.confirm_delete(cx))),
                     ),
             );
-            root = root.child(confirm);
+            root = root.child(div().w_full().p(px(13.)).child(confirm));
         }
 
         let tasks = self.tasks.clone();
         let pane = cx.weak_entity();
         let busy = self.busy;
         let preview_loading = self.preview_loading;
+        let expanded_summary = self.expanded_summary.clone();
+        let summary = self.summary.clone();
+        let summary_loading = self.summary_loading;
+        let animate = !cx.reduce_motion() && crate::native_motion::motion_allowed();
         let rows = list(self.list.clone(), move |index, _, _| {
             let task = &tasks[index];
             let id = field(task, "id");
@@ -446,38 +552,79 @@ impl Render for ArchivedChatsPane {
                 },
                 host
             );
+            let provider_icon = crate::branding::provider_for_ink(
+                &field(task, "provider"), &field(task, "model"), palette.ink,
+            );
+            let expanded = expanded_summary.as_deref() == Some(id.as_str());
             let weak = pane.clone();
-            div()
+            let mut row = div()
+                .w_full()
                 .flex()
-                .items_center()
-                .justify_between()
-                .gap_3()
-                .p_3()
-                .mb_2()
-                .rounded_md()
-                .bg(crate::design::surface_color(palette.card))
+                .flex_col()
+                .px(px(13.))
+                .py(px(12.))
+                .when(index + 1 < tasks.len(), |row| row.border_b_1().border_color(rgb(palette.line))
+                    .border_blend_mode(crate::surface_blend::separator_mode()))
+                .child(div().w_full().flex().items_center().justify_between().gap(px(12.))
+                .child(
+                    div().flex_shrink_0().w(px(28.)).h(px(28.)).rounded(px(6.))
+                        .bg(crate::design::surface_color(palette.soft))
+                        .flex().items_center().justify_center()
+                        .child(if let Some(image) = provider_icon {
+                            img(image).w(px(24.)).h(px(24.)).into_any_element()
+                        } else {
+                            div().text_size(font_size).child("◇").into_any_element()
+                        }),
+                )
                 .child(
                     div()
                         .min_w(px(0.))
                         .flex_1()
                         .flex()
                         .flex_col()
-                        .gap_1()
-                        .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
+                        .gap(px(4.))
                         .child(
                             div()
-                                .text_sm()
+                                .min_w(px(0.))
+                                .truncate()
+                                .text_size(font_size)
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(title),
+                        )
+                        .child(
+                            div()
+                                .min_w(px(0.))
+                                .truncate()
+                                .text_size(font_size)
                                 .text_color(rgb(palette.muted))
                                 .child(metadata),
                         ),
                 )
                 .child(
                     div()
+                        .flex_shrink_0()
                         .flex()
+                        .items_center()
+                        .justify_end()
                         .gap_2()
                         .child(
+                            Button::new(SharedString::from(format!("info-{id}")))
+                                .icon(IconName::Info).ghost().compact()
+                                .accessibility_label("Summarize last 10 messages")
+                                .tooltip(if expanded { "Hide summary" } else { "Summarize last 10 messages" })
+                                .on_click({
+                                    let weak = weak.clone();
+                                    let id = id.clone();
+                                    move |_, _, app| {
+                                        let _ = weak.update(app, |pane, cx| pane.toggle_summary(id.clone(), cx));
+                                    }
+                                }),
+                        )
+                        .child(
                             Button::new(SharedString::from(format!("restore-{id}")))
-                                .label("Restore")
+                                .icon(IconName::Undo2).ghost().compact()
+                                .accessibility_label("Restore archived chat")
+                                .tooltip("Restore archived chat")
                                 .with_variant(ButtonVariant::Secondary)
                                 .disabled(busy)
                                 .on_click({
@@ -491,26 +638,59 @@ impl Render for ArchivedChatsPane {
                         )
                         .child(
                             Button::new(SharedString::from(format!("delete-{id}")))
-                                .label("Delete…")
+                                .icon(IconName::Trash).ghost().compact()
+                                .accessibility_label("Permanently delete archived chat")
+                                .tooltip("Permanently delete archived chat")
                                 .with_variant(ButtonVariant::Danger)
                                 .disabled(busy || preview_loading)
-                                .on_click(move |_, _, app| {
-                                    let _ = weak
-                                        .update(app, |pane, cx| pane.begin_delete(id.clone(), cx));
+                                .on_click({
+                                    let id = id.clone();
+                                    move |_, _, app| {
+                                        let _ = weak.update(app, |pane, cx| pane.begin_delete(id.clone(), cx));
+                                    }
                                 }),
                         ),
-                )
-                .into_any_element()
+                ));
+            if expanded {
+                let detail = if summary_loading {
+                    "Monitter Admin is summarizing the last 10 messages…".to_owned()
+                } else {
+                    match &summary {
+                        Some(Ok(text)) => text.clone(),
+                        Some(Err(error)) => format!("Could not summarize this chat: {error}"),
+                        None => "Preparing summary…".to_owned(),
+                    }
+                };
+                let detail = div().id(SharedString::from(format!("archive-summary-{id}")))
+                    .relative().w_full().mt(px(10.)).pt(px(10.))
+                    .border_t_1().border_color(rgb(palette.line))
+                    .text_size(font_size).line_height(relative(1.35))
+                    .child(detail);
+                row = row.child(if animate {
+                    detail.with_animation(
+                        SharedString::from(format!("archive-summary-reveal-{id}")),
+                        Animation::new(Duration::from_millis(180)),
+                        |detail, progress| detail.top(px(8. * (1. - progress))).opacity(progress),
+                    ).into_any_element()
+                } else { detail.into_any_element() });
+            }
+            row.into_any_element()
         });
         if self.tasks.is_empty() {
             root.child(
                 div()
                     .flex_1()
+                    .p(px(13.))
+                    .text_size(font_size)
                     .text_color(rgb(palette.muted))
                     .child("No archived chats match this search."),
             )
         } else {
-            root.child(rows.flex_1().min_h(px(0.)))
+            root.child(crate::transcript_edge_fade::TranscriptEdgeFade::for_list(
+                rows.w_full().flex_1().min_h(px(0.)),
+                self.list.clone(),
+                px(24.),
+            ))
         }
     }
 }

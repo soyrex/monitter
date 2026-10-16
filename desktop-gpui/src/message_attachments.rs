@@ -43,6 +43,7 @@ enum PreviewState {
     Failed(String),
 }
 
+#[derive(Clone)]
 struct AttachmentItem {
     data: AttachmentData,
     preview: Option<PreviewState>,
@@ -94,6 +95,8 @@ pub struct MessageAttachments {
     list_item: Option<(ListState, usize)>,
     bubble_width: Option<f32>,
     bubble_layout: AttachmentLayout,
+    compact_images: bool,
+    presentation_scale: f32,
 }
 
 fn short_string(value: &Value, key: &str, max_chars: usize) -> String {
@@ -239,9 +242,26 @@ impl MessageAttachments {
             list_item: None,
             bubble_width: None,
             bubble_layout: AttachmentLayout::Cards,
+            compact_images: false,
+            presentation_scale: 1.,
         };
         pane.set_attachments(attachments, cx);
         pane
+    }
+
+    /// Independent hover presentation retains decoded images without sharing
+    /// list invalidation or attachment layout with the live transcript row.
+    pub(super) fn preview_snapshot(&self, scale: f32) -> Self {
+        let mut attachments = self.attachments.clone();
+        for item in &mut attachments {
+            if matches!(item.preview, Some(PreviewState::Decoding)) {
+                item.preview = Some(PreviewState::Pending);
+            }
+        }
+        Self { service: self.service.clone(), attachments, omitted: self.omitted,
+            generation: self.generation, error: self.error.clone(), palette: self.palette,
+            list_item: None, bubble_width: self.bubble_width, bubble_layout: self.bubble_layout,
+            compact_images: self.compact_images, presentation_scale: scale }
     }
 
     pub fn set_attachments(&mut self, attachments: &[Value], cx: &mut Context<Self>) {
@@ -411,10 +431,16 @@ impl MessageAttachments {
 
     /// First decoded image determines placement; pending images retain cards until ready.
     pub fn layout(&self) -> AttachmentLayout {
+        if self.compact_images { return AttachmentLayout::Cards; }
         self.attachments.iter().find_map(|item| match item.preview.as_ref() {
             Some(PreviewState::Ready(preview)) => Some(image_layout(preview.width, preview.height)),
             _ => None,
         }).unwrap_or(AttachmentLayout::Cards)
+    }
+    /// Assistant screenshots share one compact row; full-size viewing keeps
+    /// the same original/inline lightbox path as the larger previews.
+    pub fn set_compact_images(&mut self, compact: bool) {
+        self.compact_images = compact;
     }
     pub fn portrait_dimensions(&self, width_design: f32) -> (f32, f32) {
         self.attachments.iter().find_map(|item| match item.preview.as_ref() {
@@ -453,6 +479,7 @@ impl MessageAttachments {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let px = |value: f32| design::ui_scaled_px(value * self.presentation_scale);
         if self.attachments.is_empty() && self.omitted == 0 && self.error.is_none() {
             return div().into_any_element();
         }
@@ -464,8 +491,8 @@ impl MessageAttachments {
             .flex()
             .flex_wrap()
             .items_start()
-            .gap(px(8.))
-            .my(px(8.));
+            .gap(px(if self.compact_images { 2. } else { 8. }))
+            .my(px(if self.compact_images { 2. } else { 8. }));
         let hero = self.bubble_width.is_some() && self.bubble_layout != AttachmentLayout::Cards;
         let portrait = self.bubble_layout == AttachmentLayout::PortraitLeft;
         if hero {
@@ -492,6 +519,10 @@ impl MessageAttachments {
                 let pane = pane.clone();
                 let (width, height) = fit_dimensions(preview.width, preview.height, 284., 300.);
                 let mut preview_image = img(preview.image.clone()).w(px(width)).h(px(height)).max_w(px(284.)).max_h(px(300.)).rounded(px(5.));
+                if self.compact_images {
+                    preview_image = img(preview.image.clone()).w(px(96.)).h(px(72.))
+                        .object_fit(ObjectFit::Contain);
+                }
                 let strip = !portrait && wide_strip(preview.width, preview.height);
                 if hero {
                     preview_image = img(preview.image.clone()).w_full().h_full()
@@ -543,9 +574,14 @@ impl MessageAttachments {
                         preview_button = preview_button.h(px(image_height));
                     }
                     card = card.child(preview_button);
+                } else if self.compact_images {
+                    preview_button = preview_button.w(px(96.)).h(px(72.))
+                        .tooltip(item.data.name.clone());
+                    card = card.p_0().w(px(98.)).h(px(74.)).flex_shrink_0()
+                        .overflow_hidden().rounded(px(6.)).child(preview_button);
                 } else {
                     card = card.flex().flex_col().gap(px(6.)).p(px(8.)).child(preview_button)
-                        .child(attachment_info(&item.data, palette));
+                        .child(attachment_info(&item.data, palette, self.presentation_scale));
                 }
             } else {
                 let image_file = item.data.mime_type.starts_with("image/");
@@ -595,7 +631,7 @@ impl MessageAttachments {
                             .child(icon),
                     );
                 }
-                card = card.child(file_row.child(attachment_info(&item.data, palette)));
+                card = card.child(file_row.child(attachment_info(&item.data, palette, self.presentation_scale)));
                 if let Some(PreviewState::Failed(error)) = item.preview.as_ref() {
                     card = card.child(
                         div()
@@ -641,7 +677,8 @@ impl Render for MessageAttachments {
     }
 }
 
-fn attachment_info(data: &AttachmentData, palette: design::Palette) -> AnyElement {
+fn attachment_info(data: &AttachmentData, palette: design::Palette, scale: f32) -> AnyElement {
+    let px = |value: f32| design::ui_scaled_px(value * scale);
     div()
         .w_full()
         .min_w_0()

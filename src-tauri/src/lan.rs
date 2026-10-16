@@ -46,6 +46,7 @@ pub struct Info {
 pub struct Server {
     stop: Arc<AtomicBool>,
     info: Info,
+    access_code: Arc<Mutex<String>>,
 }
 
 impl Server {
@@ -95,7 +96,10 @@ impl Server {
         tls_listener
             .set_nonblocking(true)
             .map_err(|e| e.to_string())?;
-        let token = random_token()?;
+        let token = match load_access_code(&tls_config_path.with_file_name("lan-access-code"))? {
+            Some(code) => code,
+            None => random_token()?,
+        };
         let stop = Arc::new(AtomicBool::new(false));
         let mut urls: Vec<_> = tls
             .hosts
@@ -113,6 +117,7 @@ impl Server {
             local_ca_pem: tls.local_ca_pem.clone(),
             local_ca_fingerprint: tls.local_ca_fingerprint.clone(),
         };
+        let access_code = Arc::new(Mutex::new(token));
         let active = Arc::new(AtomicUsize::new(0));
         let auth_limiter = Arc::new(Mutex::new(AuthRateLimiter::default()));
         let thread_tls = Arc::clone(&tls.server_config);
@@ -125,7 +130,7 @@ impl Server {
             let thread_stop = Arc::clone(&stop);
             let service = Arc::clone(&service);
             let roots = asset_roots.clone();
-            let token = token.clone();
+            let token = Arc::clone(&access_code);
             let active = Arc::clone(&active);
             let auth_limiter = Arc::clone(&auth_limiter);
             let ca_pem = thread_ca.clone();
@@ -151,6 +156,10 @@ impl Server {
                                 let tls_hosts = tls_hosts.clone();
                                 let ca_pem = ca_pem.clone();
                                 thread::spawn(move || {
+                                    let Ok(token) = token.lock().map(|code| code.clone()) else {
+                                        active.fetch_sub(1, Ordering::AcqRel);
+                                        return;
+                                    };
                                     let _ = stream.set_nonblocking(false);
                                     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
                                     let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
@@ -207,7 +216,14 @@ impl Server {
             stop.store(true, Ordering::Release);
             return Err(error);
         }
-        Ok(Self { stop, info })
+        Ok(Self { stop, info, access_code })
+    }
+    pub(crate) fn set_access_code(&mut self, path: &Path, code: &str) -> Result<(), String> {
+        let mut current = self.access_code.lock().map_err(|_| "LAN access-code lock failed.")?;
+        save_access_code(path, code)?;
+        *current = code.to_owned();
+        self.info.token = code.to_owned();
+        Ok(())
     }
     pub fn info(&self) -> Info {
         self.info.clone()
@@ -928,6 +944,53 @@ fn inject_lan_marker(mut bytes: Vec<u8>) -> Vec<u8> {
     }
     bytes
 }
+pub(crate) fn validate_access_code(code: &str) -> Result<(), String> {
+    if code.len() != 6 || !code.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err("LAN access code must contain exactly six ASCII digits.".into());
+    }
+    Ok(())
+}
+
+fn load_access_code(path: &Path) -> Result<Option<String>, String> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("Could not inspect saved LAN access code: {error}")),
+    };
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err("Saved LAN access code must be a regular local file.".into());
+    }
+    #[cfg(unix)] {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0 {
+            return Err("Saved LAN access code must be private to the current user.".into());
+        }
+    }
+    let code = fs::read_to_string(path).map_err(|error| format!("Could not read saved LAN access code: {error}"))?;
+    validate_access_code(&code)?;
+    Ok(Some(code))
+}
+
+pub(crate) fn save_access_code(path: &Path, code: &str) -> Result<(), String> {
+    validate_access_code(code)?;
+    let temporary = path.with_file_name(format!(".lan-access-code-{}", uuid::Uuid::new_v4()));
+    let result = (|| {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)] {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary).map_err(|error| format!("Could not create saved LAN access code: {error}"))?;
+        file.write_all(code.as_bytes()).and_then(|_| file.sync_all())
+            .map_err(|error| format!("Could not save LAN access code: {error}"))?;
+        fs::rename(&temporary, path).map_err(|error| format!("Could not publish saved LAN access code: {error}"))?;
+        Ok(())
+    })();
+    if result.is_err() { let _ = fs::remove_file(&temporary); }
+    result
+}
+
 fn random_token() -> Result<String, String> {
     let mut token = String::with_capacity(6);
     #[cfg(unix)]
@@ -1188,6 +1251,27 @@ mod tests {
         assert!(constant_time_eq(b"abc", b"abc"));
         assert!(!constant_time_eq(b"abc", b"abd"));
         assert!(!constant_time_eq(b"abc", b"ab"));
+    }
+
+    #[test]
+    fn saved_access_code_survives_reload_and_invalid_updates() {
+        let dir = std::env::temp_dir().join(format!("monitter-fixed-code-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&dir).unwrap();
+        let path = dir.join("lan-access-code");
+        assert_eq!(load_access_code(&path).unwrap(), None);
+        save_access_code(&path, "012345").unwrap();
+        assert_eq!(load_access_code(&path).unwrap().as_deref(), Some("012345"));
+        for invalid in ["12345", "1234567", "abcdef", "１２３４５６", "12345\n"] {
+            assert!(save_access_code(&path, invalid).is_err());
+            assert_eq!(load_access_code(&path).unwrap().as_deref(), Some("012345"));
+        }
+        #[cfg(unix)] {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, 0o600);
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+            assert!(load_access_code(&path).is_err());
+        }
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

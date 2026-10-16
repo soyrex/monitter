@@ -9,6 +9,89 @@ use std::collections::HashSet;
 
 const NATIVE_PANE: &str = "MonitterNativePane";
 
+// Optional renderer metadata lives beside the native dock schema. Native
+// serde restore ignores it, while the workspace preference JSON retains it.
+const FOCUSED_PANE: &str = "focusedPaneId";
+
+pub(super) fn remembered_focus(layout: &Value) -> Option<&str> {
+    layout.get(FOCUSED_PANE)?.as_str().filter(|id| !id.is_empty())
+}
+pub(super) fn remember_focus(layout: &mut Value, focus: Option<&str>) {
+    let Some(focus) = focus else { return; };
+    if crate::docking::DockWorkspace::saved_ids(layout).is_ok_and(|ids| ids.iter().any(|id| id == focus)) {
+        layout[FOCUSED_PANE] = Value::String(focus.into());
+    }
+}
+pub(super) fn preserve_focus_metadata(layout: &mut Value, previous: Option<&Value>) {
+    if remembered_focus(layout).is_none() {
+        remember_focus(layout, previous.and_then(remembered_focus));
+    }
+}
+
+/// Remembered focus wins; otherwise traverse active tabs in visual layout
+/// order before their inactive tabs. Never focus a retained but hidden pane.
+pub(super) fn focus_candidates(layout: &Value, remembered: Option<&str>) -> Vec<String> {
+    let Ok(valid) = crate::docking::DockWorkspace::saved_ids(layout) else { return Vec::new(); };
+    fn walk(panel: &Value, ids: &mut Vec<String>) {
+        if panel["panel_name"] == NATIVE_PANE {
+            if let Some(id) = panel["info"]["panel"]["id"].as_str() { ids.push(id.into()); }
+            return;
+        }
+        let Some(children) = panel["children"].as_array() else { return; };
+        if let Some(active) = panel["info"]["tabs"]["active_index"].as_u64().and_then(|ix| usize::try_from(ix).ok()) {
+            if let Some(child) = children.get(active) { walk(child, ids); }
+            for (ix, child) in children.iter().enumerate() { if ix != active { walk(child, ids); } }
+        } else { for child in children { walk(child, ids); } }
+    }
+    let mut ids = Vec::new();
+    if let Some(focus) = remembered.or_else(|| remembered_focus(layout)).filter(|id| valid.iter().any(|valid| valid.as_str() == *id)) {
+        ids.push(focus.into());
+    }
+    walk(&layout["center"], &mut ids);
+    for dock in ["left_dock", "right_dock", "bottom_dock"] {
+        // Closed edge docks are restored but are not landing focus targets.
+        if layout[dock]["open"].as_bool() == Some(true) { walk(&layout[dock]["panel"], &mut ids); }
+    }
+    let mut seen = HashSet::new();
+    ids.retain(|id| valid.contains(id) && seen.insert(id.clone()));
+    ids
+}
+
+/// A retained registry can include hidden workspaces; only the live layout
+/// proves current ownership. A busy restore must never fall through to Open.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum SidebarTaskDestination {
+    Wait,
+    Current,
+    Workspace(String),
+    Open,
+}
+
+pub(super) fn sidebar_task_destination(
+    pane_id: &str,
+    current_layout: &Value,
+    workspaces: Option<&monitter_lib::experimental_desktop::NativeWorkspaceSet>,
+    ready: bool,
+) -> SidebarTaskDestination {
+    if !ready { return SidebarTaskDestination::Wait; }
+    if crate::docking::DockWorkspace::saved_ids(current_layout)
+        .is_ok_and(|ids| ids.iter().any(|id| id == pane_id)) {
+        return SidebarTaskDestination::Current;
+    }
+    if let Some(set) = workspaces {
+        for item in &set.items {
+            // The current serialized layout is authoritative over its older save.
+            if item.id == set.active_id { continue; }
+            if item.layout.as_ref().is_some_and(|layout|
+                crate::docking::DockWorkspace::saved_ids(layout)
+                    .is_ok_and(|ids| ids.iter().any(|id| id == pane_id))) {
+                return SidebarTaskDestination::Workspace(item.id.clone());
+            }
+        }
+    }
+    SidebarTaskDestination::Open
+}
+
 /// IDs of tasks owned by agents explicitly marked internal in the snapshot.
 /// Tasks whose agent record is missing are deliberately retained.
 pub fn internal_task_ids(snapshot: &Value) -> HashSet<String> {
@@ -65,30 +148,31 @@ pub fn project_snapshot(mut snapshot: Value) -> Value {
 /// stay errors. If no internal chat pane is present, the input is returned
 /// byte-for-byte as a JSON value (including unknown fields).
 pub fn prune_layout(layout: &Value, internal_task_ids: &HashSet<String>) -> Result<Value, String> {
-    if internal_task_ids.is_empty() {
-        return Ok(layout.clone());
-    }
+    let pane_ids=crate::docking::DockWorkspace::saved_ids(layout)?.into_iter()
+        .filter(|id| id.strip_prefix("chat:").or_else(|| crate::git_workspace::task_id(id))
+            .is_some_and(|task| internal_task_ids.contains(task))).collect();
+    prune_native_pane_ids(layout,&pane_ids)
+}
 
-    let ids = crate::docking::DockWorkspace::saved_ids(layout)?;
-    let has_hidden_chat = ids.iter().any(|id| {
-        id.strip_prefix("chat:")
-            .is_some_and(|task_id| internal_task_ids.contains(task_id))
-    });
-    if !has_hidden_chat {
-        return Ok(layout.clone());
-    }
-
+/// Remove exact native pane identities from saved layouts. This leaves backend
+/// sessions/tasks and every unrelated native/unknown pane unchanged.
+pub(super) fn prune_native_pane_ids(layout: &Value, pane_ids: &HashSet<String>) -> Result<Value,String> {
+    if pane_ids.is_empty() {return Ok(layout.clone());}
+    let ids=crate::docking::DockWorkspace::saved_ids(layout)?;
+    if !ids.iter().any(|id|pane_ids.contains(id)) {return Ok(layout.clone());}
     let mut state: DockAreaState = serde_json::from_value(layout.clone())
         .map_err(|error| format!("Invalid native workspace layout: {error}"))?;
 
-    if prune_panel(&mut state.center, internal_task_ids) == Prune::Removed {
+    if prune_panel(&mut state.center, pane_ids) == Prune::Removed {
         state.center = empty_tabs();
     }
-    state.left_dock = prune_dock(state.left_dock.take(), internal_task_ids);
-    state.right_dock = prune_dock(state.right_dock.take(), internal_task_ids);
-    state.bottom_dock = prune_dock(state.bottom_dock.take(), internal_task_ids);
+    state.left_dock = prune_dock(state.left_dock.take(), pane_ids);
+    state.right_dock = prune_dock(state.right_dock.take(), pane_ids);
+    state.bottom_dock = prune_dock(state.bottom_dock.take(), pane_ids);
 
-    serde_json::to_value(state).map_err(|error| error.to_string())
+    let mut pruned = serde_json::to_value(state).map_err(|error| error.to_string())?;
+    preserve_focus_metadata(&mut pruned, Some(layout));
+    Ok(pruned)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -132,8 +216,7 @@ fn prune_dock(dock: Option<DockState>, task_ids: &HashSet<String>) -> Option<Doc
 
 fn prune_panel(panel: &mut PanelState, task_ids: &HashSet<String>) -> Prune {
     if let Some(id) = pane_task_id(panel)
-        && let Some(task_id) = id.strip_prefix("chat:")
-        && task_ids.contains(task_id)
+        && task_ids.contains(id)
     {
         return Prune::Removed;
     }
@@ -211,6 +294,72 @@ mod tests {
         }
     }
 
+    #[test]
+    fn sidebar_task_destination_prefers_live_layout_then_saved_workspace_order() {
+        use monitter_lib::experimental_desktop::{NativeWorkspace, NativeWorkspaceSet};
+        let layout = |ids: &[&str]| serde_json::to_value(DockAreaState {
+            version: Some(1), center: tabs(ids.iter().map(|id| pane(id)).collect(), 0),
+            left_dock: None, right_dock: None, bottom_dock: None,
+        }).unwrap();
+        let current = layout(&["chat:current", "chat:duplicate"]);
+        let mut set = NativeWorkspaceSet { active_id: "current".into(), items: [
+            ("current", layout(&["chat:stale-current"])),
+            ("first", layout(&["chat:elsewhere", "chat:duplicate"])),
+            ("second", layout(&["chat:elsewhere"])),
+        ].into_iter().map(|(id, layout)| NativeWorkspace {
+            id: id.into(), name: id.into(), icon: "folder".into(), color: "#38BFD2".into(), url: None, layout: Some(layout),
+        }).collect() };
+        assert_eq!(sidebar_task_destination("chat:current", &current, Some(&set), true), SidebarTaskDestination::Current);
+        assert_eq!(sidebar_task_destination("chat:duplicate", &current, Some(&set), true), SidebarTaskDestination::Current);
+        assert_eq!(sidebar_task_destination("chat:elsewhere", &current, Some(&set), true), SidebarTaskDestination::Workspace("first".into()));
+        set.items.swap(1, 2);
+        assert_eq!(sidebar_task_destination("chat:elsewhere", &current, Some(&set), true), SidebarTaskDestination::Workspace("second".into()));
+        assert_eq!(sidebar_task_destination("chat:missing", &current, Some(&set), true), SidebarTaskDestination::Open);
+        assert_eq!(sidebar_task_destination("chat:stale-current", &current, Some(&set), true), SidebarTaskDestination::Open);
+        for id in ["chat:current", "chat:elsewhere", "chat:missing"] {
+            assert_eq!(sidebar_task_destination(id, &current, Some(&set), false), SidebarTaskDestination::Wait);
+        }
+    }
+
+    #[test]
+    fn remembered_workspace_focus_covers_browser_terminal_and_empty_panes() {
+        let mut layout = serde_json::to_value(DockAreaState { version: Some(1),
+            center: tabs(vec![pane("empty:landing"), pane("browser:42"), pane("terminal:session")], 0),
+            left_dock: None, right_dock: None, bottom_dock: None }).unwrap();
+        for id in ["browser:42", "terminal:session", "empty:landing"] {
+            remember_focus(&mut layout, Some(id));
+            assert_eq!(focus_candidates(&layout, None).first().map(String::as_str), Some(id));
+            let mut resaved = serde_json::to_value(serde_json::from_value::<DockAreaState>(layout.clone()).unwrap()).unwrap();
+            preserve_focus_metadata(&mut resaved, Some(&layout));
+            assert_eq!(remembered_focus(&resaved), Some(id));
+        }
+        remember_focus(&mut layout, Some("terminal:session"));
+        let pruned = prune_native_pane_ids(&layout, &HashSet::from(["terminal:session".into()])).unwrap();
+        assert_eq!(remembered_focus(&pruned), None);
+        assert_eq!(focus_candidates(&pruned, Some("terminal:session")), vec!["empty:landing", "browser:42"]);
+    }
+
+    #[test]
+    fn workspace_focus_fallback_prefers_active_tab_and_never_hidden_workspace_pane() {
+        let layout = serde_json::to_value(DockAreaState { version: Some(1),
+            center: tabs(vec![pane("empty:landing"), pane("browser:42"), pane("terminal:session")], 2),
+            left_dock: None, right_dock: None, bottom_dock: None }).unwrap();
+        assert_eq!(focus_candidates(&layout, Some("terminal:other-workspace")),
+            vec!["terminal:session", "empty:landing", "browser:42"]);
+        let mut layout = layout;
+        remember_focus(&mut layout, Some("terminal:other-workspace"));
+        assert_eq!(remembered_focus(&layout), None);
+    }
+
+    #[test]
+    fn terminal_exit_layout_pruning_removes_exact_session_and_preserves_unrelated_panes() {
+        let layout=serde_json::to_value(DockAreaState {version:Some(1),center:tabs(vec![pane("terminal:ended"),pane("terminal:other"),pane("chat:ended"),pane("route:projects")],1),left_dock:None,right_dock:None,bottom_dock:None}).unwrap();
+        let pruned=prune_native_pane_ids(&layout,&HashSet::from(["terminal:ended".to_owned()])).unwrap();
+        let state:DockAreaState=serde_json::from_value(pruned.clone()).unwrap();
+        assert_eq!(state.center.info,PanelInfo::tabs(0));
+        assert_eq!(crate::docking::DockWorkspace::saved_ids(&pruned).unwrap().into_iter().collect::<HashSet<_>>(),HashSet::from(["terminal:other".into(),"chat:ended".into(),"route:projects".into()]));
+        assert_eq!(prune_native_pane_ids(&pruned,&HashSet::from(["terminal:ended".into()])).unwrap(),pruned);
+    }
     #[test]
     fn projection_hides_only_tasks_with_explicit_internal_owner() {
         let snapshot = json!({

@@ -1,6 +1,7 @@
 //! Retained native VT terminal. Hiding this entity never closes a PTY.
 //! One FIFO serializes reads, resize requests, input and explicit closes.
 use crate::design::ui_scaled_px;
+use futures::{FutureExt as _, StreamExt as _};
 use gpui_kit::{
     component::{Disableable, Sizable, button::*},
     prelude::*,
@@ -14,6 +15,13 @@ use std::{
     ops::Range,
     time::Duration,
 };
+
+fn terminal_context_snapshot(snapshot: &Value) -> Value {
+    json!({"settings": snapshot["settings"], "hosts": snapshot["hosts"]})
+}
+fn terminal_context_changed(previous: &Value, snapshot: &Value) -> bool {
+    previous["settings"] != snapshot["settings"] || previous["hosts"] != snapshot["hosts"]
+}
 
 #[derive(Clone)]
 struct Appearance {
@@ -418,6 +426,116 @@ fn queue_explicit_close(queue: &mut VecDeque<Operation>, id: String, paused: boo
     paused && !discards_failed
 }
 
+/// Positive backend exit evidence for one retained pinned terminal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum TerminalEvent { Exited { session_id: String }, SessionClosed { session_id: String } }
+impl EventEmitter<TerminalEvent> for TerminalPane {}
+
+pub(super) fn remove_exited_terminal_pane(dock: &Entity<crate::docking::DockWorkspace>, session_id: &str, window: &mut Window, cx: &mut App) -> bool {
+    let Ok(key)=crate::terminal_workspace::terminal_pane_id(session_id) else {return false;};
+    dock.update(cx,|dock,cx|dock.remove(&key,window,cx))
+}
+
+fn pinned_exit_id(mode: &PaneMode, sessions: &[Value]) -> Option<String> {
+    let PaneMode::Pinned { session_id } = mode else { return None; };
+    sessions.iter().find(|session| field(session,"id") == *session_id && session["status"].as_str() == Some("exited")).map(|_|session_id.clone())
+}
+
+fn take_exit_notification(mode: &PaneMode, id: &str, reported: &mut bool, queue: &mut VecDeque<Operation>) -> Option<TerminalEvent> {
+    if *reported || !matches!(mode, PaneMode::Pinned { session_id } if session_id==id) {return None;}
+    *reported=true;
+    queue.clear();
+    Some(TerminalEvent::Exited {session_id:id.to_owned()})
+}
+
+// One lifecycle query per backend, regardless of how many pinned tabs exist.
+// Registry entries are weak; pane release cancels the last monitor task.
+#[derive(Default)]
+struct ExitMonitors(HashMap<String, WeakEntity<TerminalExitMonitor>>);
+impl Global for ExitMonitors {}
+struct TerminalSessions(Result<Vec<Value>, String>);
+struct TerminalExitMonitor {
+    watchers: std::collections::HashSet<EntityId>,
+    wake: futures::channel::mpsc::Sender<()>,
+    _task: Task<()>,
+}
+impl EventEmitter<TerminalSessions> for TerminalExitMonitor {}
+impl TerminalExitMonitor {
+    fn shared(service: DesktopService, cx: &mut App) -> Entity<Self> {
+        if cx.try_global::<ExitMonitors>().is_none() {
+            cx.set_global(ExitMonitors::default());
+        }
+        let key = service.server_instance_id().to_owned();
+        if let Some(monitor) = cx
+            .global::<ExitMonitors>()
+            .0
+            .get(&key)
+            .and_then(WeakEntity::upgrade)
+        {
+            return monitor;
+        }
+        let entity = cx.new(|cx: &mut Context<Self>| {
+            let (wake, mut wakes) = futures::channel::mpsc::channel(1);
+            let task = cx.spawn(async move |monitor, cx| {
+                loop {
+                    let Ok(active) = monitor.update(cx, |monitor, _| !monitor.watchers.is_empty())
+                    else {
+                        break;
+                    };
+                    if !active {
+                        if wakes.next().await.is_none() {
+                            break;
+                        }
+                        continue;
+                    }
+                    cx.background_executor().timer(Duration::from_secs(1)).await;
+                    let Ok(active) = monitor.update(cx, |monitor, _| !monitor.watchers.is_empty())
+                    else {
+                        break;
+                    };
+                    if !active {
+                        continue;
+                    }
+                    let service = service.clone();
+                    let result = cx
+                        .background_executor()
+                        .spawn(async move { service.invoke("list_terminals", json!({})) })
+                        .await;
+                    let sessions = result.and_then(|value| {
+                        value
+                            .as_array()
+                            .cloned()
+                            .ok_or_else(|| "Terminal list response is invalid.".to_owned())
+                    });
+                    if monitor
+                        .update(cx, |_, cx| cx.emit(TerminalSessions(sessions)))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            });
+            Self {
+                watchers: Default::default(),
+                wake,
+                _task: task,
+            }
+        });
+        let registry = &mut cx.global_mut::<ExitMonitors>().0;
+        registry.retain(|_, monitor| monitor.upgrade().is_some());
+        registry.insert(key, entity.downgrade());
+        entity
+    }
+    fn watch(&mut self, pane: EntityId, active: bool) {
+        if active {
+            self.watchers.insert(pane);
+            let _ = self.wake.try_send(());
+        } else {
+            self.watchers.remove(&pane);
+        }
+    }
+}
+
 pub struct TerminalPane {
     service: DesktopService,
     snapshot: Value,
@@ -451,6 +569,10 @@ pub struct TerminalPane {
     marked: String,
     marked_selection: Range<usize>,
     _poll: Task<()>,
+    exit_monitor: Option<Entity<TerminalExitMonitor>>,
+    exit_monitor_error: Option<String>,
+    poll_wake: futures::channel::mpsc::Sender<()>,
+    exit_reported: bool,
 }
 #[derive(Clone, PartialEq, Eq)]
 enum PaneMode {
@@ -545,6 +667,33 @@ fn initial_operations(mode: &PaneMode) -> VecDeque<Operation> {
 }
 impl TerminalPane {
     pub(super) fn palette_sessions(&self) -> &[Value] { &self.sessions }
+    /// Search the retained terminal screen and scrollback without moving its viewport.
+    pub(super) fn palette_search_text(&self, session_id: &str) -> String {
+        const LIMIT: usize = 512 * 1024;
+        let Some(model) = self.models.get(session_id) else { return String::new(); };
+        let mut screen = model.parser.screen().clone();
+        screen.set_scrollback(usize::MAX);
+        let oldest = screen.scrollback();
+        let mut text = String::new();
+        // Start with the live screen so a large history retains recent output.
+        for offset in (0..=oldest).step_by(usize::from(screen.size().0).max(1)) {
+            screen.set_scrollback(offset);
+            for ch in screen.contents().chars().chain(std::iter::once('\n')) {
+                if text.len() + ch.len_utf8() > LIMIT { return text; }
+                text.push(ch);
+            }
+        }
+        // Include the oldest partial page when history is not a screen multiple.
+        if oldest % usize::from(screen.size().0).max(1) != 0 {
+            screen.set_scrollback(oldest);
+            for ch in screen.contents().chars() {
+                if text.len() + ch.len_utf8() > LIMIT { break; }
+                text.push(ch);
+            }
+        }
+        text
+    }
+
     pub(crate) fn foreground_surface(&self) -> Rgba {
         rgb(PALETTES[self.palette].foreground)
     }
@@ -600,11 +749,18 @@ impl TerminalPane {
         initial_read_pending: bool,
         cx: &mut Context<Self>,
     ) -> Self {
+        let (poll_wake, mut wakes) = futures::channel::mpsc::channel(1);
         let poll = cx.spawn(async move |pane, cx| {
             loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(60))
-                    .await;
+                let Ok(active) = pane.update(cx, |pane, _| pane.visible && !pane.paused && !pane.exit_reported) else { break; };
+                if active {
+                    let timer = cx.background_executor().timer(Duration::from_millis(60)).fuse();
+                    let wake = wakes.next().fuse();
+                    futures::pin_mut!(timer, wake);
+                    if let futures::future::Either::Left((signal, _)) = futures::future::select(wake, timer).await {
+                        if signal.is_none() { break; }
+                    }
+                } else if wakes.next().await.is_none() { break; }
                 if pane
                     .update(cx, |pane, cx| {
                         if should_poll(pane.visible, pane.paused, pane.busy) {
@@ -649,6 +805,40 @@ impl TerminalPane {
                 }
             }
         });
+        let exit_monitor = if matches!(mode, PaneMode::Pinned { .. }) {
+            let monitor = TerminalExitMonitor::shared(service.clone(), cx);
+            let pane_id = cx.entity_id();
+            monitor.update(cx, |monitor, _| monitor.watch(pane_id, true));
+            cx.subscribe(
+                &monitor,
+                |pane, _, sessions: &TerminalSessions, cx| match &sessions.0 {
+                    Ok(sessions) => {
+                        if pane.exit_monitor_error.take().is_some() {
+                            cx.notify();
+                        }
+                        if let Some(id) = pinned_exit_id(&pane.mode, sessions) {
+                            pane.report_exit(&id, cx);
+                        }
+                    }
+                    Err(error) => {
+                        if !pane.exit_reported && pane.exit_monitor_error.as_ref() != Some(error) {
+                            pane.exit_monitor_error = Some(error.clone());
+                            cx.notify();
+                        }
+                    }
+                },
+            )
+            .detach();
+            cx.on_release(move |pane, cx| {
+                if let Some(monitor) = &pane.exit_monitor {
+                    monitor.update(cx, |monitor, _| monitor.watch(pane_id, false));
+                }
+            })
+            .detach();
+            Some(monitor)
+        } else {
+            None
+        };
         let queue = initial_operations(&mode);
         cx.observe_global::<crate::terminal_theme::Selection>(|pane, cx| {
             let index = cx.global::<crate::terminal_theme::Selection>().0;
@@ -656,7 +846,7 @@ impl TerminalPane {
         }).detach();
         let pane = Self {
             service,
-            snapshot: snapshot.clone(),
+            snapshot: terminal_context_snapshot(snapshot),
             mode,
             visible,
             initial_read_pending,
@@ -687,8 +877,32 @@ impl TerminalPane {
             marked: String::new(),
             marked_selection: 0..0,
             _poll: poll,
+            exit_monitor,
+            exit_monitor_error: None,
+            poll_wake,
+            exit_reported: false,
         };
         pane
+    }
+    fn report_exit(&mut self, id: &str, cx: &mut Context<Self>) {
+        // Discard work for the exited process, without queuing a PTY Close.
+        if let Some(event) =
+            take_exit_notification(&self.mode, id, &mut self.exit_reported, &mut self.queue)
+        {
+            if let Some(monitor) = &self.exit_monitor {
+                let pane_id = cx.entity_id();
+                monitor.update(cx, |monitor, _| monitor.watch(pane_id, false));
+            }
+            let _ = self.poll_wake.try_send(());
+            cx.emit(event);
+        }
+    }
+    fn report_known_exit(&mut self, cx: &mut Context<Self>) {
+        let exited=pinned_exit_id(&self.mode,&self.sessions).or_else(|| {
+            let PaneMode::Pinned {session_id}=&self.mode else {return None;};
+            self.models.get(session_id).filter(|model|model.status=="exited").map(|_|session_id.clone())
+        });
+        if let Some(id)=exited {self.report_exit(&id,cx);}
     }
     fn operation_allowed(&self, operation: &Operation) -> bool {
         operation_allowed(&self.mode, operation)
@@ -698,6 +912,7 @@ impl TerminalPane {
             return;
         }
         self.visible = visible;
+        let _ = self.poll_wake.try_send(());
         if !visible {
             let pinned_id = match &self.mode {
                 PaneMode::Manager => None,
@@ -769,11 +984,14 @@ impl TerminalPane {
         task_id: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        self.snapshot = snapshot.clone();
-        self.appearance = Appearance::from_snapshot(snapshot);
-        if matches!(self.mode, PaneMode::Manager) {
-            self.task_id = task_id;
+        let context_changed = terminal_context_changed(&self.snapshot, snapshot);
+        let task_changed = matches!(self.mode, PaneMode::Manager) && self.task_id != task_id;
+        if !context_changed && !task_changed { return; }
+        if context_changed {
+            self.snapshot = terminal_context_snapshot(snapshot);
+            self.appearance = Appearance::from_snapshot(snapshot);
         }
+        if task_changed { self.task_id = task_id; }
         cx.notify();
     }
     /// Adopt a terminal session opened by the owning workspace flow.
@@ -844,6 +1062,7 @@ impl TerminalPane {
             let _ = pane.update(cx, |pane, cx| {
                 pane.busy = false;
                 let is_list = matches!(op, Operation::List);
+                let closed_session=match &op {Operation::Close {id}=>Some(id.clone()),_=>None};
                 if !pane.operation_allowed(&op) {
                     pane.error = Some("Terminal response did not match this pinned session.".into());
                     pane.paused = true;
@@ -866,7 +1085,10 @@ impl TerminalPane {
                         true
                     }
                     Ok(value) => match pane.apply(op, value) {
-                        Ok(updated) => updated,
+                        Ok(updated) => {
+                            if let Some(session_id)=closed_session {cx.emit(TerminalEvent::SessionClosed {session_id});}
+                            updated
+                        },
                         Err(error) => {
                             if is_list {
                                 pane.list_in_flight = false;
@@ -878,6 +1100,8 @@ impl TerminalPane {
                         }
                     },
                 };
+                pane.report_known_exit(cx);
+                if pane.paused { let _ = pane.poll_wake.try_send(()); }
                 pane.pump(cx);
                 if changed {
                     cx.notify();
@@ -905,6 +1129,9 @@ impl TerminalPane {
                 self.install_session(value, cols, rows, true)?;
             }
             Operation::Read { id, .. } => {
+                if value.get("session").is_some_and(|session|field(session,"id")!=id) {
+                    return Err("Terminal read response did not match its session identity.".into());
+                }
                 let model = self
                     .models
                     .get_mut(&id)
@@ -1886,7 +2113,7 @@ impl Render for TerminalPane {
             .gap(px(4.))
             .p(px(8.))
             .child(controls);
-        if let Some(error) = &self.error {
+        if let Some(error) = self.error.as_ref().or(self.exit_monitor_error.as_ref()) {
             pane = pane.child(
                 div()
                     .flex_none()
@@ -1910,6 +2137,7 @@ impl Render for TerminalPane {
                 )
                 .on_click(cx.listener(|pane, _, _, cx| {
                     pane.paused = false;
+                    let _ = pane.poll_wake.try_send(());
                     pane.error = None;
                     pane.pump(cx);
                     cx.notify();
@@ -2085,7 +2313,140 @@ impl Render for TerminalPane {
 #[cfg(test)]
 mod native_terminal_tests {
     use super::*;
+    use ::core::prelude::v1::test;
 
+    #[::core::prelude::v1::test]
+    fn terminal_context_excludes_transcripts_and_detects_host_and_style_changes() {
+        let snapshot = json!({"hosts":[{"id":"local","kind":"local"}],"settings":{"terminalFontSize":14},"tasks":[{"messages":[{"text":"large transcript"}]}]});
+        let context = terminal_context_snapshot(&snapshot);
+        assert!(context.get("tasks").is_none());
+        let mut next = snapshot.clone();
+        next["tasks"][0]["messages"][0]["text"] = json!("new token");
+        assert!(!terminal_context_changed(&context, &next));
+        next["settings"]["terminalFontSize"] = json!(16);
+        assert!(terminal_context_changed(&context, &next));
+        next = snapshot.clone();
+        next["hosts"][0]["id"] = json!("replacement");
+        assert!(terminal_context_changed(&context, &next));
+    }
+
+    #[cfg(feature = "visual-export")]
+    #[gpui_kit::test]
+    fn exit_monitor_is_shared_and_registry_does_not_keep_it_alive(cx: &mut TestAppContext) {
+        let service = DesktopService::disconnected_for_ui_fixture();
+        let first = cx.update(|cx| TerminalExitMonitor::shared(service.clone(), cx));
+        let second = cx.update(|cx| TerminalExitMonitor::shared(service, cx));
+        assert_eq!(first.entity_id(), second.entity_id());
+        let one = cx.new(|_| ()).entity_id();
+        let two = cx.new(|_| ()).entity_id();
+        first.update(cx, |monitor, _| {
+            monitor.watch(one, true);
+            monitor.watch(two, true);
+            monitor.watch(one, false);
+            assert_eq!(monitor.watchers.len(), 1);
+            monitor.watch(two, false);
+            assert!(monitor.watchers.is_empty());
+        });
+        let weak = first.downgrade();
+        drop(first);
+        drop(second);
+        // Neither its waiting task nor the global registry owns the entity.
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[cfg(feature = "visual-export")]
+    #[gpui_kit::test]
+    fn hidden_terminal_wakes_on_reveal_and_monitor_failures_never_signal_exit(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let mut retained = None;
+        let (_, visual) = cx.add_window_view(|window, cx| {
+            let pane = cx.new(|cx| {
+                TerminalPane::new_inner(
+                    DesktopService::disconnected_for_ui_fixture(),
+                    &json!({}),
+                    window,
+                    PaneMode::Pinned {
+                        session_id: "owned".into(),
+                    },
+                    false,
+                    true,
+                    cx,
+                )
+            });
+            let monitor = pane.read(cx).exit_monitor.as_ref().unwrap().clone();
+            monitor.update(cx, |monitor, cx| {
+                monitor._task = cx.spawn(async move |_, _| {})
+            });
+            pane.update(cx, |pane, cx| pane._poll = cx.spawn(async move |_, _| {}));
+            retained = Some(pane.clone());
+            gpui_kit::component::Root::new(pane, window, cx)
+        });
+        let pane = retained.unwrap();
+        let (sender, mut receiver) = futures::channel::mpsc::channel(1);
+        visual.update(|_, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.poll_wake = sender;
+                assert!(receiver.next().now_or_never().is_none());
+                pane.set_visible(true, cx);
+                assert_eq!(receiver.next().now_or_never(), Some(Some(())));
+            })
+        });
+        let monitor = visual.update(|_, cx| pane.read(cx).exit_monitor.as_ref().unwrap().clone());
+        visual.update(|_, cx| {
+            monitor.update(cx, |_, cx| {
+                cx.emit(TerminalSessions(Err("Backend disconnected".into())))
+            })
+        });
+        visual.run_until_parked();
+        visual.update(|_, cx| {
+            assert_eq!(
+                pane.read(cx).exit_monitor_error.as_deref(),
+                Some("Backend disconnected")
+            );
+            assert!(!pane.read(cx).exit_reported);
+        });
+        visual.update(|_, cx| {
+            monitor.update(cx, |_, cx| {
+                cx.emit(TerminalSessions(Ok(vec![
+                    json!({"id":"owned","status":"exited"}),
+                ])))
+            })
+        });
+        visual.run_until_parked();
+        visual.update(|_, cx| {
+            assert!(pane.read(cx).exit_reported);
+            assert!(pane.read(cx).exit_monitor_error.is_none());
+            assert!(monitor.read(cx).watchers.is_empty());
+        });
+    }
+
+    #[::core::prelude::v1::test]
+    fn terminal_exit_evidence_matches_only_the_pinned_session_and_never_missing_metadata() {
+        let mode=PaneMode::Pinned {session_id:"owned".into()};
+        for sessions in [vec![],vec![json!({"id":"other","status":"exited"})],vec![json!({"id":"owned","status":"running"})],vec![json!({"id":"owned"})]] {
+            assert_eq!(pinned_exit_id(&mode,&sessions),None);
+        }
+        let sessions=vec![json!({"id":"other","status":"running"}),json!({"id":"owned","status":"exited","exitCode":0})];
+        assert_eq!(pinned_exit_id(&mode,&sessions).as_deref(),Some("owned"));
+        assert_eq!(pinned_exit_id(&PaneMode::Manager,&sessions),None);
+    }
+    #[::core::prelude::v1::test]
+    fn terminal_exit_notification_is_single_identity_bound_and_never_kills_a_pty() {
+        let mode=PaneMode::Pinned {session_id:"owned".into()};
+        let mut reported=false;
+        let mut queue=VecDeque::from([Operation::Read {id:"owned".into(),after:5},write("owned",b"pending")]);
+        let original=queue.len();
+        assert!(take_exit_notification(&mode,"other",&mut reported,&mut queue).is_none());
+        assert!(take_exit_notification(&PaneMode::Manager,"owned",&mut reported,&mut queue).is_none());
+        assert!(!reported);
+        assert_eq!(queue.len(),original);
+        assert_eq!(take_exit_notification(&mode,"owned",&mut reported,&mut queue),Some(TerminalEvent::Exited {session_id:"owned".into()}));
+        assert!(queue.is_empty());
+        assert!(take_exit_notification(&mode,"owned",&mut reported,&mut queue).is_none());
+        assert!(!queue.iter().any(|op|matches!(op,Operation::Close {..})));
+    }
     #[::core::prelude::v1::test]
     fn pinned_initializer_queues_no_list_or_open_and_fences_every_session_operation() {
         let pinned = PaneMode::Pinned {
@@ -2529,3 +2890,7 @@ mod native_terminal_tests {
         );
     }
 }
+
+#[cfg(all(test,feature="visual-export"))]
+#[path="terminal_exit_tests.rs"]
+mod terminal_exit_tests;

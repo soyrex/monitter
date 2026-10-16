@@ -70,7 +70,7 @@ fn native_panel(
             dim_inactive: false, inactive_opacity: 0.6, focus_follows_mouse: false,
         }))),
         auto_hide_tabs: Rc::new(Cell::new(false)),
-        background: None,
+        background: None, working: false, _activity_subscription: None, dock_group: None,
     })
 }
 
@@ -359,4 +359,95 @@ fn tern_transparency_exposes_native_backdrop_without_a_fill_under_panes(cx: &mut
     });
     crate::design::set_surface(&json!({"windowSurface":"opaque"}));
     crate::design::set_tile_theme(NativeTileTheme::Monitter);
+}
+
+#[gpui_kit::test]
+fn pane_header_git_controls_fit_narrow_and_wide_zoom_restore_and_close_only_owner(cx: &mut TestAppContext) {
+    use gpui_kit::component::dock::{DockPlacement, Panel as _, PanelStyle};
+    cx.update(gpui_kit::init);
+    for (id, probe, tern, auto_hide) in [
+        ("git:task-header:1", "pane-probe-git:task-header:1", true, false),
+        ("route:repository", "pane-probe-route:repository", false, true),
+    ] {
+        let mut skin = None;
+        let (area, visual) = cx.add_window_view(|window, cx| {
+            let renderer = DockSkin::new(cx);
+            skin = Some(renderer.clone());
+            DockArea::new("git-pane-header-actions", None, window, cx).with_renderer(renderer)
+        });
+        let skin = skin.unwrap();
+        let (git, neighbor) = visual.update(|window, cx| {
+            skin.set_panel_style(if tern { PanelStyle::Hidden } else { PanelStyle::Auto }, cx);
+            let git = native_panel(id, Rc::new(Cell::new(None)), None, cx);
+            git.update(cx, |panel, cx| {
+                let mut appearance = panel.appearance.get().unwrap();
+                appearance.tile_theme = if tern { NativeTileTheme::Tern } else { NativeTileTheme::Monitter };
+                panel.appearance.set(Some(appearance));
+                panel.auto_hide_tabs.set(auto_hide);
+                cx.notify();
+            });
+            let neighbor = native_panel("chat:git-header-neighbor", Rc::new(Cell::new(None)), None, cx);
+            area.update(cx, |area, cx| area.set_center(DockLayout::h_split()
+                .child(DockLayout::tabs().panel_view(panel_handle(git.clone()), cx), None)
+                .child(DockLayout::tabs().panel_view(panel_handle(neighbor.clone()), cx), None), window, cx));
+            (git, neighbor)
+        });
+        visual.update(|window, _| window.activate_window());
+        for width in [480., 1100.] {
+            visual.simulate_resize(size(px(width), px(700.)));
+            draw_frame(visual);
+            let header = visual.debug_bounds("git-pane-header").unwrap_or_else(|| panic!("{id} at {width}px: native Git header"));
+            let body = visual.debug_bounds(probe).unwrap();
+            assert!((body.top() - header.bottom()).abs() <= px(1.), "{id}: body starts immediately below header: {header:?}, {body:?}");
+            assert!(header.left() >= px(0.) && header.right() <= px(width), "{id}: header fits viewport");
+            for selector in ["git-pane-move", "git-pane-zoom", "git-pane-menu", "git-pane-close"] {
+                let control = visual.debug_bounds(selector).unwrap_or_else(|| panic!("{id} at {width}px: {selector} remains offered"));
+                assert!(control.left() >= header.left() && control.right() <= header.right()
+                    && control.top() >= header.top() && control.bottom() <= header.bottom(),
+                    "{id} at {width}px: {selector} fits owning header: {control:?} in {header:?}");
+            }
+            visual.read(|cx| assert!(git.read(cx).toolbar_in_content(cx), "Git header suppresses duplicate dock chrome"));
+            let original_width = body.size.width;
+            let group = visual.read(|cx| git.read(cx).dock_group.as_ref().unwrap().upgrade().unwrap());
+            let zoom = visual.debug_bounds("git-pane-zoom").unwrap();
+            visual.simulate_click(zoom.center(), Default::default());
+            draw_frame(visual);
+            visual.read(|cx| assert!(group.read(cx).is_zoomed(), "{id}: native zoom action changes the actual group"));
+            assert!(visual.debug_bounds(probe).unwrap().size.width > original_width, "{id}: zoom enlarges actual Git content");
+            let restore = visual.debug_bounds("git-pane-zoom").expect("zoomed header retains restore control");
+            visual.simulate_click(restore.center(), Default::default());
+            draw_frame(visual);
+            visual.read(|cx| assert!(!group.read(cx).is_zoomed(), "{id}: native restore returns the split"));
+            assert!((visual.debug_bounds(probe).unwrap().size.width - original_width).abs() <= px(1.));
+        }
+        // Visible ordinary dock tabs must not acquire a second content header.
+        visual.update(|_, cx| {
+            git.update(cx, |panel, cx| {
+                let mut appearance = panel.appearance.get().unwrap();
+                appearance.tile_theme = NativeTileTheme::Monitter;
+                panel.appearance.set(Some(appearance));
+                panel.auto_hide_tabs.set(false);
+                cx.notify();
+            });
+            skin.set_panel_style(PanelStyle::TabBar, cx);
+        });
+        draw_frame(visual);
+        assert!(visual.debug_bounds("git-pane-header").is_none(), "{id}: visible tabs keep ordinary native title chrome");
+        visual.read(|cx| assert!(!git.read(cx).toolbar_in_content(cx), "ordinary Git tabs retain dock toolbar"));
+        visual.update(|window, cx| {
+            git.update(cx, |panel, cx| { panel.auto_hide_tabs.set(true); cx.notify(); });
+            skin.set_panel_style(PanelStyle::Auto, cx);
+            window.focus(&neighbor.read(cx).spec.focus.clone(), cx);
+        });
+        draw_frame(visual);
+        let close = visual.debug_bounds("git-pane-close").expect("Git close remains reachable while neighbor focused");
+        visual.simulate_click(close.center(), Default::default());
+        draw_frame(visual);
+        visual.read(|cx| {
+            assert!(git.read(cx).removed, "{id}: native close targets Git owner");
+            assert!(!neighbor.read(cx).removed, "neighbor remains open despite owning focus");
+            assert_eq!(area.read(cx).layout(DockPlacement::Center).unwrap().panels().count(), 1);
+        });
+        visual.update(|window, _| window.remove_window());
+    }
 }

@@ -43,12 +43,39 @@ fn database(path: &Path) -> Result<Connection, String> {
         .map_err(|e| e.to_string())?;
     Ok(connection)
 }
-pub fn load() -> Result<(i64, Option<NativeWorkspaceSet>, Option<NativeTileTheme>), String> {
+/// Focus is GPUI client metadata, not part of the resident backend dock schema.
+/// Validate a projection but persist the original so restoring focus survives.
+fn validate_local_workspace_set(set: &NativeWorkspaceSet) -> Result<(), String> {
+    let mut projected = set.clone();
+    for workspace in &mut projected.items {
+        if let Some(layout) = &mut workspace.layout {
+            let focus = layout
+                .as_object_mut()
+                .and_then(|layout| layout.remove("focusedPaneId"));
+            if let Some(focus) = focus {
+                let valid = focus.as_str().is_some_and(|id| {
+                    !id.is_empty()
+                        && id.len() <= 128
+                        && id
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || b"-_:./".contains(&byte))
+                });
+                if !valid {
+                    return Err("Invalid local workspace focused pane identity.".into());
+                }
+                // A remembered pane can have since been removed. Restore
+                // revalidates membership and falls back to surviving panes.
+            }
+        }
+    }
+    validate_native_workspace_set(&projected)
+}
+pub fn load() -> Result<(i64, Option<NativeWorkspaceSet>, Option<NativeTileTheme>, bool), String> {
     load_at(&path()?)
 }
 fn load_at(
     path: &Path,
-) -> Result<(i64, Option<NativeWorkspaceSet>, Option<NativeTileTheme>), String> {
+) -> Result<(i64, Option<NativeWorkspaceSet>, Option<NativeTileTheme>, bool), String> {
     let db = database(path)?;
     let row: Option<(i64, String)> = db
         .query_row(
@@ -59,17 +86,18 @@ fn load_at(
         .optional()
         .map_err(|e| e.to_string())?;
     match row {
-        None => Ok((0, None, None)),
+        None => Ok((0, None, None, true)),
         Some((revision, payload)) => {
             if revision <= 0 || payload.len() > MAX_BYTES {
                 return Err("Workspace store exceeds its limits or is invalid.".into());
             }
             let value: serde_json::Value =
                 serde_json::from_str(&payload).map_err(|e| format!("Saved workspaces: {e}"))?;
-            let (set, theme) = if value.get("items").is_some() {
+            let (set, theme, auto_size_panes) = if value.get("items").is_some() {
                 (
-                    serde_json::from_value(value).map_err(|e| e.to_string())?,
+                    serde_json::from_value(value.clone()).map_err(|e| e.to_string())?,
                     None,
+                    true,
                 )
             } else {
                 if value["version"] != 1 {
@@ -82,10 +110,11 @@ fn load_at(
                         serde_json::from_value(value["tileTheme"].clone())
                             .map_err(|e| e.to_string())?,
                     ),
+                    value["autoSizePanes"].as_bool().unwrap_or(true),
                 )
             };
-            validate_native_workspace_set(&set)?;
-            Ok((revision, Some(set), theme))
+            validate_local_workspace_set(&set)?;
+            Ok((revision, Some(set), theme, auto_size_panes))
         }
     }
 }
@@ -93,18 +122,20 @@ pub fn save(
     revision: i64,
     set: &NativeWorkspaceSet,
     theme: NativeTileTheme,
+    auto_size_panes: bool,
 ) -> Result<i64, String> {
-    save_at(&path()?, revision, set, theme)
+    save_at(&path()?, revision, set, theme, auto_size_panes)
 }
 fn save_at(
     path: &Path,
     revision: i64,
     set: &NativeWorkspaceSet,
     theme: NativeTileTheme,
+    auto_size_panes: bool,
 ) -> Result<i64, String> {
-    validate_native_workspace_set(set)?;
+    validate_local_workspace_set(set)?;
     let payload =
-        serde_json::to_string(&serde_json::json!({"version":1,"workspaces":set,"tileTheme":theme}))
+        serde_json::to_string(&serde_json::json!({"version":1,"workspaces":set,"tileTheme":theme,"autoSizePanes":auto_size_panes}))
             .map_err(|e| e.to_string())?;
     if payload.len() > MAX_BYTES {
         return Err("Named workspaces exceed 512 KiB. Reduce the saved layouts.".into());
@@ -145,7 +176,7 @@ mod tests {
                 name: "Dev".into(),
                 icon: "code".into(),
                 color: "#41C968".into(),
-                layout: None,
+                url: Some("https://example.com/project".into()), layout: None,
             }],
         }
     }
@@ -163,22 +194,53 @@ mod tests {
             .join("workspaces.sqlite3")
     }
     #[test]
+    fn missing_auto_size_preference_defaults_on_and_off_roundtrips() {
+        let path = temp();
+        let set = fixture();
+        let revision = save_at(&path, 0, &set, NativeTileTheme::Tern, true).unwrap();
+
+        // Simulate a version-1 local record written before autoSizePanes existed.
+        let db = super::database(&path).unwrap();
+        let payload: String = db
+            .query_row("SELECT payload FROM workspaces WHERE id=1", [], |row| row.get(0))
+            .unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        value.as_object_mut().unwrap().remove("autoSizePanes");
+        db.execute(
+            "UPDATE workspaces SET payload=?1 WHERE id=1",
+            [serde_json::to_string(&value).unwrap()],
+        )
+        .unwrap();
+        drop(db);
+
+        let loaded = load_at(&path).unwrap();
+        assert_eq!(loaded.0, revision);
+        assert_eq!(loaded.1, Some(set.clone()));
+        assert_eq!(loaded.2, Some(NativeTileTheme::Tern));
+        assert!(loaded.3, "legacy preference should default to enabled");
+
+        let next_revision = save_at(&path, revision, &set, NativeTileTheme::Tern, false).unwrap();
+        assert!(!load_at(&path).unwrap().3, "explicitly disabled value should persist");
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+        assert_eq!(next_revision, revision + 1);
+    }
+    #[test]
     fn workspace_store_persists_active_layout_and_rejects_stale_writer() {
         let path = temp();
         let mut set = fixture();
-        assert_eq!(load_at(&path).unwrap(), (0, None, None));
+        assert_eq!(load_at(&path).unwrap(), (0, None, None, true));
         set.items[0].layout = Some(
             serde_json::json!({"version":1,"center":{"panel_name":"StackPanel","children":[],"info":{"stack":{"sizes":[],"axis":0}}}}),
         );
-        let revision = save_at(&path, 0, &set, NativeTileTheme::Tern).unwrap();
+        let revision = save_at(&path, 0, &set, NativeTileTheme::Tern, false).unwrap();
         assert_eq!(
             load_at(&path).unwrap(),
-            (revision, Some(set.clone()), Some(NativeTileTheme::Tern))
+            (revision, Some(set.clone()), Some(NativeTileTheme::Tern), false)
         );
         let mut other = set.clone();
         other.items[0].name = "Other".into();
         assert!(
-            save_at(&path, 0, &other, NativeTileTheme::Monitter)
+            save_at(&path, 0, &other, NativeTileTheme::Monitter, true)
                 .unwrap_err()
                 .contains("another window")
         );
@@ -189,13 +251,13 @@ mod tests {
     fn workspace_store_rejects_invalid_metadata_without_overwriting() {
         let path = temp();
         let set = fixture();
-        let revision = save_at(&path, 0, &set, NativeTileTheme::Tern).unwrap();
+        let revision = save_at(&path, 0, &set, NativeTileTheme::Tern, true).unwrap();
         let mut bad = set.clone();
         bad.active_id = "missing".into();
-        assert!(save_at(&path, revision, &bad, NativeTileTheme::Monitter).is_err());
+        assert!(save_at(&path, revision, &bad, NativeTileTheme::Monitter, true).is_err());
         assert_eq!(
             load_at(&path).unwrap(),
-            (revision, Some(set), Some(NativeTileTheme::Tern))
+            (revision, Some(set), Some(NativeTileTheme::Tern), true)
         );
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
@@ -206,13 +268,39 @@ mod tests {
         let mut second = set.items[0].clone();
         second.id = "22222222-2222-4222-8222-222222222222".into(); second.name = "Second".into();
         let second_id = second.id.clone(); set.items.push(second);
-        let revision = save_at(&path, 0, &set, NativeTileTheme::Tern).unwrap();
+        let revision = save_at(&path, 0, &set, NativeTileTheme::Tern, true).unwrap();
         assert!(crate::workspace_order::reorder(&mut set, &first, &second_id));
-        let revision = save_at(&path, revision, &set, NativeTileTheme::Tern).unwrap();
+        let revision = save_at(&path, revision, &set, NativeTileTheme::Tern, true).unwrap();
         assert_eq!(load_at(&path).unwrap().1, Some(set.clone()));
         assert!(crate::workspace_order::remove(&mut set, &first));
-        save_at(&path, revision, &set, NativeTileTheme::Tern).unwrap();
+        save_at(&path, revision, &set, NativeTileTheme::Tern, true).unwrap();
         assert_eq!(load_at(&path).unwrap().1, Some(set));
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
+    #[test]
+    fn workspace_store_roundtrips_local_focus_and_keeps_dock_schema_strict() {
+        let path = temp();
+        let mut set = fixture();
+        set.items[0].layout = Some(serde_json::json!({
+            "version":1,
+            "focusedPaneId":"chat:main",
+            "center":{"panel_name":"MonitterNativePane","children":[],"info":{"panel":{"id":"chat:main"}}}
+        }));
+        let revision = save_at(&path, 0, &set, NativeTileTheme::Tern, true).unwrap();
+        assert_eq!(load_at(&path).unwrap().1, Some(set.clone()));
+        for invalid in [serde_json::json!(7), serde_json::json!("chat:bad id")] {
+            let mut bad = set.clone();
+            bad.items[0].layout.as_mut().unwrap()["focusedPaneId"] = invalid;
+            assert!(save_at(&path, revision, &bad, NativeTileTheme::Tern, true).is_err());
+        }
+        let mut bad = set.clone();
+        bad.items[0].layout.as_mut().unwrap()["unknownClientField"] = serde_json::json!(true);
+        assert!(save_at(&path, revision, &bad, NativeTileTheme::Tern, true).is_err());
+        assert_eq!(load_at(&path).unwrap().1, Some(set.clone()));
+        set.items[0].layout.as_mut().unwrap()["focusedPaneId"] = serde_json::json!("chat:removed");
+        save_at(&path, revision, &set, NativeTileTheme::Tern, true).unwrap();
+        assert_eq!(load_at(&path).unwrap().1, Some(set));
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
 }

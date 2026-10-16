@@ -1,7 +1,11 @@
 //! Local completion markers seeded from authoritative records, never mount effects.
 use crate::chat::feedback::{self, Clock, FeedbackClock};
 use crate::design::ui_scaled_px as px;
-use gpui_kit::{prelude::*, *};
+use gpui_kit::{
+    component::{Sizable, spinner::Spinner},
+    prelude::*,
+    *,
+};
 use std::time::Duration;
 
 pub(crate) struct CompletionState {
@@ -28,7 +32,6 @@ pub(crate) struct CompletionMarker {
     color: u32,
     size: f32,
     visible: bool,
-    show_done: bool,
 }
 impl CompletionMarker {
     pub(crate) fn new(id: &str, status: &str) -> Self {
@@ -42,7 +45,6 @@ impl CompletionMarker {
             color: 0,
             size: 12.,
             visible: true,
-            show_done: false,
         }
     }
     pub(crate) fn set_status(
@@ -79,12 +81,6 @@ impl CompletionMarker {
         self.clock.borrow_mut().painted = false;
         cx.notify();
     }
-    pub(crate) fn show_done(&mut self, cx: &mut Context<Self>) {
-        if !self.show_done {
-            self.show_done = true;
-            cx.notify();
-        }
-    }
     pub(crate) fn set_appearance(
         &mut self,
         icon: &'static str,
@@ -106,21 +102,18 @@ impl Render for CompletionMarker {
             .clock
             .borrow_mut()
             .progress(cx.reduce_motion() || !crate::native_motion::motion_allowed());
-        feedback::painted(
-            div()
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap(px(3.))
-                .text_size(px(self.size))
-                .text_color(rgb(self.color))
-                .child(div().opacity(progress).child(self.icon))
-                .when(
-                    self.show_done && self.state.status == "completed",
-                    |marker| marker.child(div().text_size(px(9.)).child("Done")),
-                ),
-            self.clock.clone(),
-        )
+        let marker = div()
+            .flex_none()
+            .flex()
+            .items_center()
+            .text_size(px(self.size))
+            .text_color(rgb(self.color));
+        let marker = if self.state.status == "running" {
+            marker.child(Spinner::new().xsmall().color(rgb(self.color).into()))
+        } else {
+            marker.child(div().opacity(progress).child(self.icon))
+        };
+        feedback::painted(marker, self.clock.clone())
     }
 }
 #[cfg(test)]

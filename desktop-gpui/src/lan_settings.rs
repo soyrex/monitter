@@ -2,6 +2,7 @@
 use crate::design::ui_scaled_px as px;
 use gpui_kit::{
     component::{ActiveTheme, Disableable, button::*, switch::Switch},
+    component::input::{Input, InputState},
     prelude::*,
     *,
 };
@@ -13,6 +14,7 @@ pub struct LanSettingsPane {
     busy: bool,
     reveal: bool,
     error: Option<String>,
+    access_code: Entity<InputState>,
 }
 #[derive(Clone, Copy)]
 enum Operation {
@@ -21,13 +23,18 @@ enum Operation {
     Stop,
 }
 impl LanSettingsPane {
-    pub fn new(service: DesktopService, cx: &mut Context<Self>) -> Self {
+    pub fn new(service: DesktopService, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut pane = Self {
             service,
             status: None,
             busy: false,
             reveal: false,
             error: None,
+            access_code: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .masked(true)
+                    .placeholder("Six digit access code")
+            }),
         };
         pane.request(Operation::Read, cx);
         pane
@@ -61,6 +68,41 @@ impl LanSettingsPane {
         .detach();
         cx.notify();
     }
+
+    fn save_access_code(&mut self, cx: &mut Context<Self>) {
+        let code = self.access_code.read(cx).value().to_string();
+        if code.len() != 6 || !code.bytes().all(|byte| byte.is_ascii_digit()) {
+            self.error = Some("Enter exactly six digits for the access code.".into());
+            cx.notify();
+            return;
+        }
+        if self.busy {
+            return;
+        }
+        self.busy = true;
+        self.error = None;
+        self.reveal = false;
+        let service = self.service.clone();
+        let task = cx.background_executor().spawn(async move {
+            service.set_lan_access_code(code)
+        });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                view.busy = false;
+                match result {
+                    Ok(status) => {
+                        view.status = Some(status);
+                        view.error = None;
+                    }
+                    Err(error) => view.error = Some(error),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
 }
 impl Render for LanSettingsPane {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -78,6 +120,19 @@ impl Render for LanSettingsPane {
                     .on_change(cx.listener(|view, enabled, _, cx| view.request(if *enabled { Operation::Start } else { Operation::Stop }, cx)))))
             .child(Button::new("lan-refresh").label("Refresh status").disabled(self.busy).on_click(cx.listener(|view, _, _, cx| view.request(Operation::Read, cx))));
         if let Some(status) = &self.status {
+            panel = panel
+                .child(div().flex().flex_col().gap(px(6.))
+                    .child(div().font_weight(FontWeight::MEDIUM).child("Change access code"))
+                    .child(div().text_size(crate::settings::settings_text_size(0.8)).text_color(muted)
+                        .child("Choose a six digit code that stays the same across restarts. Saving applies it immediately."))
+                    .child(Input::new(&self.access_code)
+                        .text_size(crate::settings::settings_text_size(0.86))
+                        .aria_label("New six digit LAN access code")
+                        .disabled(self.busy))
+                    .child(Button::new("lan-save-code")
+                        .label("Save code")
+                        .disabled(self.busy)
+                        .on_click(cx.listener(|view, _, _, cx| view.save_access_code(cx)))));
             for (index, url) in status.info.urls.iter().enumerate() {
                 let copy = url.clone();
                 let open = url.clone();

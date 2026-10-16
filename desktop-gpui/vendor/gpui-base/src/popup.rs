@@ -31,6 +31,7 @@ pub struct Popup {
     base: gpui::Stateful<Div>,
     style: StyleRefinement,
     anchor: Anchor,
+    anchor_bounds: Option<Bounds<Pixels>>,
     offset: Pixels,
     on_position: Option<Box<dyn Fn(ResolvedPosition, Bounds<Pixels>)>>,
     trigger: AnyElement,
@@ -45,6 +46,7 @@ impl Popup {
             id,
             style: StyleRefinement::default(),
             anchor: Anchor::TopLeft,
+            anchor_bounds: None,
             offset: px(0.),
             on_position: None,
             trigger: trigger.into_any_element(),
@@ -54,6 +56,13 @@ impl Popup {
 
     pub fn anchor(mut self, anchor: impl Into<Anchor>) -> Self {
         self.anchor = anchor.into();
+        self
+    }
+
+    /// Use a viewport-coordinate rectangle as the popup positioning reference.
+    /// The trigger is still laid out and measured normally for interaction.
+    pub fn anchor_bounds(mut self, bounds: Bounds<Pixels>) -> Self {
+        self.anchor_bounds = Some(bounds);
         self
     }
 
@@ -132,11 +141,13 @@ impl RenderOnce for Popup {
         let state =
             window.use_keyed_state((self.id, "anchor"), cx, |_, _| PopupAnchorState::default());
         let anchor = self.anchor;
+        let anchor_bounds = self.anchor_bounds;
         let trigger_bounds = Rc::new(Cell::new(state.read(cx).bounds));
         let offset = self.offset;
+        let initial_anchor_bounds = anchor_bounds.unwrap_or(state.read(cx).bounds);
         let position = Rc::new(Cell::new(anchor_position(
             anchor,
-            state.read(cx).bounds,
+            initial_anchor_bounds,
             offset,
         )));
 
@@ -151,7 +162,11 @@ impl RenderOnce for Popup {
                         let trigger_bounds = trigger_bounds.clone();
                         move |bounds, window, cx| {
                             trigger_bounds.set(bounds);
-                            position.set(anchor_position(anchor, bounds, offset));
+                            position.set(anchor_position(
+                                anchor,
+                                anchor_bounds.unwrap_or(bounds),
+                                offset,
+                            ));
                             let first = state.update(cx, |state, _| {
                                 let first = !state.captured;
                                 state.bounds = bounds;
@@ -219,6 +234,21 @@ mod tests {
             Popup::resolved_corner(Anchor::BottomRight, bounds),
             Point::new(px(300.), px(50.))
         );
+    }
+
+    #[test]
+    fn explicit_anchor_bounds_position_popup_without_moving_trigger() {
+        let trigger = Bounds {
+            origin: Point::new(px(12.), px(18.)),
+            size: gpui::Size::new(px(30.), px(20.)),
+        };
+        let pane = Bounds {
+            origin: Point::new(px(100.), px(80.)),
+            size: gpui::Size::new(px(400.), px(300.)),
+        };
+
+        assert_eq!(anchor_position(Anchor::BottomCenter, trigger, px(0.)), point(px(27.), px(18.)));
+        assert_eq!(anchor_position(Anchor::BottomCenter, pane, px(0.)), point(px(300.), px(80.)));
     }
 
     struct Harness;

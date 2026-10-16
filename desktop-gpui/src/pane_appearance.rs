@@ -51,7 +51,7 @@ impl PaneAppearance {
         if active && self.show_active_border {
             let mut color = rgb(self.active_border_color);
             if self.tile_theme == NativeTileTheme::Tern {
-                color.a = self.border_opacity as f32 / 100.;
+                color.a = self.resolved_active_border_opacity();
             }
             panel = panel.child(div().absolute().inset_0().border_1()
                 .border_color(color));
@@ -68,6 +68,11 @@ impl PaneAppearance {
         } else {
             self.active_border_color
         }
+    }
+
+    /// Keep the active-pane highlight legible when regular border opacity is low.
+    pub(crate) fn resolved_active_border_opacity(&self) -> f32 {
+        (self.border_opacity as f32 / 100.).max(0.5)
     }
 }
 

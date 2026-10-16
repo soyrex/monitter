@@ -114,7 +114,13 @@ fn snapshot_active_tools(task: &Value, task_id: &str, snapshot: &Value) -> Vec<S
         .into_iter()
         .flatten()
         .filter(|event| event["taskId"] == task_id);
-    active_tools(task, messages, events)
+    if let Some(context) = snapshot.get("nativeMessageContext") {
+        let user = context[task_id]["latestUserAt"].as_i64()
+            .map(|at| json!({"role":"user", "createdAt":at}));
+        active_tools(task, user.iter(), events)
+    } else {
+        active_tools(task, messages, events)
+    }
 }
 /// Absent goals need no maintenance. Read failures back off quietly; only
 /// known non-complete goals in a running task refresh once per minute.
@@ -824,6 +830,12 @@ mod tests {
                 event("unknown-phase","queued",35)]
         });
         assert_eq!(snapshot_active_tools(&task, "own", &snapshot), ["current"]);
+        let mut compact = snapshot.clone();
+        compact["messages"] = json!([]);
+        compact["nativeMessageContext"] = json!({"own":{"latestUserAt":30}, "other":{"latestUserAt":300}});
+        assert_eq!(snapshot_active_tools(&task, "own", &compact), ["current"]);
+        compact["nativeMessageContext"]["own"]["latestUserAt"] = Value::Null;
+        assert!(snapshot_active_tools(&task, "own", &compact).is_empty());
         snapshot["events"].as_array_mut().unwrap().push(json!({
             "taskId":"own","kind":"status","createdAt":36,"title":"turn.failed"
         }));

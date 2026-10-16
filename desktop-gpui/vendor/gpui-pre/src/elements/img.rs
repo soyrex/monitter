@@ -2,7 +2,7 @@ use crate::{
     AnyElement, AnyImageCache, App, Asset, AssetLogger, Bounds, DefiniteLength, Element, ElementId,
     Entity, GlobalElementId, Hitbox, Image, ImageCache, InspectorElementId, InteractiveElement,
     Interactivity, IntoElement, LayoutId, Length, ObjectFit, Pixels, RenderImage, Resource,
-    SharedString, SharedUri, StyleRefinement, Styled, Task, Window, decode_static_image,
+    SharedString, SharedUri, StyleRefinement, Styled, Task, Transformation, Window, decode_static_image,
     decode_static_image_from_decoder, px,
 };
 use anyhow::Result;
@@ -194,6 +194,7 @@ pub struct Img {
     source: ImageSource,
     style: ImageStyle,
     image_cache: Option<AnyImageCache>,
+    transformation: Option<Transformation>,
 }
 
 /// Create a new image element.
@@ -204,10 +205,18 @@ pub fn img(source: impl Into<ImageSource>) -> Img {
         source: source.into(),
         style: ImageStyle::default(),
         image_cache: None,
+        transformation: None,
     }
 }
 
 impl Img {
+    /// Transform the painted image around its center without changing layout or hit testing.
+    /// The decoded image and atlas tile are reused across transformations.
+    pub fn with_transformation(mut self, transformation: Transformation) -> Self {
+        self.transformation = Some(transformation);
+        self
+    }
+
     /// A list of all format extensions currently supported by this img element
     pub fn extensions() -> &'static [&'static str] {
         // This is the list in [image::ImageFormat::from_extension] + `svg`
@@ -493,13 +502,16 @@ impl Element for Img {
                         .get_bounds(bounds, data.size(layout_state.frame_index));
                     let corner_radii = style.corner_radii.to_pixels(window.rem_size());
                     window
-                        .paint_image(
+                        .paint_image_with_transformation(
                             bounds,
                             new_bounds,
                             corner_radii,
                             data,
                             layout_state.frame_index,
                             self.style.grayscale,
+                            self.transformation.map(|transform| {
+                                transform.into_matrix(bounds.center(), window.scale_factor())
+                            }).unwrap_or_default(),
                         )
                         .log_err();
                 } else if let Some(replacement) = &mut layout_state.replacement {
@@ -833,6 +845,58 @@ mod tests {
                 });
             },
         )
+    }
+
+    #[gpui::test]
+    fn rotating_image_reuses_texture_and_preserves_layout_and_clipping(cx: &mut TestAppContext) {
+        let window = cx.add_empty_window();
+        let image = test_image_with_size(40, 20);
+        let mut draw = |transformation: Transformation| {
+            window.draw(point(px(30.), px(40.)), size(px(40.), px(20.)), |_, _| {
+                img(ImageSource::Render(image.clone()))
+                    .size_full()
+                    .rounded(px(3.))
+                    .with_transformation(transformation)
+                    .into_any_element()
+            });
+            window.update(|window, _| *window.rendered_frame.scene.polychrome_sprites
+                .last().expect("image painted"))
+        };
+        let still = draw(Transformation::default());
+        let rotated = draw(Transformation::rotate(crate::radians(std::f32::consts::FRAC_PI_2)));
+        assert_eq!(still.tile, rotated.tile, "rotation must reuse the decoded texture");
+        assert_eq!(still.bounds, rotated.bounds, "rotation must not relayout the image");
+        assert_eq!(still.content_mask, rotated.content_mask, "parent clipping stays in screen space");
+        assert_eq!(still.corner_radii, rotated.corner_radii, "corners stay in local image space");
+        assert_ne!(still.transformation, rotated.transformation);
+        assert!((rotated.transformed_bounds.size.width.0 - still.bounds.size.height.0).abs() < 0.001);
+        assert!((rotated.transformed_bounds.size.height.0 - still.bounds.size.width.0).abs() < 0.001);
+        assert!((rotated.transformed_bounds.center().x.0 - still.bounds.center().x.0).abs() < 0.001);
+        assert!((rotated.transformed_bounds.center().y.0 - still.bounds.center().y.0).abs() < 0.001);
+        let restored = draw(Transformation::default());
+        assert_eq!(restored.transformed_bounds, still.bounds);
+        assert_eq!(restored.tile, still.tile);
+    }
+
+    #[gpui::test]
+    fn transformed_image_uses_rotated_bounds_for_scene_visibility(cx: &mut TestAppContext) {
+        let window = cx.add_empty_window();
+        let image = test_image_with_size(40, 20);
+        window.draw(point(px(0.), px(0.)), size(px(100.), px(100.)), |_, _| {
+            // Original image is below the clipping rectangle; rotating it around its center
+            // brings the left half into view. Scene culling must retain that visible portion.
+            div().size(px(40.)).overflow_hidden().child(
+                img(ImageSource::Render(image.clone()))
+                    .absolute().left(px(0.)).top(px(41.)).w(px(40.)).h(px(20.))
+                    .with_transformation(Transformation::rotate(crate::radians(std::f32::consts::FRAC_PI_2))),
+            ).into_any_element()
+        });
+        window.update(|window, _| {
+            let sprite = window.rendered_frame.scene.polychrome_sprites.last()
+                .expect("partially visible rotated image must not be culled");
+            assert!(sprite.bounds.intersect(&sprite.content_mask.bounds).is_empty());
+            assert!(!sprite.transformed_bounds.intersect(&sprite.content_mask.bounds).is_empty());
+        });
     }
 
     #[gpui::test]

@@ -1,7 +1,7 @@
 //! The dock area: the trees, the entity cache that mirrors them, and the
 //! reconciliation that keeps the two in step.
 
-use crate::TestSupportExt as _;
+use crate::{TestSupportExt as _, theme::ActiveTheme as _};
 use std::{
     collections::{HashMap, HashSet},
     rc::Rc,
@@ -13,7 +13,7 @@ use gpui::{
     AnyElement, AnyView, App, AppContext as _, Axis, Bounds, Context, Div, Empty, Entity,
     EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, ParentElement,
     Pixels, Point, Render, SharedString, Stateful, Styled as _, Subscription, WeakEntity, Window,
-    div, prelude::FluentBuilder as _, px,
+    deferred, div, prelude::FluentBuilder as _, px,
 };
 
 use crate::{
@@ -23,7 +23,7 @@ use crate::{
 
 use super::{
     dock_placement::{Dock, DockSizing},
-    drag::{AnyDrag, DropTarget},
+    drag::{AnyDrag, DragPanel, DropTarget},
     layout::{
         DockLayout, EditResult, InsertTarget, NodeId, NodeKind, PaneNode, PaneRef, PaneTree,
         PanelId, RootKind,
@@ -40,6 +40,8 @@ pub enum DockEvent {
     /// The layout changed. Subscribe to persist it; this fires on every edit,
     /// so a subscriber that writes to disk should debounce.
     LayoutChanged,
+    /// A user changed a pane divider, as distinct from layout/window reflow.
+    ManuallyResized,
     /// A host-owned drag item was dropped inside the dock.
     DragDrop { item: AnyDrag, target: DropTarget },
 }
@@ -1161,6 +1163,7 @@ impl DockArea {
                     return;
                 };
                 if tree.set_sizes(node, sizes.clone()).changed() {
+                    cx.emit(DockEvent::ManuallyResized);
                     cx.emit(DockEvent::LayoutChanged);
                 }
                 // The state is where these came from, so the next reconcile
@@ -1314,6 +1317,8 @@ impl DockArea {
             return;
         };
         let was_open = pane.dock.is_open();
+        let previous_size = pane.dock.size();
+        let previous_live_size = pane.dock.live_size();
         if placement == DockPlacement::Bottom && pane.dock.is_collapsible() && size < PANEL_MIN_SIZE
         {
             pane.dock.set_open(size > CLOSED_BOTTOM_STRIP);
@@ -1323,9 +1328,12 @@ impl DockArea {
             pane.dock.set_live_size(None);
             pane.dock.set_size(size);
         }
+        let manually_changed = pane.dock.is_open() != was_open
+            || pane.dock.size() != previous_size || pane.dock.live_size() != previous_live_size;
         if pane.dock.is_open() != was_open {
             self.reconcile(window, cx);
         }
+        if manually_changed { cx.emit(DockEvent::ManuallyResized); }
         cx.notify();
     }
 
@@ -1359,6 +1367,89 @@ impl DockArea {
 
 /// Rendering.
 impl DockArea {
+    /// Painted after resize handles and pane contents so the narrow insertion
+    /// band wins hit testing at the seam, including nested split boundaries.
+    fn gap_drop_band(
+        &self,
+        _split: NodeId,
+        child: NodeId,
+        axis: Axis,
+        leading: bool,
+        _window: &mut Window,
+        cx: &mut App,
+    ) -> AnyElement {
+        let area = self.this.clone();
+        let placement = match axis {
+            Axis::Horizontal => Placement::Left,
+            Axis::Vertical => Placement::Top,
+        };
+        let extent = self.renderer.split_gap_hit_extent(cx);
+        let band = div()
+            .id((
+                if leading {
+                    "gap-drop-leading"
+                } else {
+                    "gap-drop-trailing"
+                },
+                child.as_u64(),
+            ))
+            .absolute()
+            .when(axis == Axis::Horizontal, |band| {
+                band.top_0()
+                    .bottom_0()
+                    .w(extent)
+                    .when(leading, |band| band.left_0())
+                    .when(!leading, |band| band.right_0())
+            })
+            .when(axis == Axis::Vertical, |band| {
+                band.left_0()
+                    .right_0()
+                    .h(extent)
+                    .when(leading, |band| band.top_0())
+                    .when(!leading, |band| band.bottom_0())
+            })
+            .drag_over::<DragPanel>(|band, _, _, cx| {
+                band.bg(cx.theme().tokens.colors.primary.opacity(0.75))
+            })
+            .on_drop(move |drag: &DragPanel, window, cx| {
+                cx.stop_propagation();
+                _ = area.update(cx, |area, cx| {
+                    area.move_panel_to_gap(drag.panel(), child, placement, window, cx);
+                });
+            });
+        deferred(band).with_priority(4).into_any_element()
+    }
+
+    fn move_panel_to_gap(
+        &mut self,
+        panel: PanelId,
+        node: NodeId,
+        placement: Placement,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.locked {
+            return;
+        }
+        if self
+            .placement_of_panel(panel)
+            .and_then(|source| self.layout(source))
+            .is_some_and(|tree| tree.panel_is_beside(panel, node, placement))
+        {
+            return;
+        }
+        self.move_panel(
+            panel,
+            InsertTarget::Split {
+                node,
+                placement,
+                size: None,
+            },
+            window,
+            cx,
+        );
+    }
+
     /// Lower one container to an element.
     fn render_node(&self, node: &PaneNode, window: &mut Window, cx: &mut App) -> AnyElement {
         match node.kind() {
@@ -1392,6 +1483,36 @@ impl DockArea {
                         resizable_panel()
                             .visible(shown[ix])
                             .child(self.render_node(child, window, cx))
+                            .when(cx.has_active_drag() && !self.locked && shown[ix], |panel| {
+                                let previous = shown[..ix].iter().any(|shown| *shown);
+                                let next = children
+                                    .iter()
+                                    .enumerate()
+                                    .skip(ix + 1)
+                                    .find(|(ix, _)| shown[*ix])
+                                    .map(|(_, child)| child.id());
+                                panel
+                                    .when(previous, |panel| {
+                                        panel.child(self.gap_drop_band(
+                                            node.id(),
+                                            child.id(),
+                                            axis,
+                                            true,
+                                            window,
+                                            cx,
+                                        ))
+                                    })
+                                    .when_some(next, |panel, next| {
+                                        panel.child(self.gap_drop_band(
+                                            node.id(),
+                                            next,
+                                            axis,
+                                            false,
+                                            window,
+                                            cx,
+                                        ))
+                                    })
+                            })
                             // `flex_none` is what makes the size stick.
                             // `ResizablePanel` sets `flex_grow: 1` on itself,
                             // so a slot given a size would otherwise treat it
@@ -1934,6 +2055,11 @@ pub trait DockAreaRenderer: 'static {
         div().id("dock-area-center")
     }
 
+    /// Width of the insertion hit band within each slot adjoining a split.
+    fn split_gap_hit_extent(&self, _: &App) -> Pixels {
+        px(12.)
+    }
+
     /// The painted part of the divider between two slots of a split.
     ///
     /// `None` keeps base's own one-pixel line, so a skin that has no opinion
@@ -2028,7 +2154,7 @@ impl DockArea {
 
 #[cfg(test)]
 mod tests {
-    use gpui::{TestAppContext, VisualTestContext};
+    use gpui::{StatefulInteractiveElement as _, TestAppContext, VisualTestContext};
 
     use std::{
         cell::{Cell, RefCell},
@@ -2073,6 +2199,100 @@ mod tests {
             let _ = crate::Theme::global_mut(cx);
         });
         cx.add_window_view(|window, cx| DockArea::new("test-dock", None, window, cx))
+    }
+
+    struct GapDropSkin;
+    impl DockAreaRenderer for GapDropSkin {
+        fn tab_group_renderer(&self) -> Rc<dyn TabGroupRenderer> {
+            Rc::new(GapDropSkin)
+        }
+    }
+    impl TabGroupRenderer for GapDropSkin {
+        fn render_tab_bar(
+            &self,
+            group: &TabGroupContext,
+            _: &mut Window,
+            cx: &mut App,
+        ) -> AnyElement {
+            let name = format!("gap-tab-{}", group.node().as_u64());
+            div()
+                .id(("gap-test-tab", group.node().as_u64()))
+                .h(px(24.))
+                .w(px(80.))
+                .debug_selector(move || name.clone().into())
+                .when_some(group.drag_panel(0, cx), |tab, drag| {
+                    tab.on_drag(drag, |drag, _, _, cx| cx.new(|_| drag.clone()))
+                })
+                .into_any_element()
+        }
+    }
+
+    #[gpui::test]
+    fn gap_drop_hit_target_wins_resize_boundary_and_retains_entities(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let _ = crate::Theme::global_mut(cx);
+        });
+        let (area, cx) = cx.add_window_view(|window, cx| {
+            DockArea::new("gap-test", None, window, cx).with_renderer(Rc::new(GapDropSkin))
+        });
+        cx.update(|window, cx| {
+            let panels: Vec<_> = ["A", "B", "C"]
+                .into_iter()
+                .map(|name| TestPanel::new(name, cx))
+                .collect();
+            area.update(cx, |area, cx| {
+                area.set_center(
+                    DockLayout::h_split()
+                        .child(DockLayout::tabs().panel(panels[0].clone()), Some(px(200.)))
+                        .child(DockLayout::tabs().panel(panels[1].clone()), Some(px(200.)))
+                        .child(DockLayout::tabs().panel(panels[2].clone()), None),
+                    window,
+                    cx,
+                )
+            });
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let nodes = [
+            child_node(&area, 0, cx),
+            child_node(&area, 1, cx),
+            child_node(&area, 2, cx),
+        ];
+        let original = cx.read(|cx| area.read(cx).container_entity_ids());
+        let source = cx
+            .debug_bounds(Box::leak(format!("gap-tab-{}", nodes[2].as_u64()).into_boxed_str()))
+            .unwrap()
+            .center();
+        let seam = cx
+            .debug_bounds(Box::leak(format!("gap-tab-{}", nodes[1].as_u64()).into_boxed_str()))
+            .unwrap()
+            .left();
+        cx.simulate_mouse_down(source, gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.simulate_mouse_move(
+            gpui::point(source.x + px(15.), source.y),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::none(),
+        );
+        let drop = gpui::point(seam, px(80.));
+        cx.simulate_mouse_move(drop, gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.simulate_mouse_up(drop, gpui::MouseButton::Left, gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.read(|cx| {
+            let area = area.read(cx);
+            let tree = area.layout(DockPlacement::Center).unwrap();
+            let PaneRef::Split { children, .. } = tree.root().kind() else {
+                panic!("split")
+            };
+            assert_eq!(children.len(), 3);
+            assert_eq!(children[0].id(), nodes[0]);
+            assert_eq!(children[2].id(), nodes[1]);
+            let current = area.container_entity_ids();
+            for entry in original
+                .into_iter()
+                .filter(|(node, _)| nodes[..2].contains(node))
+            {
+                assert!(current.contains(&entry));
+            }
+        });
     }
 
     #[gpui::test]

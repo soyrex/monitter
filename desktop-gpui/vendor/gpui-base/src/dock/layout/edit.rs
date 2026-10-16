@@ -4,7 +4,7 @@ use gpui::Pixels;
 
 use crate::Placement;
 
-use super::node::{NodeId, NodeKind, PaneNode, PanelId};
+use super::node::{NodeId, NodeKind, PaneNode, PaneRef, PanelId};
 use super::tree::PaneTree;
 
 /// Where a panel should land.
@@ -59,6 +59,74 @@ impl PaneTree {
             let inserted = tree.apply_insert(panel, target);
             detached || inserted
         })
+    }
+
+    /// Insert at a split boundary. A singleton already beside that boundary
+    /// stays in place, retaining its node and measured allocation.
+    pub fn move_panel_to_gap(
+        &mut self,
+        panel: PanelId,
+        node: NodeId,
+        placement: Placement,
+    ) -> EditResult {
+        if self.find_node(node).is_none()
+            || !self.contains_panel(panel)
+            || self.panel_is_beside(panel, node, placement)
+        {
+            return EditResult::default();
+        }
+        self.move_panel(
+            panel,
+            InsertTarget::Split {
+                node,
+                placement,
+                size: None,
+            },
+        )
+    }
+
+    pub(crate) fn panel_is_beside(
+        &self,
+        panel: PanelId,
+        node: NodeId,
+        placement: Placement,
+    ) -> bool {
+        let Some(source) = self.find_panel_node(panel) else {
+            return false;
+        };
+        let Some(source_path) = self.path_of_node(source) else {
+            return false;
+        };
+        let Some(target_path) = self.path_of_node(node) else {
+            return false;
+        };
+        let PaneRef::Tabs { panels, .. } = self.node_at(&source_path).kind() else {
+            return false;
+        };
+        if panels.len() != 1 {
+            return false;
+        }
+        if source == node {
+            return true;
+        }
+        let Some((source_parent, source_ix)) = split_parent_of(&source_path) else {
+            return false;
+        };
+        let Some((target_parent, target_ix)) = split_parent_of(&target_path) else {
+            return false;
+        };
+        if source_parent != target_parent {
+            return false;
+        }
+        let NodeKind::Split { axis, .. } = self.node_at(&target_parent).kind_ref() else {
+            return false;
+        };
+        *axis == placement.axis()
+            && if matches!(placement, Placement::Left | Placement::Top) {
+                source_ix + 1 == target_ix
+            } else {
+                target_ix + 1 == source_ix
+            }
     }
 
     pub fn split(
@@ -359,6 +427,117 @@ mod tests {
         let tabs = tree.push_tabs_for_test(tree.root().id(), vec![panel(1)]);
         tree.normalize();
         (tree, tabs)
+    }
+
+    #[test]
+    fn gap_drop_inserts_between_adjacent_panes_and_retains_neighbours() {
+        let (mut tree, first) = tree_with_one_group();
+        tree.split(first, panel(2), Placement::Right, None);
+        let second = tree.find_panel_node(panel(2)).unwrap();
+        tree.split(second, panel(3), Placement::Right, None);
+        assert!(
+            tree.move_panel_to_gap(panel(3), second, Placement::Left)
+                .changed()
+        );
+        assert_eq!(
+            tree.panels().collect::<Vec<_>>(),
+            vec![panel(1), panel(3), panel(2)]
+        );
+        assert_eq!(tree.find_panel_node(panel(1)), Some(first));
+        assert_eq!(tree.find_panel_node(panel(2)), Some(second));
+        assert_ne!(tree.find_panel_node(panel(3)), Some(second));
+    }
+
+    #[test]
+    fn gap_drop_adjoining_nested_split_inserts_at_outer_boundary() {
+        let (mut tree, first) = tree_with_one_group();
+        tree.split(first, panel(2), Placement::Right, None);
+        let second = tree.find_panel_node(panel(2)).unwrap();
+        tree.split(second, panel(3), Placement::Bottom, None);
+        tree.split(first, panel(4), Placement::Left, None);
+        let nested = match tree.root().kind() {
+            PaneRef::Split { children, .. } => children.last().unwrap().id(),
+            _ => panic!("expected root split"),
+        };
+        assert!(
+            tree.move_panel_to_gap(panel(4), nested, Placement::Left)
+                .changed()
+        );
+        assert_eq!(
+            tree.panels().collect::<Vec<_>>(),
+            vec![panel(1), panel(4), panel(2), panel(3)]
+        );
+        assert!(matches!(
+            tree.find_node(nested).unwrap().kind(),
+            PaneRef::Split {
+                axis: gpui::Axis::Vertical,
+                ..
+            }
+        ));
+        let PaneRef::Split { children, .. } = tree.root().kind() else {
+            panic!("root split")
+        };
+        assert_eq!(children.len(), 3);
+        assert!(
+            matches!(children[1].kind(), PaneRef::Tabs { panels, .. } if panels == &[panel(4)])
+        );
+    }
+
+    #[test]
+    fn gap_drop_extracts_one_tab_from_adjacent_group() {
+        let (mut tree, first) = tree_with_one_group();
+        tree.insert_panel(
+            panel(3),
+            InsertTarget::Tabs {
+                node: first,
+                ix: None,
+                activate: false,
+            },
+        );
+        tree.split(first, panel(2), Placement::Right, None);
+        let second = tree.find_panel_node(panel(2)).unwrap();
+        assert!(
+            tree.move_panel_to_gap(panel(3), second, Placement::Left)
+                .changed()
+        );
+        assert_eq!(
+            tree.panels().collect::<Vec<_>>(),
+            vec![panel(1), panel(3), panel(2)]
+        );
+        assert_eq!(tree.find_panel_node(panel(1)), Some(first));
+        assert_ne!(tree.find_panel_node(panel(3)), Some(first));
+    }
+
+    #[test]
+    fn gap_drop_stale_target_preserves_source() {
+        let (mut tree, first) = tree_with_one_group();
+        tree.split(first, panel(2), Placement::Right, None);
+        let stale = tree.find_panel_node(panel(2)).unwrap();
+        tree.remove_panel(panel(2));
+        let snapshot = tree.clone();
+        assert!(
+            !tree
+                .move_panel_to_gap(panel(1), stale, Placement::Left)
+                .changed()
+        );
+        assert_eq!(tree, snapshot);
+    }
+
+    #[test]
+    fn gap_drop_source_beside_boundary_is_no_op_on_both_axes() {
+        for (before, after) in [
+            (Placement::Left, Placement::Right),
+            (Placement::Top, Placement::Bottom),
+        ] {
+            let (mut tree, first) = tree_with_one_group();
+            tree.split(first, panel(2), after, None);
+            let second = tree.find_panel_node(panel(2)).unwrap();
+            let snapshot = tree.clone();
+            assert!(!tree.move_panel_to_gap(panel(1), second, before).changed());
+            assert!(!tree.move_panel_to_gap(panel(2), first, after).changed());
+            assert!(!tree.move_panel_to_gap(panel(2), second, before).changed());
+            assert_eq!(tree, snapshot);
+        }
     }
 
     #[test]

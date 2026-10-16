@@ -1,4 +1,4 @@
-//! A noninteractive AppKit outline above GPUI and native browser child views.
+//! A noninteractive AppKit outline and outward glow above GPUI/browser child views.
 //! Active-pane painting keeps the view visible; a frame finalizer hides it only
 //! after a rendered workspace observes that no active pane owns it.
 use gpui_kit::{Bounds, Pixels, Point, Rgba, Window};
@@ -53,13 +53,22 @@ fn record_geometry_paint() {
 #[cfg(not(target_os = "macos"))]
 pub fn begin_frame(_: &Window) {}
 #[cfg(not(target_os = "macos"))]
-pub fn observe_candidate(_: bool, _: &Window) {}
+pub fn observe_candidate(_: &str, _: bool, _: &Window) {}
 #[cfg(not(target_os = "macos"))]
 pub fn finish_frame(_: &Window) {}
 #[cfg(not(target_os = "macos"))]
 pub fn clear(_: &Window) {}
 #[cfg(not(target_os = "macos"))]
-pub fn paint(_: Bounds<Pixels>, _: Rgba, _: &[Point<Pixels>], _: &Window) -> bool {
+pub fn retain_panes(_: &[String], _: &Window) {}
+#[cfg(not(target_os = "macos"))]
+pub fn paint(
+    _: &str,
+    _: Bounds<Pixels>,
+    _: Rgba,
+    _: Rgba,
+    _: &[Point<Pixels>],
+    _: &Window,
+) -> bool {
     false
 }
 
@@ -70,7 +79,7 @@ mod macos {
     use objc2::runtime::AnyObject;
     use objc2::{ClassType, MainThreadMarker, MainThreadOnly, class, define_class, msg_send};
     use objc2_app_kit::NSView;
-    use objc2_foundation::{NSPoint, NSRect, NSSize};
+    use objc2_foundation::{NSNumber, NSPoint, NSRect, NSSize, NSString};
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use std::{cell::RefCell, collections::HashMap, ffi::c_void, ptr};
 
@@ -105,6 +114,7 @@ mod macos {
         fn CGPathCreateMutable() -> *mut NativeCGPath;
         fn CGPathMoveToPoint(path: *mut NativeCGPath, transform: *const c_void, x: f64, y: f64);
         fn CGPathAddLineToPoint(path: *mut NativeCGPath, transform: *const c_void, x: f64, y: f64);
+        fn CGPathAddRect(path: *mut NativeCGPath, transform: *const c_void, rect: NSRect);
         fn CGPathCloseSubpath(path: *mut NativeCGPath);
         fn CGPathRelease(path: *const NativeCGPath);
     }
@@ -139,11 +149,16 @@ mod macos {
         view: Weak<PaneHighlightView>,
         bounds: Option<Bounds<Pixels>>,
         color: Option<Rgba>,
+        glow_color: Option<Rgba>,
+        pulsing: bool,
         contour: Vec<Point<Pixels>>,
+        glow_layers: Vec<Retained<AnyObject>>,
+        glow_mask: Retained<AnyObject>,
+        glow_container: Retained<AnyObject>,
         frame: OverlayFrameState,
     }
     thread_local! {
-        static OVERLAYS: RefCell<HashMap<usize, Overlay>> = RefCell::new(HashMap::new());
+        static OVERLAYS: RefCell<HashMap<(usize, String), Overlay>> = RefCell::new(HashMap::new());
     }
 
     fn host(window: &Window) -> Option<*mut NSView> {
@@ -152,6 +167,34 @@ mod macos {
             RawWindowHandle::AppKit(handle) => Some(handle.ns_view.as_ptr().cast()),
             _ => None,
         }
+    }
+
+    /// Reconcile live dock pane IDs at a topology boundary. Cached pane render
+    /// replays remain visible; closed or switched-away panes cannot leave ghosts.
+    pub fn retain_panes(pane_ids: &[String], window: &Window) {
+        if MainThreadMarker::new().is_none() {
+            return;
+        }
+        let Some(host) = host(window) else {
+            return;
+        };
+        OVERLAYS.with(|state| {
+            state.borrow_mut().retain(|(owner, id), overlay| {
+                let Some(view) = overlay.view.load() else {
+                    return false;
+                };
+                if *owner != host as usize || pane_ids.contains(id) {
+                    return true;
+                }
+                if overlay.frame.clear() {
+                    record_hide();
+                }
+                unsafe {
+                    let _: () = msg_send![&*view, removeFromSuperview];
+                }
+                false
+            })
+        });
     }
 
     pub fn begin_frame(window: &Window) {
@@ -166,8 +209,10 @@ mod macos {
             // The view does not retain its parent. Release detached overlays
             // left behind by closed windows on the next live frame.
             state.retain(|_, overlay| overlay.view.load().is_some());
-            if let Some(overlay) = state.get_mut(&(host as usize)) {
-                overlay.frame.begin_frame();
+            for ((owner, _), overlay) in state.iter_mut() {
+                if *owner == host as usize {
+                    overlay.frame.begin_frame();
+                }
             }
         });
     }
@@ -176,7 +221,7 @@ mod macos {
     /// active outline. Called during render, before GPUI's deferred paint pass.
     /// A candidate survives a replayed deferred Canvas even when its callback
     /// is not invoked on that frame.
-    pub fn observe_candidate(candidate: bool, window: &Window) {
+    pub fn observe_candidate(pane_id: &str, candidate: bool, window: &Window) {
         if MainThreadMarker::new().is_none() {
             return;
         }
@@ -184,7 +229,10 @@ mod macos {
             return;
         };
         OVERLAYS.with(|state| {
-            if let Some(overlay) = state.borrow_mut().get_mut(&(host as usize)) {
+            if let Some(overlay) = state
+                .borrow_mut()
+                .get_mut(&(host as usize, pane_id.to_owned()))
+            {
                 overlay.frame.observe_candidate(candidate);
             }
         });
@@ -194,38 +242,15 @@ mod macos {
     /// active pane during this frame. The caller runs after deferred pane
     /// overlays; an unobserved cached replay preserves the current view.
     pub fn finish_frame(window: &Window) {
-        if MainThreadMarker::new().is_none() {
-            return;
-        }
-        let Some(host) = host(window) else {
-            return;
-        };
-        OVERLAYS.with(|state| {
-            let mut state = state.borrow_mut();
-            state.retain(|_, overlay| overlay.view.load().is_some());
-            let Some(overlay) = state.get_mut(&(host as usize)) else {
-                return;
-            };
-            let should_hide = overlay.frame.finish_frame();
-            if !should_hide {
-                return;
-            }
-            let Some(view) = overlay.view.load() else {
-                return;
-            };
-            unsafe {
-                let _: () = msg_send![class!(CATransaction), begin];
-                let _: () = msg_send![class!(CATransaction), setDisableActions: true];
-                view.setHidden(true);
-                let _: () = msg_send![class!(CATransaction), commit];
-            }
-            record_hide();
-        });
+        update_window_visibility(window, false);
     }
 
-    /// Explicitly hides the native highlight for lock and other state
-    /// transitions that must take effect immediately.
+    /// Hide every pane overlay for lock and other immediate state transitions.
     pub fn clear(window: &Window) {
+        update_window_visibility(window, true);
+    }
+
+    fn update_window_visibility(window: &Window, clear: bool) {
         if MainThreadMarker::new().is_none() {
             return;
         }
@@ -235,28 +260,29 @@ mod macos {
         OVERLAYS.with(|state| {
             let mut state = state.borrow_mut();
             state.retain(|_, overlay| overlay.view.load().is_some());
-            let Some(overlay) = state.get_mut(&(host as usize)) else {
-                return;
-            };
-            if !overlay.frame.clear() {
-                return;
+            for ((owner, _), overlay) in state.iter_mut() {
+                if *owner != host as usize { continue; }
+                let hide = if clear { overlay.frame.clear() } else { overlay.frame.finish_frame() };
+                if !hide { continue; }
+                let Some(view) = overlay.view.load() else { continue; };
+                unsafe {
+                    let _: () = msg_send![class!(CATransaction), begin];
+                    let _: () = msg_send![class!(CATransaction), setDisableActions: true];
+                    let _: () = msg_send![&*overlay.glow_container, removeAnimationForKey: &*NSString::from_str("monitter-activity-glow-pulse")];
+                    overlay.pulsing = false;
+                    view.setHidden(true);
+                    let _: () = msg_send![class!(CATransaction), commit];
+                }
+                record_hide();
             }
-            let Some(view) = overlay.view.load() else {
-                return;
-            };
-            unsafe {
-                let _: () = msg_send![class!(CATransaction), begin];
-                let _: () = msg_send![class!(CATransaction), setDisableActions: true];
-                view.setHidden(true);
-                let _: () = msg_send![class!(CATransaction), commit];
-            }
-            record_hide();
         });
     }
 
     pub fn paint(
+        pane_id: &str,
         bounds: Bounds<Pixels>,
         color: Rgba,
+        glow_color: Rgba,
         contour: &[Point<Pixels>],
         window: &Window,
     ) -> bool {
@@ -280,21 +306,46 @@ mod macos {
         } else {
             host.bounds().size.height - top - height
         };
-        let frame = NSRect::new(NSPoint::new(x, y), NSSize::new(width, height));
+        const GLOW_SPREAD: f64 = 20.;
+        let frame = NSRect::new(
+            NSPoint::new(x - GLOW_SPREAD, y - GLOW_SPREAD),
+            NSSize::new(width + GLOW_SPREAD * 2., height + GLOW_SPREAD * 2.),
+        );
         OVERLAYS.with(|state| {
             let mut state = state.borrow_mut();
             state.retain(|_, overlay| overlay.view.load().is_some());
-            let overlay = state.entry(host_ptr as usize).or_insert_with(|| {
+            let overlay = state.entry((host_ptr as usize, pane_id.to_owned())).or_insert_with(|| {
                 let view: Retained<PaneHighlightView> =
                     unsafe { msg_send![PaneHighlightView::alloc(mtm), initWithFrame: frame] };
                 view.setWantsLayer(true);
                 view.setHidden(true);
+                let mut glow_layers = Vec::with_capacity(20);
+                let glow_mask;
+                let glow_container;
                 unsafe {
                     let shape: *mut AnyObject = msg_send![class!(CAShapeLayer), layer];
                     let _: () = msg_send![&*view, setLayer: shape];
                     let _: () = msg_send![shape, setFillColor: ptr::null::<NativeCGColor>()];
                     let _: () = msg_send![shape, setLineWidth: 1.0f64];
                     let _: () = msg_send![shape, setGeometryFlipped: true];
+                    // The even-odd mask keeps the outside of the pane contour,
+                    // allowing the halo to radiate outward into its 20px margin.
+                    let glow: *mut AnyObject = msg_send![class!(CALayer), layer];
+                    let mask: *mut AnyObject = msg_send![class!(CAShapeLayer), layer];
+                    let white: *mut AnyObject = msg_send![class!(NSColor), whiteColor];
+                    let white_cg: *const NativeCGColor = msg_send![white, CGColor];
+                    let _: () = msg_send![mask, setFillColor: white_cg];
+                    let _: () = msg_send![glow, setMask: mask];
+                    let _: () = msg_send![shape, addSublayer: glow];
+                    glow_container = Retained::retain(glow).expect("new glow container");
+                    glow_mask = Retained::retain(mask).expect("new glow mask");
+                    for depth in (1..=20).rev() {
+                        let band: *mut AnyObject = msg_send![class!(CAShapeLayer), layer];
+                        let _: () = msg_send![band, setFillColor: ptr::null::<NativeCGColor>()];
+                        let _: () = msg_send![band, setLineWidth: f64::from(depth * 2)];
+                        let _: () = msg_send![glow, addSublayer: band];
+                        glow_layers.push(Retained::retain(band).expect("new glow band"));
+                    }
                 }
                 // The native parent owns the overlay. The registry is weak, so
                 // destroying the host releases the overlay without a callback.
@@ -306,7 +357,12 @@ mod macos {
                     view: Weak::from_retained(&view),
                     bounds: None,
                     color: None,
+                    glow_color: None,
+                    pulsing: false,
                     contour: Vec::new(),
+                    glow_layers,
+                    glow_mask,
+                    glow_container,
                     frame: OverlayFrameState::default(),
                 }
             });
@@ -330,6 +386,14 @@ mod macos {
                 }
                 let layer: *mut AnyObject = msg_send![&*view, layer];
                 if !layer.is_null() {
+                    if bounds_changed {
+                        let local = NSRect::new(NSPoint::new(0., 0.), frame.size);
+                        let _: () = msg_send![&*overlay.glow_container, setFrame: local];
+                        let _: () = msg_send![&*overlay.glow_mask, setFrame: local];
+                        for band in &overlay.glow_layers {
+                            let _: () = msg_send![&**band, setFrame: local];
+                        }
+                    }
                     let _: () =
                         msg_send![layer, setContentsScale: f64::from(window.scale_factor())];
                     if bounds_changed || overlay.contour != contour {
@@ -338,19 +402,21 @@ mod macos {
                             for (index, point) in contour.iter().enumerate() {
                                 let point_x: f64 = point.x.into();
                                 let point_y: f64 = point.y.into();
+                                let local_x = point_x - x + GLOW_SPREAD;
+                                let local_y = point_y - top + GLOW_SPREAD;
                                 if index == 0 {
                                     CGPathMoveToPoint(
                                         path,
                                         ptr::null(),
-                                        point_x - x,
-                                        point_y - top,
+                                        local_x,
+                                        local_y,
                                     );
                                 } else {
                                     CGPathAddLineToPoint(
                                         path,
                                         ptr::null(),
-                                        point_x - x,
-                                        point_y - top,
+                                        local_x,
+                                        local_y,
                                     );
                                 }
                             }
@@ -358,6 +424,25 @@ mod macos {
                             // CAShapeLayer copies the supplied CGPath; release
                             // our creation reference after assigning the path.
                             let _: () = msg_send![layer, setPath: path.cast_const()];
+                            let mask_path = CGPathCreateMutable();
+                            let outer = NSRect::new(NSPoint::new(0., 0.), frame.size);
+                            CGPathAddRect(mask_path, ptr::null(), outer);
+                            // Re-add pane contour as a hole so only its exterior glows.
+                            for (index, point) in contour.iter().enumerate() {
+                                let px: f64 = point.x.into();
+                                let py: f64 = point.y.into();
+                                let (px, py) = (px - x + GLOW_SPREAD, py - top + GLOW_SPREAD);
+                                if index == 0 { CGPathMoveToPoint(mask_path, ptr::null(), px, py); }
+                                else { CGPathAddLineToPoint(mask_path, ptr::null(), px, py); }
+                            }
+                            CGPathCloseSubpath(mask_path);
+                            let even_odd = NSString::from_str("evenOdd");
+                            let _: () = msg_send![&*overlay.glow_mask, setFillRule: &*even_odd];
+                            let _: () = msg_send![&*overlay.glow_mask, setPath: mask_path.cast_const()];
+                            CGPathRelease(mask_path);
+                            for band in &overlay.glow_layers {
+                                let _: () = msg_send![&**band, setPath: path.cast_const()];
+                            }
                             CGPathRelease(path);
                             overlay.contour.clear();
                             overlay.contour.extend_from_slice(contour);
@@ -372,9 +457,49 @@ mod macos {
                         let _: () = msg_send![layer, setStrokeColor: cg_color];
                         overlay.color = Some(color);
                     }
+                    // Compositor-only breathing: a three-second round trip,
+                    // with no GPUI timers or chat/content invalidation.
+                    let pulse = glow_color.a > 0. && crate::native_motion::motion_allowed();
+                    if overlay.pulsing != pulse {
+                        let key = NSString::from_str("monitter-activity-glow-pulse");
+                        let _: () = msg_send![&*overlay.glow_container, removeAnimationForKey: &*key];
+                        if pulse {
+                            let animation: *mut AnyObject = msg_send![class!(CABasicAnimation), animationWithKeyPath: &*NSString::from_str("opacity")];
+                            let low = NSNumber::new_f32(0.65);
+                            let high = NSNumber::new_f32(1.0);
+                            let timing: *mut AnyObject = msg_send![class!(CAMediaTimingFunction), functionWithName: &*NSString::from_str("easeInEaseOut")];
+                            let _: () = msg_send![animation, setFromValue: &*low];
+                            let _: () = msg_send![animation, setToValue: &*high];
+                            let _: () = msg_send![animation, setDuration: 1.5f64];
+                            let _: () = msg_send![animation, setAutoreverses: true];
+                            let _: () = msg_send![animation, setRepeatCount: f32::INFINITY];
+                            let _: () = msg_send![animation, setTimingFunction: timing];
+                            let _: () = msg_send![&*overlay.glow_container, addAnimation: animation forKey: &*key];
+                        }
+                        overlay.pulsing = pulse;
+                    }
+                    if overlay.glow_color != Some(glow_color) {
+                        for (index, band) in overlay.glow_layers.iter().enumerate() {
+                            // A quadratic falloff reaches transparency at 20px.
+                            // Composite narrow bands over wider, fainter bands.
+                            let depth = 20 - index;
+                            let outer = (20 - depth) as f64 / 20.;
+                            let inner = (21 - depth) as f64 / 20.;
+                            let outer_alpha = 0.18 * outer * outer;
+                            let inner_alpha = 0.18 * inner * inner;
+                            let alpha = (inner_alpha - outer_alpha) / (1. - outer_alpha);
+                            let tint: *mut AnyObject = msg_send![class!(NSColor),
+                                colorWithSRGBRed: f64::from(glow_color.r)
+                                green: f64::from(glow_color.g) blue: f64::from(glow_color.b)
+                                alpha: f64::from(glow_color.a) * alpha];
+                            let tint_cg: *const NativeCGColor = msg_send![tint, CGColor];
+                            let _: () = msg_send![&**band, setStrokeColor: tint_cg];
+                        }
+                        overlay.glow_color = Some(glow_color);
+                    }
                 }
                 // Above every sibling, including browser views created later.
-                // Parent supplies the inset stroke contour: no layout gap.
+                // The expanded frame reserves room for the outward halo.
                 let subviews: *mut AnyObject = msg_send![host, subviews];
                 let last: *mut AnyObject = msg_send![subviews, lastObject];
                 if last.cast_const() != Retained::as_ptr(&view).cast::<AnyObject>() {
@@ -391,7 +516,7 @@ mod macos {
     }
 }
 #[cfg(target_os = "macos")]
-pub use macos::{begin_frame, clear, finish_frame, observe_candidate, paint};
+pub use macos::{begin_frame, clear, finish_frame, observe_candidate, paint, retain_panes};
 
 #[cfg(all(test, feature = "visual-export"))]
 #[path = "pane_highlight_tests.rs"]

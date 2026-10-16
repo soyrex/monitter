@@ -56,7 +56,7 @@ pub use gpui_base::dock::{
     register_panel,
 };
 pub use panel::*;
-pub use tab_panel::{DragPanelPreview, pane_controls, pane_drag_region, pane_menu};
+pub use tab_panel::{DragPanelPreview, pane_controls, pane_move_control, pane_close_control, pane_zoom_control, pane_drag_region, pane_menu};
 
 actions!(dock, [ToggleZoom, ClosePanel]);
 

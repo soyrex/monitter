@@ -602,7 +602,7 @@ mod tests {
             codex_home: None,
             acp: None,
             model_settings: None,
-            archived_agent_name: None,
+            archived_agent_name: None, agent_worktree: None,
         });
         snap
     }

@@ -2528,6 +2528,7 @@ fn thread_request(
                 "mcp_servers.monitter.url": endpoint,
                 "mcp_servers.monitter.bearer_token_env_var":"MONITTER_TOKEN",
                 "mcp_servers.monitter.required":true,
+                "mcp_servers.monitter.default_tools_approval_mode": if extensions.auto_approve_monitter_mcp { "approve" } else { "prompt" },
                 "mcp_servers.monitter.enabled_tools": crate::collaboration_mcp::tool_names(),
                 "mcp_servers.monitter.tools.install_shared_skill.approval_mode":"prompt"
             })
@@ -2573,6 +2574,36 @@ fn thread_request(
 mod tests {
     use super::*;
     use std::{io::Cursor, path::PathBuf};
+
+
+    #[test]
+    fn monitter_mcp_auto_approval_is_scoped_and_opt_out_survives_resume() {
+        let task: Task = serde_json::from_value(json!({
+            "id":"task", "agentId":"agent", "title":"task",
+            "nativeSessionId":"thread", "status":"idle", "archived":false,
+            "createdAt":0, "updatedAt":0, "parentTaskId":null, "channelId":null,
+            "hostId":"host", "cwd":"/tmp", "provider":"codex", "model":"",
+            "sandbox":"workspace-write", "projectId":null
+        })).unwrap();
+        for enabled in [true, false] {
+            let mut extensions = crate::extensions_runtime::RuntimeExtensions::default();
+            extensions.auto_approve_monitter_mcp = enabled;
+            let request = thread_request(&task, Some("http://127.0.0.1:4444/mcp"),
+                Some("http://127.0.0.1:4555/mcp"), &extensions);
+            assert_eq!(request["method"], "thread/resume");
+            assert_eq!(request["params"]["approvalPolicy"], "on-request");
+            assert_eq!(request["params"]["sandbox"], "workspace-write");
+            let config = request["params"]["config"].as_object().unwrap();
+            assert_eq!(config["mcp_servers.monitter.default_tools_approval_mode"],
+                if enabled { "approve" } else { "prompt" });
+            assert_eq!(config["mcp_servers.monitter.tools.install_shared_skill.approval_mode"], "prompt");
+            assert!(config.keys().filter(|key| key.contains("approval_mode"))
+                .all(|key| key.starts_with("mcp_servers.monitter.")));
+            let no_grant = thread_request(&task, None, None, &extensions);
+            assert!(no_grant["params"]["config"].as_object().is_none_or(|config|
+                config.keys().all(|key| !key.starts_with("mcp_servers.monitter."))));
+        }
+    }
 
     fn mcp_consent_fixture() -> Value {
         json!({"mode":"form","serverName":"chrome-devtools","message":"Allow tool?",

@@ -2,7 +2,8 @@ use std::rc::Rc;
 
 use gpui::{
     Anchor, AnyElement, App, Context, ElementId, InteractiveElement as _, IntoElement,
-    ParentElement, RenderOnce, StyleRefinement, Styled, Window, div, prelude::FluentBuilder as _,
+    ParentElement, RenderOnce, SharedString, StyleRefinement, Styled, Window, div,
+    prelude::FluentBuilder as _,
 };
 use gpui_base::HoverCard as BaseHoverCard;
 pub use gpui_base::HoverCardState;
@@ -27,6 +28,7 @@ pub struct HoverCard {
                 + 'static,
         >,
     >,
+    header: Option<(SharedString, SharedString)>,
     children: Vec<AnyElement>,
     open_delay: Duration,
     close_delay: Duration,
@@ -43,12 +45,23 @@ impl HoverCard {
             anchor: Anchor::TopCenter,
             trigger: None,
             content: None,
+            header: None,
             children: vec![],
             open_delay: Duration::from_secs_f64(0.6),
             close_delay: Duration::from_secs_f64(0.3),
             appearance: true,
             on_open_change: None,
         }
+    }
+
+    /// Add a title and supporting text above the popup content.
+    pub fn header(
+        mut self,
+        title: impl Into<SharedString>,
+        subtitle: impl Into<SharedString>,
+    ) -> Self {
+        self.header = Some((title.into(), subtitle.into()));
+        self
     }
 
     /// Set the anchor corner of the hover card, default is [`Anchor::TopCenter`].
@@ -127,6 +140,7 @@ impl RenderOnce for HoverCard {
         let anchor = self.anchor;
         let appearance = self.appearance;
         let content = self.content;
+        let header = self.header;
         let children = self.children;
         let style = self.style;
 
@@ -136,12 +150,16 @@ impl RenderOnce for HoverCard {
             .close_delay(self.close_delay)
             .trigger((trigger)(window, cx))
             .content(move |state, window, cx| {
-                Popover::render_popover_content(anchor, appearance, window, cx)
+                Popover::render_popover_content(anchor, appearance, header, window, cx)
                     .overflow_hidden()
-                    .when_some(content, |this, content| {
-                        this.child((content)(state, window, cx))
-                    })
-                    .children(children)
+                    .child(
+                        crate::v_flex()
+                            .when(appearance, |this| this.p_3())
+                            .when_some(content, |this, content| {
+                                this.child((content)(state, window, cx))
+                            })
+                            .children(children),
+                    )
                     .refine_style(&style)
             })
             .when_some(self.on_open_change, |this, callback| {

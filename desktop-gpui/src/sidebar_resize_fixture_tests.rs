@@ -41,7 +41,7 @@ impl Render for SidebarResizeHarness {
         {
             self.suppress_resize_event.set(true);
             self.state.update(cx, |state, cx| {
-                state.resize_panel(0, super::design::ui_px(desired, self.scale), window, cx);
+                state.resize_panel_for_layout(0, super::design::ui_px(desired, self.scale), window, cx);
             });
             self.suppress_resize_event.set(false);
         }
@@ -65,10 +65,11 @@ impl Render for SidebarResizeHarness {
                 self.width_touched.get(),
                 self.collapsed.get(),
                 is_resizing,
+                self.scale,
             ) {
                 self.suppress_resize_event.set(true);
                 self.state.update(cx, |state, cx| {
-                    state.resize_panel(0, super::design::ui_px(desired, self.scale), window, cx);
+                    state.resize_panel_for_layout(0, super::design::ui_px(desired, self.scale), window, cx);
                 });
                 self.suppress_resize_event.set(false);
             }
@@ -198,16 +199,42 @@ fn drag_sidebar_to(visual: &mut VisualTestContext, target_x: f32) {
 fn sidebar_drag_crosses_threshold_then_release_collapses_and_can_expand(cx: &mut TestAppContext) {
     let (harness, visual) = fixture(cx, false, 252., 100);
 
-    drag_sidebar_to(visual, 120.);
+    drag_sidebar_to(visual, 119.);
     harness.read_with(visual, |harness, cx| {
         assert!(harness.state.read(cx).is_resizing());
         assert!(!harness.collapsed.get());
         assert_eq!(
             harness.state.read(cx).sizes()[0].as_f32().round(),
-            120.,
-            "the active divider drag must be allowed below the normal 160px minimum"
+            119.,
+            "the active divider drag must be allowed below the 120px expanded threshold"
         );
-        assert_eq!(sidebar_resize_target(120., false, true, 100), None);
+        assert_eq!(sidebar_resize_target(119., false, true, 100), None);
+    });
+    visual.simulate_mouse_up(
+        point(px(119.), px(90.)),
+        MouseButton::Left,
+        Modifiers::default(),
+    );
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    harness.read_with(visual, |harness, cx| {
+        assert!(
+            harness.collapsed.get(),
+            "release below 120px collapses the rail"
+        );
+        assert!(!harness.state.read(cx).is_resizing());
+        assert_eq!(
+            harness.state.read(cx).sizes()[0].as_f32().round(),
+            80.,
+            "the release frame normalizes the collapsed rail to its compact width"
+        );
+    });
+
+    drag_sidebar_to(visual, 120.);
+    harness.read_with(visual, |harness, cx| {
+        assert!(harness.state.read(cx).is_resizing());
+        assert!(harness.collapsed.get());
+        assert_eq!(harness.state.read(cx).sizes()[0].as_f32().round(), 120.);
     });
     visual.simulate_mouse_up(
         point(px(120.), px(90.)),
@@ -218,39 +245,13 @@ fn sidebar_drag_crosses_threshold_then_release_collapses_and_can_expand(cx: &mut
     visual.update(|window, cx| window.draw(cx).clear(cx));
     harness.read_with(visual, |harness, cx| {
         assert!(
-            harness.collapsed.get(),
-            "release below 140px collapses the rail"
-        );
-        assert!(!harness.state.read(cx).is_resizing());
-        assert_eq!(
-            harness.state.read(cx).sizes()[0].as_f32().round(),
-            80.,
-            "the release frame normalizes the collapsed rail to its compact width"
-        );
-    });
-
-    drag_sidebar_to(visual, 105.);
-    harness.read_with(visual, |harness, cx| {
-        assert!(harness.state.read(cx).is_resizing());
-        assert!(harness.collapsed.get());
-        assert_eq!(harness.state.read(cx).sizes()[0].as_f32().round(), 105.);
-    });
-    visual.simulate_mouse_up(
-        point(px(105.), px(90.)),
-        MouseButton::Left,
-        Modifiers::default(),
-    );
-    visual.update(|window, cx| window.draw(cx).clear(cx));
-    visual.update(|window, cx| window.draw(cx).clear(cx));
-    harness.read_with(visual, |harness, cx| {
-        assert!(
             !harness.collapsed.get(),
-            "dragging past the compact hysteresis threshold expands the rail"
+            "dragging past the 120px threshold expands the rail"
         );
         assert_eq!(
             harness.state.read(cx).sizes()[0].as_f32().round(),
-            160.,
-            "the expanded rail restores its ordinary minimum width after release"
+            120.,
+            "the expanded rail restores its 120px boundary width after release"
         );
     });
 }
@@ -496,4 +497,41 @@ fn hidden_transition_drag_release_persists_full_even_without_a_collapse_change(c
         assert!(!harness.collapsed.get());
         assert_eq!(harness.persisted_mode.get(), super::preferences_modal::SidebarMode::Full);
     });
+}
+
+#[gpui_kit::test]
+fn sidebar_raw_119_120_pixel_boundary_survives_scaled_real_divider_gestures(
+    cx: &mut TestAppContext,
+) {
+    for scale in [100, 150] {
+        let (harness, visual) = fixture(cx, false, 252., scale);
+        for (width, collapsed, expected_width) in
+            [(120., false, 120.), (119., true, 80.), (120., false, 120.)]
+        {
+            drag_sidebar_to(visual, width);
+            visual.simulate_mouse_up(
+                point(px(width), px(90.)),
+                MouseButton::Left,
+                Modifiers::default(),
+            );
+            visual.update(|window, cx| window.draw(cx).clear(cx));
+            visual.update(|window, cx| window.draw(cx).clear(cx));
+            harness.read_with(visual, |harness, cx| {
+                assert_eq!(
+                    harness.collapsed.get(),
+                    collapsed,
+                    "scale {scale}, raw width {width}"
+                );
+                assert!((harness.state.read(cx).sizes()[0].as_f32() - expected_width).abs() < 0.01);
+                assert_eq!(
+                    harness.persisted_mode.get(),
+                    if collapsed {
+                        super::preferences_modal::SidebarMode::Icons
+                    } else {
+                        super::preferences_modal::SidebarMode::Full
+                    }
+                );
+            });
+        }
+    }
 }

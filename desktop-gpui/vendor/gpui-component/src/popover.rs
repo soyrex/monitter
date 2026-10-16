@@ -1,8 +1,8 @@
 use gpui::{
     Anchor, Animation, AnimationExt as _, AnyElement, App, Bounds, Context, Div, ElementId,
     FocusHandle, InteractiveElement as _, IntoElement, MouseButton, ParentElement, PathBuilder,
-    Pixels, Point, RenderOnce, Stateful, StyleRefinement, Styled, Window, canvas, point,
-    prelude::FluentBuilder as _, px,
+    Pixels, Point, RenderOnce, SharedString, Stateful, StyleRefinement, Styled, Window, canvas,
+    point, prelude::FluentBuilder as _, px,
 };
 use std::{cell::Cell, rc::Rc, time::Duration};
 
@@ -10,7 +10,7 @@ use crate::{ActiveTheme as _, ThemeStyled as _};
 use crate::{
     Selectable, StyledExt as _,
     animation::ease_out_cubic,
-    styled::{popover_ring, popover_shadow},
+    styled::{popover_ring, popover_shadow, popup_header},
     surface_backdrop, v_flex,
 };
 use gpui_base::Placement;
@@ -109,6 +109,7 @@ pub struct Popover {
     id: ElementId,
     style: StyleRefinement,
     anchor: Anchor,
+    anchor_bounds: Option<Bounds<Pixels>>,
     offset: Option<Pixels>,
     arrow: bool,
     default_open: bool,
@@ -121,6 +122,7 @@ pub struct Popover {
                 + 'static,
         >,
     >,
+    header: Option<(SharedString, SharedString)>,
     children: Vec<AnyElement>,
     /// Style for the trigger container, the element laid out in the parent
     /// and measured to anchor the popup.
@@ -138,12 +140,14 @@ impl Popover {
             id: id.into(),
             style: StyleRefinement::default(),
             anchor: Anchor::TopLeft,
+            anchor_bounds: None,
             offset: None,
             arrow: false,
             trigger: None,
             trigger_style: None,
             content: None,
             tracked_focus_handle: None,
+            header: None,
             children: vec![],
             mouse_button: MouseButton::Left,
             appearance: true,
@@ -154,6 +158,16 @@ impl Popover {
         }
     }
 
+    /// Add a title and supporting text above the popup content.
+    pub fn header(
+        mut self,
+        title: impl Into<SharedString>,
+        subtitle: impl Into<SharedString>,
+    ) -> Self {
+        self.header = Some((title.into(), subtitle.into()));
+        self
+    }
+
     /// Set the anchor corner of the popover, default is [`Anchor::TopLeft`].
     ///
     /// This names the popover's own anchor, not a corner of the trigger.
@@ -161,6 +175,13 @@ impl Popover {
     /// above it, right-aligned. Legacy anchoring clamps without flipping.
     pub fn anchor(mut self, anchor: impl Into<Anchor>) -> Self {
         self.anchor = anchor.into();
+        self
+    }
+
+    /// Use a viewport-coordinate rectangle as the popup positioning reference.
+    /// The trigger remains in its normal layout position and keeps its hitbox.
+    pub fn anchor_bounds(mut self, bounds: Bounds<Pixels>) -> Self {
+        self.anchor_bounds = Some(bounds);
         self
     }
 
@@ -298,6 +319,7 @@ impl Popover {
     pub(crate) fn render_popover_content(
         anchor: Anchor,
         appearance: bool,
+        header: Option<(SharedString, SharedString)>,
         _: &mut Window,
         cx: &mut App,
     ) -> Stateful<Div> {
@@ -305,7 +327,10 @@ impl Popover {
             .id("content")
             .occlude()
             .tab_group()
-            .when(appearance, |this| this.popover_style(cx).p_3())
+            .when(appearance, |this| this.popover_style(cx))
+            .when_some(header, |this, (title, subtitle)| {
+                this.child(popup_header(title, subtitle, cx))
+            })
             .map(|this| match anchor {
                 Anchor::TopLeft | Anchor::TopCenter | Anchor::TopRight => this.top_1(),
                 Anchor::BottomLeft | Anchor::BottomCenter | Anchor::BottomRight => this.bottom_1(),
@@ -317,6 +342,7 @@ impl Popover {
 impl RenderOnce for Popover {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let anchor = self.anchor;
+        let anchor_bounds = self.anchor_bounds;
         let arrow_size = if self.arrow {
             window.rem_size() * 0.375
         } else {
@@ -338,6 +364,7 @@ impl RenderOnce for Popover {
         let style = self.style;
         let children = self.children;
         let content = self.content;
+        let header = self.header;
         let trigger_style = self.trigger_style;
         let on_open_change = self.on_open_change;
         let backdrop_owner = self.id.clone();
@@ -348,6 +375,7 @@ impl RenderOnce for Popover {
 
         BasePopover::new(self.id)
             .anchor(self.anchor)
+            .when_some(anchor_bounds, |this, bounds| this.anchor_bounds(bounds))
             .offset(offset)
             .on_position(move |position, trigger| resolved.set(Some((position, trigger))))
             .mouse_button(self.mouse_button)
@@ -356,14 +384,24 @@ impl RenderOnce for Popover {
             .content(move |state, window, cx| {
                 v_flex()
                     .id("content")
+                    .when(cfg!(test), |this| {
+                        this.debug_selector(|| "popup-header-surface".into())
+                    })
                     .occlude()
                     .tab_group()
-                    .when(appearance, |this| this.popover_style(cx).p_3())
+                    .when(appearance, |this| this.popover_style(cx))
                     .child(surface_backdrop::popup_backdrop_layer(radius))
-                    .when_some(content, |this, content| {
-                        this.child((content)(state, window, cx))
+                    .when_some(header, |this, (title, subtitle)| {
+                        this.child(popup_header(title, subtitle, cx))
                     })
-                    .children(children)
+                    .child(
+                        v_flex()
+                            .when(appearance, |this| this.p_3())
+                            .when_some(content, |this, content| {
+                                this.child((content)(state, window, cx))
+                            })
+                            .children(children),
+                    )
                     .refine_style(&style)
                     .when(arrow, |this| {
                         this.child(
@@ -923,6 +961,42 @@ mod tests {
         // A change callback reports state transitions, not redundant dismissal
         // requests. The base host may see both paths, but only the first closes.
         assert_eq!(&*changes.borrow(), &[true, false]);
+    }
+
+    struct HeaderHarness;
+
+    impl Render for HeaderHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            Popover::new("header-layout-popover")
+                .default_open(true)
+                .w(px(240.))
+                .header("Popup title", "Supporting text wraps inside the popup")
+                .trigger(Button::new("header-layout-trigger").label("Open"))
+                .child(
+                    div()
+                        .debug_selector(|| "header-layout-body".into())
+                        .h(px(40.)),
+                )
+        }
+    }
+
+    #[gpui::test]
+    fn header_divider_spans_surface_while_body_retains_padding(cx: &mut gpui::TestAppContext) {
+        cx.update(crate::init);
+        let (_, window) = cx.add_window_view(|_, _| HeaderHarness);
+        window.update(|window, cx| window.draw(cx).clear(cx));
+        window.update(|window, cx| window.draw(cx).clear(cx));
+
+        let surface = window.debug_bounds("popup-header-surface").unwrap();
+        let divider = window.debug_bounds("popup-header-divider").unwrap();
+        let body = window.debug_bounds("header-layout-body").unwrap();
+        assert_eq!(divider.left(), surface.left());
+        assert_eq!(divider.right(), surface.right());
+        assert_eq!(divider.size.width, px(240.));
+        assert!(body.left() > surface.left());
+        assert!(body.right() < surface.right());
+        assert!(body.top() > divider.bottom());
+        assert_eq!(body.left() - surface.left(), surface.right() - body.right());
     }
 
     struct DefaultOpenHarness;

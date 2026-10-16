@@ -279,6 +279,15 @@ impl Journal {
     }
 
     pub fn changes(&self, from: u64, through: u64) -> Option<(Vec<Message>, Vec<String>)> {
+        self.changes_with_projection(from, through, Clone::clone)
+    }
+
+    fn changes_with_projection(
+        &self,
+        from: u64,
+        through: u64,
+        project: impl Fn(&Message) -> Message,
+    ) -> Option<(Vec<Message>, Vec<String>)> {
         if from > through {
             return None;
         }
@@ -303,14 +312,16 @@ impl Journal {
             }
             for message in upserts {
                 removed.remove(&message.id);
-                messages.insert(message.id.clone(), message.clone());
+                messages.insert(message.id.clone(), message);
             }
             expected = expected.checked_add(1)?;
         }
         if expected != through.checked_add(1)? {
             return None;
         }
-        let mut messages = messages.into_values().collect::<Vec<_>>();
+        // Coalesce borrowed journal entries before copying payloads. Native
+        // hidden-task previews never need to be allocated for this response.
+        let mut messages = messages.into_values().map(project).collect::<Vec<_>>();
         messages
             .sort_by(|left, right| (left.created_at, &left.id).cmp(&(right.created_at, &right.id)));
         Some((messages, removed.into_iter().collect()))
@@ -401,28 +412,85 @@ pub fn projection(snapshot: &Snapshot, include_messages: bool) -> Snapshot {
     output
 }
 
+/// Private native startup/reset projection. History clones share persistent
+/// nodes; only the requested task tails allocate message/attachment payloads.
+pub fn native_projection(snapshot: &Snapshot, message_task_ids: &BTreeSet<&str>) -> Snapshot {
+    let mut output = projection(snapshot, false);
+    let mut positions = Vec::new();
+    for task in &snapshot.tasks {
+        if message_task_ids.contains(task.id.as_str()) {
+            positions.extend(
+                snapshot.messages.scope_indices(&task.id).iter().rev()
+                    .take(LIVE_MESSAGES_PER_TASK).copied(),
+            );
+        }
+    }
+    positions.sort_unstable();
+    output.messages = positions.into_iter()
+        .map(|index| snapshot.messages[index].clone()).collect();
+    output
+}
+
+fn native_delta_message(message: &Message, message_task_ids: &BTreeSet<&str>) -> Message {
+    if message_task_ids.contains(message.task_id.as_str()) {
+        return message.clone();
+    }
+    Message {
+        stream_status: message.stream_status.clone(),
+        phase: message.phase.clone(),
+        response_metadata: message.response_metadata.clone(),
+        id: message.id.clone(),
+        task_id: message.task_id.clone(),
+        role: message.role.clone(),
+        text: message.text.clone(),
+        created_at: message.created_at,
+        sender_agent_id: message.sender_agent_id.clone(),
+        collaboration_id: message.collaboration_id.clone(),
+        attachments: message.attachments.iter().map(|attachment| crate::attachments::Attachment {
+            id: attachment.id.clone(),
+            name: attachment.name.clone(),
+            mime_type: attachment.mime_type.clone(),
+            size: attachment.size,
+            path: attachment.path.clone(),
+            preview_data_url: None,
+            source_id: attachment.source_id.clone(),
+        }).collect(),
+    }
+}
+
 pub fn compact_events(
     snapshot: &Snapshot,
 ) -> crate::history::History<std::sync::Arc<crate::model::RunEvent>> {
     let mut events = Vec::new();
+    let mut progress = Vec::new();
     for task_id in snapshot.events.scope_ids() {
+        // Progress is replaced in place, so its history position may precede
+        // the ordinary diagnostic tail even though its timestamp is current.
+        if snapshot.tasks.iter().any(|task| task.id == task_id && task.status == "running") {
+            if let Ok(Some(index)) = snapshot.events.index_of_id(&format!("agent-progress:{task_id}")) {
+                if snapshot.events[index].kind == "agent_progress" { progress.push(index); }
+            }
+        }
         let positions = snapshot.events.scope_indices(&task_id);
         events.extend(
             positions
                 .iter()
                 .rev()
                 .take(512)
-                .filter(|index| !matches!(snapshot.events[**index].kind.as_str(), "log" | "output"))
+                .filter(|index| !matches!(snapshot.events[**index].kind.as_str(), "log" | "output" | "agent_progress"))
                 .take(crate::lan_sync::MAX_LIVE_EVENTS_PER_TASK)
                 .copied(),
         );
     }
+    progress.sort_unstable_by_key(|index| snapshot.events[*index].created_at);
+    let progress_start = progress.len().saturating_sub(crate::lan_sync::MAX_LIVE_EVENTS);
+    let progress = &progress[progress_start..];
     events.sort_unstable();
-    let start = events
-        .len()
-        .saturating_sub(crate::lan_sync::MAX_LIVE_EVENTS);
-    events[start..]
-        .iter()
+    let start = events.len().saturating_sub(crate::lan_sync::MAX_LIVE_EVENTS - progress.len());
+    let mut selected = events[start..].to_vec();
+    selected.extend_from_slice(progress);
+    selected.sort_unstable();
+    selected.iter()
         .map(|index| std::sync::Arc::new(crate::lan_sync::compact_event(&snapshot.events[*index])))
         .collect()
 }
@@ -534,6 +602,23 @@ impl crate::Service {
     }
 
     pub(crate) fn ui_delta(&self, revision: Option<&str>) -> Result<UiDeltaResponse, String> {
+        self.ui_delta_with_scope(revision, None)
+    }
+
+    pub(crate) fn native_ui_delta(
+        &self,
+        revision: Option<&str>,
+        message_task_ids: &[String],
+    ) -> Result<UiDeltaResponse, String> {
+        let scope = message_task_ids.iter().map(String::as_str).collect();
+        self.ui_delta_with_scope(revision, Some(&scope))
+    }
+
+    fn ui_delta_with_scope(
+        &self,
+        revision: Option<&str>,
+        message_task_ids: Option<&BTreeSet<&str>>,
+    ) -> Result<UiDeltaResponse, String> {
         let data = self.committed_data()?;
         let current = format!("{}:{}", self.revision_epoch, data.revision);
         if revision == Some(current.as_str()) {
@@ -547,7 +632,10 @@ impl crate::Service {
             .and_then(|value| parse_revision(value, &self.revision_epoch))
             .and_then(|from| {
                 let journal = self.ui_journal.lock().ok()?;
-                let changes = journal.changes(from, data.revision)?;
+                let changes = match message_task_ids {
+                    Some(scope) => journal.changes_with_projection(from, data.revision, |message| native_delta_message(message, scope))?,
+                    None => journal.changes(from, data.revision)?,
+                };
                 let retained = journal.retained(from, data.revision, &data.snapshot);
                 let channels = journal.channel_changes(from, data.revision, &data.snapshot)?;
                 Some((changes, retained, channels))
@@ -581,7 +669,10 @@ impl crate::Service {
         } else {
             Ok(UiDeltaResponse {
                 revision: current,
-                snapshot: Some(projection(&data.snapshot, true)),
+                snapshot: Some(match message_task_ids {
+                    Some(scope) => native_projection(&data.snapshot, scope),
+                    None => projection(&data.snapshot, true),
+                }),
                 delta: None,
             })
         }
@@ -641,6 +732,125 @@ mod tests {
             agent_conversation_turns_used: 0,
             agent_conversation_paused: false,
         }
+    }
+
+    fn preview_attachment() -> crate::attachments::Attachment {
+        crate::attachments::Attachment {
+            id: "attachment".into(),
+            name: "fixture.png".into(),
+            mime_type: "image/png".into(),
+            size: 123,
+            path: "/fixture/attachment.png".into(),
+            preview_data_url: Some("data:image/png;base64,fixture".into()),
+            source_id: Some("source".into()),
+        }
+    }
+
+    #[test]
+    fn native_projection_scopes_reset_tails_and_preserves_revision_and_history() {
+        let directory = std::env::temp_dir().join(format!("monitter-native-ui-sync-{}", crate::model::id()));
+        let service = crate::Service::open(None, directory.clone()).unwrap();
+        let agent_id = service.snapshot().unwrap().agents[0].id.clone();
+        let visible = service.create_task(crate::CreateTaskInput {
+            agent_id,
+            title: "Native projection fixture".into(),
+            native_session_id: None,
+            parent_task_id: None,
+            channel_id: None,
+            project_id: None,
+            cwd: None,
+            model_settings: None,
+            sandbox: None,
+        }).unwrap();
+        let mut hidden = visible.clone();
+        hidden.id = crate::model::id();
+        service.mutate(None, |state| {
+            state.tasks.push(hidden.clone());
+            state.messages.clear();
+            for task_id in [&visible.id, &hidden.id] {
+                for index in 0..70 {
+                    let mut row = message(&format!("{task_id}-{index}"), "history");
+                    row.task_id = task_id.clone();
+                    row.created_at = index;
+                    row.attachments.push(preview_attachment());
+                    state.messages.push(row);
+                }
+            }
+            state.channels.push(channel("channel", "channel body"));
+            state.subagent_transcripts.insert("subagent".into(), vec![crate::model::SubagentTranscriptEntry {
+                id: "entry".into(), role: "assistant".into(), text: "subagent body".into(), created_at: 1,
+            }].into());
+            Ok(())
+        }).unwrap();
+
+        let initial = service.native_ui_delta(None, &[]).unwrap();
+        let canonical = service.ui_delta(None).unwrap();
+        assert_eq!(initial.revision, canonical.revision);
+        let metadata_only = initial.snapshot.as_ref().unwrap();
+        let canonical_snapshot = canonical.snapshot.as_ref().unwrap();
+        assert!(metadata_only.messages.is_empty());
+        assert_eq!(metadata_only.tasks, canonical_snapshot.tasks);
+        assert_eq!(metadata_only.channels, canonical_snapshot.channels);
+        assert_eq!(metadata_only.subagent_transcripts, canonical_snapshot.subagent_transcripts);
+        assert_eq!(metadata_only.channels.last().unwrap().messages[0].text, "channel body");
+        assert_eq!(metadata_only.subagent_transcripts["subagent"][0].text, "subagent body");
+        assert_eq!(canonical_snapshot.messages.len(), LIVE_MESSAGES_PER_TASK * 2);
+
+        let scope = vec![visible.id.clone(), visible.id.clone(), "unknown".into()];
+        let scoped = service.native_ui_delta(None, &scope).unwrap();
+        let scoped_snapshot = scoped.snapshot.as_ref().unwrap();
+        assert_eq!(scoped.revision, initial.revision);
+        assert_eq!(scoped_snapshot.messages.len(), LIVE_MESSAGES_PER_TASK);
+        assert_eq!(scoped_snapshot.messages[0].id, format!("{}-6", visible.id));
+        assert!(scoped_snapshot.messages.iter().all(|row| row.task_id == visible.id && row.attachments[0].preview_data_url.is_some()));
+        let scope_only = service.native_ui_delta(Some(&initial.revision), &scope).unwrap();
+        assert!(scope_only.snapshot.is_none() && scope_only.delta.is_none());
+
+        let visible_last = format!("{}-69", visible.id);
+        let hidden_last = format!("{}-69", hidden.id);
+        service.mutate(None, |state| {
+            for id in [&visible_last, &hidden_last] {
+                state.messages.update_by_id(id, |row| row.text = "changed".into()).unwrap();
+            }
+            state.channels.last_mut().unwrap().messages.get_mut_tracked(0).unwrap().text = "channel update".into();
+            state.subagent_transcripts.get_mut("subagent").unwrap().push(crate::model::SubagentTranscriptEntry {
+                id: "next-entry".into(), role: "assistant".into(), text: "subagent update".into(), created_at: 2,
+            });
+            Ok(())
+        }).unwrap();
+        let native = service.native_ui_delta(Some(&initial.revision), &scope).unwrap();
+        let normal = service.ui_delta(Some(&initial.revision)).unwrap();
+        assert_eq!(native.revision, normal.revision);
+        let native_delta = native.delta.unwrap();
+        let normal_delta = normal.delta.unwrap();
+        assert_eq!(native_delta.from_revision, initial.revision);
+        assert_eq!(native_delta.messages.len(), 2);
+        assert_eq!(native_delta.removed_message_ids, normal_delta.removed_message_ids);
+        assert_eq!(native_delta.metadata, normal_delta.metadata);
+        assert_eq!(serde_json::to_value(&native_delta.channel_message_changes).unwrap(), serde_json::to_value(&normal_delta.channel_message_changes).unwrap());
+        assert_eq!(native_delta.retained_channel_ids, normal_delta.retained_channel_ids);
+        assert_eq!(native_delta.retained_subagent_transcript_ids, normal_delta.retained_subagent_transcript_ids);
+        for row in &native_delta.messages {
+            let normal_row = normal_delta.messages.iter().find(|candidate| candidate.id == row.id).unwrap();
+            let mut expected = normal_row.clone();
+            if row.task_id == hidden.id { expected.attachments[0].preview_data_url = None; }
+            assert_eq!(row, &expected);
+            assert!(normal_row.attachments[0].preview_data_url.is_some());
+        }
+        let hydrated = service.task_messages(&hidden.id, None, Some(64)).unwrap();
+        assert_eq!(hydrated.revision, native.revision);
+        assert!(hydrated.messages.last().unwrap().attachments[0].preview_data_url.is_some());
+
+        service.mutate(None, |state| {
+            state.messages.retain(|row| row.id != visible_last);
+            Ok(())
+        }).unwrap();
+        let reset = service.native_ui_delta(Some(&native.revision), &[]).unwrap();
+        assert!(reset.delta.is_none());
+        assert!(reset.snapshot.unwrap().messages.is_empty());
+        assert!(service.snapshot().unwrap().messages.iter().all(|row| row.attachments[0].preview_data_url.is_some()));
+        drop(service);
+        let _ = std::fs::remove_dir_all(directory);
     }
 
     #[test]
@@ -913,5 +1123,29 @@ mod tests {
             .is_some());
         drop(reopened);
         let _ = std::fs::remove_dir_all(directory);
+    }
+}
+
+#[cfg(test)]
+mod progress_tests {
+    #[test]
+    fn progress_survives_diagnostic_tail_compaction() {
+        let mut snapshot=crate::model::default_snapshot();
+        let mut task=crate::model::task_from_agent(&snapshot.agents[0], &crate::model::CreateTaskInput {
+            agent_id:snapshot.agents[0].id.clone(),title:"Progress".into(),native_session_id:None,parent_task_id:None,
+            channel_id:None,project_id:None,cwd:None,model_settings:None,sandbox:None,
+        });
+        task.status="running".into();
+        let task_id=task.id.clone(); snapshot.tasks.push(task);
+        snapshot.events.push(std::sync::Arc::new(crate::model::RunEvent {
+            id:format!("agent-progress:{task_id}"),task_id:task_id.clone(),kind:"agent_progress".into(),
+            title:"Checking build".into(),detail:"{}".into(),created_at:9999,
+        }));
+        for n in 0..600 { snapshot.events.push(std::sync::Arc::new(crate::model::RunEvent {
+            id:format!("tool-{n}"),task_id:task_id.clone(),kind:"tool".into(),title:"Tool".into(),detail:"{}".into(),created_at:n,
+        })); }
+        let events=super::compact_events(&snapshot);
+        assert!(events.iter().any(|event|event.kind=="agent_progress"));
+        assert!(events.len()<=crate::lan_sync::MAX_LIVE_EVENTS_PER_TASK+1);
     }
 }

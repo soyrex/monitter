@@ -270,14 +270,18 @@ fn save_async(mode: MotionPreference) {
 pub enum ActivityAnimation {
     #[default]
     Sparkles,
+    Liquid,
     Grid,
     Matrix,
 }
 
 impl ActivityAnimation {
+    pub const ALL: [Self; 4] = [Self::Sparkles, Self::Liquid, Self::Grid, Self::Matrix];
+
     /// Parse a snapshot setting; unknown or absent values use Tauri's default.
     pub fn from_snapshot(value: Option<&str>) -> Self {
         match value {
+            Some("liquid") => Self::Liquid,
             Some("grid") => Self::Grid,
             Some("matrix") => Self::Matrix,
             _ => Self::Sparkles,
@@ -287,6 +291,7 @@ impl ActivityAnimation {
     pub const fn id(self) -> &'static str {
         match self {
             Self::Sparkles => "sparkles",
+            Self::Liquid => "liquid",
             Self::Grid => "grid",
             Self::Matrix => "matrix",
         }
@@ -295,6 +300,7 @@ impl ActivityAnimation {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Sparkles => "Sparkles",
+            Self::Liquid => "Liquid wave",
             Self::Grid => "Pulse grid",
             Self::Matrix => "Letter stream",
         }
@@ -314,6 +320,10 @@ mod tests {
         for preference in MotionPreference::ALL {
             assert_eq!(MotionPreference::parse(preference.id()), Some(preference));
         }
+        assert_eq!(
+            ActivityAnimation::from_snapshot(Some("liquid")),
+            ActivityAnimation::Liquid
+        );
         assert_eq!(
             ActivityAnimation::from_snapshot(Some("grid")),
             ActivityAnimation::Grid

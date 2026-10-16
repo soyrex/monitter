@@ -21,6 +21,10 @@ Closing an editor invokes Neovim's ordinary window/quit operation, so unsaved
 changes remain protected. Use Neovim's explicit `:q!` to discard changes.
 Closing/reopening the GUI preserves editor processes in the persistent backend.
 Backend shutdown does not provide durable recovery of unsaved buffers.
+Workspace restoration reconnects to surviving backend sessions. Missing or exited
+Neovim sessions are removed from the layout, including inactive workspaces; a
+confirmed missing session during polling also removes its panes. Transport errors
+retain the editor so a temporary backend interruption does not discard the layout.
 
 This first implementation launches local Neovim sessions. It does not attach to
 an existing terminal Neovim or launch Neovim over SSH. Floating plugin windows,
@@ -72,3 +76,29 @@ node scripts/gpui-toolchain.mjs cargo test --manifest-path scripts/neovim-smoke/
 The tests launch `nvim --clean`, edit only temporary files and shut down their
 own editor processes. Runtime acceptance and any remaining limitations are
 recorded in `NEOVIM-IMPLEMENTATION.md`.
+
+### Native editor footer
+
+The editor footer follows the Subagents / Agent map bar styling. It displays
+the current window's working directory, Neovim-detected buffer filetype, and
+the matching local Monitter project. Neovim external command-line input replaces
+the footer details while active; executing or cancelling restores the status.
+The footer has no close button; normal Neovim and Monitter close commands remain.
+Private `read_neovim` includes session `cwd` and per-window `cwd` and `filetype`.
+Window-local `:lcd`, tab-local `:tcd`, and `:cd` are reflected by the next metadata
+refresh. Existing backends without these fields require an update for live metadata.
+
+### Native file browser
+
+New Neovim sessions open a native file-browser dock pane beside the editor.
+Folders navigate in place; selecting a file opens it in that browser's Neovim
+session and focuses its editor. Up/Down select rows, Enter opens them, and
+Backspace goes to the parent folder. Refresh and the hidden-file toggle are native
+controls. Closing the browser does not close the editor; use **Show Neovim files**
+in the command menu to restore it. Directory listings are limited to 4096 entries.
+
+The private owner-local commands `neovim_list_directory` (`id`, absolute `path`)
+and `neovim_open_file` (`id`, `windowId`, absolute `path`) remain unavailable to
+LAN/mobile clients. File opening uses structured Neovim arguments and never forces
+discarding a modified buffer. Symlink folders can be navigated; paths are resolved
+by the backend.

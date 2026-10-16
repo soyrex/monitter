@@ -1,5 +1,10 @@
 //! Native Neovim grid rendering and queued private backend IPC.
 use crate::design::ui_scaled_px;
+use futures::{FutureExt as _, StreamExt as _};
+use gpui_kit::component::{
+    ActiveTheme,
+    button::{Button, ButtonVariants},
+};
 use gpui_kit::{prelude::*, *};
 use monitter_gpui_desktop::neovim_model::{Cell, CmdlineChunk, NeovimModel};
 use monitter_lib::experimental_desktop::DesktopService;
@@ -16,6 +21,22 @@ pub enum NeovimSessionEvent {
     Exited,
     /// The backend could not be reached.
     Error,
+}
+
+fn session_is_missing(error: &str) -> bool {
+    error == "Neovim session no longer exists."
+}
+
+// Keep animated editors responsive, but bound idle RPC and hidden lifecycle work.
+fn neovim_poll_delay(visible: bool, idle_reads: u32) -> Duration {
+    if !visible {
+        return Duration::from_secs(1);
+    }
+    Duration::from_millis((20u64 << idle_reads.min(4)).min(250))
+}
+
+fn has_gui_panes(pane_count: usize) -> bool {
+    pane_count > 0
 }
 
 fn to_rgb(v: i64) -> u32 {
@@ -66,9 +87,12 @@ impl Appearance {
 /// One attached Neovim session: owns the `NeovimModel`, polls redraw batches,
 /// and maintains the window-layout projection used to reconcile dock panes.
 pub struct NeovimSession {
+    service: DesktopService,
     id: String,
     pub snapshot: Value,
     model: NeovimModel,
+    workspace: Value,
+    palette: Option<crate::design::Palette>,
     seq: u64,
     error: Option<String>,
     sizes: std::collections::HashMap<i64, (u16, u16)>,
@@ -77,6 +101,9 @@ pub struct NeovimSession {
     last_focus: Option<i64>,
     pub pending_focus: Option<i64>,
     focus_revision: u64,
+    gui_panes: std::collections::HashSet<EntityId>,
+    visible_panes: std::collections::HashSet<EntityId>,
+    wake: futures::channel::mpsc::Sender<()>,
     _poll: Task<()>,
 }
 impl EventEmitter<NeovimSessionEvent> for NeovimSession {}
@@ -85,8 +112,11 @@ fn empty_layout() -> Value {
 }
 impl NeovimSession {
     pub fn new(service: DesktopService, id: String, cx: &mut Context<Self>) -> Self {
+        let pane_service = service.clone();
         let poll_id = id.clone();
+        let (wake, mut wakes) = futures::channel::mpsc::channel(1);
         let poll = cx.spawn(async move |this, cx| {
+            let mut idle_reads = 0u32;
             loop {
                 let Ok((after, commands, exited, focus_revision)) = this.update(cx, |s, _| {
                     (
@@ -101,6 +131,7 @@ impl NeovimSession {
                 if exited {
                     break;
                 }
+                let had_commands = !commands.is_empty();
                 let service = service.clone();
                 let id = poll_id.clone();
                 let result = cx
@@ -122,6 +153,11 @@ impl NeovimSession {
                         )
                     })
                     .await;
+                let active = result
+                    .0
+                    .as_ref()
+                    .ok()
+                    .is_some_and(|response| response["seq"].as_u64().unwrap_or(after) != after);
                 if this
                     .update(cx, |s, cx| {
                         if result.2 == Some(s.focus_revision) {
@@ -133,25 +169,54 @@ impl NeovimSession {
                         }
                         match result.0 {
                             Ok(response) => s.consume(response, cx),
-                            Err(error) => {
-                                s.error = Some(error);
-                                cx.notify();
-                            }
+                            Err(error) => s.consume_read_error(error, cx),
                         }
                     })
                     .is_err()
                 {
                     break;
                 }
-                cx.background_executor()
-                    .timer(Duration::from_millis(20))
-                    .await;
+                idle_reads = if active || had_commands {
+                    0
+                } else {
+                    idle_reads.saturating_add(1)
+                };
+                let Ok((has_panes, visible)) = this.update(cx, |s, _| {
+                    (has_gui_panes(s.gui_panes.len()), !s.visible_panes.is_empty())
+                }) else {
+                    break;
+                };
+                if !has_panes {
+                    // The GUI released every pane for this session. Keep the
+                    // backend editor alive, but park this client poller until
+                    // a saved workspace recreates a pane and wakes us.
+                    if wakes.next().await.is_none() {
+                        break;
+                    }
+                    idle_reads = 0;
+                    continue;
+                }
+                let delay = neovim_poll_delay(visible, idle_reads);
+                let timer = cx.background_executor().timer(delay).fuse();
+                let wake = wakes.next().fuse();
+                futures::pin_mut!(timer, wake);
+                if let futures::future::Either::Left((signal, _)) =
+                    futures::future::select(wake, timer).await
+                {
+                    if signal.is_none() {
+                        break;
+                    }
+                    idle_reads = 0;
+                }
             }
         });
         Self {
+            service: pane_service,
             id,
             snapshot: empty_layout(),
             model: NeovimModel::new(),
+            workspace: Value::Null,
+            palette: None,
             seq: 0,
             error: None,
             sizes: Default::default(),
@@ -160,8 +225,79 @@ impl NeovimSession {
             last_focus: None,
             pending_focus: None,
             focus_revision: 0,
+            gui_panes: Default::default(),
+            visible_panes: Default::default(),
+            wake,
             _poll: poll,
         }
+    }
+    fn set_pane_visible(&mut self, pane: EntityId, visible: bool) {
+        let changed = if visible {
+            self.visible_panes.insert(pane)
+        } else {
+            self.visible_panes.remove(&pane)
+        };
+        if changed {
+            let _ = self.wake.try_send(());
+        }
+    }
+    fn retain_gui_pane(&mut self, pane: EntityId) {
+        if self.gui_panes.insert(pane) {
+            let _ = self.wake.try_send(());
+        }
+    }
+    fn release_gui_pane(&mut self, pane: EntityId) {
+        if self.gui_panes.remove(&pane) {
+            // A hidden pane may have no visibility transition left to wake the
+            // poll loop. Wake it so it can park immediately when this was the
+            // final GUI view for the session.
+            let _ = self.wake.try_send(());
+        }
+        self.set_pane_visible(pane, false);
+    }
+    pub fn set_workspace(&mut self, snapshot: &Value, cx: &mut Context<Self>) {
+        let workspace = json!({"projects": snapshot["projects"], "hosts": snapshot["hosts"]});
+        let changed =
+            self.workspace != workspace || self.snapshot["settings"] != snapshot["settings"];
+        self.workspace = workspace;
+        self.snapshot["settings"] = snapshot["settings"].clone();
+        if changed {
+            cx.notify();
+        }
+    }
+    pub fn set_theme(&mut self, palette: crate::design::Palette, settings: &Value, cx: &mut Context<Self>) {
+        if self.palette != Some(palette) || self.snapshot["settings"] != *settings {
+            self.palette = Some(palette);
+            self.snapshot["settings"] = settings.clone();
+            cx.notify();
+        }
+    }
+    /// Retained rendered window text and filename metadata; never reads files.
+    pub(super) fn palette_search_text(&self, win: i64) -> String {
+        const LIMIT: usize = 512 * 1024;
+        let mut text = String::new();
+        if let Some(row) = self.snapshot["windows"].as_array()
+            .and_then(|rows| rows.iter().find(|row| row["id"].as_i64() == Some(win))) {
+            for key in ["name", "cwd", "filetype"] {
+                if let Some(value) = row[key].as_str() {
+                    for ch in value.chars().chain(std::iter::once('\n')) {
+                        if text.len() + ch.len_utf8() > LIMIT { return text; }
+                        text.push(ch);
+                    }
+                }
+            }
+        }
+        for position in self.model.windows.values().filter(|position| position.win == win) {
+            if let Some(grid) = self.model.grid(position.grid) {
+                for row in grid.cells.chunks(usize::from(grid.cols).max(1)) {
+                    for ch in row.iter().flat_map(|cell| cell.text.chars()).chain(std::iter::once('\n')) {
+                        if text.len() + ch.len_utf8() > LIMIT { return text; }
+                        text.push(ch);
+                    }
+                }
+            }
+        }
+        text
     }
     pub fn model(&self) -> &NeovimModel {
         &self.model
@@ -210,12 +346,26 @@ impl NeovimSession {
             || self.snapshot["windows"] != response["windows"]
             || self.snapshot["currentWindow"] != response["currentWindow"]
             || self.snapshot["exited"] != response["exited"];
+        response["settings"] = self.snapshot["settings"].clone();
         self.snapshot = response;
         if flushed || changed {
             cx.emit(NeovimSessionEvent::Updated);
             cx.notify();
         }
     }
+    fn consume_read_error(&mut self, error: String, cx: &mut Context<Self>) {
+        if session_is_missing(&error) {
+            // This is an authoritative registry miss, not a transport failure.
+            // Feed it through normal reconciliation so orphan panes disappear.
+            self.queue.clear();
+            self.pending_focus = None;
+            self.consume(json!({"layout": null, "windows": [], "exited": true}), cx);
+        } else {
+            self.error = Some(error);
+            cx.notify();
+        }
+    }
+
     fn enqueue(&mut self, name: &'static str, mut args: Value, cx: &mut Context<Self>) {
         if self.queue.len() >= 512 {
             self.error = Some("Neovim input queue is full; wait for the editor.".into());
@@ -224,6 +374,7 @@ impl NeovimSession {
         }
         args["id"] = json!(self.id);
         self.queue.push_back((name, args));
+        let _ = self.wake.try_send(());
     }
     pub fn focus_window(&mut self, win: i64, cx: &mut Context<Self>) {
         if self.last_focus != Some(win) {
@@ -232,6 +383,11 @@ impl NeovimSession {
             self.focus_revision = self.focus_revision.wrapping_add(1);
             self.enqueue("neovim_focus", json!({"windowId":win}), cx);
         }
+    }
+    pub fn open_file(&mut self, win: i64, path: &str, cx: &mut Context<Self>) {
+        self.focus_window(win, cx);
+        self.enqueue("neovim_open_file", json!({"windowId":win,"path":path}), cx);
+        self.last_focus = None;
     }
     pub fn command(&mut self, win: i64, command: &str, cx: &mut Context<Self>) {
         self.focus_window(win, cx);
@@ -292,6 +448,8 @@ pub struct NeovimPane {
     appearance: Appearance,
     grid_bounds: Option<Bounds<Pixels>>,
     cell_width: Pixels,
+    files: Entity<crate::neovim_files::NeovimFilesPane>,
+    files_visible: bool,
 }
 
 /// An owned, renderable copy of one window's grid frame, decoupled from the
@@ -375,8 +533,40 @@ impl NeovimPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let pane_id = cx.entity_id();
+        session.update(cx, |session, _| session.retain_gui_pane(pane_id));
+        cx.on_release(move |pane, cx| {
+            pane.session
+                .update(cx, |session, _| session.release_gui_pane(pane_id));
+        })
+        .detach();
         let appearance = Appearance::from_snapshot(&session.read(cx).snapshot);
         cx.observe(&session, |_, _, cx| cx.notify()).detach();
+        let service = session.read(cx).service.clone();
+        let id = session.read(cx).id.clone();
+        let path = session.read(cx).snapshot["cwd"]
+            .as_str()
+            .unwrap_or("")
+            .to_owned();
+        let files =
+            cx.new(|cx| crate::neovim_files::NeovimFilesPane::new(service, id, path, window, cx));
+        cx.subscribe_in(
+            &files,
+            window,
+            |pane, _, event: &crate::neovim_files::NeovimFilesEvent, window, cx| match event {
+                crate::neovim_files::NeovimFilesEvent::OpenFile(path) => {
+                    pane.session
+                        .update(cx, |session, cx| session.open_file(pane.win, path, cx));
+                    pane.focus.focus(window, cx);
+                }
+                crate::neovim_files::NeovimFilesEvent::Collapse => {
+                    pane.files_visible = false;
+                    pane.focus.focus(window, cx);
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
         let focus = cx.focus_handle();
         cx.on_focus(&focus, window, |pane, _, cx| {
             // Focus is an event, not a render side effect. Neovim can change
@@ -397,7 +587,21 @@ impl NeovimPane {
             appearance,
             grid_bounds: None,
             cell_width: ui_scaled_px(8.4),
+            files,
+            files_visible: true,
         }
+    }
+
+    pub(crate) fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        let pane_id = cx.entity_id();
+        self.session
+            .update(cx, |session, _| session.set_pane_visible(pane_id, visible));
+    }
+
+    pub fn show_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.files_visible = true;
+        self.files.focus_handle(cx).focus(window, cx);
+        cx.notify();
     }
 
     /// Whether this pane's window hosts the visible cursor (and therefore the
@@ -596,7 +800,12 @@ impl Element for NeovimGrid {
             );
         }
         window.with_content_mask(Some(ContentMask::new(bounds)), |window| {
-            window.paint_quad(fill(bounds, rgb(frame.default_bg)));
+            // The dock paints the shared translucent pane surface once. Leave
+            // the editor's normal background clear so its padding and grid
+            // meet seamlessly. Floating windows still need their own backing.
+            if self.win.is_some() {
+                window.paint_quad(fill(bounds, rgb(frame.default_bg)));
+            }
             for row in 0..frame.rows {
                 for col in 0..frame.cols {
                     let cell = &frame.cells[row as usize * frame.cols as usize + col as usize];
@@ -608,7 +817,7 @@ impl Element for NeovimGrid {
                         bounds.origin.y + px(cell_height * row as f32),
                     );
                     let is_wide = text_width(&cell.text) == 2;
-                    if cell.bg != frame.default_bg || is_wide {
+                    if cell.bg != frame.default_bg {
                         let w = *width * if is_wide { 2. } else { 1. };
                         window.paint_quad(fill(
                             Bounds {
@@ -756,11 +965,16 @@ impl Render for NeovimPane {
             let model = session.model();
             monitter_gpui_desktop::neovim_keys::context(&model.mode, model.cmdline_visible)
         };
-        let palette = crate::design::palette(
-            &self.session.read(cx).snapshot["settings"],
-            window.appearance(),
-        );
+        let palette = self.session.read(cx).palette.unwrap_or_else(|| {
+            crate::design::palette(
+                &self.session.read(cx).snapshot["settings"],
+                window.appearance(),
+            )
+        });
         let snapshot = self.session.read(cx).snapshot.clone();
+        self.files.update(cx, |files, cx| {
+            files.set_theme(snapshot["settings"].clone(), palette, cx)
+        });
         let interface_font_ratio = snapshot["settings"]["interfaceFontSize"]
             .as_f64()
             .filter(|size| size.is_finite())
@@ -771,15 +985,17 @@ impl Render for NeovimPane {
 
         let mut screen = div()
             .id("neovim-screen")
+            .when(palette.dark, |screen| {
+                screen.bg(rgb(0x000000).opacity(0.20))
+            })
+            .pt(px(20.))
+            .pr(px(20.))
             .flex_1()
             .min_h(px(0.))
             .min_w_0()
             .w_full()
             .relative()
-            .key_context(mode_context)
-            .track_focus(&self.focus)
             .cursor(CursorStyle::IBeam)
-            .on_key_down(cx.listener(Self::key))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
@@ -919,43 +1135,6 @@ impl Render for NeovimPane {
                         .children(items),
                 );
             }
-
-            // Cmdline, beneath the grid.
-            let cmdlines = self.session.read(cx).model().cmdlines.clone();
-            if !cmdlines.is_empty() {
-                let mut text = String::new();
-                for c in cmdlines.values() {
-                    if !text.is_empty() {
-                        text.push(' ');
-                    }
-                    text.push_str(&c.prompt);
-                    text.push_str(&c.firstc);
-                    let content = chunks_text(&c.content);
-                    let mut pos = c.pos.min(content.len());
-                    while !content.is_char_boundary(pos) {
-                        pos -= 1;
-                    }
-                    text.push_str(&content[..pos]);
-                    text.push('▏');
-                    text.push_str(&content[pos..]);
-                }
-                screen = screen.child(
-                    div()
-                        .id("neovim-cmdline")
-                        .absolute()
-                        .left(px(8.))
-                        .bottom(px(8.))
-                        .right(px(8.))
-                        .px(px(8.))
-                        .py(px(4.))
-                        .rounded(px(6.))
-                        .bg(rgba((0x000000 << 8) | 0xC0))
-                        .text_size(px(12. * interface_font_ratio))
-                        .line_height(relative(1.3))
-                        .text_color(rgb(0xeeeeee))
-                        .child(text),
-                );
-            }
         }
 
         let error = self.session.read(cx).error.clone().map(|error| {
@@ -965,33 +1144,13 @@ impl Render for NeovimPane {
                 error
             }
         });
-        div()
+        let editor = div()
             .flex()
             .flex_col()
-            .size_full()
+            .flex_1()
+            .h_full()
             .min_w_0()
             .min_h_0()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .px(px(8.))
-                    .py(px(3.))
-                    .text_size(px(11.))
-                    .text_color(rgb(palette.muted))
-                    .child(format!("Neovim · {}", self.session.read(cx).model.mode))
-                    .child(
-                        div()
-                            .id("close-neovim")
-                            .cursor_pointer()
-                            .child("Close")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.session
-                                    .update(cx, |s, cx| s.close_window(this.win, cx))
-                            })),
-                    ),
-            )
             .children(error.map(|error| {
                 div()
                     .px(px(8.))
@@ -1003,7 +1162,198 @@ impl Render for NeovimPane {
                 (!self.marked.is_empty()).then(|| div().px(px(8.)).child(self.marked.clone())),
             )
             .child(screen)
+            .child({
+                let session = self.session.read(cx);
+                let command = (session.snapshot["currentWindow"].as_i64() == Some(self.win))
+                    .then(|| {
+                        session
+                            .model
+                            .cmdlines
+                            .iter()
+                            .max_by_key(|(level, _)| *level)
+                            .map(|(_, command)| command_text(command))
+                    })
+                    .flatten();
+                let mut footer = div()
+                    .id("neovim-status-footer")
+                    .flex_shrink_0()
+                    .w_full()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(5.))
+                    .border_t_1()
+                    .border_color(rgb(palette.line))
+                    .px(px(10.))
+                    .py(px(5.))
+                    .bg(crate::design::surface_color(palette.panel))
+                    .text_color(rgb(palette.muted))
+                    .text_size((cx.theme().font_size - px(4.)).max(px(8.)));
+                let command_active = command.is_some();
+                if let Some(command) = command {
+                    footer = footer.child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .border_1()
+                            .border_color(rgb(palette.line).opacity(0.))
+                            .px(px(8.))
+                            .py(px(4.))
+                            .text_color(rgb(palette.ink))
+                            .child(command),
+                    );
+                } else {
+                    let row = snapshot["windows"]
+                        .as_array()
+                        .and_then(|windows| {
+                            windows
+                                .iter()
+                                .find(|row| row["id"].as_i64() == Some(self.win))
+                        })
+                        .unwrap_or(&Value::Null);
+                    let cwd = row["cwd"]
+                        .as_str()
+                        .filter(|cwd| !cwd.is_empty())
+                        .or_else(|| snapshot["cwd"].as_str())
+                        .unwrap_or("");
+                    let language = row["filetype"]
+                        .as_str()
+                        .filter(|language| !language.is_empty())
+                        .unwrap_or("Plain text");
+                    let project = project_name(&session.workspace, cwd);
+                    for (index, label) in [
+                        cwd.to_owned(),
+                        language.to_owned(),
+                        project,
+                        mode_label(&session.model.mode).to_owned(),
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        if !label.is_empty() {
+                            footer = footer.child(
+                                div()
+                                    .rounded(px(4.))
+                                    .border_1()
+                                    .border_color(rgb(palette.line).opacity(0.))
+                                    .px(px(8.))
+                                    .py(px(4.))
+                                    .min_w_0()
+                                    .truncate()
+                                    .when(index == 0, |item| item.flex_1())
+                                    .when(index != 0, |item| item.flex_shrink_0())
+                                    .when(index == 2, |item| item.max_w(px(160.)))
+                                    .child(label),
+                            );
+                        }
+                    }
+                }
+                footer.when(!command_active, |footer| {
+                    footer.child(
+                        Button::new("neovim-toggle-files")
+                            .ghost()
+                            .accessibility_label("Toggle Neovim file browser")
+                            .child("Files")
+                            .on_click(cx.listener(|pane, _, window, cx| {
+                                if pane.files_visible {
+                                    pane.files_visible = false;
+                                    pane.focus.focus(window, cx);
+                                    cx.notify();
+                                } else {
+                                    pane.show_files(window, cx);
+                                }
+                            })),
+                    )
+                })
+            });
+        div()
+            .id("neovim-editor-pane")
+            .track_focus(&self.focus)
+            .key_context(mode_context)
+            .on_key_down(cx.listener(Self::key))
+            .size_full()
+            .min_w_0()
+            .min_h_0()
+            .flex()
+            .when(self.files_visible, |pane| {
+                pane.child(
+                    div()
+                        .id("neovim-integrated-files")
+                        .w(px(240.))
+                        .max_w(relative(0.4))
+                        .h_full()
+                        .flex_shrink_0()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .border_r_1()
+                        .border_color(rgb(palette.line))
+                        .child(self.files.clone()),
+                )
+            })
+            .child(editor)
     }
+}
+
+fn command_text(command: &monitter_gpui_desktop::neovim_model::Cmdline) -> String {
+    let content = chunks_text(&command.content);
+    let mut pos = command.pos.min(content.len());
+    while !content.is_char_boundary(pos) {
+        pos -= 1;
+    }
+    format!(
+        "{}{}{}{}▏{}",
+        command.firstc,
+        command.prompt,
+        " ".repeat(command.indent as usize),
+        &content[..pos],
+        &content[pos..]
+    )
+}
+
+fn mode_label(mode: &str) -> &str {
+    match mode {
+        "normal" => "Normal",
+        "insert" => "Insert",
+        "replace" => "Replace",
+        "visual" => "Visual",
+        "visual_select" => "Visual select",
+        "cmdline_normal" | "cmdline_insert" | "cmdline_replace" => "Command",
+        "terminal" => "Terminal",
+        "operator" => "Operator pending",
+        "" => "Normal",
+        other => other,
+    }
+}
+
+fn project_name(workspace: &Value, cwd: &str) -> String {
+    let path = std::path::Path::new(cwd);
+    if !path.is_absolute() {
+        return String::new();
+    }
+    workspace["projects"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|project| {
+            project["workspaces"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(move |root| {
+                    let host = root["hostId"].as_str()?;
+                    let local = workspace["hosts"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .any(|row| row["id"].as_str() == Some(host) && row["kind"] == "local");
+                    let root = std::path::Path::new(root["cwd"].as_str()?);
+                    (local && root.is_absolute() && path.starts_with(root))
+                        .then(|| (root.components().count(), field(project, "name")))
+                })
+        })
+        .max_by_key(|(depth, _)| *depth)
+        .map(|(_, name)| name)
+        .unwrap_or_default()
 }
 
 fn chunks_text(chunks: &[CmdlineChunk]) -> String {
@@ -1098,6 +1448,209 @@ fn field(v: &Value, key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ::core::prelude::v1::test;
+
+    #[test]
+    fn idle_editor_polling_is_bounded_and_resets_after_activity() {
+        assert_eq!(neovim_poll_delay(false, 0), Duration::from_secs(1));
+        assert_eq!(neovim_poll_delay(true, 0), Duration::from_millis(20));
+        assert_eq!(
+            neovim_poll_delay(true, u32::MAX),
+            Duration::from_millis(250)
+        );
+        assert!(!has_gui_panes(0));
+        assert!(has_gui_panes(1));
+    }
+
+    #[cfg(feature = "visual-export")]
+    #[gpui_kit::test]
+    fn hidden_editor_input_wakes_immediately_and_visibility_is_aggregated(cx: &mut TestAppContext) {
+        let session = cx.new(|cx| {
+            let mut session = NeovimSession::new(
+                DesktopService::disconnected_for_ui_fixture(),
+                "wake".into(),
+                cx,
+            );
+            session._poll = cx.spawn(async move |_, _| {});
+            session
+        });
+        let first = cx.new(|_| ()).entity_id();
+        let second = cx.new(|_| ()).entity_id();
+        let (sender, mut receiver) = futures::channel::mpsc::channel(1);
+        session.update(cx, |session, cx| {
+            session.wake = sender;
+            assert!(receiver.next().now_or_never().is_none());
+            assert_eq!(
+                neovim_poll_delay(!session.visible_panes.is_empty(), 0),
+                Duration::from_secs(1)
+            );
+            session.input(1, "x", cx);
+            // The waiting future becomes ready without advancing a timer.
+            assert_eq!(receiver.next().now_or_never(), Some(Some(())));
+            assert_eq!(
+                session
+                    .queue
+                    .iter()
+                    .map(|(name, _)| *name)
+                    .collect::<Vec<_>>(),
+                vec!["neovim_focus", "neovim_input"]
+            );
+            session.set_pane_visible(first, true);
+            session.set_pane_visible(second, true);
+            session.set_pane_visible(first, false);
+            assert_eq!(session.visible_panes.len(), 1);
+            session.set_pane_visible(second, false);
+            assert!(session.visible_panes.is_empty());
+        });
+    }
+
+    // Dispatch through the actual native render/focus tree, without a backend,
+    // so moving the focus handle away from the key handler is observable.
+    #[cfg(feature = "visual-export")]
+    #[gpui_kit::test]
+    fn integrated_sidebar_preserves_editor_key_routing(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let mut retained = None;
+        let (_, visual) = cx.add_window_view(|window, cx| {
+            let session = cx.new(|cx| {
+                let mut session = NeovimSession::new(
+                    DesktopService::disconnected_for_ui_fixture(),
+                    "focus-fixture".into(),
+                    cx,
+                );
+                // Cancel polling: inspect the real input queue locally.
+                session._poll = cx.spawn(async move |_, _| {});
+                session
+            });
+            let pane = cx.new(|cx| NeovimPane::new(session, 1001, window, cx));
+            let focus = pane.read(cx).focus.clone();
+            focus.focus(window, cx);
+            retained = Some(pane.clone());
+            gpui_kit::component::Root::new(pane, window, cx)
+        });
+        let pane = retained.unwrap();
+        visual.run_until_parked();
+        visual.update(|_, cx| {
+            let session = pane.read(cx).session.clone();
+            session.update(cx, |session, _| session.queue.clear())
+        });
+        visual.simulate_keystrokes("escape");
+        visual.update(|_, cx| {
+            assert!(
+                pane.read(cx)
+                    .session
+                    .read(cx)
+                    .queue
+                    .iter()
+                    .any(|(name, args)| *name == "neovim_input" && args["keys"] == "<Esc>")
+            );
+            let session = pane.read(cx).session.clone();
+            session.update(cx, |session, _| session.queue.clear());
+        });
+        visual.update(|window, cx| pane.update(cx, |pane, cx| pane.show_files(window, cx)));
+        visual.run_until_parked();
+        visual.update(|window, cx| {
+            assert!(pane.read(cx).focus.contains_focused(window, cx));
+            assert!(!pane.read(cx).focus.is_focused(window));
+        });
+        visual.simulate_keystrokes("escape");
+        visual.update(|_, cx| {
+            assert!(
+                !pane
+                    .read(cx)
+                    .session
+                    .read(cx)
+                    .queue
+                    .iter()
+                    .any(|(name, _)| *name == "neovim_input")
+            )
+        });
+        visual.update(|_, cx| {
+            let files = pane.read(cx).files.clone();
+            files.update(cx, |_, cx| {
+                cx.emit(crate::neovim_files::NeovimFilesEvent::OpenFile(
+                    "/fixture/file.rs".into(),
+                ));
+            })
+        });
+        visual.update(|window, cx| {
+            assert!(pane.read(cx).focus.is_focused(window));
+            assert!(
+                pane.read(cx)
+                    .session
+                    .read(cx)
+                    .queue
+                    .iter()
+                    .any(|(name, args)| *name == "neovim_open_file"
+                        && args["windowId"] == 1001
+                        && args["path"] == "/fixture/file.rs")
+            );
+        });
+    }
+
+    #[cfg(feature = "visual-export")]
+    #[gpui_kit::test]
+    fn missing_session_reconciles_but_transient_errors_preserve_editor(cx: &mut TestAppContext) {
+        let session = cx.new(|cx| {
+            let mut session = NeovimSession::new(
+                DesktopService::disconnected_for_ui_fixture(), "gone".into(), cx);
+            session._poll = cx.spawn(async move |_, _| {});
+            session.snapshot = json!({"layout": ["leaf", 1001], "windows": [{"id":1001}], "exited":false});
+            session
+        });
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let capture = events.clone();
+        let _subscription = cx.update(|cx| {
+            cx.subscribe(&session, move |_, event: &NeovimSessionEvent, _| {
+                capture.borrow_mut().push(*event)
+            })
+        });
+        session.update(cx, |session, cx| {
+            session.consume_read_error("Backend disconnected".into(), cx);
+            assert_eq!(session.snapshot["exited"], false);
+            assert_eq!(session.snapshot["layout"], json!(["leaf",1001]));
+            session.pending_focus = Some(1001);
+            session.enqueue("neovim_input", json!({"keys":"x"}), cx);
+            session.consume_read_error("Neovim session no longer exists.".into(), cx);
+            assert_eq!(session.snapshot["exited"], true);
+            assert!(session.snapshot["windows"].as_array().unwrap().is_empty());
+            assert!(session.queue.is_empty());
+            assert!(session.pending_focus.is_none());
+        });
+        cx.run_until_parked();
+        assert_eq!(*events.borrow(), vec![NeovimSessionEvent::Updated]);
+    }
+
+    #[test]
+    fn command_caret_uses_vim_byte_position_and_prompt() {
+        let command = monitter_gpui_desktop::neovim_model::Cmdline {
+            firstc: "/".into(),
+            prompt: "find ".into(),
+            indent: 2,
+            content: vec![CmdlineChunk {
+                text: "éclair".into(),
+                hl_id: 0,
+            }],
+            pos: 2,
+        };
+        assert_eq!(command_text(&command), "/find   é▏clair");
+        let command = monitter_gpui_desktop::neovim_model::Cmdline { pos: 1, ..command };
+        assert_eq!(command_text(&command), "/find   ▏éclair");
+    }
+
+    #[test]
+    fn project_uses_deepest_local_ancestor_with_path_boundaries() {
+        let workspace = json!({"hosts": [{"id":"local","kind":"local"}, {"id":"ssh","kind":"ssh"}],
+        "projects": [
+            {"name":"Outer", "workspaces":[{"hostId":"local", "cwd":"/code/app"}]},
+            {"name":"Inner", "workspaces":[{"hostId":"local", "cwd":"/code/app/nested"}]},
+            {"name":"Remote", "workspaces":[{"hostId":"ssh", "cwd":"/code/app/nested/src"}]}
+        ]});
+        assert_eq!(project_name(&workspace, "/code/app/nested/src"), "Inner");
+        assert_eq!(project_name(&workspace, "/code/app/src"), "Outer");
+        assert_eq!(project_name(&workspace, "/code/application"), "");
+        assert_eq!(project_name(&workspace, "app/src"), "");
+    }
 
     #[test]
     fn wide_and_narrow_characters() {
@@ -1111,6 +1664,14 @@ mod tests {
     #[test]
     fn colors_mask_alpha() {
         assert_eq!(to_rgb(0xFF_00AABB), 0x00AABB);
+    }
+
+    #[test]
+    fn missing_session_is_distinct_from_transport_and_editor_errors() {
+        assert!(session_is_missing("Neovim session no longer exists."));
+        for error in ["Backend disconnected", "Neovim stream closed", "No write since last change", "request timed out"] {
+            assert!(!session_is_missing(error));
+        }
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Bounded, presentation-only projection of structured tool details.
 use crate::design::ui_scaled_px as px;
 use gpui_kit::{
-    component::{ActiveTheme, text::TextView},
+    component::{ActiveTheme, Sizable, button::*, text::TextView},
     prelude::*,
     *,
 };
@@ -182,16 +182,42 @@ fn project(
 pub(super) struct PreparedDetail {
     blocks: Vec<Block>,
     literals: Vec<SharedString>,
+    inline_diffs: Vec<Option<crate::git::InlineDiff>>,
 }
 pub(super) fn prepare(source: &str) -> Option<PreparedDetail> {
-    let blocks = blocks(source)?;
+    if source.len() > MAX_TEXT {
+        return None;
+    }
+    let blocks = blocks(source).or_else(|| {
+        crate::git::InlineDiff::prepare(source).map(|_| {
+            vec![Block {
+                label: String::new(),
+                text: source.to_owned(),
+            }]
+        })
+    })?;
     let literals = blocks
         .iter()
         .map(|block| SharedString::from(super::literal_detail(&block.text)))
         .collect();
-    Some(PreparedDetail { blocks, literals })
+    let inline_diffs = blocks
+        .iter()
+        .map(|block| crate::git::InlineDiff::prepare(&block.text))
+        .collect();
+    Some(PreparedDetail {
+        blocks,
+        literals,
+        inline_diffs,
+    })
 }
-pub(super) fn render_prepared(detail: &PreparedDetail, event_id: &str, cx: &App) -> AnyElement {
+pub(super) fn render_prepared(
+    detail: &PreparedDetail,
+    event_id: &str,
+    task_id: &str,
+    git_owner: Option<WeakEntity<crate::chat::ChatPane>>,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
     let mut body = div().w_full().min_w_0().flex().flex_col().gap(px(6.));
     for (index, block) in detail.blocks.iter().enumerate() {
         let mut section = div().w_full().min_w_0().flex().flex_col().gap(px(3.));
@@ -204,14 +230,34 @@ pub(super) fn render_prepared(detail: &PreparedDetail, event_id: &str, cx: &App)
                     .child(block.label.clone()),
             );
         }
-        section = section.child(
-            TextView::markdown(
-                SharedString::from(format!("tool-detail-{event_id}-{index}")),
-                detail.literals[index].clone(),
-            )
-            .selectable(true)
-            .scrollable(false),
-        );
+        if let Some(diff) = &detail.inline_diffs[index] {
+            section =
+                section.child(diff.render(&format!("tool-diff-{event_id}-{index}"), window, cx));
+            if let Some(owner) = git_owner.clone() {
+                let task_id = task_id.to_owned();
+                section = section.child(
+                    Button::new(format!("tool-diff-open-{event_id}-{index}"))
+                        .text()
+                        .compact()
+                        .xsmall()
+                        .label("Open in Changes")
+                        .on_click(move |_, _, cx| {
+                            let _ = owner.update(cx, |_, cx| {
+                                cx.emit(crate::chat::ChatEvent::Git(task_id.clone()));
+                            });
+                        }),
+                );
+            }
+        } else {
+            section = section.child(
+                TextView::markdown(
+                    SharedString::from(format!("tool-detail-{event_id}-{index}")),
+                    detail.literals[index].clone(),
+                )
+                .selectable(true)
+                .scrollable(false),
+            );
+        }
         body = body.child(section);
     }
     body.into_any_element()
@@ -220,6 +266,27 @@ pub(super) fn render_prepared(detail: &PreparedDetail, event_id: &str, cx: &App)
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[::core::prelude::v1::test]
+    fn actual_patch_payloads_get_inline_previews() {
+        let patch = "--- a/example.rs\n+++ b/example.rs\n@@ -1 +1 @@\n-old\n+new\n";
+        let raw = prepare(patch).unwrap();
+        assert!(raw.inline_diffs[0].is_some());
+        let structured = prepare(&serde_json::json!({"patch": patch}).to_string()).unwrap();
+        assert!(structured.inline_diffs[0].is_some());
+    }
+
+    #[::core::prelude::v1::test]
+    fn ordinary_literals_and_path_counts_are_not_invented_patches() {
+        assert!(prepare("ordinary output\nwith punctuation").is_none());
+        assert!(prepare("{\"patch\":\"unfinished").is_none());
+        let prepared = prepare(
+            r##"{"path":"example.rs","additions":1,"deletions":1,"text":"# exact literal"}"##,
+        )
+        .unwrap();
+        assert!(prepared.inline_diffs.iter().all(Option::is_none));
+        assert_eq!(prepared.blocks.last().unwrap().text, "# exact literal");
+    }
+
     #[::core::prelude::v1::test]
     fn prepared_detail_keeps_exact_blocks_and_literal_text_without_reprojection() {
         let source = r##"{"command":"echo `hello`","output":"# Literal heading\nnext"}"##;

@@ -109,6 +109,8 @@ impl Render for Tooltip {
             // Wrap in a child, to ensure the left margin is applied to the tooltip
             BaseTooltip::new("tooltip-popup")
                 .h_flex()
+                .relative()
+                .child(crate::surface_backdrop::popup_geometry_layer())
                 .font_family(cx.theme().font_family.clone())
                 .m_3()
                 .bg(gpui::Background::from(cx.theme().popover).backdrop_blur(20.))

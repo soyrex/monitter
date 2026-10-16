@@ -64,6 +64,9 @@ impl NativeNavigation {
         cx.defer(move |cx| {
             match handle.update(cx, |_root, window, cx| {
                 weak.update(cx, |desktop, cx| {
+                    // Native App actions bypass the inert startup paint tree.
+                    // Cached presentation cannot authorize workspace mutations.
+                    if desktop.startup_pending { return; }
                     if crate::shortcut_desktop::workspace_shortcuts_blocked(
                         window.has_active_dialog(cx),
                         desktop.preferences_open || crate::session_lock::locked(cx),

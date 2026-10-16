@@ -15,6 +15,14 @@ pub fn parse_id(id: &str) -> Option<(&str, i64)> {
     (!session.is_empty() && win > 0).then_some((session, win))
 }
 
+pub fn parse_files_id(id: &str) -> Option<&str> {
+    id.strip_prefix("neovim-files:")
+        .filter(|session| !session.is_empty())
+}
+fn files_id(session: &str) -> String {
+    format!("neovim-files:{session}")
+}
+
 fn leaves(layout: &Value) -> Vec<i64> {
     if layout[0] == "leaf" {
         return layout[1].as_i64().into_iter().collect();
@@ -125,10 +133,12 @@ impl Desktop {
         cx: &mut Context<Self>,
     ) -> Option<Entity<neovim::NeovimSession>> {
         if let Some(session) = self.neovim_sessions.get(id) {
+            session.update(cx, |session, cx| session.set_workspace(&self.snapshot, cx));
             return Some(session.clone());
         }
         let service = self.service.clone()?;
         let session = cx.new(|cx| neovim::NeovimSession::new(service, id.to_owned(), cx));
+        session.update(cx, |session, cx| session.set_workspace(&self.snapshot, cx));
         let id_owned = id.to_owned();
         cx.subscribe_in(
             &session,
@@ -145,6 +155,24 @@ impl Desktop {
         .detach();
         self.neovim_sessions.insert(id.to_owned(), session.clone());
         Some(session)
+    }
+
+    pub(super) fn show_neovim_files(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let key = self
+            .dock
+            .read(cx)
+            .focused_pane_id(window, cx)
+            .ok_or("Focus a Neovim editor first.")?;
+        let pane = self
+            .neovim_panes
+            .get(&key)
+            .ok_or("Focus a Neovim editor first.")?;
+        pane.update(cx, |pane, cx| pane.show_files(window, cx));
+        Ok(())
     }
 
     pub(super) fn neovim_spec(
@@ -172,7 +200,13 @@ impl Desktop {
             .unwrap_or_else(|| "Neovim".into());
         let weak = cx.weak_entity();
         let active_key = key.clone();
+        let visible_pane = pane.downgrade();
         let lifecycle: docking::LifecycleHook = Rc::new(move |event, _, cx| {
+            match event {
+                docking::PaneLifecycle::Visible(visible) => { let _ = visible_pane.update(cx, |pane, cx| pane.set_visible(visible, cx)); }
+                docking::PaneLifecycle::Removed => { let _ = visible_pane.update(cx, |pane, cx| pane.set_visible(false, cx)); }
+                _ => {}
+            }
             if matches!(event, docking::PaneLifecycle::Active(true)) {
                 let weak = weak.clone();
                 let key = active_key.clone();
@@ -194,12 +228,22 @@ impl Desktop {
             focus: pane.focus_handle(cx),
             lifecycle: Some(lifecycle),
             // Neovim must acknowledge a close before removing the native pane.
-            // The editor's close button and workspace close action use that path.
+            // The workspace close action uses that path.
             closable: false,
         })
     }
 
-    fn reconcile_neovim(
+    /// Release a Neovim pane after DockWorkspace reports an actual removal.
+    /// Layout switches run in retaining mode and do not emit this event, so
+    /// panes in inactive named workspaces remain cached. Their saved layout
+    /// can also recreate a released pane later from the live session snapshot.
+    pub(super) fn release_removed_neovim_pane(&mut self, key: &str, cx: &App) {
+        if parse_id(key).is_some() && !self.dock.read(cx).contains(key) {
+            self.neovim_panes.remove(key);
+        }
+    }
+
+    pub(super) fn reconcile_neovim(
         &mut self,
         id: &str,
         window: &mut Window,
@@ -208,16 +252,16 @@ impl Desktop {
         let Some(session) = self.neovim_sessions.get(id).cloned() else {
             return Ok(());
         };
+        session.update(cx, |session, cx| session.set_workspace(&self.snapshot, cx));
         let snapshot = session.read(cx).snapshot.clone();
+        if snapshot["exited"] == true {
+            return self.remove_neovim_session_panes(id, window, cx);
+        }
         let layout = snapshot["layout"].clone();
-        if layout.is_null() && snapshot["exited"] != true {
+        if layout.is_null() {
             return Ok(());
         }
-        let wanted: HashSet<i64> = if snapshot["exited"] == true {
-            HashSet::new()
-        } else {
-            leaves(&layout).into_iter().collect()
-        };
+        let wanted: HashSet<i64> = leaves(&layout).into_iter().collect();
         let mut existing: HashSet<i64> = self
             .neovim_panes
             .keys()
@@ -364,6 +408,54 @@ impl Desktop {
         Ok(())
     }
 
+    fn remove_neovim_session_panes(
+        &mut self,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        // Include retained panes in inactive workspaces, not just docked panes.
+        let mut obsolete: HashSet<String> = self.neovim_panes.keys()
+            .filter(|key| parse_id(key).is_some_and(|(session, _)| session == id))
+            .cloned().collect();
+        obsolete.extend(docking::DockWorkspace::saved_ids(&self.dock.read(cx).serialize(cx)?)?
+            .into_iter().filter(|key| parse_id(key).is_some_and(|(session, _)| session == id)));
+        obsolete.insert(files_id(id));
+        let focused = self.dock.read(cx).focused_pane_id(window, cx);
+        let owned_focus = focused.as_ref().is_some_and(|key| obsolete.contains(key));
+        for key in &obsolete {
+            self.dock.update(cx, |dock, cx| { dock.remove(key, window, cx); });
+            self.neovim_panes.remove(key);
+        }
+        if let Some(set) = &mut self.named_workspaces {
+            for item in &mut set.items {
+                if let Some(layout) = &mut item.layout {
+                    // Saved inactive layouts can contain additional window IDs.
+                    let ids = docking::DockWorkspace::saved_ids(layout)?.into_iter()
+                        .filter(|key| parse_id(key).is_some_and(|(session, _)| session == id)
+                            || parse_files_id(key) == Some(id)).collect();
+                    let cleaned = workspace_visibility::prune_native_pane_ids(layout, &ids)?;
+                    if cleaned != *layout {
+                        *layout = cleaned;
+                        self.workspaces_dirty = true;
+                    }
+                }
+            }
+        }
+        self.neovim_sessions.remove(id);
+        self.neovim_layouts.remove(id);
+        self.neovim_origins.remove(id);
+        self.neovim_focus_windows.remove(id);
+        if owned_focus {
+            self.dock.update(cx, |dock, cx| { dock.focus_relative_pane("first", window, cx); });
+        }
+        self.dock_current = self.dock.read(cx).focused_pane_id(window, cx);
+        self.preferences_dirty = true;
+        self.queue_preferences_save(cx);
+        cx.notify();
+        Ok(())
+    }
+
     pub(super) fn neovim_split_focused(
         &mut self,
         vertical: bool,
@@ -396,6 +488,11 @@ impl Desktop {
         };
         if let Some(session) = self.neovim_sessions.get(id) {
             session.update(cx, |session, cx| session.close_window(win, cx));
+        } else {
+            // A stale restored identity has no editor that could acknowledge close.
+            if let Err(error) = self.remove_neovim_session_panes(id, window, cx) {
+                self.error = Some(error);
+            }
         }
         true
     }
@@ -418,6 +515,7 @@ fn editor_title(row: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ::core::prelude::v1::test;
     #[test]
     fn nested_split_uses_closest_retained_neighbor() {
         let tree = json!(["row", [["leaf", 1], ["col", [["leaf", 2], ["leaf", 3]]]]]);
@@ -436,5 +534,8 @@ mod tests {
         assert_eq!(parse_id("neovim:abc:1000"), Some(("abc", 1000)));
         assert!(parse_id("neovim::0").is_none());
         assert!(parse_id("terminal:abc").is_none());
+        assert_eq!(parse_files_id("neovim-files:abc"), Some("abc"));
+        assert!(parse_files_id("neovim-files:").is_none());
+        assert!(parse_id("neovim-files:abc").is_none());
     }
 }

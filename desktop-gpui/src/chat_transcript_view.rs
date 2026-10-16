@@ -4,6 +4,7 @@
 //! only renders the already-prepared virtual list, including when a streaming
 //! message, disclosure, focus or viewport resize invalidates its descendants.
 use super::*;
+use gpui_kit::base::{ElementExt as _, TextSelectionGroupId};
 
 /// Paint/layout geometry is independent of committed transcript content.
 /// Visible virtual rows sample this retained scalar after each pane reflow.
@@ -13,7 +14,7 @@ pub(super) struct TranscriptGeometry {
 }
 impl TranscriptGeometry {
     pub(super) fn from_viewport_width(width: f32) -> Self {
-        Self { width: width - space::SECTION * 2. }
+        Self { width: width - (space::SECTION + 5.) * 2. }
     }
     pub(super) fn bubble_fraction(self) -> f32 {
         if self.width <= 420. { 1. } else { 0.9 }
@@ -33,7 +34,7 @@ impl TranscriptGeometry {
 #[derive(Clone)]
 pub(super) struct TranscriptPreparationKey {
     snapshot: std::rc::Weak<Value>,
-    rows: Option<Rc<Vec<TimelineRow>>>,
+    rows: Option<Rc<im::Vector<TimelineRow>>>,
     selected: Option<String>,
     palette: design::Palette,
     interface_family: SharedString,
@@ -49,7 +50,6 @@ pub(super) struct TranscriptPreparationKey {
     complete: bool,
     history_top_reached: bool,
     refreshing: bool,
-    disclosure_generation: u64,
     date: chrono::NaiveDate,
 }
 impl TranscriptPreparationKey {
@@ -85,7 +85,6 @@ impl TranscriptPreparationKey {
                     && state.list.is_scrolled_to_end() == Some(false)
             }),
             refreshing: pane.refreshing,
-            disclosure_generation: pane.response_disclosure_generation,
             date: chrono::Local::now().date_naive(),
         }
     }
@@ -99,7 +98,7 @@ impl TranscriptPreparationKey {
     }
     /// Text-only substitution preserves every prepared wrapper and grouping.
     /// Do not erase an already-pending structural invalidation.
-    pub(super) fn advance_stream_rows(&mut self, previous: &Rc<Vec<TimelineRow>>, next: &Rc<Vec<TimelineRow>>) {
+    pub(super) fn advance_stream_rows(&mut self, previous: &Rc<im::Vector<TimelineRow>>, next: &Rc<im::Vector<TimelineRow>>) {
         if self.rows.as_ref().is_some_and(|rows| Rc::ptr_eq(rows, previous)) {
             self.rows = Some(next.clone());
         }
@@ -128,13 +127,12 @@ impl PartialEq for TranscriptPreparationKey {
             && self.complete == other.complete
             && self.history_top_reached == other.history_top_reached
             && self.refreshing == other.refreshing
-            && self.disclosure_generation == other.disclosure_generation
             && self.date == other.date
     }
 }
 
 #[cfg(feature = "performance-profiling")]
-const PREPARATION_REASONS: [&str; 21] = [
+const PREPARATION_REASONS: [&str; 20] = [
     "initial",
     "missingViewport",
     "snapshot",
@@ -154,12 +152,11 @@ const PREPARATION_REASONS: [&str; 21] = [
     "historyComplete",
     "historyTop",
     "refreshing",
-    "disclosure",
     "date",
 ];
 #[cfg(feature = "performance-profiling")]
-static PREPARATION_REASON_COUNTS: [std::sync::atomic::AtomicU64; 21] =
-    [const { std::sync::atomic::AtomicU64::new(0) }; 21];
+static PREPARATION_REASON_COUNTS: [std::sync::atomic::AtomicU64; 20] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 20];
 
 #[cfg(feature = "performance-profiling")]
 pub(super) fn preparation_reason_counts() -> Vec<(&'static str, u64)> {
@@ -177,7 +174,7 @@ impl TranscriptPreparationKey {
     /// without message, draft, task, provider or source payload information.
     pub(super) fn record_invalidation(&self, previous: Option<&Self>, missing_viewport: bool) {
         use std::sync::atomic::Ordering::Relaxed;
-        let mut flags = [false; 21];
+        let mut flags = [false; 20];
         flags[0] = previous.is_none();
         flags[1] = missing_viewport;
         if let Some(old) = previous {
@@ -203,8 +200,7 @@ impl TranscriptPreparationKey {
             flags[16] = old.complete != self.complete;
             flags[17] = old.history_top_reached != self.history_top_reached;
             flags[18] = old.refreshing != self.refreshing;
-            flags[19] = old.disclosure_generation != self.disclosure_generation;
-            flags[20] = old.date != self.date;
+            flags[19] = old.date != self.date;
         }
         for (changed, count) in flags.iter().zip(&PREPARATION_REASON_COUNTS) {
             if *changed {
@@ -254,6 +250,8 @@ fn defer_for_task<T: 'static>(
 
 pub(super) struct TranscriptViewport {
     task_id: String,
+    selection_group: TextSelectionGroupId,
+    owner: Option<WeakEntity<ChatPane>>,
     load_earlier: Rc<dyn Fn(&str, &mut App)>,
     load_unmeasured_history: Rc<dyn Fn(&str, &mut App)>,
     #[cfg(test)]
@@ -262,6 +260,11 @@ pub(super) struct TranscriptViewport {
     error: Option<String>,
     palette: design::Palette,
     geometry: Rc<std::cell::Cell<TranscriptGeometry>>,
+    minimap_visible: bool,
+    minimap_exit: Option<std::time::Instant>,
+    minimap_jump: Option<minimap::MarkerJump>,
+    pub(super) minimap_emphasis: minimap::Emphasis,
+    pub(super) minimap_bottom_inset: Pixels,
 }
 impl TranscriptViewport {
     pub(super) fn new(
@@ -272,6 +275,7 @@ impl TranscriptViewport {
         palette: design::Palette,
         geometry: Rc<std::cell::Cell<TranscriptGeometry>>,
     ) -> Self {
+        let chat_owner = owner.clone();
         let retry_owner = owner.clone();
         let load_earlier = Rc::new(move |task_id: &str, cx: &mut App| {
             let _ = retry_owner.update(cx, |pane, cx| {
@@ -303,15 +307,75 @@ impl TranscriptViewport {
         });
         Self {
             task_id,
+            selection_group: TextSelectionGroupId::new(),
+            owner: Some(chat_owner),
             load_earlier,
             load_unmeasured_history,
             list,
             error,
             palette,
             geometry,
+            minimap_visible: false,
+            minimap_exit: None,
+            minimap_jump: None,
+            minimap_emphasis: minimap::Emphasis::default(),
+            minimap_bottom_inset: gpui_kit::px(0.),
             #[cfg(test)]
             render_count: 0,
         }
+    }
+    pub(super) fn cancel_minimap_jump(&mut self) { self.minimap_jump = None; }
+    pub(super) fn set_composer_hidden(&mut self, hidden: Pixels, cx: &mut Context<Self>) {
+        if self.minimap_bottom_inset != hidden {
+            self.minimap_bottom_inset = hidden;
+            cx.notify();
+        }
+    }
+    pub(super) fn minimap_marker_jump(&mut self, row: usize, cx: &mut Context<Self>) {
+        self.minimap_navigated(false, cx);
+        let Some(list) = &self.list else { return; };
+        let state = list.read(cx).state.clone();
+        state.set_follow_mode(FollowMode::Normal);
+        if crate::native_motion::motion_allowed() {
+            self.minimap_jump = Some(minimap::MarkerJump::new(row.min(state.item_count().saturating_sub(1))));
+        } else { state.scroll_to(gpui_kit::ListOffset { item_ix: row, offset_in_item: gpui_kit::px(0.) }); }
+        self.repaint_scroll(cx);
+    }
+    fn advance_minimap_jump(&mut self, cx: &mut Context<Self>) {
+        let Some(list) = &self.list else { self.minimap_jump = None; return; };
+        let state = list.read(cx).state.clone();
+        if self.minimap_jump.as_mut().is_some_and(|jump| jump.advance(&state)) {
+            self.minimap_navigated(false, cx);
+        } else { self.repaint_scroll(cx); }
+    }
+    pub(super) fn minimap_navigated(&mut self, at_bottom: bool, cx: &mut Context<Self>) {
+        self.cancel_minimap_jump();
+        let Some(owner) = self.owner.clone() else { self.repaint_scroll(cx); return; };
+        let task_id = self.task_id.clone();
+        cx.defer(move |cx| {
+            let _ = owner.update(cx, |pane, cx| {
+                if pane.selected.as_deref() != Some(task_id.as_str()) { return; }
+                if at_bottom { pane.finish_bottom_jump(cx); return; }
+                pane.bottom_jump = None;
+                if let Some(state) = pane.transcripts.get_mut(&task_id) {
+                    state.list.set_follow_mode(FollowMode::Normal);
+                    pane.composer_scroll_distance = crate::composer_scroll::remaining_tail_distance(
+                        state.list.max_offset_for_scrollbar().y,
+                        state.list.scroll_px_offset_for_scrollbar().y, gpui_kit::px(0.));
+                }
+                let earlier = pane.transcripts.get(&task_id).is_some_and(|state| {
+                    state.list.logical_scroll_top().item_ix <= 2 && !state.loading && !state.complete() && state.error.is_none()
+                });
+                if earlier { pane.load_earlier(cx); }
+                pane.invalidate_transcript_list(cx);
+                cx.notify();
+            });
+        });
+        self.repaint_scroll(cx);
+    }
+    pub(super) fn repaint_scroll(&mut self, cx: &mut Context<Self>) {
+        if let Some(list) = &self.list { list.update(cx, |_, cx| cx.notify()); }
+        cx.notify();
     }
     pub(super) fn set_content(
         &mut self,
@@ -321,6 +385,7 @@ impl TranscriptViewport {
         palette: design::Palette,
         cx: &mut Context<Self>,
     ) {
+        if self.task_id != task_id { self.selection_group = TextSelectionGroupId::new(); self.minimap_visible = false; self.minimap_exit = None; self.minimap_jump = None; self.minimap_emphasis = minimap::Emphasis::default(); }
         self.task_id = task_id;
         self.list = list;
         self.error = error;
@@ -329,14 +394,20 @@ impl TranscriptViewport {
     }
 }
 impl Render for TranscriptViewport {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(test)]
         {
             self.render_count += 1;
         }
+        if self.minimap_jump.is_some() {
+            let owner = cx.weak_entity();
+            window.on_next_frame(move |_, cx| { let _ = owner.update(cx, |view, cx| view.advance_minimap_jump(cx)); });
+            window.request_animation_frame();
+        }
         let load_unmeasured_history = self.load_unmeasured_history.clone();
         let scroll_task_id = self.task_id.clone();
         let geometry = self.geometry.clone();
+        let repaint = cx.weak_entity();
         let mut transcript = div()
             .id("transcript")
             .relative()
@@ -356,6 +427,8 @@ impl Render for TranscriptViewport {
             .flex_col()
             .gap(px(space::SECTION))
             .on_scroll_wheel(move |event: &ScrollWheelEvent, _, cx| {
+                let repaint = repaint.clone();
+                cx.defer(move |cx| { let _ = repaint.update(cx, |view, cx| { view.cancel_minimap_jump(); cx.notify(); }); });
                 // An empty scroll extent does not prove older history should
                 // load. Only an upward user gesture can fetch the earlier page.
                 if event.delta.pixel_delta(px(20.)).y <= gpui_kit::px(0.) {
@@ -363,6 +436,8 @@ impl Render for TranscriptViewport {
                 }
                 load_unmeasured_history(&scroll_task_id, cx);
             });
+        #[cfg(test)]
+        { transcript = transcript.debug_selector(|| "retained-transcript-viewport".into()); }
         if let Some(error) = self.error.clone() {
             let load_earlier = self.load_earlier.clone();
             let retry_task_id = self.task_id.clone();
@@ -384,12 +459,27 @@ impl Render for TranscriptViewport {
         if let Some(list) = self.list.as_ref() {
             transcript =
                 transcript.child(list.clone().cached(StyleRefinement::default().size_full()));
+            let retained = list.read(cx);
+            let visible = (retained.state.item_count() > 0 && !retained.state.is_following_tail()) || retained.state.is_scrollbar_dragging();
+            if visible { self.minimap_exit = None; }
+            else if self.minimap_visible && crate::native_motion::motion_allowed() {
+                self.minimap_exit = Some(std::time::Instant::now());
+            }
+            self.minimap_visible = visible;
+            let exit = self.minimap_exit.map(|start| (start.elapsed().as_secs_f32() / 0.15).min(1.));
+            if exit == Some(1.) { self.minimap_exit = None; }
+            if visible || self.minimap_exit.is_some() {
+                let emphasis = self.minimap_emphasis.advance(std::time::Instant::now());
+                transcript = transcript.child(minimap::render(retained.state.clone(), retained.minimap.clone(), retained.rows.clone(), self.geometry.get(), self.palette, cx.weak_entity(), window, cx, exit, emphasis, self.minimap_bottom_inset));
+                if self.minimap_emphasis.animating() { window.request_animation_frame(); cx.notify(); }
+                if self.minimap_exit.is_some() { window.request_animation_frame(); cx.notify(); }
+            }
         } else {
             transcript = transcript.child(transcript_column(div().child(
                 "Select a chat or create one from Agents. Saved CLI authentication is used only when you send a message.",
             )));
         }
-        transcript
+        transcript.text_selection_group(self.selection_group)
     }
 }
 
@@ -399,12 +489,12 @@ mod geometry_tests {
     #[::core::prelude::v1::test]
     fn bubble_and_attachment_modes_track_live_width_thresholds() {
         use message_attachments::AttachmentLayout;
-        let wide = TranscriptGeometry::from_viewport_width(461.);
-        let narrow = TranscriptGeometry::from_viewport_width(460.);
+        let wide = TranscriptGeometry::from_viewport_width(471.);
+        let narrow = TranscriptGeometry::from_viewport_width(470.);
         assert_eq!(wide.bubble_fraction(), 0.9);
         assert_eq!(narrow.bubble_fraction(), 1.);
-        let portrait = TranscriptGeometry::from_viewport_width(360.);
-        let landscape = TranscriptGeometry::from_viewport_width(359.);
+        let portrait = TranscriptGeometry::from_viewport_width(370.);
+        let landscape = TranscriptGeometry::from_viewport_width(369.);
         assert_eq!(portrait.attachment_layout(AttachmentLayout::PortraitLeft), AttachmentLayout::PortraitLeft);
         assert_eq!(landscape.attachment_layout(AttachmentLayout::PortraitLeft), AttachmentLayout::LandscapeBottom);
         assert_eq!(landscape.attachment_layout(AttachmentLayout::Cards), AttachmentLayout::Cards);
@@ -415,3 +505,11 @@ mod geometry_tests {
 #[cfg(all(test, feature = "visual-export"))]
 #[path = "chat_render_isolation_tests.rs"]
 mod tests;
+
+#[cfg(all(test, feature = "visual-export"))]
+#[path = "chat_minimap_tests.rs"]
+mod minimap_tests;
+
+#[cfg(all(test, feature = "visual-export"))]
+#[path = "chat_selection_tests.rs"]
+mod pane_selection_tests;

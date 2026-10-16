@@ -2,6 +2,7 @@
 //! The persistent server alone owns execution and storage; GUI handles only
 //! connect over same-user local IPC. Mobile/LAN allowlists remain unchanged.
 //! Calls can perform disk or process I/O and must run on a background worker.
+pub use crate::browser_open::BrowserOpenRequest;
 use crate::{Service, command_capabilities};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -11,6 +12,7 @@ pub const APP_ID: &str = "com.monitter.gpui.experimental";
 pub use crate::attachments::Attachment;
 pub use crate::attachments::ReadAttachmentFile;
 pub use crate::scheduler::ScheduleInput;
+pub use crate::server_restart::{RestartAgent, RestartMode, RestartStatus};
 pub use crate::ui_sync::{
     ChannelMessageChange, ChannelMessagesPage, TaskMessagesPage, UiDelta, UiDeltaResponse,
 };
@@ -190,6 +192,8 @@ pub struct NativeWorkspace {
     pub name: String,
     pub color: String,
     pub icon: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
     #[serde(default)]
     pub layout: Option<Value>,
 }
@@ -477,9 +481,12 @@ pub fn validate_native_workspace_set(workspaces: &NativeWorkspaceSet) -> Result<
                 || workspace.color.len() != 7
                 || !workspace.color.starts_with('#')
                 || !workspace.color[1..].bytes().all(|byte| byte.is_ascii_hexdigit())
-                || !["folder", "code", "terminal", "globe", "sparkles"].contains(&workspace.icon.as_str())
+                || !valid_native_workspace_icon(&workspace.icon)
             {
                 return Err("Invalid native workspace metadata or duplicate ID.".into());
+            }
+            if let Some(url) = &workspace.url {
+                validate_native_workspace_url(url)?;
             }
             if let Some(layout) = &workspace.layout {
                 validate_native_layout(layout)?;
@@ -489,6 +496,21 @@ pub fn validate_native_workspace_set(workspaces: &NativeWorkspaceSet) -> Result<
             return Err("Native active workspace does not exist.".into());
         }
     Ok(())
+}
+
+/// Explicit bundled catalogue keys only; never file paths or arbitrary asset URLs.
+pub fn valid_native_workspace_icon(value: &str) -> bool {
+    ["folder", "code", "terminal", "globe", "sparkles"].contains(&value)
+        || value.strip_prefix("lucide:").is_some_and(|key|
+            include_str!("workspace_icons.txt").lines().any(|name| name == key))
+}
+
+/// Workspace URLs are presentation metadata; they never grant browser authority.
+pub fn validate_native_workspace_url(value: &str) -> Result<(), String> {
+    let valid = value.len() <= 8192 && !value.chars().any(char::is_control)
+        && tauri::Url::parse(value).is_ok_and(|url| matches!(url.scheme(), "http" | "https")
+            && url.host_str().is_some() && url.username().is_empty() && url.password().is_none());
+    if valid { Ok(()) } else { Err("Enter an HTTP(S) website URL without credentials.".into()) }
 }
 
 fn validate_native_layout(layout: &Value) -> Result<(), String> {
@@ -517,20 +539,9 @@ fn validate_native_layout(layout: &Value) -> Result<(), String> {
 }
 
 fn validate_native_browser_url(value: &str) -> Result<(), String> {
-    let url = tauri::Url::parse(value.trim())
-        .map_err(|_| "Native browser metadata contains an invalid URL.".to_owned())?;
-    if url.as_str() == "about:blank" {
-        return Ok(());
-    }
-    if !matches!(url.scheme(), "http" | "https")
-        || url.host_str().is_none()
-        || !url.username().is_empty()
-        || url.password().is_some()
-    {
-        return Err("Native browser metadata URL is not allowed.".into());
-    }
-    Ok(())
+    crate::browser_links::validate_saved_url(value)
 }
+
 fn validate_preference_pane(
     pane: &PreferencePane,
     depth: usize,
@@ -744,7 +755,10 @@ fn native_preferences_write(_: &std::path::Path, _: &[u8]) -> Result<(), String>
 }
 
 const LOCAL: &[&str] = &[
+    "summarize_notification", "summarize_archived_task", "rename_all", "read_admin_activity",
+    "read_project_build_queue", "recover_project_build",
     "get_command_capabilities",
+    "merge_task_worktree",
     "list_system_fonts",
     "choose_local_folder",
     "plan_jev_route",
@@ -893,6 +907,21 @@ impl BackendService {
         }
         Ok(NativeLanStatus { running, info })
     }
+    /// Owner-only: save a chosen code and update authentication without restarting agents or listeners.
+    pub fn set_lan_access_code(&self, code: String) -> Result<NativeLanStatus, String> {
+        crate::lan::validate_access_code(&code)?;
+        let _control = self.0.lan_control.lock().map_err(|_| "LAN control lock failed.")?;
+        let path = self.0.preferences.dir.join("lan-access-code");
+        {
+            let mut slot = self.0.service.lan.lock().map_err(|_| "LAN server lock failed.")?;
+            if let Some(server) = slot.as_mut() {
+                server.set_access_code(&path, &code)?;
+            } else {
+                crate::lan::save_access_code(&path, &code)?;
+            }
+        }
+        self.lan_status_locked()
+    }
     pub fn start_lan(&self) -> Result<NativeLanStatus, String> {
         let _control = self
             .0
@@ -994,6 +1023,10 @@ impl BackendService {
                 service.cleanup();
                 return Err(error);
             }
+            if let Err(error) = service.recover_restart() {
+                service.cleanup();
+                return Err(error);
+            }
             service.dispatch_startup_queues();
             service.start_idle_collector();
             service.start_scheduler();
@@ -1044,6 +1077,11 @@ impl BackendService {
         }
         self.0.preferences.save(expected_revision, data)
     }
+    pub(crate) fn prepare_replacement(&self) -> Result<(), String> { self.0.service.prepare_replacement() }
+    pub(crate) fn begin_restart(&self, mode: crate::server_restart::RestartMode) -> Result<crate::server_restart::RestartStatus, String> { self.0.service.begin_restart(mode) }
+    pub(crate) fn poll_restart(&self) -> Result<Option<crate::server_restart::RestartStatus>, String> { self.0.service.poll_restart() }
+    pub(crate) fn cancel_restart(&self) -> Result<(), String> { self.0.service.cancel_restart() }
+    pub(crate) fn restart_active_agents(&self) -> Result<Vec<crate::server_restart::RestartAgent>, String> { self.0.service.restart_active_agents() }
     pub fn shutdown(&self) {
         self.0.service.cleanup();
     }
@@ -1087,8 +1125,23 @@ impl BackendService {
         self.0.service.ui_delta(revision)
     }
 
+    /// Private native projection; scope controls reset tails and delta previews,
+    /// while journal revisions and authoritative history remain shared.
+    pub fn read_native_ui_changes(
+        &self,
+        revision: Option<&str>,
+        message_task_ids: &[String],
+    ) -> Result<UiDeltaResponse, String> {
+        self.ensure_running()?;
+        self.0.service.native_ui_delta(revision, message_task_ids)
+    }
+
     /// Read-only local diagnostics for the persistent server's idle collector.
     /// Deliberately not part of the shared/mobile command allowlist.
+    pub fn publish_report_theme(&self, theme: &crate::report_styles::ReportTheme) -> Result<(), String> { self.ensure_running()?; self.0.service.publish_report_theme(theme) }
+    pub fn work_log_owner(&self,operation:&str,args:Value)->Result<Value,String>{self.ensure_running()?;self.0.service.work_log_owner(operation,args)}
+    pub fn read_browser_open_requests(&self) -> Result<Vec<BrowserOpenRequest>, String> { self.ensure_running()?; self.0.service.read_browser_open_requests() }
+    pub fn ack_browser_open_request(&self, id: &str) -> Result<(), String> { self.ensure_running()?; self.0.service.ack_browser_open_request(id) }
     pub fn read_idle_runtime_status(&self) -> Result<Value, String> {
         self.ensure_running()?;
         self.0.service.idle_runtime_status()
@@ -1240,6 +1293,13 @@ impl BackendService {
                 capabilities.commands.dedup();
                 encode(capabilities)
             }
+            "read_admin_activity" => service.read_admin_activity(),
+            "rename_all" => encode(service.rename_all(arg(&args, "targets")?)?),
+            "summarize_notification" => service.summarize_notification(&arg::<String>(&args, "taskId")?, &arg::<String>(&args, "messageId")?),
+            "summarize_archived_task" => service.summarize_archived_task(&arg::<String>(&args, "taskId")?),
+            "read_project_build_queue" => service.read_project_build_queue(&arg::<String>(&args, "projectId")?),
+            "merge_task_worktree" => encode(service.merge_task_worktree(&arg::<String>(&args, "taskId")?)?),
+            "recover_project_build" => service.recover_project_build(&arg::<String>(&args, "buildRunId")?, arg(&args, "processStopped")?, &arg::<String>(&args, "summary")?),
             "get_extension_config" => encode(service.extension_config()?),
             "save_extension_config" => encode(service.save_extension_config(arg(&args, "config")?)?),
             "list_environment_secrets" => encode(service.environment_secrets()?),
@@ -1373,20 +1433,40 @@ pub enum BackendAvailability {
 /// Cloneable GUI facade. Dropping/closing any GUI handle disconnects only;
 /// execution and native preferences remain in the independent menu-bar server.
 #[derive(Clone)]
-pub struct DesktopService(ipc::Client);
+pub struct DesktopService(ipc::Client, Arc<std::sync::atomic::AtomicBool>);
+
+fn native_ui_changes_or_legacy(
+    unavailable: &std::sync::atomic::AtomicBool,
+    native: impl FnOnce() -> Result<UiDeltaResponse, String>,
+    legacy: impl FnOnce() -> Result<UiDeltaResponse, String>,
+) -> Result<UiDeltaResponse, String> {
+    use std::sync::atomic::Ordering;
+    if unavailable.load(Ordering::Acquire) {
+        return legacy();
+    }
+    match native() {
+        Err(error) if error == ipc::UNKNOWN_PRIVATE_NATIVE_METHOD => {
+            unavailable.store(true, Ordering::Release);
+            legacy()
+        },
+        result => result,
+    }
+}
 
 impl DesktopService {
     /// A permanently disconnected facade for explicitly enabled UI fixtures.
     /// It never resolves the user's profile or opens a backend connection.
     #[cfg(feature = "gpui-ui-fixtures")]
     pub fn disconnected_for_ui_fixture() -> Self {
-        Self(ipc::Client::disconnected_for_ui_fixture())
+        Self(ipc::Client::disconnected_for_ui_fixture(), Arc::new(std::sync::atomic::AtomicBool::new(false)))
     }
     pub fn open() -> Result<Self, String> {
         Self::connect()
     }
     pub fn connect() -> Result<Self, String> {
-        ipc::Client::connect(&profile_dir()?).map(Self)
+        // Client identity is fixed to the server instance. Reconnecting creates
+        // a fresh capability cache; facade clones share this instance's result.
+        ipc::Client::connect(&profile_dir()?).map(|client| Self(client, Arc::new(std::sync::atomic::AtomicBool::new(false))))
     }
     /// Only Absent permits the launcher to start a missing/stale backend.
     /// Permission, authentication, and live protocol failures remain visible.
@@ -1407,6 +1487,22 @@ impl DesktopService {
     pub fn read_ui_changes(&self, revision: Option<&str>) -> Result<UiDeltaResponse, String> {
         self.0
             .call("read_ui_changes", serde_json::json!({"revision":revision}))
+    }
+    /// Older persistent backends continue serving their legacy projection.
+    /// Only their exact unknown-method response permits this compatibility path;
+    /// authentication, transport and semantic errors remain visible.
+    pub fn read_native_ui_changes(
+        &self,
+        revision: Option<&str>,
+        message_task_ids: &[String],
+    ) -> Result<UiDeltaResponse, String> {
+        native_ui_changes_or_legacy(
+            &self.1,
+            || self.0.call("read_native_ui_changes", serde_json::json!({
+                "revision": revision, "messageTaskIds": message_task_ids,
+            })),
+            || self.read_ui_changes(revision),
+        )
     }
     pub fn read_task_messages(
         &self,
@@ -1430,6 +1526,10 @@ impl DesktopService {
             serde_json::json!({"channelId":channel_id,"beforeId":before_id,"limit":limit}),
         )
     }
+    pub fn publish_report_theme(&self, theme: &crate::report_styles::ReportTheme) -> Result<(), String> { self.0.call("publish_report_theme", serde_json::json!({"theme":theme})) }
+    pub fn work_log_owner(&self,operation:&str,args:Value)->Result<Value,String>{self.0.call("work_log_owner",serde_json::json!({"operation":operation,"args":args}))}
+    pub fn read_browser_open_requests(&self) -> Result<Vec<BrowserOpenRequest>, String> { self.0.call("read_browser_open_requests", serde_json::json!({})) }
+    pub fn ack_browser_open_request(&self, id: &str) -> Result<(), String> { self.0.call("ack_browser_open_request", serde_json::json!({"id":id})) }
     pub fn subscribe_changes(&self) -> Result<async_channel::Receiver<()>, String> {
         self.0.subscribe()
     }
@@ -1484,6 +1584,9 @@ impl DesktopService {
     }
     pub fn read_lan_status(&self) -> Result<NativeLanStatus, String> {
         self.0.call("read_lan_status", Value::Null)
+    }
+    pub fn set_lan_access_code(&self, code: String) -> Result<NativeLanStatus, String> {
+        self.0.call("set_lan_access_code", serde_json::json!({"code":code}))
     }
     pub fn start_lan(&self) -> Result<NativeLanStatus, String> {
         self.0.call("start_lan", Value::Null)
@@ -1559,6 +1662,34 @@ fn validate_profile(dir: &std::path::Path) -> Result<(), String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn native_projection_falls_back_only_for_exact_legacy_unknown_method() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let unavailable = AtomicBool::new(false);
+        let legacy = || Ok(UiDeltaResponse { revision: "legacy:1".into(), snapshot: None, delta: None });
+        let fallback = native_ui_changes_or_legacy(&unavailable, || Err(ipc::UNKNOWN_PRIVATE_NATIVE_METHOD.into()), legacy).unwrap();
+        assert_eq!(fallback.revision, "legacy:1");
+        assert!(unavailable.load(Ordering::Acquire));
+        assert_eq!(native_ui_changes_or_legacy(&unavailable, || panic!("cached legacy instance must not probe again"), legacy).unwrap().revision, "legacy:1");
+        for error in [
+            "Private IPC authentication failed.",
+            "Private IPC connection lost; delivery may be ambiguous.",
+            "Invalid native UI change arguments.",
+            "Unknown private native method.",
+        ] {
+            let available = AtomicBool::new(false);
+            let result = native_ui_changes_or_legacy(&available, || Err(error.into()), || panic!("must not fall back"));
+            assert_eq!(result.unwrap_err(), error);
+            assert!(!available.load(Ordering::Acquire));
+        }
+        let fresh_instance = AtomicBool::new(false);
+        let current = UiDeltaResponse { revision: "native:2".into(), snapshot: None, delta: None };
+        assert_eq!(native_ui_changes_or_legacy(&fresh_instance, || Ok(current), || panic!("must not fall back")).unwrap().revision, "native:2");
+        assert!(!fresh_instance.load(Ordering::Acquire));
+        assert_eq!(native_ui_changes_or_legacy(&fresh_instance, || Err(ipc::UNKNOWN_PRIVATE_NATIVE_METHOD.into()), || Err("legacy read failed".into())).unwrap_err(), "legacy read failed");
+        assert!(fresh_instance.load(Ordering::Acquire));
+    }
 
     #[test]
     fn lan_assets_require_isolated_profile_and_real_entry_file() {
@@ -1722,7 +1853,7 @@ mod tests {
             .unwrap();
         let commands = capabilities["commands"].as_array().unwrap();
         assert!(commands.iter().any(|command| command == "save_settings"));
-        for command in ["get_extension_config", "save_extension_config", "list_environment_secrets", "set_environment_secret", "delete_environment_secret"] {
+        for command in ["read_admin_activity", "summarize_notification", "summarize_archived_task", "get_extension_config", "save_extension_config", "list_environment_secrets", "set_environment_secret", "delete_environment_secret"] {
             assert!(commands.iter().any(|value| value == command), "owner capability missing: {command}");
             let error = desktop.0.service.lan_invoke(command, json!({})).unwrap_err();
             assert!(error.contains("not available"), "owner settings escaped into LAN: {command}: {error}");
@@ -2081,7 +2212,7 @@ mod tests {
         let workspace = NativeWorkspace {
             id: id.clone(), name: "Development".into(), color: "#Aabb09".into(),
             icon: "code".into(),
-            layout: Some(json!({"version":1,"center":{"panel_name":"MonitterNativePane","children":[],"info":{"panel":{"id":"chat:main"}}}})),
+            url: None, layout: Some(json!({"version":1,"center":{"panel_name":"MonitterNativePane","children":[],"info":{"panel":{"id":"chat:main"}}}})),
         };
         let mut data = NativePreferenceData::default();
         data.workspaces = Some(NativeWorkspaceSet { active_id: id, items: vec![workspace] });
@@ -2327,5 +2458,28 @@ mod tests {
         assert!(validate_profile(&profile).is_err());
         std::fs::remove_file(profile).unwrap();
         std::fs::remove_dir(temp).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod workspace_metadata_tests {
+    use super::*;
+    #[test]
+    fn workspace_url_is_optional_and_restricted_to_safe_web_targets() {
+        let old = serde_json::json!({"id":"a", "name":"Project", "color":"#38BFD2", "icon":"folder", "layout":null});
+        let mut item: NativeWorkspace = serde_json::from_value(old).unwrap();
+        assert_eq!(item.url, None);
+        assert!(serde_json::to_value(&item).unwrap().get("url").is_none());
+        item.url = Some("https://example.com/project".into());
+        assert_eq!(serde_json::from_value::<NativeWorkspace>(serde_json::to_value(&item).unwrap()).unwrap(), item);
+        assert!(validate_native_workspace_url("http://localhost:8080/project").is_ok());
+        for url in ["", "about:blank", "file:///tmp/index.html", "https://user@example.com", "https://example.com/\n", "javascript:alert(1)"] {
+            assert!(validate_native_workspace_url(url).is_err(), "{url}");
+        }
+    }
+    #[test]
+    fn workspace_icons_use_known_catalogue_keys_only() {
+        for icon in ["folder", "sparkles", "lucide:rocket", "lucide:activity"] { assert!(valid_native_workspace_icon(icon), "{icon}"); }
+        for icon in ["lucide:../etc/passwd", "icons/rocket.svg", "lucide:unknown-icon-name", "https://example.com/icon.svg"] { assert!(!valid_native_workspace_icon(icon), "{icon}"); }
     }
 }

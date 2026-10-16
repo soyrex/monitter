@@ -256,13 +256,14 @@ fn merge_opencode_mcp_config(existing: Option<&str>, endpoint: &str) -> Result<S
 }
 
 fn codex_args(task: &Task, collaboration_endpoint: Option<&str>) -> Vec<String> {
-    codex_args_with_jev(task, collaboration_endpoint, None)
+    codex_args_with_jev(task, collaboration_endpoint, None, true)
 }
 
 fn codex_args_with_jev(
     task: &Task,
     collaboration_endpoint: Option<&str>,
     jev_decisions_endpoint: Option<&str>,
+    auto_approve_monitter_mcp: bool,
 ) -> Vec<String> {
     // These are exec options and must precede the optional resume subcommand.
     let mut args = vec!["exec".into()];
@@ -312,7 +313,7 @@ fn codex_args_with_jev(
             "-c".into(),
             format!("mcp_servers.monitter.enabled_tools={tools}"),
             "-c".into(),
-            "mcp_servers.monitter.default_tools_approval_mode=\"approve\"".into(),
+            format!("mcp_servers.monitter.default_tools_approval_mode={:?}", if auto_approve_monitter_mcp { "approve" } else { "prompt" }),
             "-c".into(),
             "mcp_servers.monitter.tools.install_shared_skill.approval_mode=\"prompt\"".into(),
         ]);
@@ -696,7 +697,7 @@ fn build_command_with_options(
     collaboration: Option<&SessionGrant>,
     claude_mcp_config_path: Option<&std::path::Path>,
 ) -> Result<Command, String> {
-    build_command_with_jev_options(host, task, collaboration, None, claude_mcp_config_path)
+    build_command_with_jev_options(host, task, collaboration, None, claude_mcp_config_path, true)
 }
 
 fn build_command_with_jev_options(
@@ -705,6 +706,7 @@ fn build_command_with_jev_options(
     collaboration: Option<&SessionGrant>,
     jev_decisions: Option<&SessionGrant>,
     claude_mcp_config_path: Option<&std::path::Path>,
+    auto_approve_monitter_mcp: bool,
 ) -> Result<Command, String> {
     if jev_decisions.is_some() && host.kind != "local" {
         return Err("Jev Decisions MCP is not supported on SSH hosts until a dedicated secure tunnel is available.".into());
@@ -740,12 +742,13 @@ fn build_command_with_jev_options(
             task,
             collaboration.map(|grant| grant.endpoint.as_str()),
             jev_decisions.map(|grant| grant.endpoint.as_str()),
+            auto_approve_monitter_mcp,
         ),
         "claude" => {
             let mut args = adapters::claude::args(task);
             if let Some(path) = claude_mcp_config_path {
                 args.extend(["--mcp-config".into(), path.to_string_lossy().into_owned()]);
-                if collaboration.is_some() {
+                if collaboration.is_some() && auto_approve_monitter_mcp {
                     args.extend(["--allowedTools".into(), claude_tool_names()]);
                 }
             } else if let Some(grant) = collaboration {
@@ -754,9 +757,10 @@ fn build_command_with_jev_options(
                 args.extend([
                     "--mcp-config".into(),
                     claude_mcp_config(&grant.endpoint),
-                    "--allowedTools".into(),
-                    claude_tool_names(),
                 ]);
+                if auto_approve_monitter_mcp {
+                    args.extend(["--allowedTools".into(), claude_tool_names()]);
+                }
             }
             args
         }
@@ -1742,6 +1746,7 @@ pub struct RunControl {
     // the registry while its task is completed so a later message can use the
     // same native context rather than creating a --resume subprocess.
     resident: AtomicBool,
+    launch_model_settings: Mutex<Option<(String, Option<crate::model::ModelSettings>)>>,
     /// Monitter-owned identity for the current provider turn. It is minted on
     /// every send, including later turns on resident transports.
     run_id: Mutex<String>,
@@ -1906,6 +1911,23 @@ impl RunControl {
             .map(|pid| pid as libc::pid_t)
     }
 
+    #[cfg(test)]
+    pub(crate) fn work_log_fixture_child(&self, child: Child) {
+        *self.child.lock().unwrap()=Some(child);
+    }
+    #[cfg(test)]
+    pub(crate) fn work_log_stop_fixture_child(&self) {
+        if let Some(mut child)=self.child.lock().unwrap().take() {let _=child.kill();let _=child.wait();}
+    }
+    pub(crate) fn work_log_root(&self) -> Option<(libc::pid_t,i64)> {
+        let mut guard=self.child.lock().ok()?;let child=guard.as_mut()?;
+        if child.try_wait().ok()?.is_some(){return None}
+        let pid=child.id() as libc::pid_t;
+        let started=crate::process_metrics::work_log_process_started_at(pid)?;
+        if child.try_wait().ok()?.is_some(){return None}
+        Some((pid,started))
+    }
+
     pub fn new(remote_supervised: bool) -> Arc<Self> {
         Arc::new(Self {
             cancelled: AtomicBool::new(false),
@@ -1930,6 +1952,7 @@ impl RunControl {
             runtime_config_discovered: AtomicBool::new(false),
             runtime_node_repl_specs: Mutex::new(Vec::new()),
             resident: AtomicBool::new(false),
+            launch_model_settings: Mutex::new(None),
             run_id: Mutex::new(crate::model::id()),
             run_started_at: Mutex::new(crate::model::now()),
             child: Mutex::new(None),
@@ -3791,6 +3814,18 @@ impl RunControl {
         format!("{}:{turn_id}:{rpc_id}", self.app_server_instance_id)
     }
 
+    pub(crate) fn record_launch_model_settings(&self, task: &Task) {
+        if let Ok(mut settings) = self.launch_model_settings.lock() {
+            *settings = Some((task.model.clone(), task.model_settings.clone()));
+        }
+    }
+
+    pub(crate) fn needs_model_relaunch(&self, task: &Task) -> Result<bool, String> {
+        if !self.is_resident() || matches!(task.provider.as_str(), "codex" | "acp") { return Ok(false); }
+        let settings = self.launch_model_settings.lock().map_err(|_| "Runtime model settings lock failed.")?;
+        Ok(settings.as_ref().is_some_and(|(model, settings)| model != &task.model || settings != &task.model_settings))
+    }
+
     pub(crate) fn mark_resident(&self) {
         self.resident.store(true, Ordering::SeqCst);
     }
@@ -4918,6 +4953,7 @@ fn cleanup_remote_helper(host: &Host, helper_dir: &str) {
 }
 
 pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunControl>) {
+    service.work_log_register_run(&task_id,&control);
     thread::spawn(move || {
         let (mut task, host) = match service.task_and_host(&task_id) {
             Ok(value) => value,
@@ -5095,6 +5131,7 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
             grant_for_command,
             jev_decisions_grant.as_ref(),
             claude_config.as_ref().map(|file| file.path()),
+            extensions.auto_approve_monitter_mcp,
         ) {
             Ok(command) => command,
             Err(error) => {
@@ -5229,6 +5266,7 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
             return;
         }
         if task.provider == "claude" {
+            control.record_launch_model_settings(&task);
             control.mark_resident();
             // Claude's stream-json session can cold-resume through its saved
             // native session ID. The collector additionally requires that ID
@@ -5699,8 +5737,31 @@ for line in sys.stdin.buffer:
             sandbox: "read-only".into(),
             project_id: None,
             acp: None,
-            archived_agent_name: None,
+            archived_agent_name: None, agent_worktree: None,
             codex_home: None,
+        }
+    }
+
+    #[test]
+    fn model_settings_launch_bound_change_preserves_resume_command_and_rejects_active_retirement() {
+        let control = RunControl::new(false);
+        let mut current = task(Some("saved-claude-session"), "old-model");
+        current.provider = "claude".into();
+        control.record_launch_model_settings(&current);
+        control.mark_resident();
+        assert!(!control.needs_model_relaunch(&current).unwrap());
+        current.model = "new-model".into();
+        assert!(control.needs_model_relaunch(&current).unwrap());
+        let args = crate::adapters::claude::args(&current);
+        assert!(args.windows(2).any(|pair| pair == ["--resume", "saved-claude-session"]));
+        assert!(args.windows(2).any(|pair| pair == ["--model", "new-model"]));
+        assert!(!control.try_retire_idle(Instant::now(), Duration::ZERO), "active/dormant owner cannot be retired for a model switch");
+        current.model = "old-model".into();
+        assert!(!control.needs_model_relaunch(&current).unwrap(), "selecting the original model does not restart it");
+        current.model = "new-model".into();
+        for provider in ["codex", "acp"] {
+            current.provider = provider.into();
+            assert!(!control.needs_model_relaunch(&current).unwrap(), "per-turn transports retain their owner");
         }
     }
 
@@ -6742,6 +6803,7 @@ for line in sys.stdin.buffer:
             &task(None, ""),
             Some("http://127.0.0.1:4444/mcp"),
             Some("http://127.0.0.1:4555/mcp"),
+            true,
         );
         let joined = args.join(" ");
         assert!(joined.contains("mcp_servers.monitter.url"));
@@ -6795,6 +6857,40 @@ for line in sys.stdin.buffer:
                 .any(|(key, value)| key == "MONITTER_ENDPOINT"
                     && value.as_deref() == Some("http://127.0.0.1:4444/mcp"))
         );
+    }
+
+    #[test]
+    fn monitter_mcp_auto_approval_launch_policy_gates_only_builtin_tools() {
+        let mut host = host("local");
+        host.claude_path = std::env::current_exe().unwrap().display().to_string();
+        let mut task = task(None, "");
+        let grant = SessionGrant {
+            endpoint: "http://127.0.0.1:4444/mcp".into(),
+            token: "not-in-argv".into(),
+        };
+        for enabled in [true, false] {
+            task.provider = "codex".into();
+            task.sandbox = "workspace-write".into();
+            let args = codex_args_with_jev(&task, Some(&grant.endpoint), None, enabled);
+            assert!(args.contains(&format!("mcp_servers.monitter.default_tools_approval_mode={:?}",
+                if enabled { "approve" } else { "prompt" })));
+            assert!(args.contains(&"mcp_servers.monitter.tools.install_shared_skill.approval_mode=\"prompt\"".into()));
+            assert!(!args.iter().any(|arg| arg.contains("dangerously")));
+            task.provider = "claude".into();
+            task.sandbox = "harness-configured".into();
+            for config_path in [None, Some(std::path::Path::new("/tmp/fixture-mcp.json"))] {
+                let command = build_command_with_jev_options(&host, &task, Some(&grant), None, config_path, enabled).unwrap();
+                let args = command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect::<Vec<_>>();
+                assert!(args.contains(&"--mcp-config".into()));
+                assert_eq!(args.contains(&"--allowedTools".into()), enabled);
+                if enabled {
+                    let allowed = args.iter().position(|arg| arg == "--allowedTools").unwrap();
+                    assert_eq!(args[allowed + 1], claude_tool_names());
+                    assert!(!args[allowed + 1].contains("install_shared_skill"));
+                }
+                assert!(!args.iter().any(|arg| arg.contains("not-in-argv")));
+            }
+        }
     }
 
     #[test]

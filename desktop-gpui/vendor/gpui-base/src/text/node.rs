@@ -13,6 +13,10 @@ use gpui::{
 };
 use markdown::mdast;
 
+#[path = "code_presentation.rs"]
+mod code_presentation;
+use code_presentation::CodePresentation;
+
 use crate::{
     StyledExt, h_flex,
     scrollable_mask::horizontal_scroll_area,
@@ -1742,6 +1746,8 @@ impl Paragraph {
 #[derive(Debug, Clone)]
 pub struct CodeBlock {
     lang: Option<SharedString>,
+    presentation: Arc<CodePresentation>,
+    width_cache: Arc<Mutex<Option<(gpui::Font, Pixels)>>>,
     state: Arc<Mutex<InlineState>>,
     highlight_cache: Arc<Mutex<Option<CachedCodeBlockHighlights>>>,
     source_segments: Vec<SourceSegment>,
@@ -1768,9 +1774,10 @@ impl PartialEq for CodeBlock {
 }
 
 impl CodeBlock {
-    /// Get the language of the code block.
+    /// Get the explicit language, or a conservatively inferred code language.
+    /// Original Markdown source retains its original fence label.
     pub fn lang(&self) -> Option<SharedString> {
-        self.lang.clone()
+        self.presentation.language.clone()
     }
 
     /// Get the code content of the code block.
@@ -1795,6 +1802,7 @@ impl CodeBlock {
         lang: Option<SharedString>,
         span: Option<impl Into<Span>>,
     ) -> Self {
+        let presentation = Arc::new(CodePresentation::new(&code, lang.as_deref()));
         let state = Arc::new(Mutex::new(InlineState::default()));
         if let Ok(mut state) = state.lock() {
             state.set_text(code);
@@ -1802,6 +1810,8 @@ impl CodeBlock {
 
         Self {
             lang,
+            presentation,
+            width_cache: Arc::new(Mutex::new(None)),
             state,
             highlight_cache: Arc::new(Mutex::new(None)),
             source_segments: vec![],
@@ -1921,54 +1931,95 @@ impl CodeBlock {
         let style = &node_cx.style;
         let leaf_key = self.span.map(|span| TextLeafKey::block(span.start));
 
-        let block = div()
-            .w_full()
-            .min_w_0()
-            .p_3()
-            .bg(style.code_background())
+        let scroll_handle = window
+            .use_keyed_state(block_element_id("code-scroll", self.span, options.ix), cx, |_, _| ScrollHandle::default())
+            .read(cx).clone();
+        let code = self.code();
+        let copy_code = code.clone();
+        let gutter_width = (self.presentation.gutter_columns as f32 * 8. + 16.).max(30.);
+        let mut code_style = window.text_style();
+        code_style.font_family = cx.theme().tokens.typography.mono.clone();
+        code_style.font_weight = FontWeight::NORMAL;
+        code_style.font_style = FontStyle::Normal;
+        code_style.font_size = px(12.).into();
+        let font = code_style.font();
+        let cached_width = self.width_cache.lock().ok().and_then(|cache| cache.as_ref()
+            .filter(|(cached_font, _)| cached_font == &font).map(|(_, width)| *width));
+        let width = cached_width.unwrap_or_else(|| {
+            let width = code.split('\n').map(|line| {
+                window.text_system().layout_line(line, px(12.), &[code_style.clone().to_run(line.len())], None).width
+            }).fold(px(0.), Pixels::max);
+            if let Ok(mut cache) = self.width_cache.lock() { *cache = Some((font, width)); }
+            width
+        });
+        let highlighted = fade_highlights(
+            node_cx.code_block_highlighter.as_ref()
+                .map(|highlighter| self.highlighted_styles(highlighter)).unwrap_or_default()
+                .into_iter().map(|(range, style)| {
+                    // Code typography is stable even when a syntax theme emphasizes tokens.
+                    let mut style = style;
+                    style.font_weight = Some(FontWeight::NORMAL);
+                    style.font_style = Some(FontStyle::Normal);
+                    (range, InlineHighlight::from(style))
+                }).collect(),
+            node_cx.stream_fades(leaf_key),
+        );
+        let inline = Inline::new(self.state.clone(), vec![], highlighted, node_cx.link_click_handler.clone())
+            .range_backgrounds(node_cx.range_backgrounds(leaf_key).to_vec())
+            .reveal(node_cx.reveal_at(leaf_key, 0, code.len()));
+        let presentation = self.presentation.clone();
+        let code_track = div().relative().min_w_full().w(width + px(gutter_width + 12.))
+            .flex().flex_row().py(px(6.))
+            .whitespace_nowrap()
+            // One paint element for all diff rows, with no per-line UI tree.
+            // Decorations never enter selection or copied source bytes.
+            .child(gpui::canvas(|_, _, _| {}, move |bounds, _, window, _| {
+                let mask = window.content_mask().bounds;
+                let first = (((mask.top() - bounds.top() - px(6.)) / px(18.)).floor().max(0.)) as usize;
+                let last = (((mask.bottom() - bounds.top()) / px(18.)).ceil().max(0.)) as usize;
+                let start = presentation.changes.partition_point(|(row, _)| *row < first);
+                for &(row, added) in &presentation.changes[start..] {
+                    if row > last { break; }
+                    let color: Hsla = if added { gpui::rgb(0x2da44e).into() } else { gpui::rgb(0xcf222e).into() };
+                    window.paint_quad(gpui::fill(gpui::Bounds::new(
+                        gpui::point(bounds.left(), bounds.top() + px(6. + row as f32 * 18.)),
+                        gpui::size(bounds.size.width, px(18.)),
+                    ), color.opacity(0.13)));
+                }
+            }).absolute().size_full());
+        let gutter = div().relative().w(px(gutter_width)).flex_shrink_0().pr(px(10.))
+            .text_right().text_color(style.muted_foreground()).child(self.presentation.gutter.clone());
+        let body = div().relative().flex_shrink_0().pr(px(12.))
+            .w(width + px(12.)).child(inline);
+        #[cfg(test)]
+        let gutter = gutter.debug_selector(|| "code-block-gutter".to_string());
+        #[cfg(test)]
+        let body = body.debug_selector(|| "code-block-body".to_string());
+        let code_track = code_track.child(gutter).child(body);
+        let mut header = div().id("code-header").h(px(26.)).px(px(10.))
+            .flex().items_center().justify_between().border_b_1().border_color(style.border())
+            .text_size(px(10.)).text_color(style.muted_foreground())
+            .child(self.lang().unwrap_or_else(|| "code".into()));
+        #[cfg(test)]
+        { header = header.debug_selector(|| "code-block-header".to_string()); }
+        let copy = div().id("copy-code").cursor_pointer().px(px(4.)).py(px(2.))
+            .on_click(move |_, _, cx| {
+                cx.stop_propagation();
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy_code.to_string()));
+            }).child("Copy");
+        header = header.child(div().flex().items_center().gap(px(8.))
+            .children(node_cx.code_block_actions.as_ref().map(|actions| actions(self, window, cx)))
+            .child(copy));
+        let block = div().id(block_element_id("codeblock", self.span, options.ix))
+            .w_full().min_w_0().bg(style.code_background())
+            .refine_style(style.code_block())
             .font_family(cx.theme().tokens.typography.mono.clone())
-            .text_size(cx.theme().tokens.typography.mono_md.size)
-            .relative()
-            .refine_style(&style.code_block())
-            .child(
-                Inline::new(
-                    self.state.clone(),
-                    vec![],
-                    fade_highlights(
-                        node_cx
-                            .code_block_highlighter
-                            .as_ref()
-                            .map(|highlighter| self.highlighted_styles(highlighter))
-                            .unwrap_or_default()
-                            .into_iter()
-                            .map(|(range, style)| (range, InlineHighlight::from(style)))
-                            .collect(),
-                        node_cx.stream_fades(leaf_key),
-                    ),
-                    node_cx.link_click_handler.clone(),
-                )
-                .range_backgrounds(node_cx.range_backgrounds(leaf_key).to_vec())
-                .reveal(node_cx.reveal_at(leaf_key, 0, self.code().len())),
-            );
-        // The id scopes the caller's action ids per code block, so plain ids
-        // like `"copy"` don't collide across blocks; without actions nothing
-        // under the block needs element state.
-        let block = match node_cx.code_block_actions.clone() {
-            Some(actions) => block
-                .id(block_element_id("codeblock", self.span, options.ix))
-                .child(
-                    div()
-                        .id("actions")
-                        .absolute()
-                        .top_2()
-                        .right_2()
-                        .bg(style.code_background())
-                        .rounded(cx.theme().tokens.radius.md)
-                        .child(actions(&self, window, cx)),
-                )
-                .into_any_element(),
-            None => block.into_any_element(),
-        };
+            .font_weight(FontWeight::NORMAL).not_italic().text_size(px(12.)).line_height(px(18.))
+            .overflow_hidden().child(header)
+            .child(horizontal_scroll_area(
+                block_element_id("code-viewport", self.span, options.ix), &scroll_handle,
+                &StyleRefinement::default(), code_track,
+            )).into_any_element();
 
         gapped(
             block,

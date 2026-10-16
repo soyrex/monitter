@@ -31,10 +31,42 @@ fn rows(value: &Value, key: &str) -> Vec<Value> {
         .cloned()
         .unwrap_or_default()
 }
+fn borrowed_rows<'a>(value: &'a Value, key: &str) -> &'a [Value] {
+    value.get(key).and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default()
+}
+fn visible_channels(snapshot: &Value) -> impl Iterator<Item = &Value> {
+    borrowed_rows(snapshot, "channels").iter().filter(|channel| {
+        !channel["id"].as_str().unwrap_or_default().starts_with("__monitter-project-board__:")
+    })
+}
+fn channel_metadata_changed(previous: &Value, snapshot: &Value) -> bool {
+    let mut previous = visible_channels(previous);
+    let mut current = visible_channels(snapshot);
+    loop {
+        match (previous.next(), current.next()) {
+            (None, None) => return false,
+            (Some(previous), Some(current)) => {
+                fn metadata(channel: &Value) -> impl Iterator<Item = (&String, &Value)> {
+                    channel.as_object().into_iter().flat_map(|object| object.iter()).filter(|(key, _)| key.as_str() != "messages")
+                }
+                if !metadata(previous).eq(metadata(current)) { return true; }
+            }
+            _ => return true,
+        }
+    }
+}
+fn channel_agents_changed(previous: &Value, snapshot: &Value) -> bool {
+    fn metadata(agent: &Value) -> (&Value, &Value, &Value) { (&agent["id"], &agent["name"], &agent["internal"]) }
+    // Compare the fields rendered in the member editor and author fallback;
+    // agent runtime/task changes do not alter this view.
+    !borrowed_rows(previous, "agents").iter().map(metadata)
+        .eq(borrowed_rows(snapshot, "agents").iter().map(metadata))
+}
+fn channel_messages_changed(previous: Option<&Value>, channel: &Value, reset: bool) -> bool {
+    reset || previous.is_none_or(|previous| borrowed_rows(previous, "messages") != borrowed_rows(channel, "messages"))
+}
 fn member(channel: &Value, id: &str) -> bool {
-    rows(channel, "agentIds")
-        .iter()
-        .any(|value| value.as_str() == Some(id))
+    borrowed_rows(channel, "agentIds").iter().any(|value| value.as_str() == Some(id))
 }
 /// Root-owned paging boundaries are invalidated by resets or cursor deletion;
 /// missing means unknown, while an explicit None means a successfully loaded end.
@@ -51,16 +83,16 @@ pub(super) fn reconcile_cursors(
     for id in resets {
         cursors.remove(id);
     }
-    let channels = rows(snapshot, "channels");
+    let channels = borrowed_rows(snapshot, "channels");
     cursors.retain(|id, cursor| {
         channels
             .iter()
-            .find(|row| field(row, "id") == *id)
+            .find(|row| row["id"].as_str() == Some(id.as_str()))
             .is_some_and(|row| {
                 cursor.as_ref().is_none_or(|cursor| {
-                    rows(row, "messages")
+                    borrowed_rows(row, "messages")
                         .iter()
-                        .any(|message| field(message, "id") == *cursor)
+                        .any(|message| message["id"].as_str() == Some(cursor.as_str()))
                 })
             })
     });
@@ -140,33 +172,63 @@ impl ChannelPane {
         cursors: &HashMap<String, Option<String>>,
         cx: &mut Context<Self>,
     ) {
-        self.snapshot = snapshot;
+        // Conservative adapter for direct snapshots/fixtures lacking a delta.
+        let previous: HashMap<&str, &Value> = visible_channels(&self.snapshot)
+            .filter_map(|channel| Some((channel["id"].as_str()?, channel))).collect();
+        let changed_channels = visible_channels(&snapshot).filter_map(|channel| {
+            let id = channel["id"].as_str()?;
+            channel_messages_changed(previous.get(id).copied(), channel, false).then(|| id.to_owned())
+        }).collect();
+        self.sync_scoped(snapshot, revision, reset, reset_channels, cursors, &changed_channels, cx);
+    }
+    /// Production delta boundary: channel body work is restricted to changed IDs.
+    pub fn sync_scoped(
+        &mut self,
+        snapshot: Rc<Value>,
+        revision: &str,
+        reset: bool,
+        reset_channels: &[String],
+        cursors: &HashMap<String, Option<String>>,
+        changed_channels: &HashSet<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let channels_changed = channel_metadata_changed(&self.snapshot, &snapshot);
+        let body_changes = visible_channels(&snapshot).any(|channel| channel["id"].as_str().is_some_and(|id| changed_channels.contains(id)));
+        let metadata_changed = channel_agents_changed(&self.snapshot, &snapshot)
+            || self.snapshot["settings"] != snapshot["settings"];
+        let cursors_changed = self.next_before != *cursors;
+        let previous = std::mem::replace(&mut self.snapshot, snapshot);
         self.revision = revision.to_owned();
-        self.next_before = cursors.clone();
-        let channels = self.channels();
-        let ids: HashSet<String> = channels.iter().map(|row| field(row, "id")).collect();
-        self.transcripts.retain(|id, _| ids.contains(id));
+        if cursors_changed { self.next_before = cursors.clone(); }
+        if !channels_changed && !body_changes && !reset && reset_channels.is_empty() {
+            if metadata_changed || cursors_changed { cx.notify(); }
+            return;
+        }
+        let channels: Vec<&Value> = visible_channels(&self.snapshot).collect();
+        let ids: HashSet<&str> = channels.iter().filter_map(|row| row["id"].as_str()).collect();
+        self.transcripts.retain(|id, _| ids.contains(id.as_str()));
         self.recipient_selections.retain(|id, recipients| {
-            if let Some(channel) = channels.iter().find(|row| field(row, "id") == *id) {
+            if let Some(channel) = channels.iter().find(|row| row["id"].as_str() == Some(id.as_str())) {
                 recipients.retain(|recipient| member(channel, recipient));
                 true
-            } else {
-                false
-            }
+            } else { false }
         });
-        if self.selected.as_ref().is_some_and(|id| !ids.contains(id)) {
+        if self.selected.as_ref().is_some_and(|id| !ids.contains(id.as_str())) {
             self.selection_removed = true;
         }
-        for channel in channels {
-            let id = field(&channel, "id");
-            let state = self.transcripts.entry(id.clone()).or_default();
-            state.reconcile(
-                rows(&channel, "messages"),
-                reset || reset_channels.contains(&id),
-            );
+        let previous_channels: HashMap<&str, &Value> = visible_channels(&previous)
+            .filter_map(|channel| Some((channel["id"].as_str()?, channel))).collect();
+        for channel in &channels {
+            let id = field(channel, "id");
+            let old = previous_channels.get(id.as_str()).copied();
+            let reset = reset || reset_channels.contains(&id);
+            let missing = !self.transcripts.contains_key(&id);
+            if missing || reset || (changed_channels.contains(&id) && channel_messages_changed(old, channel, false)) {
+                self.transcripts.entry(id).or_default().reconcile(rows(channel, "messages"), reset);
+            }
         }
-        if let Some(channel) = self.current() {
-            self.recipients.retain(|id| member(&channel, id));
+        if let Some(channel) = channels.iter().find(|channel| channel["id"].as_str() == self.selected.as_deref()) {
+            self.recipients.retain(|id| member(channel, id));
         }
         cx.notify();
     }
@@ -718,6 +780,68 @@ impl Render for ChannelPane {
 #[cfg(test)]
 mod native_channel_tests {
     use super::*;
+    use ::core::prelude::v1::test;
+    #[::core::prelude::v1::test]
+    fn channel_sync_scope_ignores_task_tokens_but_keeps_members_history_and_resets() {
+        let previous = json!({"channels":[{"id":"a","agentIds":["one"],"messages":[{"id":"m","text":"hello"}]}],"agents":[{"id":"one","name":"One","internal":false,"status":"idle"}],"tasks":[{"id":"t","messages":[]}]});
+        let mut next = previous.clone();
+        next["tasks"][0]["messages"] = json!([{"text":"new token"}]);
+        next["agents"][0]["status"] = json!("running");
+        assert!(!channel_metadata_changed(&previous, &next));
+        assert!(!channel_agents_changed(&previous, &next));
+        next["channels"][0]["agentIds"] = json!([]);
+        assert!(channel_metadata_changed(&previous, &next));
+        assert!(!channel_messages_changed(Some(&previous["channels"][0]), &next["channels"][0], false));
+        assert!(channel_messages_changed(Some(&previous["channels"][0]), &next["channels"][0], true));
+        next["channels"][0]["messages"][0]["text"] = json!("edited");
+        let mut body_only = previous.clone();
+        body_only["channels"][0]["messages"][0]["text"] = json!("edited");
+        assert!(!channel_metadata_changed(&previous, &body_only), "metadata gate must never traverse transcript bodies");
+        assert!(channel_messages_changed(Some(&previous["channels"][0]), &next["channels"][0], false));
+        next["agents"][0]["name"] = json!("Renamed");
+        assert!(channel_agents_changed(&previous, &next));
+    }
+
+    #[cfg(feature = "visual-export")]
+    #[gpui_kit::test]
+    fn channel_sync_keeps_paged_state_on_unrelated_updates_and_honors_explicit_reset(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let mut retained = None;
+        let (_, visual) = cx.add_window_view(|window, cx| {
+            let pane = cx.new(|cx| ChannelPane::new(DesktopService::disconnected_for_ui_fixture(), window, cx));
+            retained = Some(pane.clone());
+            gpui_kit::component::Root::new(pane, window, cx)
+        });
+        let pane = retained.unwrap();
+        let previous = Rc::new(json!({"channels":[{"id":"a","messages":[{"id":"m","text":"hello"}]}]}));
+        let cursors = HashMap::from([("a".into(), Some("m".into()))]);
+        visual.update(|_, cx| pane.update(cx, |pane, cx| pane.sync(previous.clone(), "one", false, &[], &cursors, cx)));
+        let mut next = previous.as_ref().clone();
+        next["tasks"] = json!([{"id":"t","messages":[{"text":"token"}]}]);
+        let next = Rc::new(next);
+        visual.update(|_, cx| pane.update(cx, |pane, cx| {
+            let state = pane.transcripts.get_mut("a").unwrap();
+            state.boundary = crate::transcript::HistoryBoundary::More("m".into());
+            let messages = state.messages.clone();
+            pane.sync_scoped(next.clone(), "two", false, &[], &cursors, &HashSet::new(), cx);
+            assert!(Rc::ptr_eq(&pane.snapshot, &next));
+            assert_eq!(pane.revision, "two");
+            assert!(Rc::ptr_eq(&messages, &pane.transcripts["a"].messages));
+            assert!(matches!(&pane.transcripts["a"].boundary, crate::transcript::HistoryBoundary::More(cursor) if cursor == "m"));
+            // Even a different body must be ignored when the delta says no
+            // channel changed: this verifies the scoped path avoids deep scans.
+            let mut body = next.as_ref().clone();
+            body["channels"][0]["messages"][0]["text"] = json!("edited");
+            let body = Rc::new(body);
+            pane.sync_scoped(body.clone(), "three", false, &[], &cursors, &HashSet::new(), cx);
+            assert!(Rc::ptr_eq(&messages, &pane.transcripts["a"].messages));
+            // An explicit reset is authoritative even with no changed IDs.
+            pane.sync_scoped(body, "four", false, &["a".into()], &HashMap::new(), &HashSet::new(), cx);
+            assert!(matches!(pane.transcripts["a"].boundary, crate::transcript::HistoryBoundary::Unknown));
+            assert!(pane.next_before.is_empty());
+        }));
+    }
+
     #[::core::prelude::v1::test]
     fn reset_and_cursor_removal_invalidate_only_affected_scopes() {
         let snapshot = json!({"channels":[{"id":"a","messages":[{"id":"known"}]},{"id":"b","messages":[]},{"id":"c","messages":[]}]});

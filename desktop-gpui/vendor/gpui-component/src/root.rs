@@ -199,14 +199,20 @@ impl WindowState {
         };
 
         Some(
-            div()
-                .absolute()
-                .inset_0()
-                .when_some(mt, |this, offset| this.mt(offset))
-                .when_some(mr, |this, offset| this.mr(offset))
-                .when_some(mb, |this, offset| this.mb(offset))
-                .when_some(ml, |this, offset| this.ml(offset))
-                .child(root.read(cx).notification.clone()),
+            // Toasts must paint and receive pointer events above deferred pane
+            // chrome, dialogs, menus and tooltips, regardless of tree order.
+            // Defer only this layer: its empty space stays non-occluding.
+            gpui::deferred(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .when_some(mt, |this, offset| this.mt(offset))
+                    .when_some(mr, |this, offset| this.mr(offset))
+                    .when_some(mb, |this, offset| this.mb(offset))
+                    .when_some(ml, |this, offset| this.ml(offset))
+                    .child(root.read(cx).notification.clone()),
+            )
+            .with_priority(usize::MAX),
         )
     }
 

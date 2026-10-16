@@ -11,8 +11,8 @@
 //! (no `reasoningSummary`) is filtered out, transport-artifact activities are
 //! dropped, and approval rows are emitted only when the request is resolved.
 use serde_json::Value;
-use std::rc::Rc;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use super::TimelineRow;
 
@@ -490,6 +490,7 @@ pub enum ConversationItem {
     Message(Rc<Value>),
     Activity(Rc<Value>),
     Approval(ApprovalRow),
+    ExchangeGroup { members: Vec<ConversationItem>, peer_key: String, exchange_count: usize },
     ReasoningGroup(Vec<Rc<Value>>),
     ToolGroup(Vec<Rc<Value>>),
     ProcessGroup {
@@ -506,12 +507,48 @@ pub enum NestedGroup {
 }
 
 impl ConversationItem {
+    /// Leaves retain source identity while their list index belongs to the run.
+    pub fn leaves(&self) -> Vec<&ConversationItem> {
+        match self { Self::ExchangeGroup {members,..} => members.iter().flat_map(Self::leaves).collect(), _=>vec![self] }
+    }
+    pub fn contains_source(&self, key: &str) -> bool {
+        self.leaves().iter().any(|row| {
+            row.stable_key() == key || match row {
+                Self::ToolGroup(values) | Self::ReasoningGroup(values) | Self::ProcessGroup { values, .. } =>
+                    values.iter().any(|row| key == format!("activity:{}", field(row,"id"))),
+                _ => false,
+            }
+        })
+    }
+    pub fn exchange_disclosure_key(&self) -> String {
+        match self {
+            Self::Message(row) => field(row,"id"),
+            Self::Activity(row) => format!("event:{}",field(row,"id")),
+            _ => self.stable_key(),
+        }
+    }
+    pub fn activity_tool_keys(&self) -> HashSet<String> { self.activity_tool_keys_matching(false) }
+    pub fn activity_failed_tool_keys(&self) -> HashSet<String> { self.activity_tool_keys_matching(true) }
+    fn activity_tool_keys_matching(&self, failed_only: bool) -> HashSet<String> {
+        let values = match self {
+            Self::ToolGroup(values) | Self::ReasoningGroup(values) | Self::ProcessGroup { values, .. } => values,
+            _ => return HashSet::new(),
+        };
+        values.iter().filter(|row| matches!(field(row,"kind").as_str(),"tool" | "subagent"))
+            .filter(|row| !failed_only || parse_detail(&field(row,"detail")).is_some_and(|d| d["update"]["status"].as_str().or_else(||d["status"].as_str()) == Some("failed")))
+            .map(|row| {
+                let detail = parse_detail(&field(row,"detail"));
+                detail.as_ref().and_then(|d| d["toolCallId"].as_str().or_else(||d["item"]["id"].as_str()).or_else(||d["id"].as_str()))
+                    .map(str::to_owned).unwrap_or_else(||field(row,"id"))
+            }).collect::<HashSet<_>>()
+    }
     pub fn at(&self) -> i64 {
         match self {
             Self::Message(value) | Self::Activity(value) => {
                 value["createdAt"].as_i64().unwrap_or(0)
             }
             Self::Approval(row) => row.at(),
+            Self::ExchangeGroup { members, .. } => members.first().map(Self::at).unwrap_or(0),
             Self::ReasoningGroup(values)
             | Self::ToolGroup(values)
             | Self::ProcessGroup { values, .. } => values
@@ -528,6 +565,7 @@ impl ConversationItem {
             Self::Message(value) => format!("message:{}", field(value, "id")),
             Self::Activity(value) => format!("activity:{}", field(value, "id")),
             Self::Approval(row) => format!("approval:{}", row.id),
+            Self::ExchangeGroup { members, .. } => members.first().map(Self::stable_key).unwrap_or_default(),
             Self::ReasoningGroup(values) => {
                 format!("reasoning-group:{}", first_id(values))
             }
@@ -542,6 +580,7 @@ impl ConversationItem {
     pub fn row_count(&self) -> usize {
         match self {
             Self::Message(_) | Self::Activity(_) | Self::Approval(_) => 1,
+            Self::ExchangeGroup { members, .. } => members.iter().map(Self::row_count).sum(),
             Self::ReasoningGroup(values)
             | Self::ToolGroup(values)
             | Self::ProcessGroup { values, .. } => values.len(),
@@ -733,14 +772,17 @@ fn coalesce_acp_activity(events: Vec<Rc<Value>>, messages: &[Rc<Value>]) -> Vec<
 
 /// Build a flat, chronologically-sorted source list from the native timeline.
 /// The grouped view is a pure projection of this list.
-pub fn projection(rows: &[TimelineRow], approvals: &[ApprovalRow]) -> Vec<ConversationItem> {
+pub fn projection<'a>(
+    rows: impl IntoIterator<Item = &'a TimelineRow>,
+    approvals: &[ApprovalRow],
+) -> Vec<ConversationItem> {
     projection_with_options(rows, approvals, true)
 }
 
 /// Project the transcript while optionally batching adjacent same-family tool
 /// calls into one disclosure. Reasoning and mixed process grouping stay intact.
-pub fn projection_with_options(
-    rows: &[TimelineRow],
+pub fn projection_with_options<'a>(
+    rows: impl IntoIterator<Item = &'a TimelineRow>,
     approvals: &[ApprovalRow],
     compress_tools: bool,
 ) -> Vec<ConversationItem> {
@@ -771,7 +813,8 @@ pub fn projection_with_options(
     }
     for row in approvals {
         if row.status == "pending"
-            || (row.status == "approved" && row.rule_id.as_ref().is_some_and(|id| !id.trim().is_empty()))
+            || (row.status == "approved"
+                && row.rule_id.as_ref().is_some_and(|id| !id.trim().is_empty()))
         {
             continue;
         }
@@ -1220,14 +1263,17 @@ pub fn is_request_boundary(item: &ConversationItem) -> bool {
 
 /// Helper used by `transcript.rs` to expose the projection at the call site.
 /// Owns no state; the caller passes the existing flat rows in.
-pub fn project(rows: &[TimelineRow], approvals: &[ApprovalRow]) -> Vec<ConversationItem> {
+pub fn project<'a>(
+    rows: impl IntoIterator<Item = &'a TimelineRow>,
+    approvals: &[ApprovalRow],
+) -> Vec<ConversationItem> {
     projection(rows, approvals)
 }
 
 /// Public options-aware counterpart to `project`; the legacy wrapper keeps
 /// the historical compressed-tool projection for existing callers.
-pub fn project_with_options(
-    rows: &[TimelineRow],
+pub fn project_with_options<'a>(
+    rows: impl IntoIterator<Item = &'a TimelineRow>,
     approvals: &[ApprovalRow],
     compress_tools: bool,
 ) -> Vec<ConversationItem> {
@@ -1236,7 +1282,9 @@ pub fn project_with_options(
 
 /// Stable set of event ids already covered by the projection. Used by the
 /// renderer to detach retained native entities on authoritative removal.
-pub fn visible_event_ids(items: &[ConversationItem]) -> HashSet<String> {
+pub fn visible_event_ids<'a>(
+    items: impl IntoIterator<Item = &'a ConversationItem>,
+) -> HashSet<String> {
     let mut ids: HashSet<String> = HashSet::new();
     for item in items {
         match item {
@@ -1245,6 +1293,7 @@ pub fn visible_event_ids(items: &[ConversationItem]) -> HashSet<String> {
             }
             ConversationItem::Approval(_) => {}
             ConversationItem::Message(_) => {}
+            ConversationItem::ExchangeGroup { members, .. } => ids.extend(visible_event_ids(members)),
             ConversationItem::ReasoningGroup(values)
             | ConversationItem::ToolGroup(values)
             | ConversationItem::ProcessGroup { values, .. } => {
@@ -1292,13 +1341,19 @@ mod tests {
 
     #[::core::prelude::v1::test]
     fn projection_shares_large_message_payload_with_source_row() {
-        let message = Rc::new(json!({"id":"large", "role":"user", "taskId":"task", "createdAt":1, "text":"x".repeat(1024 * 1024)}));
+        let message = Rc::new(
+            json!({"id":"large", "role":"user", "taskId":"task", "createdAt":1, "text":"x".repeat(1024 * 1024)}),
+        );
         let source = vec![TimelineRow::Message(message.clone())];
         let projection = project(&source, &[]);
-        let ConversationItem::Message(projected) = &projection[0] else { panic!("expected message") };
+        let ConversationItem::Message(projected) = &projection[0] else {
+            panic!("expected message")
+        };
         assert!(Rc::ptr_eq(&message, projected));
         let cloned = projection.clone();
-        let ConversationItem::Message(cloned_message) = &cloned[0] else { panic!("expected message") };
+        let ConversationItem::Message(cloned_message) = &cloned[0] else {
+            panic!("expected message")
+        };
         assert!(Rc::ptr_eq(&message, cloned_message));
     }
 
@@ -1797,15 +1852,32 @@ mod tests {
     #[::core::prelude::v1::test]
     fn saved_rule_approvals_stay_out_of_chat_but_explicit_decisions_remain() {
         let saved = ApprovalRow {
-            id: "saved".into(), task_id: "task-1".into(), status: "approved".into(),
-            created_at: 5, resolved_at: Some(12), rule_id: Some("rule-1".into()),
-            summary: "Read a file".into(), tool: "read".into(),
+            id: "saved".into(),
+            task_id: "task-1".into(),
+            status: "approved".into(),
+            created_at: 5,
+            resolved_at: Some(12),
+            rule_id: Some("rule-1".into()),
+            summary: "Read a file".into(),
+            tool: "read".into(),
         };
-        let explicit = ApprovalRow { id: "explicit".into(), rule_id: None, ..saved.clone() };
-        let denied = ApprovalRow { id: "denied".into(), status: "denied".into(), ..saved.clone() };
+        let explicit = ApprovalRow {
+            id: "explicit".into(),
+            rule_id: None,
+            ..saved.clone()
+        };
+        let denied = ApprovalRow {
+            id: "denied".into(),
+            status: "denied".into(),
+            ..saved.clone()
+        };
         let items = projection(&[], &[saved, explicit, denied]);
         assert_eq!(items.len(), 2);
-        assert!(items.iter().all(|item| matches!(item, ConversationItem::Approval(row) if row.id != "saved")));
+        assert!(
+            items
+                .iter()
+                .all(|item| matches!(item, ConversationItem::Approval(row) if row.id != "saved"))
+        );
     }
 
     #[::core::prelude::v1::test]
@@ -2003,16 +2075,20 @@ mod tests {
     fn has_active_output_returns_true_for_trailing_reasoning_or_tool() {
         let items = vec![
             ConversationItem::Message(
-                json!({"id":"m1","createdAt":10,"role":"user","taskId":"task-1","text":"hi"}).into(),
+                json!({"id":"m1","createdAt":10,"role":"user","taskId":"task-1","text":"hi"})
+                    .into(),
             ),
-            ConversationItem::ReasoningGroup(vec![event(
-                "a",
-                "reasoning",
-                "task-1",
-                15,
-                "Thinking",
-                "{\"summary\":\"x\"}",
-            ).into()]),
+            ConversationItem::ReasoningGroup(vec![
+                event(
+                    "a",
+                    "reasoning",
+                    "task-1",
+                    15,
+                    "Thinking",
+                    "{\"summary\":\"x\"}",
+                )
+                .into(),
+            ]),
         ];
         assert!(has_active_output(&items));
         let items = vec![ConversationItem::Message(

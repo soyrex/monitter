@@ -37,12 +37,14 @@ enum Scenario {
     PipelineUpdates,
     BrowserAdjacent,
     Motion,
+    Minimap,
 }
 impl Scenario {
     fn name(self) -> &'static str {
         match self {
             Self::Static => "static + active sparkles",
             Self::Idle => "idle",
+            Self::Minimap => "chat minimap: synthetic message sizes and roles",
             Self::StreamingBody => "streaming-body + active sparkles",
             Self::PipelineUpdates => "pipeline-updates + active sparkles",
             Self::BrowserAdjacent => "browser-adjacent + active sparkles",
@@ -85,6 +87,14 @@ impl Render for PerformanceScenario {
                         self.scenario.name(), self.chats.len(), self.rows)))
                 .children(self.invalid_option.as_ref().map(|option|
                     div().child(format!("Unknown scenario {option:?}; showing static fixture.")))))
+            .when(self.scenario == Scenario::Minimap, |view| view.child(div().flex().gap_2().px_4().py_2()
+                .child(gpui_kit::component::button::Button::new("minimap-fixture-older").label("Preview older messages")
+                    .on_click(cx.listener(|this, _, _, cx| { if let Some(chat) = this.chats.values().next() { chat.update(cx, |pane, cx| pane.minimap_fixture_scroll(Some(15), cx)); } })))
+                .child(gpui_kit::component::button::Button::new("minimap-fixture-latest").label("Return to latest")
+                    .on_click(cx.listener(|this, _, _, cx| { if let Some(chat) = this.chats.values().next() { chat.update(cx, |pane, cx| pane.minimap_fixture_scroll(None, cx)); } })))
+                .child(gpui_kit::component::button::Button::new("minimap-fixture-marker").label("Preview marker jump")
+                    .on_click(cx.listener(|this, _, _, cx| { if let Some(chat) = this.chats.values().next() { chat.update(cx, |pane, cx| pane.minimap_fixture_marker_jump(5, cx)); } })))
+            ))
             .when(self.scenario == Scenario::Motion, |view| view.child(self.motion_controls(cx)))
             .when(self.scenario == Scenario::Motion && self.disclosure_open, |view| view.child(self.disclosure_fixture(window, cx)))
             .child(div().flex_1().min_h_0().flex()
@@ -291,6 +301,7 @@ impl PerformanceScenario {
             .updated_at = chrono::Utc::now().timestamp_millis();
         self.publication.enqueue(PublicationChanges {
             message_tasks: HashSet::from([task]),
+            message_ids: HashSet::from([message]),
             ..Default::default()
         });
         self.start_publication(cx);
@@ -301,13 +312,27 @@ impl PerformanceScenario {
         };
         let source = self.source.as_ref().unwrap().clone();
         let panes: HashSet<_> = self.chats.keys().cloned().collect();
+        let visible: HashSet<_> = self
+            .chats
+            .iter()
+            .filter_map(|(id, pane)| {
+                pane.read(cx)
+                    .wants_history_publication()
+                    .then(|| id.clone())
+            })
+            .collect();
         let previous = self.index.clone();
         let previous_records = self.records.clone();
         let previous_transcripts = self.child_transcripts.clone();
         let worker_changes = changes.clone();
         let worker = cx.background_executor().spawn(async move {
-            let mut prepared =
-                native_publication::prepare(source, panes.clone(), &worker_changes, previous)?;
+            let mut prepared = native_publication::prepare_visible(
+                source,
+                panes.clone(),
+                visible,
+                &worker_changes,
+                previous,
+            )?;
             for id in &panes {
                 let records =
                     if prepared.sync_tasks.contains(id) || !previous_records.contains_key(id) {
@@ -317,8 +342,9 @@ impl PerformanceScenario {
                     };
                 let transcripts =
                     if prepared.sync_tasks.contains(id) || !previous_transcripts.contains_key(id) {
-                        crate::collaboration::prepare_child_transcripts(
+                        crate::collaboration::prepare_child_transcripts_indexed(
                             &prepared.snapshot,
+                            &prepared.index,
                             &records,
                             previous_transcripts.get(id),
                         )
@@ -337,7 +363,9 @@ impl PerformanceScenario {
             let _ = scene.update(cx, |scene, cx| {
                 if scene.publication.finish(generation, changes.clone()) {
                     match result {
-                        Ok(prepared) => scene.commit_publication(prepared, generation, cx),
+                        Ok(prepared) => {
+                            scene.commit_publication(prepared, generation, &changes, cx)
+                        }
                         Err(error) => eprintln!("Synthetic pipeline preparation failed: {error}"),
                     }
                 }
@@ -350,9 +378,10 @@ impl PerformanceScenario {
         &mut self,
         mut prepared: PreparedPublication,
         generation: u64,
+        changes: &PublicationChanges,
         cx: &mut Context<Self>,
     ) {
-        self.index = Some(prepared.index);
+        self.index = Some(prepared.index.clone());
         self.records = prepared.collaboration_records;
         self.child_transcripts = prepared.collaboration_transcripts;
         let snapshot = Rc::new(prepared.snapshot);
@@ -368,17 +397,30 @@ impl PerformanceScenario {
             }
             let history = prepared.histories.remove(id);
             pane.update(cx, |pane, cx| {
-                pane.sync_prepared(
+                let patches = prepared
+                    .body_only_tasks
+                    .contains(id)
+                    .then(|| prepared.message_updates.remove(id).unwrap_or_default());
+                let boundary = changes.task_boundary_index(
+                    id,
+                    revision.as_deref(),
+                    &snapshot,
+                    self.index.as_ref().unwrap(),
+                );
+                pane.publish_indexed(
                     snapshot.clone(),
                     revision.clone(),
                     self.records[id].clone(),
                     self.child_transcripts[id].clone(),
                     prepared.transcript_context_unchanged_tasks.contains(id),
+                    history,
+                    changes.reset,
+                    boundary.map(|boundary| boundary.next_before_id.clone()),
+                    self.index.clone(),
+                    patches,
+                    prepared.lazy_history_tasks.contains(id),
                     cx,
                 );
-                if let Some(messages) = history {
-                    pane.reconcile_history(messages, false, cx);
-                }
             });
         }
         crate::retire_snapshot(retired_snapshot, cx);
@@ -405,15 +447,27 @@ fn snapshot(scenario: Scenario, row_count: usize, pane_count: usize) -> Value {
     for pane in 0..pane_count {
         let task = format!("{TASK}-{pane}");
         tasks.push(json!({"id":task,"title":format!("Synthetic performance pane {}",pane+1),
-            "agentId":"synthetic-agent","status":if scenario==Scenario::Idle {"idle"} else {"running"},
+            "agentId":"synthetic-agent","status":if matches!(scenario, Scenario::Idle | Scenario::Minimap) {"idle"} else {"running"},
             "createdAt":now,"updatedAt":now,"queue":[],"hostId":"synthetic-host",
             "cwd":"","provider":"codex","model":"synthetic","sandbox":"read-only"}));
-        messages.extend((0..row_count).map(|index| json!({
-            "id":format!("synthetic-message-{pane}-{index}"),"taskId":task,
-            "role":if index%2==0 {"user"} else {"assistant"},
-            "text":format!("Synthetic history row {index}. Isolated native fixture for retained layout, selection, scrolling and input."),
-            "createdAt":now-(row_count-index) as i64*1_000,
-        })));
+        messages.extend((0..row_count).map(|index| {
+            let minimap = scenario == Scenario::Minimap;
+            let user = if minimap { index % 3 == 0 } else { index % 2 == 0 };
+            let text = if minimap {
+                let label = if user { "User prompt" } else if index % 3 == 2 { "Agent closing answer" } else { "Agent progress" };
+                let detail = "This is clearly labelled synthetic text for checking the compact chat minimap, message lengths, hover previews and navigation. ";
+                format!("{label} {index}.\n\n{}", detail.repeat(if index % 7 == 0 { 18 } else if index % 4 == 0 { 5 } else { 1 }))
+            } else {
+                format!("Synthetic history row {index}. Isolated native fixture for retained layout, selection, scrolling and input.")
+            };
+            let mut message = json!({
+                "id":format!("synthetic-message-{pane}-{index}"),"taskId":task,
+                "role":if user {"user"} else {"assistant"}, "text":text,
+                "createdAt":now-(row_count-index) as i64*1_000,
+            });
+            if minimap && index % 3 == 2 { message["phase"] = json!("final_answer"); }
+            message
+        }));
         if matches!(
             scenario,
             Scenario::StreamingBody | Scenario::PipelineUpdates
@@ -448,13 +502,21 @@ pub fn open_if_requested(cx: &mut App) -> bool {
         "pipeline-updates" => (Scenario::PipelineUpdates, None),
         "browser-adjacent" => (Scenario::BrowserAdjacent, None),
         "motion" => (Scenario::Motion, None),
+        "minimap" => (Scenario::Minimap, None),
         _ => (Scenario::Static, Some(option)),
     };
     let row_count = std::env::var("MONITTER_GPUI_PERF_HISTORY_ROWS")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(10_000)
-        .clamp(1_000, 100_000);
+        .clamp(
+            if scenario == Scenario::Minimap {
+                12
+            } else {
+                1_000
+            },
+            100_000,
+        );
     let pane_count = match scenario {
         Scenario::PipelineUpdates => 4,
         Scenario::Motion => 3,
@@ -488,7 +550,17 @@ pub fn open_if_requested(cx: &mut App) -> bool {
     if let Err(error) = monitter_gpui_desktop::fonts::register(cx) {
         eprintln!("{error}");
     }
-    let snapshot = Rc::new(snapshot(scenario, row_count, pane_count));
+    let mut fixture_snapshot = snapshot(scenario, row_count, pane_count);
+    // Explicitly synthetic, disconnected preview of a blocking permission dialog.
+    if std::env::var_os("MONITTER_GPUI_APPROVAL_PREVIEW").is_some() {
+        fixture_snapshot["approvalRequests"] = json!([{
+            "id":"synthetic-approval-preview", "taskId":format!("{TASK}-0"),
+            "status":"pending", "provider":"codex", "tool":"Command execution",
+            "summary":"/bin/zsh -c python3", "risk":"high", "rememberable":true,
+            "detail":json!({"command":"/bin/zsh -c \"python3 - <<'PY'\nfrom pathlib import Path\n\nproject = Path('synthetic-fixture')\nfor file in project.glob('*.rs'):\n    print(file.name)\nPY\"", "reason":"Synthetic preview only. No command will run."}).to_string()
+        }]);
+    }
+    let snapshot = Rc::new(fixture_snapshot);
     let palette = design::palette(&snapshot["settings"], gpui_kit::WindowAppearance::Dark);
     crate::activity_effects::sync(&snapshot, palette, cx);
     let (handle, _) = gpui_kit::open_window(
@@ -703,6 +775,13 @@ pub fn open_if_requested(cx: &mut App) -> bool {
                 }
             });
             if scenario == Scenario::PipelineUpdates {
+                scene.update(cx, |scene, cx| {
+                    scene.publication.enqueue(PublicationChanges {
+                        reset: true,
+                        ..Default::default()
+                    });
+                    scene.start_publication(cx);
+                });
                 let owner = scene.downgrade();
                 cx.spawn(async move |cx| {
                     loop {
@@ -733,6 +812,47 @@ mod tests {
     use super::{Scenario, snapshot};
     use monitter_lib::model::Snapshot;
     #[cfg(unix)]
+    #[test]
+    fn opening_idle_parent_prepares_child_history_from_compact_source() {
+        use monitter_gpui_desktop::native_publication::{PublicationChanges, prepare};
+        use std::collections::HashSet;
+        let mut value = snapshot(Scenario::PipelineUpdates, 10, 2);
+        let parent = value["tasks"][0]["id"].as_str().unwrap().to_owned();
+        let child = value["tasks"][1]["id"].as_str().unwrap().to_owned();
+        value["collaborations"] = serde_json::json!([{"id":"idle-child","kind":"delegation","fromAgentId":"fixture-agent","fromTaskId":parent,"toTaskId":child,"toAgentId":"fixture-agent","requestId":"idle-request","text":"child","status":"completed","createdAt":0,"updatedAt":0}]);
+        let source: Snapshot = serde_json::from_value(value).unwrap();
+        let initial = prepare(
+            source.clone(),
+            HashSet::new(),
+            &PublicationChanges {
+                reset: true,
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+        let opened = prepare(
+            source,
+            HashSet::from([parent.clone()]),
+            &PublicationChanges {
+                message_tasks: HashSet::from([parent.clone()]),
+                ..Default::default()
+            },
+            Some(initial.index),
+        )
+        .unwrap();
+        assert!(opened.sync_tasks.contains(&parent));
+        assert!(opened.snapshot["messages"].as_array().unwrap().is_empty());
+        let records = crate::collaboration::records(&opened.snapshot, &parent);
+        assert!(!records.is_empty());
+        let transcripts = crate::collaboration::prepare_child_transcripts_indexed(
+            &opened.snapshot,
+            &opened.index,
+            &records,
+            None,
+        );
+        assert!(transcripts.values().any(|entries| !entries.is_empty()));
+    }
     #[test]
     fn fixture_service_rejects_reads_commands_and_subscriptions() {
         let service =

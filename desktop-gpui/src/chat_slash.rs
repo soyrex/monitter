@@ -181,9 +181,13 @@ impl ChatPane {
         cx.spawn(async move |pane, cx| {
             let result = rx.await.unwrap_or_else(|_| Err("Naming worker closed before returning.".into()));
             cx.update(|cx| {
-                let generated = result.as_ref().ok().and_then(|snapshot| snapshot["tasks"].as_array())
-                    .and_then(|tasks| tasks.iter().find(|task| task["id"].as_str() == Some(task_id.as_str())))
-                    .and_then(|task| task["title"].as_str());
+                let generated = result.as_ref().ok().and_then(|result| {
+                    result.as_str().or_else(|| {
+                        result["tasks"].as_array()?.iter()
+                            .find(|task| task["id"].as_str() == Some(task_id.as_str()))
+                            .and_then(|task| task["title"].as_str())
+                    })
+                });
                 if let Some(title) = generated {
                     crate::activity_effects::complete_naming(&task_id, title, cx);
                 } else {
@@ -193,8 +197,7 @@ impl ChatPane {
             let _ = pane.update(cx, |pane, cx| {
                 if pane.task_id() != task_id { return; }
                 match &result {
-                    Ok(snapshot) => {
-                        cx.emit(ChatEvent::SnapshotUpdated(snapshot.clone()));
+                    Ok(_) => {
                         pane.refresh(cx);
                     }
                     Err(error) => pane.error = Some(error.clone()),
@@ -238,8 +241,6 @@ impl ChatPane {
             cx.notify();
             return;
         };
-        let task_id = self.task_id();
-        let local_confirmation = notice.is_some();
         let stopping = commands.iter().any(|(command, _)| *command == "cancel_task");
         let (tx, rx) = futures::channel::oneshot::channel();
         let started = std::thread::Builder::new()
@@ -260,10 +261,27 @@ impl ChatPane {
             cx.notify();
             return;
         }
+        self.await_slash_result(rx, original, notice, stopping, window, cx);
+    }
+
+    fn await_slash_result(
+        &mut self,
+        rx: futures::channel::oneshot::Receiver<Result<Value, String>>,
+        original: String,
+        notice: Option<String>,
+        stopping: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let task_id = self.task_id();
+        let local_confirmation = notice.is_some();
+        // Worker creation succeeded: consume the submitted draft in this event,
+        // before waiting for RPC. Completion must never clear a later draft,
+        // even when the user types the same slash command again.
+        self.clear_slash_draft(&original, window, cx);
         self.busy = true;
         self.composer_footer
             .update(cx, |footer, cx| footer.set_busy(true, cx));
-        self.slash.update(cx, |slash, cx| slash.dismiss(cx));
         cx.spawn_in(window, async move |pane, cx| {
             let result = rx
                 .await
@@ -277,7 +295,6 @@ impl ChatPane {
                 }
                 match result {
                     Ok(result) => {
-                        pane.clear_sent = Some((task_id, original));
                         pane.slash_effect = result["effect"].as_str().map(str::to_owned);
                         let message = result["message"]
                             .as_str()
@@ -321,6 +338,65 @@ impl ChatPane {
 #[cfg(test)]
 mod tests {
     use super::{literal_prompt, typed_submit_before_menu, rename_request};
+    fn delayed_slash_result(
+        cx: &mut gpui_kit::TestAppContext,
+        sent: &str,
+        result: Result<serde_json::Value, String>,
+        replacement: Option<&str>,
+    ) {
+        let (pane, visual) = super::super::composer_ack_tests::mount(cx, sent);
+        let (tx, rx) = futures::channel::oneshot::channel();
+        visual.update(|window, cx| pane.update(cx, |pane, cx| {
+            pane.await_slash_result(rx, sent.into(), Some("Context cleared.".into()), false, window, cx);
+            assert!(pane.composer.read(cx).value().is_empty(), "clear happens synchronously without ChatPane render or RPC completion");
+            assert_eq!(pane.draft(cx), "");
+            assert!(pane.busy);
+            assert!(pane.clear_sent.is_none(), "no deferred composer clearing is queued");
+        }));
+        visual.run_until_parked();
+        if let Some(replacement) = replacement {
+            visual.update(|window, cx| pane.update(cx, |pane, cx| {
+                pane.composer.update(cx, |input, cx| input.set_value(replacement.to_owned(), window, cx));
+            }));
+        }
+        let failed = result.is_err();
+        tx.send(result).expect("pending slash result receiver");
+        visual.run_until_parked();
+        pane.read_with(visual, |pane, cx| {
+            assert!(!pane.busy);
+            assert_eq!(pane.composer.read(cx).value().as_ref(), replacement.unwrap_or(""));
+            assert_eq!(pane.draft(cx), replacement.unwrap_or(""));
+            assert!(pane.clear_sent.is_none(), "completion cannot clear a later identical command");
+            assert_eq!(pane.error.is_some(), failed, "RPC errors remain visible");
+        });
+    }
+
+    #[gpui_kit::test]
+    fn clear_clears_composer_before_delayed_rpc(cx: &mut gpui_kit::TestAppContext) {
+        delayed_slash_result(cx, "/clear", Ok(serde_json::json!({})), None);
+    }
+
+    #[gpui_kit::test]
+    fn new_completion_preserves_identical_newly_typed_command(cx: &mut gpui_kit::TestAppContext) {
+        delayed_slash_result(cx, "/new", Ok(serde_json::json!({})), Some("/new"));
+    }
+
+    #[gpui_kit::test]
+    fn slash_failure_preserves_new_draft_and_visible_error(cx: &mut gpui_kit::TestAppContext) {
+        delayed_slash_result(cx, "/clear", Err("Synthetic command failure".into()), Some("A new draft"));
+    }
+
+    #[gpui_kit::test]
+    fn slash_without_backend_retains_submitted_draft(cx: &mut gpui_kit::TestAppContext) {
+        let (pane, visual) = super::super::composer_ack_tests::mount(cx, "/clear");
+        visual.update(|window, cx| pane.update(cx, |pane, cx| {
+            pane.slash_rpc(vec![("clear_task_context", serde_json::json!({"taskId":"ack-task"}))], "/clear".into(), None, window, cx);
+            assert_eq!(pane.composer.read(cx).value().as_ref(), "/clear");
+            assert!(!pane.busy);
+            assert!(pane.error.is_some());
+        }));
+    }
+
     #[::core::prelude::v1::test]
     fn rename_bare_command_uses_admin_autoname_and_explicit_title_stays_manual() {
         let (command, args) = rename_request("task-123", "");

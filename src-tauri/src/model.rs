@@ -208,6 +208,8 @@ pub struct Task {
     /// archived through the ordinary archive flow.
     #[serde(default)]
     pub archived_agent_name: Option<String>,
+    #[serde(default)]
+    pub agent_worktree: Option<crate::agent_worktree::AgentWorktree>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -689,7 +691,7 @@ pub fn agent_instructions(agent: &Agent, user_name: &str) -> String {
             serde_json::json!(user_name.trim())
         ));
     }
-    let mut parts = vec![];
+    let mut parts = vec![crate::collaboration_mcp::PROGRESS_INSTRUCTIONS.to_string()];
     if !agent.description.trim().is_empty() {
         parts.push(format!("Purpose: {}", agent.description.trim()));
     }
@@ -779,6 +781,9 @@ pub struct RunUsageSample {
     pub classification: String,
     #[serde(default)]
     pub provider_turn_id: Option<String>,
+    /// Authoritative adapter reset identity, when reported. Never inferred from a decrease.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub counter_epoch: Option<String>,
     pub tokens: UsageTokens,
     pub cost_usd: Option<f64>,
     pub duration_ms: Option<i64>,
@@ -1057,6 +1062,9 @@ pub struct InputOption {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
+    /// Launch policy for built-in Monitter MCP tools in supported harnesses.
+    #[serde(default = "default_auto_approve_monitter_mcp")]
+    pub auto_approve_monitter_mcp: bool,
     /// Opt-in project coordination board. Off for existing installations.
     #[serde(default)]
     pub project_board_enabled: bool,
@@ -1134,6 +1142,9 @@ pub struct Settings {
     pub voice_transcription_engine: String,
 }
 impl Eq for Settings {}
+fn default_auto_approve_monitter_mcp() -> bool {
+    true
+}
 fn default_terminal_font_size() -> u8 {
     14
 }
@@ -1187,6 +1198,10 @@ pub struct ProjectWorkspace {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Project {
+    #[serde(default)]
+    pub build_management_enabled: bool,
+    #[serde(default)]
+    pub agent_worktrees_enabled: bool,
     pub id: String,
     pub name: String,
     pub description: String,
@@ -1248,6 +1263,10 @@ pub struct Snapshot {
     pub mail_batches: Vec<MailBatch>,
     #[serde(default)]
     pub work_plans: Vec<WorkPlan>,
+    #[serde(default)]
+    pub build_requests: Vec<BuildRequest>,
+    #[serde(default)]
+    pub build_runs: Vec<BuildRun>,
     /// Event records are immutable after insertion. Sharing their allocation
     /// keeps a candidate Snapshot clone from duplicating every historical
     /// event on an ordinary streaming update; serde retains the same JSON
@@ -1712,6 +1731,8 @@ pub fn default_snapshot() -> Snapshot {
         messages: Default::default(),
         mail_batches: vec![],
         work_plans: vec![],
+        build_requests: vec![],
+        build_runs: vec![],
         events: Default::default(),
         channels: vec![],
         project_board_messages: vec![],
@@ -1727,6 +1748,7 @@ pub fn default_snapshot() -> Snapshot {
         schedule_runs: vec![],
         pending_throwaway_task_ids: vec![],
         settings: Settings {
+            auto_approve_monitter_mcp: true,
             project_board_enabled: false,
             board_guidance_text: None,
             user_name: String::new(),
@@ -1770,6 +1792,19 @@ pub fn default_snapshot() -> Snapshot {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn monitter_mcp_auto_approval_defaults_on_and_preserves_opt_out() {
+        let mut settings = serde_json::to_value(super::default_snapshot().settings).unwrap();
+        assert_eq!(settings["autoApproveMonitterMcp"], true);
+        settings.as_object_mut().unwrap().remove("autoApproveMonitterMcp");
+        let migrated: super::Settings = serde_json::from_value(settings.clone()).unwrap();
+        assert!(migrated.auto_approve_monitter_mcp);
+        settings["autoApproveMonitterMcp"] = serde_json::json!(false);
+        let disabled: super::Settings = serde_json::from_value(settings).unwrap();
+        assert!(!disabled.auto_approve_monitter_mcp);
+        assert_eq!(serde_json::to_value(disabled).unwrap()["autoApproveMonitterMcp"], false);
+    }
     use super::*;
 
     #[test]
@@ -1858,12 +1893,11 @@ mod tests {
         agent.instructions.clear();
         let identity =
             "You are acting as Claudine. You are an agent running inside the Monitter harness.";
-        assert_eq!(agent_instructions(agent, ""), identity);
-        assert_eq!(agent_instructions(agent, "  "), identity);
-        assert_eq!(
-            agent_instructions(agent, &snapshot.settings.user_name),
-            format!("{identity} Your user is \"Álex \\\"Al\\\"\".")
-        );
+        assert!(agent_instructions(agent, "").starts_with(identity));
+        assert!(agent_instructions(agent, "").contains(crate::collaboration_mcp::PROGRESS_INSTRUCTIONS));
+        assert!(agent_instructions(agent, "  ").starts_with(identity));
+        assert!(agent_instructions(agent, &snapshot.settings.user_name)
+            .starts_with(&format!("{identity} Your user is \"Álex \\\"Al\\\"\".")));
     }
 
     #[test]
@@ -2199,7 +2233,7 @@ mod task_migration_tests {
     fn projects_and_task_links_round_trip_in_camel_case() {
         let mut snapshot = default_snapshot();
         let project_id = "project-1".to_string();
-        snapshot.projects.push(Project {
+        snapshot.projects.push(Project { build_management_enabled: false, agent_worktrees_enabled: false,
             id: project_id.clone(),
             name: "Project".into(),
             description: "Description".into(),
@@ -2292,7 +2326,7 @@ pub fn task_from_agent(agent: &Agent, input: &CreateTaskInput) -> Task {
         acp: (agent.provider == "acp")
             .then(|| agent.acp.clone())
             .flatten(),
-        archived_agent_name: None,
+        archived_agent_name: None, agent_worktree: None,
     }
 }
 
@@ -2315,4 +2349,41 @@ impl crate::history::HistoryRecord for ChannelMessage {
 }
 impl crate::history::HistoryRecord for SubagentTranscriptEntry {
     fn id(&self) -> &str { &self.id }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BuildRequest {
+    pub id: String,
+    pub project_id: String,
+    pub task_id: String,
+    pub agent_id: String,
+    pub host_id: String,
+    pub request_id: String,
+    pub title: String,
+    pub command: String,
+    pub cwd: String,
+    pub target_key: String,
+    pub status: String,
+    pub build_run_id: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BuildRun {
+    pub id: String,
+    pub project_id: String,
+    pub owner_task_id: String,
+    pub host_id: String,
+    pub request_ids: Vec<String>,
+    pub command: String,
+    pub cwd: String,
+    pub target_key: String,
+    pub status: String,
+    pub summary: String,
+    pub exit_code: Option<i32>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub lease_expires_at: i64,
 }
