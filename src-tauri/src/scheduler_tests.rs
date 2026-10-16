@@ -272,7 +272,7 @@ fn overlap_decision_picks_queue_for_persistent_with_running_previous() {
             codex_home: None,
             acp: None,
             model_settings: None,
-            archived_agent_name: None,
+            archived_agent_name: None, agent_worktree: None,
         });
         Ok(snap.clone())
     }).unwrap();
@@ -364,7 +364,7 @@ fn add_throwaway_task(service: &Service, status: &str, cwd: &std::path::Path) ->
                 codex_home: None,
                 acp: None,
                 model_settings: None,
-                archived_agent_name: None,
+                archived_agent_name: None, agent_worktree: None,
             });
             snap.messages.push(crate::model::Message {
                 id: crate::model::id(),
@@ -474,7 +474,7 @@ fn save_throwaway_schedule_registers_pending_id_on_fire() {
                 codex_home: None,
                 acp: None,
                 model_settings: None,
-                archived_agent_name: None,
+                archived_agent_name: None, agent_worktree: None,
             });
             snap.pending_throwaway_task_ids.push(id.clone());
             Ok(id)
@@ -564,7 +564,7 @@ fn full_throwaway_cycle_produces_succeeded_run_and_report() {
                 codex_home: None,
                 acp: None,
                 model_settings: None,
-                archived_agent_name: None,
+                archived_agent_name: None, agent_worktree: None,
             });
             snap.messages.push(crate::model::Message {
                 id: crate::model::id(),
@@ -677,7 +677,7 @@ fn run_schedule_now_persistent_thread_records_succeeded_when_task_already_comple
                 codex_home: None,
                 acp: None,
                 model_settings: None,
-                archived_agent_name: None,
+                archived_agent_name: None, agent_worktree: None,
             });
             // And a ScheduleRun row that points at this task so
             // dispatch finds the existing task id.

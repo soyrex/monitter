@@ -10,8 +10,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub(crate) const IDLE_RUNTIME_TIMEOUT: Duration = Duration::from_secs(5 * 60);
-const COLLECT_INTERVAL: Duration = Duration::from_secs(60);
+pub(crate) const IDLE_RUNTIME_TIMEOUT: Duration = Duration::from_secs(45);
+const COLLECT_INTERVAL: Duration = Duration::from_secs(10);
 pub(crate) const RUNTIME_RELEASE_TIMEOUT: Duration = Duration::from_secs(15);
 
 fn task_allows_retirement(data: &ServiceData, task_id: &str) -> bool {
@@ -52,6 +52,24 @@ fn task_allows_retirement(data: &ServiceData, task_id: &str) -> bool {
 }
 
 impl Service {
+    /// Private GPUI owner diagnostics. Clone state and controls before reading
+    /// OS process identities, without holding a persistence/registry lock.
+    #[cfg(feature = "experimental-gpui")]
+    pub(crate) fn idle_runtime_status(&self) -> Result<serde_json::Value, String> {
+        let data = self.committed_data()?;
+        let controls = self.runs.lock()
+            .map_err(|_| "Runtime registry is unavailable.")?.tasks.clone();
+        let now = Instant::now();
+        let mut statuses = controls.into_iter().map(|(task_id, control)| {
+            let mut status = control.idle_retirement_status(now);
+            status["taskEligible"] = serde_json::json!(task_allows_retirement(&data, &task_id));
+            status["taskId"] = serde_json::json!(task_id);
+            status
+        }).collect::<Vec<_>>();
+        statuses.sort_by(|a, b| a["taskId"].as_str().cmp(&b["taskId"].as_str()));
+        Ok(serde_json::json!({"idleTimeoutMs": IDLE_RUNTIME_TIMEOUT.as_millis() as u64, "runtimes": statuses}))
+    }
+
     pub(crate) fn start_idle_collector(self: &Arc<Self>) {
         if self.idle_collector_started.swap(true, Ordering::AcqRel) {
             return;
@@ -114,14 +132,24 @@ impl Service {
         };
         let mut retired = 0;
         for (task_id, control) in candidates {
-            // Provider/MCP infrastructure can start after the completed-turn
-            // refresh (and even after the collector's previous sweep). While
-            // this runtime has never reported tool work, adopt the current
-            // owned tree before deciding whether it is safe to retire. The
-            // permanent tool-work fence makes this a no-op for any runtime
-            // that has crossed a user-tool boundary, where late descendants
-            // must continue to pin retirement.
-            let _ = control.refresh_runtime_process_baseline_while_idle_if_no_tool_work();
+            // Retire idle owner infrastructure aggressively, including plugin
+            // helpers that startup discovery could not classify. Capture exact
+            // PID/start identities only under the quiescent lifecycle fences;
+            // active turns, approvals and tracked background jobs remain pinned.
+            let _ = control.refresh_runtime_process_baseline_while_idle();
+            if !control.retirement_process_tree_is_safe() && control.current_app_server_thread().is_some() {
+                // Read effective provider configuration, including global and
+                // project MCP launches. This query observes the existing owner;
+                // it never begins a turn or extends the idle clock.
+                if let Ok((task, host)) = self.task_and_host(&task_id) {
+                    if host.kind == "local" {
+                        if let Ok(config) = control.query_app_server("config/read", serde_json::json!({"cwd":task.cwd,"includeLayers":false}), Duration::from_secs(2)) {
+                            control.extend_runtime_infrastructure_launches_from_config(&config);
+                        }
+                    }
+                }
+            }
+            let _ = control.refresh_configured_runtime_infrastructure();
             // Process inspection and all teardown I/O happen outside service
             // locks. Unknown descendants conservatively pin the runtime.
             if !control.is_retiring() && !control.retirement_process_tree_is_safe() {

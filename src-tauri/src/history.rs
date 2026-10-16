@@ -74,6 +74,9 @@ pub enum HistoryDelta {
 /// A persistent, ordered collection with identity and scope indexes.
 pub struct History<T: HistoryRecord> {
     rows: Vector<T>,
+    /// Bodies evicted from the resident view remain authoritative in SQLite.
+    /// This is private cache state, never serialized as durable history.
+    cold_payload_ids: PersistentHashMap<String, ()>,
     ids: Mutex<PersistentHashMap<String, Vector<usize>>>,
     scopes: Mutex<PersistentHashMap<String, Vector<usize>>>,
     indexes_dirty: AtomicBool,
@@ -93,6 +96,7 @@ impl<T: HistoryRecord + Clone> Clone for History<T> {
         // A new clone token intentionally starts a fresh delta log.
         Self {
             rows: self.rows.clone(),
+            cold_payload_ids: self.cold_payload_ids.clone(),
             ids: Mutex::new(self.ids.lock().expect("history id index poisoned").clone()),
             scopes: Mutex::new(
                 self.scopes
@@ -121,6 +125,7 @@ impl<T: HistoryRecord> History<T> {
         let version = next_version();
         Self {
             rows,
+            cold_payload_ids: PersistentHashMap::new(),
             ids: Mutex::new(ids),
             scopes: Mutex::new(scopes),
             indexes_dirty: AtomicBool::new(false),
@@ -134,6 +139,21 @@ impl<T: HistoryRecord> History<T> {
 
     pub fn len(&self) -> usize {
         self.rows.len()
+    }
+
+    pub(crate) fn payload_is_cold(&self, id: &str) -> bool {
+        self.cold_payload_ids.contains_key(id)
+    }
+
+    pub(crate) fn has_cold_payloads(&self) -> bool {
+        !self.cold_payload_ids.is_empty()
+    }
+
+    /// Eviction changes neither durable identity nor the mutation journal.
+    pub(crate) fn evict_payload(&mut self, index: usize, value: T) {
+        assert_eq!(self.rows[index].id(), value.id());
+        self.cold_payload_ids.insert(value.id().to_owned(), ());
+        self.rows[index] = value;
     }
 
     pub fn is_empty(&self) -> bool {
@@ -325,6 +345,15 @@ impl<T: HistoryRecord> History<T> {
     {
         let mut row = self.get_mut_tracked(index)?;
         Some(update(&mut row))
+    }
+
+    /// Replace an evicted row with a complete payload and a tracked point update.
+    /// Callers must supply the full durable record, never a compact UI shell.
+    pub(crate) fn replace_full_at(&mut self, index: usize, value: T) -> Option<()> {
+        let id = self.rows.get(index)?.id().to_owned();
+        assert_eq!(id, value.id(), "full payload replacement preserves identity");
+        self.cold_payload_ids.remove(&id);
+        self.update_at(index, |row| *row = value)
     }
 
     pub fn update_by_id<R, F>(
@@ -772,6 +801,24 @@ mod tests {
                 .collect();
             assert_eq!(scoped.iter().copied().collect::<Vec<_>>(), expected_scoped);
         }
+    }
+
+    #[test]
+    fn tool_call_lifecycle_full_replacement_tracks_and_thaws_only_target() {
+        let mut before = History::from_vec(vec![row(0, 0, 10), row(1, 0, 20)]);
+        before.evict_payload(0, row(0, 0, 0));
+        before.evict_payload(1, row(1, 0, 0));
+        let mut after = before.clone();
+        assert_eq!(after.replace_full_at(0, row(0, 0, 30)), Some(()));
+        assert!(!after.payload_is_cold("id-0"));
+        assert!(after.payload_is_cold("id-1"));
+        assert!(before.payload_is_cold("id-0"));
+        assert_eq!(after.get_by_id("id-0").unwrap().unwrap().value, 30);
+        assert_eq!(after.delta_since(&before), HistoryDelta::Incremental {
+            from_version: before.version(), to_version: after.version(),
+            changes: vec![HistoryChange::Update { index: 0 }],
+        });
+        assert_indexes_match(&after, &[row(0, 0, 30), row(1, 0, 0)]);
     }
 
     #[test]

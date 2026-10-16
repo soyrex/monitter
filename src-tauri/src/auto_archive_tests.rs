@@ -50,7 +50,7 @@ fn task(service: &Service, id: &str, project_id: Option<&str>) -> Task {
         sandbox: "workspace-write".into(),
         project_id: project_id.map(str::to_owned),
         acp: None,
-        archived_agent_name: None,
+        archived_agent_name: None, agent_worktree: None,
     }
 }
 
@@ -129,7 +129,7 @@ fn selection_is_strict_at_cutoff_and_uses_latest_message_activity() {
 fn recurring_rules_use_project_override_and_keep_unscoped_global_tasks() {
     let f = fixture("rule-precedence");
     let project_id = uuid::Uuid::new_v4().to_string();
-    let project = Project {
+    let project = Project { build_management_enabled: false, agent_worktrees_enabled: false,
         id: project_id.clone(),
         name: "Project".into(),
         description: String::new(),
@@ -348,7 +348,7 @@ fn protocol_one_time_project_scope_excludes_other_projects_and_unassigned_tasks(
     f.service
         .mutate(None, |s| {
             for (id, name) in [(&included, "Included"), (&other, "Other")] {
-                s.projects.push(Project {
+                s.projects.push(Project { build_management_enabled: false, agent_worktrees_enabled: false,
                     id: (*id).clone(),
                     name: name.into(),
                     description: String::new(),
@@ -472,7 +472,7 @@ fn project_rule_can_be_saved_then_deleted_to_restore_inheritance() {
     let project_id = uuid::Uuid::new_v4().to_string();
     f.service
         .mutate(None, |s| {
-            s.projects.push(Project {
+            s.projects.push(Project { build_management_enabled: false, agent_worktrees_enabled: false,
                 id: project_id.clone(),
                 name: "Project".into(),
                 description: String::new(),

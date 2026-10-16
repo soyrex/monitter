@@ -1,0 +1,42 @@
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import ts from 'typescript';
+const compiled = ts.transpileModule(readFileSync('src/lib/lan-access-storage.ts', 'utf8'), {
+  compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
+}).outputText;
+const { createLanAccessStore } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`);
+const storage = () => {
+  const values = new Map();
+  return { getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, value), removeItem: key => values.delete(key) };
+};
+const session = storage(), persistent = storage();
+const make = (tab = session) => createLanAccessStore(() => tab, () => persistent);
+let client = make();
+client.setAccessKey(' 000042 ');
+assert.equal(client.accessKey(), '000042');
+assert.equal(make(storage()).accessKey(), '', 'pending/unvalidated input is not durable');
+client.rememberAccessKey('000042');
+assert.equal(make(storage()).accessKey(), '000042', 'validated bearer survives a new tab/browser page');
+persistent.removeItem("monitter.lan.access");
+client = make();
+assert.equal(client.accessKey(), "000042", "legacy session remains available before migration");
+client.rememberAccessKey(client.accessKey());
+assert.equal(make(storage()).accessKey(), '000042', 'existing tab credential migrates after validation');
+client.setAccessKey('000043');
+client.rememberAccessKey('000043');
+assert.equal(client.clearAccessKey('000042'), false, 'late unauthorized request cannot clear replacement');
+assert.equal(make(storage()).accessKey(), '000043');
+const older = make(storage());
+older.setAccessKey('000042');
+assert.equal(older.clearAccessKey('000042'), true);
+assert.equal(make(storage()).accessKey(), '000043', 'old tab rejection cannot erase newer saved bearer');
+assert.equal(client.clearAccessKey('000043'), true);
+assert.equal(make(storage()).accessKey(), '', 'revocation removes the saved bearer');
+const denied = () => { throw new Error('storage blocked'); };
+const blocked = createLanAccessStore(denied, denied);
+blocked.setAccessKey('000044');
+blocked.rememberAccessKey('000044');
+assert.equal(blocked.accessKey(), '000044', 'blocked storage still permits in-page authentication');
+assert.equal(blocked.clearAccessKey('000044'), true);
+assert.equal(blocked.accessKey(), '');
+console.log('LAN access persistence regressions passed.');

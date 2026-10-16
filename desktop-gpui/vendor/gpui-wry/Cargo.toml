@@ -1,0 +1,17 @@
+[package]
+name = "gpui-wry"
+version = "0.7.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+description = "Locally adapted GPUI Wry wrapper for Monitter GPUI"
+repository = "https://github.com/longbridge/gpui-kit/tree/main/crates/webview"
+
+[features]
+inspector = ["wry/devtools"]
+performance-profiling = []
+
+[dependencies]
+anyhow = "1"
+gpui = { package = "gpui-pre", version = "=0.3.7" }
+wry = "=0.55.1"

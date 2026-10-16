@@ -361,6 +361,8 @@ pub fn compact_snapshot(snapshot: &Snapshot) -> Snapshot {
         messages: snapshot.messages.clone(),
         mail_batches: snapshot.mail_batches.clone(),
         work_plans: snapshot.work_plans.clone(),
+        build_requests: snapshot.build_requests.clone(),
+        build_runs: snapshot.build_runs.clone(),
         events: crate::ui_sync::compact_events(snapshot),
         channels: snapshot.channels.clone(),
         project_board_messages: snapshot.project_board_messages.clone(),

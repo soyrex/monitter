@@ -2,15 +2,28 @@
 
 ## Desktop and mobile build boundary
 
-The installed macOS desktop is GPUI. Desktop changes, builds and installs use
-`/Users/alex/code/monitter-gpui`, its `AGENTS.md`, and `npm run build:gpui`.
-Tauri/Svelte in this checkout serves mobile web and the iOS/Android apps.
-Do not use `build:mac` or `install:mac` here to update `/Applications/Monitter.app`.
-When adding a harness, implement its desktop picker in the GPUI checkout as well
-as any applicable mobile client changes here. Verify the installed executable
-and bundle identity before building or replacing the desktop app.
+GPUI is the primary desktop GUI on the canonical `main` branch. Its Rust UI
+lives in `desktop-gpui/`; Tauri/Svelte is retained for iOS/Android and mobile web.
+The shared Rust backend lives in `src-tauri/`. Desktop work no longer requires
+an experimental branch or a separate checkout.
 
-Monitter is a Tauri desktop workspace for real CLI and ACP agents. The desktop runs the agents locally or over SSH; mobile and shared browser clients connect to that desktop. macOS is the primary tested desktop platform. Do not edit the unrelated CME checkout.
+Use `npm run check:gpui`, `npm run build:gpui`, and `npm run dev:gpui` for
+desktop development. Do not use legacy `build:mac` or `install:mac` to update
+`/Applications/Monitter.app`. See `desktop-gpui/LINUX.md` for Omarchy builds.
+When adding a harness, update the GPUI desktop picker and applicable mobile clients.
+Verify installed bundle identity before replacing it. Preserve live backend agents,
+profiles and sessions; installs and restarts require session authorization.
+
+Prefer retained GPUI entities, native focus/actions/input, virtualized lists and
+typed Rust state. Keep execution/security authoritative in the Rust backend and
+retain the mobile protocol. Track incomplete desktop features in
+`desktop-gpui/parity.json`; source availability does not establish platform parity.
+
+Track cache growth with `node scripts/gpui-disk.mjs`. Native commands share
+`.cargo-target/gpui`. Preserve active builds and warm caches; reclaim only idle,
+regenerable owned artifacts under disk pressure. Preserve user data and rollback copies.
+
+Monitter is a GPUI desktop workspace for real CLI and ACP agents. The desktop runs the agents locally or over SSH; mobile and shared browser clients connect to that desktop. macOS is the primary tested desktop platform. Do not edit the unrelated CME checkout.
 
 ## Project map
 
@@ -22,7 +35,7 @@ Monitter is a Tauri desktop workspace for real CLI and ACP agents. The desktop r
 
 ## Code choices and boundaries
 
-- Use **Tauri 2 + Rust** for native services, process and filesystem access, persistence, and security decisions. Use **Svelte 5 + SvelteKit + TypeScript** for the UI, with Vite/npm for development. Follow existing patterns before introducing another framework or dependency.
+- Use **Rust** for native services, process and filesystem access, persistence, and security decisions. Use **GPUI + Rust** for the desktop UI and **Svelte 5 + SvelteKit + TypeScript** for mobile and web UI, with Vite/npm for development. Follow existing patterns before introducing another framework or dependency.
 - Read `docs/CONTRACT.md` and `src/lib/types.ts` before changing data exchanged across the frontend/backend boundary. Keep Rust serde fields and TypeScript fields aligned, use camelCase JSON, Unix millisecond timestamps, and UUID string IDs as the contract specifies. Update the contract when behavior or commands change.
 - The Rust backend is authoritative for task and agent state. Use the existing bridge and scoped Tauri/LAN permissions; do not move privileged operations into the renderer or widen remote access for UI convenience. Keep errors visible.
 - Preserve users' CLI authentication, configuration, native sessions, transcripts, and data. Use real installed harnesses, starting with Codex; never fabricate working agents, conversations, progress, usage, host connections, or model replies.
@@ -42,3 +55,7 @@ Monitter is a Tauri desktop workspace for real CLI and ACP agents. The desktop r
 - Use `npm ci` for a clean dependency install. `npm run check` checks Svelte/TypeScript; `npm run build` builds the web assets; `cargo test --manifest-path src-tauri/Cargo.toml` runs Rust tests. Choose focused tests from `scripts/` for the changed behavior, then broaden only for a concrete remaining risk.
 - `npm run tauri dev` runs the desktop app. `npm run dev` is a browser design preview and does not run native agents. For the installed macOS app, `npm run dev:app-ui` serves the hot UI on the dedicated bridge port; backend edits require a native rebuild.
 - Do not purchase or provision paid services. A specific transaction requires Alex's explicit approval of vendor/account, total price and currency, term, and recurring charges before any charge or commitment; research or setup approval is not purchase approval.
+
+## Experimental preview lifecycle authorization
+
+Alex has authorized this agent to own experimental preview launches and restarts for development and verification. This supersedes the earlier requirement to ask before restarting the preview. Verify the exact experimental executable before stopping it. Production Monitter, mobile/shared clients, profiles, and unrelated processes remain protected.

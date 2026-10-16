@@ -39,6 +39,8 @@ impl Service {
     ) -> Result<RuntimeExtensions, String> {
         let (task, host) = self.task_and_host(task_id)?;
         let mut extensions = self.runtime_extensions_for_agent(&task.agent_id)?;
+        extensions.auto_approve_monitter_mcp =
+            self.committed_data()?.snapshot.settings.auto_approve_monitter_mcp;
         // Check the user's catalogue before adding our reserved server identity.
         extensions.validate_for(&task.provider, &host.kind)?;
         if let Some(grant) = self.mail_grant(task_id)? {
@@ -222,6 +224,25 @@ mod tests {
             .unwrap();
         (service, root, task_id, agent_id)
     }
+    #[test]
+    fn monitter_mcp_auto_approval_runtime_reads_persisted_setting() {
+        let (service, root, task_id, _) = fixture();
+        assert!(service.runtime_extensions_for_task(&task_id).unwrap().auto_approve_monitter_mcp);
+        service.mutate(None, |snapshot| {
+            snapshot.settings.auto_approve_monitter_mcp = false;
+            Ok(())
+        }).unwrap();
+        assert!(!service.runtime_extensions_for_task(&task_id).unwrap().auto_approve_monitter_mcp);
+        // Saving unrelated preferences must not erase the opt-out.
+        service.mutate(None, |snapshot| {
+            snapshot.settings.user_name = "Fixture".into();
+            Ok(())
+        }).unwrap();
+        assert!(!service.runtime_extensions_for_task(&task_id).unwrap().auto_approve_monitter_mcp);
+        drop(service);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     fn rpc(grant: &SessionGrant, name: &str, args: serde_json::Value) -> String {
         use std::io::{Read, Write};
         let address = grant

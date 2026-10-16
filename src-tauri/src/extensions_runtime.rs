@@ -12,11 +12,23 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct RuntimeExtensions {
+    pub(crate) auto_approve_monitter_mcp: bool,
     servers: Vec<McpServerConfig>,
     skill_context: String,
     mail_server: Option<McpServerConfig>,
+}
+
+impl Default for RuntimeExtensions {
+    fn default() -> Self {
+        Self {
+            auto_approve_monitter_mcp: true,
+            servers: Vec::new(),
+            skill_context: String::new(),
+            mail_server: None,
+        }
+    }
 }
 
 pub(crate) struct PrivateConfigFile(PathBuf);
@@ -98,6 +110,7 @@ impl RuntimeExtensions {
             skill_context.push_str("\n</monitter-managed-skill>");
         }
         Self {
+            auto_approve_monitter_mcp: true,
             servers,
             skill_context,
             mail_server: None,
@@ -177,6 +190,11 @@ impl RuntimeExtensions {
         }
         let encoded = serde_json::to_vec(&self.all_servers().collect::<Vec<_>>()).ok()?;
         Some(format!("{:x}", Sha256::digest(encoded)))
+    }
+
+    pub(crate) fn stdio_launches(&self) -> Vec<(String, Vec<String>)> {
+        self.all_servers().filter(|server| server.transport == McpTransport::Stdio)
+            .map(|server| (server.command.clone(), server.args.clone())).collect()
     }
 
     /// Codex app-server's `config` object is sent over its owned stdin pipe.

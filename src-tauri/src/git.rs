@@ -1,7 +1,7 @@
 use crate::{model::Host, runner};
 use serde::Serialize;
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
     io::Read,
     path::PathBuf,
@@ -25,12 +25,23 @@ static SILENT_PROBES: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct GitLineStats {
+    pub additions: Option<u64>,
+    pub deletions: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GitFileStatus {
     pub path: String,
     pub original_path: Option<String>,
     pub index_status: String,
     pub worktree_status: String,
     pub untracked: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub staged_stats: Option<GitLineStats>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unstaged_stats: Option<GitLineStats>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -53,6 +64,7 @@ pub struct GitDiff {
     pub text: String,
     pub truncated: bool,
     pub binary: bool,
+    pub context_lines: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,6 +141,66 @@ pub fn status(host: &Host, cwd: &str) -> Result<GitStatus, String> {
         files,
         truncated,
     })
+}
+
+/// Explicit changes-pane request; routine discovery/footer status stays cheap.
+pub fn status_with_stats(host: &Host, cwd: &str) -> Result<GitStatus, String> {
+    let mut status = status(host, cwd)?;
+    if !status.repository || status.files.is_empty() {
+        return Ok(status);
+    }
+    let root = status.root.as_deref().unwrap_or(cwd);
+    for staged in [true, false] {
+        if !status.files.iter().any(|file| {
+            !file.untracked && if staged {
+                file.index_status != " " && file.index_status != "?"
+            } else {
+                file.worktree_status != " " && file.worktree_status != "?"
+            }
+        }) { continue; }
+        let mut args = vec!["diff", "--no-ext-diff", "--no-textconv", "--numstat", "-z", "--find-renames"];
+        if staged { args.push("--cached"); }
+        args.push("--");
+        let output = run_git(host, root, &args, STATUS_LIMIT)?;
+        if !output.status.is_some_and(|value| value.success()) {
+            return Err(command_error("Git change statistics failed", &output.stderr));
+        }
+        // A bounded/incomplete record is never interpreted as a zero count.
+        let stats = parse_numstat(&output.stdout);
+        status.truncated |= output.truncated;
+        for file in &mut status.files {
+            if staged { file.staged_stats = stats.get(&file.path).cloned(); }
+            else { file.unstaged_stats = stats.get(&file.path).cloned(); }
+        }
+    }
+    Ok(status)
+}
+
+// With -z a rename has an empty path followed by old\0new\0. Split only
+// the first two tabs: ordinary filenames themselves can contain tabs/newlines.
+fn parse_numstat(raw: &[u8]) -> HashMap<String, GitLineStats> {
+    let mut fields = raw.split(|byte| *byte == 0);
+    let mut result = HashMap::new();
+    while let Some(record) = fields.next() {
+        let mut columns = record.splitn(3, |byte| *byte == b'\t');
+        let (Some(added), Some(deleted), Some(path)) = (columns.next(), columns.next(), columns.next()) else { continue; };
+        let path = if path.is_empty() {
+            let (Some(_old), Some(new)) = (fields.next(), fields.next()) else { break; };
+            new
+        } else { path };
+        if path.is_empty() { continue; }
+        let count = |bytes: &[u8]| std::str::from_utf8(bytes).ok()?.parse::<u64>().ok();
+        let (additions, deletions) = if added == b"-" && deleted == b"-" {
+            (None, None)
+        } else {
+            let (Some(a), Some(d)) = (count(added), count(deleted)) else { continue; };
+            (Some(a), Some(d))
+        };
+        // Ignore a final record without its NUL terminator after output capping.
+        if !raw.ends_with(&[0]) && fields.clone().next().is_none() { break; }
+        result.insert(String::from_utf8_lossy(path).into_owned(), GitLineStats { additions, deletions });
+    }
+    result
 }
 
 /// The UI uses this entry point for discovery. Missing markers and probe
@@ -402,6 +474,16 @@ fn wait_remote_for_marker(host: &Host, cwd: &str) -> Result<bool, String> {
 }
 
 pub fn diff(host: &Host, cwd: &str, path: &str, scope: &str) -> Result<GitDiff, String> {
+    diff_with_context(host, cwd, path, scope, 3)
+}
+
+pub fn diff_with_context(
+    host: &Host, cwd: &str, path: &str, scope: &str, context_lines: u32,
+) -> Result<GitDiff, String> {
+    if context_lines > 1000 {
+        return Err("Git diff context must be at most 1000 lines.".into());
+    }
+    let unified = format!("--unified={context_lines}");
     let scope = DiffScope::parse(scope)?;
     let Some(root) = repository_root(host, cwd)? else {
         return Ok(GitDiff {
@@ -411,6 +493,7 @@ pub fn diff(host: &Host, cwd: &str, path: &str, scope: &str) -> Result<GitDiff, 
             text: String::new(),
             truncated: false,
             binary: false,
+            context_lines,
         });
     };
     validate_path(path)?;
@@ -434,6 +517,7 @@ pub fn diff(host: &Host, cwd: &str, path: &str, scope: &str) -> Result<GitDiff, 
             "--cached",
             "--no-ext-diff",
             "--no-textconv",
+            &unified,
             "--color=never",
             "--",
         ],
@@ -441,6 +525,7 @@ pub fn diff(host: &Host, cwd: &str, path: &str, scope: &str) -> Result<GitDiff, 
             "diff",
             "--no-ext-diff",
             "--no-textconv",
+            &unified,
             "--color=never",
             "--",
         ],
@@ -449,6 +534,7 @@ pub fn diff(host: &Host, cwd: &str, path: &str, scope: &str) -> Result<GitDiff, 
             "--no-index",
             "--no-ext-diff",
             "--no-textconv",
+            &unified,
             "--",
             "/dev/null",
             path,
@@ -479,6 +565,7 @@ pub fn diff(host: &Host, cwd: &str, path: &str, scope: &str) -> Result<GitDiff, 
         text,
         truncated: output.truncated,
         binary,
+        context_lines,
     })
 }
 
@@ -683,6 +770,8 @@ fn parse_status(raw: &[u8]) -> (Option<String>, Vec<GitFileStatus>) {
             index_status: index.into(),
             worktree_status: worktree.into(),
             untracked: index == '?' && worktree == '?',
+            staged_stats: None,
+            unstaged_stats: None,
         });
     }
     (branch, files)
@@ -729,6 +818,64 @@ mod tests {
         git(&dir, &["add", "base.txt", "rename-source.txt"]);
         git(&dir, &["commit", "-qm", "base"]);
         dir
+    }
+
+    #[test]
+    fn diff_context_defaults_to_three_and_accepts_bounded_expansion() {
+        let root = repo();
+        let content = (0..40).map(|i| format!("context-{i}\n")).collect::<String>();
+        fs::write(root.join("base.txt"), &content).unwrap();
+        git(&root, &["add", "base.txt"]);
+        git(&root, &["commit", "-qm", "context fixture"]);
+        fs::write(root.join("base.txt"), content.replace("context-20\n", "changed\n")).unwrap();
+        let cwd = root.to_str().unwrap();
+        let normal = diff(&host(), cwd, "base.txt", "unstaged").unwrap();
+        let wide = diff_with_context(&host(), cwd, "base.txt", "unstaged", 1000).unwrap();
+        assert_eq!(normal.context_lines, 3);
+        assert_eq!(wide.context_lines, 1000);
+        assert_eq!(serde_json::to_value(&wide).unwrap()["contextLines"], 1000);
+        assert!(!normal.text.contains(" context-0\n"));
+        assert!(wide.text.contains(" context-0\n"));
+        git(&root, &["add", "base.txt"]);
+        assert!(diff_with_context(&host(), cwd, "base.txt", "staged", 1000)
+            .unwrap().text.contains(" context-0\n"));
+        fs::write(root.join("new.txt"), "new\n").unwrap();
+        assert!(diff_with_context(&host(), cwd, "new.txt", "untracked", 1000)
+            .unwrap().text.contains("+new"));
+        assert!(diff_with_context(&host(), cwd, "base.txt", "staged", 1001).is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn numstat_parser_preserves_rename_tabs_binary_and_incomplete_records() {
+        let stats = parse_numstat(b"2\t3\tfile\tname\0-\t-\tbinary\0"
+            .iter().copied().chain(b"0\t0\t\0old name\0new\tname\0".iter().copied()).collect::<Vec<_>>().as_slice());
+        assert_eq!(stats["file\tname"].additions, Some(2));
+        assert_eq!(stats["file\tname"].deletions, Some(3));
+        assert_eq!(stats["binary"].additions, None);
+        assert_eq!(stats["new\tname"].deletions, Some(0));
+        assert!(parse_numstat(b"1\t0\tcut-off").is_empty());
+    }
+
+    #[test]
+    fn statistics_cover_both_scopes_rename_binary_and_cheap_status() {
+        let root = repo();
+        fs::write(root.join("base.txt"), "base\nstaged\n").unwrap();
+        fs::write(root.join("binary.bin"), [0, 1, 0]).unwrap();
+        git(&root, &["mv", "rename-source.txt", "new name\tfile.txt"]);
+        git(&root, &["add", "base.txt", "binary.bin"]);
+        fs::write(root.join("base.txt"), "base\nstaged\nunstaged\n").unwrap();
+        let cwd = root.to_str().unwrap();
+        assert!(status(&host(), cwd).unwrap().files.iter().all(|file| file.staged_stats.is_none()));
+        let result = status_with_stats(&host(), cwd).unwrap();
+        let base = result.files.iter().find(|file| file.path == "base.txt").unwrap();
+        assert_eq!(base.staged_stats.as_ref().unwrap().additions, Some(1));
+        assert_eq!(base.unstaged_stats.as_ref().unwrap().additions, Some(1));
+        let renamed = result.files.iter().find(|file| file.path == "new name\tfile.txt").unwrap();
+        assert_eq!(renamed.staged_stats.as_ref().unwrap().additions, Some(0));
+        let binary = result.files.iter().find(|file| file.path == "binary.bin").unwrap();
+        assert_eq!(binary.staged_stats.as_ref().unwrap().additions, None);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

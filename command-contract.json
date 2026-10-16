@@ -1149,6 +1149,23 @@
         "lan"
       ]
     },
+    "merge_task_worktree": {
+      "arguments": [
+        {
+          "name": "taskId",
+          "rustName": "task_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "Snapshot",
+      "resultTsType": "Snapshot",
+      "legacyCompatible": false,
+      "surfaces": [
+        "native"
+      ]
+    },
     "delete_project": {
       "arguments": [
         {
@@ -1197,6 +1214,54 @@
       "surfaces": [
         "native",
         "lan"
+      ]
+    },
+    "read_project_build_queue": {
+      "arguments": [
+        {
+          "name": "projectId",
+          "rustName": "project_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "serde_json::Value",
+      "resultTsType": "JsonValue",
+      "legacyCompatible": false,
+      "surfaces": [
+        "native"
+      ]
+    },
+    "recover_project_build": {
+      "arguments": [
+        {
+          "name": "buildRunId",
+          "rustName": "build_run_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "processStopped",
+          "rustName": "process_stopped",
+          "rustType": "bool",
+          "tsType": "boolean",
+          "optional": false
+        },
+        {
+          "name": "summary",
+          "rustName": "summary",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        }
+      ],
+      "resultRustType": "serde_json::Value",
+      "resultTsType": "JsonValue",
+      "legacyCompatible": false,
+      "surfaces": [
+        "native"
       ]
     },
     "set_task_project": {
@@ -2061,6 +2126,13 @@
           "rustType": "String",
           "tsType": "string",
           "optional": false
+        },
+        {
+          "name": "includeStats",
+          "rustName": "include_stats",
+          "rustType": "Option<bool>",
+          "tsType": "boolean | null",
+          "optional": true
         }
       ],
       "resultRustType": "git::GitStatus",
@@ -2118,6 +2190,13 @@
           "rustType": "String",
           "tsType": "GitDiffScope",
           "optional": false
+        },
+        {
+          "name": "contextLines",
+          "rustName": "context_lines",
+          "rustType": "Option<u32>",
+          "tsType": "number | null",
+          "optional": true
         }
       ],
       "resultRustType": "git::GitDiff",
@@ -2564,7 +2643,8 @@
         "cancelTask",
         "resumeTask",
         "listTerminals",
-        "readTerminal"
+        "readTerminal",
+        "getTaskMessages"
       ],
       "mappings": {
         "getSnapshot": {
@@ -2618,6 +2698,12 @@
             "read_terminal"
           ],
           "semantics": "owner bridge terminal read"
+        },
+        "getTaskMessages": {
+          "nativeCommands": [
+            "get_task_messages"
+          ],
+          "semantics": "read bounded task message history through owner bridge"
         }
       }
     },

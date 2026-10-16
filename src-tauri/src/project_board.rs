@@ -164,7 +164,7 @@ mod tests {
         let agent_id = service.snapshot().unwrap().agents[0].id.clone();
         service.mutate(None, |snapshot| {
             for project_id in ["a", "b"] {
-                snapshot.projects.push(Project { id: project_id.into(), name: project_id.into(), description: String::new(), icon: "folder".into(), color: "#3f9d6a".into(), workspaces: vec![], board_guidance_text: None });
+                snapshot.projects.push(Project { build_management_enabled: false, agent_worktrees_enabled: false, id: project_id.into(), name: project_id.into(), description: String::new(), icon: "folder".into(), color: "#3f9d6a".into(), workspaces: vec![], board_guidance_text: None });
             }
             Ok(())
         }).unwrap();
@@ -207,7 +207,7 @@ mod tests {
     #[test]
     fn guidance_uses_project_then_global_then_builtin_fallback() {
         let mut snapshot = crate::model::default_snapshot();
-        snapshot.projects.push(Project { id: "p".into(), name: "P".into(), description: String::new(), icon: "folder".into(), color: "#3f9d6a".into(), workspaces: vec![], board_guidance_text: None });
+        snapshot.projects.push(Project { build_management_enabled: false, agent_worktrees_enabled: false, id: "p".into(), name: "P".into(), description: String::new(), icon: "folder".into(), color: "#3f9d6a".into(), workspaces: vec![], board_guidance_text: None });
         assert_eq!(effective_guidance(&snapshot, Some("p"), "built-in"), "built-in");
         snapshot.settings.board_guidance_text = Some(" global guidance ".into());
         assert!(effective_guidance(&snapshot, Some("p"), "built-in").contains("global guidance"));
@@ -222,7 +222,7 @@ mod tests {
         let mut snapshot = crate::model::default_snapshot();
         snapshot.settings.project_board_enabled = true;
         snapshot.settings.board_guidance_text = Some("Coordinate edits with the team.".into());
-        snapshot.projects.push(Project { id: "p".into(), name: "P".into(), description: String::new(), icon: "folder".into(), color: "#3f9d6a".into(), workspaces: vec![], board_guidance_text: None });
+        snapshot.projects.push(Project { build_management_enabled: false, agent_worktrees_enabled: false, id: "p".into(), name: "P".into(), description: String::new(), icon: "folder".into(), color: "#3f9d6a".into(), workspaces: vec![], board_guidance_text: None });
         let agent = snapshot.agents[0].clone();
         snapshot.tasks.push(crate::model::task_from_agent(&agent, &CreateTaskInput { agent_id: agent.id.clone(), title: "T".into(), native_session_id: None, parent_task_id: None, channel_id: None, project_id: Some("p".into()), cwd: None, model_settings: None, sandbox: None }));
         let task_id = snapshot.tasks[0].id.clone();

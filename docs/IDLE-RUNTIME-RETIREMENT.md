@@ -5,7 +5,7 @@ installing a new app build is a separate operation.
 
 ## Outcome
 
-After a chat has had no active turn for more than five minutes, release its
+After a chat has had no active turn for more than 45 seconds, release its
 owned harness subprocess and disposable helpers. Keep the task, transcript,
 native session ID, queued messages, configuration and native session files.
 The next message restores the same native session and starts one new turn.
@@ -17,11 +17,11 @@ independent chats and processes.
 
 ## Lifecycle and collector
 
-Use one service-owned collector, sweeping every 60 seconds. Use monotonic time
-for the five-minute threshold; UI reads and protocol keepalives do not reset it.
+Use one service-owned collector, sweeping every 10 seconds. Use monotonic time
+for the 45-second threshold; UI reads and protocol keepalives do not reset it.
 Record `idle_since` only once a turn has ended and its durable updates have been
 saved. Clear it when a send reserves the next turn. A continuously idle eligible
-runtime is normally collected between five and six minutes later. Check the idle
+runtime is normally collected between 45 and 55 seconds later. Check the idle
 timestamp before inspecting process ownership, so younger idle runtimes incur
 only an in-memory eligibility check. Already-retiring owners remain eligible for
 cleanup retries.
@@ -38,24 +38,25 @@ candidates. Each owner has a generation identity.
 
 Retirement requires all of the following:
 
-- More than five minutes continuously idle, with a saved native session ID.
+- More than 45 seconds continuously idle, with a saved native session ID.
 - A local macOS provider with cold-resume support: Codex app-server, Claude
   stream-json, or ACP advertising session resume/load. SSH processes remain
   pinned because local process inspection cannot verify remote background work.
 - No accepted send awaiting dispatch, queued/sending message, pending start,
   steer/configuration request, approval or user-input request.
-- No active tool work, continuation or owned background job that shutdown would
-  interrupt. Where background ownership cannot be established, skip collection.
+- No active tool work, continuation or tracked background job that shutdown would
+  interrupt.
 - No active internal-admin broker request for the internal admin runtime.
 
-Process identities are captured before the first prompt. A successful completion
-can refresh that infrastructure baseline only while the transport has never
-reported tool work, accounting for MCP helpers that start lazily. Idle sweeps
-also capture late startup helpers while holding the lifecycle reservation, so
-a new turn cannot start during that capture. The baseline
-freezes once any tool invocation is observed; unknown live descendants then pin
-the runtime. This is intentionally conservative and may retain an idle runtime
-whose helper starts late after tool use.
+Process identities are captured before the first prompt. Once the resumable owner
+is conclusively idle, capture its current descendants under lifecycle and ownership
+locks, even after previous tool activity or failed startup discovery. Idle plugin,
+computer-use and MCP helpers are disposable owner infrastructure. Retirement signals
+only these exact PID/start-time identities, never a name match or whole process group.
+New descendants after the sample still require another inventory before teardown.
+Pending requests, approvals, protocol events and tracked background jobs prevent
+capture and retirement. Reading status, usage or configuration does not reset
+idle_since or become active protocol work.
 
 A silent tool, long reasoning turn, human approval wait or delegation wait is
 still active. Never use time since the last output token as evidence of idleness.
@@ -82,7 +83,9 @@ crash. Mark the owner retiring before closing pipes. Otherwise ACP's existing
 automatic transport repair could immediately relaunch a process GC just stopped.
 
 Close the adapter's owned stdin/control queue, with a bounded deadline, then escalate
-termination only for its owned process group and disposable helpers. Confirm
+termination only for its exact captured root/helper identities. Idle retirement
+does not signal an entire process group; explicit user cancellation retains its
+existing group shutdown behavior. Confirm
 exit (including verified helper identities that detach or reparent), reap children,
 release streams, waiters and temporary resources, revoke
 owner-scoped grants, and finally release the registry entry. Never stop standalone

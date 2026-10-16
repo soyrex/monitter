@@ -115,7 +115,7 @@ fn eligible_idle_runtime_is_retired_after_timeout() {
     owner.capture_runtime_process_baseline().unwrap();
     let retired = f
         .service
-        .collect_idle_runtimes_at(Instant::now() + Duration::from_secs(301));
+        .collect_idle_runtimes_at(Instant::now() + (crate::runtime_gc::IDLE_RUNTIME_TIMEOUT + Duration::from_secs(1)));
     assert_eq!(retired, 1);
     assert!(!owner.is_retiring());
     assert!(!f.service.has_resident_run(&task.id));
@@ -138,7 +138,7 @@ fn nonterminal_native_codex_subagents_pin_idle_runtime() {
 
         assert_eq!(
             f.service
-                .collect_idle_runtimes_at(Instant::now() + Duration::from_secs(301)),
+                .collect_idle_runtimes_at(Instant::now() + (crate::runtime_gc::IDLE_RUNTIME_TIMEOUT + Duration::from_secs(1))),
             0,
             "Codex child status {status:?} must conservatively pin the parent runtime"
         );
@@ -163,7 +163,7 @@ fn terminal_native_codex_subagents_allow_idle_runtime_retirement() {
 
         assert_eq!(
             f.service
-                .collect_idle_runtimes_at(Instant::now() + Duration::from_secs(301)),
+                .collect_idle_runtimes_at(Instant::now() + (crate::runtime_gc::IDLE_RUNTIME_TIMEOUT + Duration::from_secs(1))),
             1,
             "terminal Codex child status {status:?} must not pin the parent runtime"
         );
@@ -191,7 +191,7 @@ fn other_tasks_and_subagent_sources_do_not_pin_idle_runtime() {
 
     assert_eq!(
         f.service
-            .collect_idle_runtimes_at(Instant::now() + Duration::from_secs(301)),
+            .collect_idle_runtimes_at(Instant::now() + (crate::runtime_gc::IDLE_RUNTIME_TIMEOUT + Duration::from_secs(1))),
         1
     );
 }
@@ -203,7 +203,7 @@ fn unsupported_resume_is_pinned() {
     let owner = f.idle_owner(&task.id, false);
     assert_eq!(
         f.service
-            .collect_idle_runtimes_at(Instant::now() + Duration::from_secs(301)),
+            .collect_idle_runtimes_at(Instant::now() + (crate::runtime_gc::IDLE_RUNTIME_TIMEOUT + Duration::from_secs(1))),
         0
     );
     assert!(!owner.is_retiring());
@@ -233,7 +233,7 @@ fn queued_delivery_blocks_collection() {
         .unwrap();
     assert_eq!(
         f.service
-            .collect_idle_runtimes_at(Instant::now() + Duration::from_secs(301)),
+            .collect_idle_runtimes_at(Instant::now() + (crate::runtime_gc::IDLE_RUNTIME_TIMEOUT + Duration::from_secs(1))),
         0
     );
     assert!(!owner.is_retiring());
@@ -271,7 +271,7 @@ fn pending_approval_blocks_collection() {
         .unwrap();
     assert_eq!(
         f.service
-            .collect_idle_runtimes_at(Instant::now() + Duration::from_secs(301)),
+            .collect_idle_runtimes_at(Instant::now() + (crate::runtime_gc::IDLE_RUNTIME_TIMEOUT + Duration::from_secs(1))),
         0
     );
     assert!(!owner.is_retiring());
@@ -296,13 +296,13 @@ fn stale_owner_cannot_release_successor_generation() {
 }
 
 #[test]
-fn just_under_five_minute_boundary_is_still_idle() {
+fn just_under_idle_timeout_boundary_is_still_idle() {
     let f = Fixture::new("boundary");
     let task = f.task("Boundary", Some("native-boundary"));
     let owner = f.idle_owner(&task.id, true);
     assert_eq!(
         f.service
-            .collect_idle_runtimes_at(Instant::now() + Duration::from_secs(299)),
+            .collect_idle_runtimes_at(Instant::now() + (crate::runtime_gc::IDLE_RUNTIME_TIMEOUT - Duration::from_secs(1))),
         0
     );
     assert!(owner.is_idle());
@@ -326,7 +326,7 @@ fn running_task_is_pinned_even_when_owner_is_marked_idle() {
         .unwrap();
     assert_eq!(
         f.service
-            .collect_idle_runtimes_at(Instant::now() + Duration::from_secs(301)),
+            .collect_idle_runtimes_at(Instant::now() + (crate::runtime_gc::IDLE_RUNTIME_TIMEOUT + Duration::from_secs(1))),
         0
     );
     assert!(!owner.is_retiring());
@@ -356,7 +356,7 @@ fn sending_queue_entry_blocks_collection() {
         .unwrap();
     assert_eq!(
         f.service
-            .collect_idle_runtimes_at(Instant::now() + Duration::from_secs(301)),
+            .collect_idle_runtimes_at(Instant::now() + (crate::runtime_gc::IDLE_RUNTIME_TIMEOUT + Duration::from_secs(1))),
         0
     );
     assert!(!owner.is_retiring());
@@ -375,7 +375,7 @@ fn accepted_fresh_send_marks_task_running_before_gc() {
     assert!(prompt.is_some());
     assert_eq!(
         f.service
-            .collect_idle_runtimes_at(Instant::now() + Duration::from_secs(301)),
+            .collect_idle_runtimes_at(Instant::now() + (crate::runtime_gc::IDLE_RUNTIME_TIMEOUT + Duration::from_secs(1))),
         0
     );
     assert!(!owner.is_retiring());
@@ -410,7 +410,7 @@ fn active_internal_admin_broker_request_pins_runtime() {
         .unwrap();
     assert_eq!(
         f.service
-            .collect_idle_runtimes_at(Instant::now() + Duration::from_secs(301)),
+            .collect_idle_runtimes_at(Instant::now() + (crate::runtime_gc::IDLE_RUNTIME_TIMEOUT + Duration::from_secs(1))),
         0
     );
     assert!(!owner.is_retiring());
@@ -422,7 +422,7 @@ fn send_waits_for_the_exact_retiring_owner_to_be_reaped() {
     let task = f.task("Retirement barrier", Some("native-barrier"));
     let owner = f.idle_owner(&task.id, true);
     assert!(owner.try_retire_idle(
-        Instant::now() + Duration::from_secs(301),
+        Instant::now() + (crate::runtime_gc::IDLE_RUNTIME_TIMEOUT + Duration::from_secs(1)),
         crate::runtime_gc::IDLE_RUNTIME_TIMEOUT,
     ));
 
@@ -458,7 +458,7 @@ fn cancellation_after_acceptance_prevents_late_idle_collection() {
     );
     assert_eq!(
         f.service
-            .collect_idle_runtimes_at(Instant::now() + Duration::from_secs(301)),
+            .collect_idle_runtimes_at(Instant::now() + (crate::runtime_gc::IDLE_RUNTIME_TIMEOUT + Duration::from_secs(1))),
         0
     );
     assert!(!owner.is_retiring());
@@ -477,7 +477,7 @@ fn remote_host_runtime_is_pinned_for_conservative_gc() {
         .unwrap();
     assert_eq!(
         f.service
-            .collect_idle_runtimes_at(Instant::now() + Duration::from_secs(301)),
+            .collect_idle_runtimes_at(Instant::now() + (crate::runtime_gc::IDLE_RUNTIME_TIMEOUT + Duration::from_secs(1))),
         0
     );
     assert!(!owner.is_retiring());

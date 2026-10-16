@@ -78,20 +78,25 @@ This is an actively developed project, not a claim of feature parity across plat
 
 ## Build and try it
 
-The desktop app uses **Tauri 2, Rust, Svelte 5, and TypeScript**. Install Node/npm, Rust, and the native Tauri build dependencies for your operating system. On macOS, this includes Xcode command-line tools.
+The primary desktop GUI uses **GPUI and Rust**, with a shared Rust backend in
+`src-tauri/`. Both live on `main`. **Tauri/Svelte is retained for Android, iOS
+and mobile web**; it is not the primary desktop GUI.
 
 ```sh
 npm ci
-npm run tauri dev
-```
-
-Agent execution requires a configured host with an installed, authenticated harness. `npm run dev` runs the browser design preview; it does not start native agents.
-
-```sh
-npm run check
 npm run build
-cargo test --manifest-path src-tauri/Cargo.toml
+npm run build:gpui
+npm run dev:gpui
 ```
+
+For Omarchy / Arch Linux, follow [the Linux build guide](desktop-gpui/LINUX.md).
+For desktop architecture, verification and platform limitations, see
+[desktop-gpui/README.md](desktop-gpui/README.md). Linux and Windows runtime
+compatibility remains unverified.
+
+`npm run check:gpui` checks the native desktop. `npm run check` checks the
+Svelte/TypeScript clients. `npm run dev` serves the web UI; agent execution
+requires the Rust backend and an installed, authenticated harness.
 
 ## Experimental local model router
 
@@ -278,13 +283,13 @@ with `npm run test:mail-triage:ui`.
 
 Platform build instructions:
 
-- macOS: `npm run build:mac`, then `npm run install:mac`. For a local debug package, use `npm run build:mac:local` and `npm run install:mac -- --debug`.
+- macOS desktop: `npm run build:gpui -- --release` (see [the desktop guide](desktop-gpui/README.md)).
 - Android: [Android build and pairing guide](mobile-android/README.md).
 - iOS: [iOS build and device guide](mobile-ios/README.md).
 
 The macOS build is locally ad-hoc signed; this is not a notarized public installer.
 
-For frontend development with an installed macOS app, run `npm run dev:app-ui`, then choose **Monitter → Load Hot-Reload UI**. Follow the LAN access pairing prompt if requested. Backend changes still require a rebuild. Run only one hot-reload server on port 18420 at a time.
+For legacy Tauri/mobile web frontend development, run `npm run dev:app-ui`, then choose **Monitter → Load Hot-Reload UI**. Follow the LAN access pairing prompt if requested. Backend changes still require a rebuild. Run only one hot-reload server on port 18420 at a time.
 
 ## Testers welcome
 

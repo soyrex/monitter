@@ -91,6 +91,8 @@ export interface JevCommandPlan { traceId: string; candidateId: string; confiden
 export type TaskStatus = 'idle' | 'running' | 'completed' | 'error' | 'interrupted';
 export type SidebarView = 'standard' | 'activity' | 'projects';
 export interface Project {
+  buildManagementEnabled?: boolean;
+  agentWorktreesEnabled?: boolean;
   id: string; name: string; description: string; icon: string; color: string;
   workspaces: { hostId: string; cwd: string }[];
   /** Optional project-specific override for project-board coordination guidance. */
@@ -121,7 +123,9 @@ export interface Agent {
   /** Internal agents are configurable in Settings but hidden from conversation surfaces. */
   internal?: boolean;
 }
+export interface AgentWorktree { root: string; path: string; branch: string; baseCommit: string; targetBranch: string; }
 export interface Task {
+  agentWorktree?: AgentWorktree | null;
   id: string; agentId: string; title: string; nativeSessionId: string | null;
   archived: boolean; status: TaskStatus; createdAt: number; updatedAt: number;
   parentTaskId: string | null; channelId: string | null; projectId: string | null;
@@ -255,7 +259,7 @@ export interface SubagentTranscriptEntry {
   createdAt: number;
 }
 export interface RunEvent {
-  id: string; taskId: string; kind: 'status' | 'tool' | 'reasoning' | 'usage' | 'error' | 'output' | 'computer' | 'goal' | 'log' | 'collaboration' | 'subagent' | 'schedule' | 'jevDecision';
+  id: string; taskId: string; kind: 'status' | 'tool' | 'reasoning' | 'usage' | 'error' | 'output' | 'computer' | 'goal' | 'log' | 'collaboration' | 'subagent' | 'schedule' | 'jevDecision' | 'agent_progress';
   title: string; detail: string; createdAt: number;
 }
 /** A revision-aware, compact UI projection. A null snapshot means unchanged. */
@@ -332,6 +336,8 @@ export interface InteractionInput {
 export interface Settings {
   /** Opt-in private coordination board for project tasks. */
   projectBoardEnabled?: boolean;
+  /** Defaults to true; controls automatic approval of the built-in Monitter MCP tools for Codex and Claude. */
+  autoApproveMonitterMcp?: boolean;
   /** Global fallback for editable project-board coordination guidance. */
   boardGuidanceText?: string | null;
   /** Optional user identity supplied to agents for chats started after saving. */
@@ -351,7 +357,7 @@ export interface Settings {
   windowTransparency?: number;
   showActivePaneBorder?: boolean; dimInactivePanes?: boolean; inactivePaneOpacity?: number; focusFollowsMouse?: boolean;
   /** Decorative effect shown while an agent is working. */
-  activityAnimation?: 'sparkles' | 'grid' | 'matrix';
+  activityAnimation?: 'sparkles' | 'liquid' | 'grid' | 'matrix';
   /** Native macOS voice mode; absent settings retain Whisper. Remote voice remains on desktop Whisper. */
   voiceTranscriptionEngine?: 'whisper' | 'apple';
   accent: string; theme: 'light' | 'dark' | 'system'; interfaceScale: number;
@@ -391,6 +397,8 @@ export interface Snapshot {
   mailBatches?: MailBatch[];
   /** Task-scoped checklists maintained through the injected collaboration MCP. */
   workPlans?: WorkPlan[];
+  buildRequests?: BuildRequest[];
+  buildRuns?: BuildRun[];
   events: RunEvent[]; channels: Channel[]; projects: Project[]; settings: Settings;
   /** Owner-only project notes; absent from shared-visitor projections. */
   projectBoardMessages?: ProjectBoardMessage[];
@@ -513,12 +521,15 @@ export interface Attachment {
 export interface AttachmentTarget { taskId?: string; agentId?: string; projectId?: string | null; }
 export interface AttachmentFileData { filename: string; mimeType: string; dataBase64: string; }
 export interface VoiceTranscription { text: string; }
+export interface GitLineStats { additions: number | null; deletions: number | null; }
 export interface GitFileStatus {
   path: string;
   originalPath: string | null;
   indexStatus: string;
   worktreeStatus: string;
   untracked: boolean;
+  stagedStats?: GitLineStats;
+  unstagedStats?: GitLineStats;
 }
 export type TaskGitStatus = { repository: false } | {
   repository: true;
@@ -532,6 +543,7 @@ export type TaskGitDiff = { repository: false } | {
   repository: true;
   path: string;
   scope: GitDiffScope;
+  contextLines?: number;
   text: string;
   truncated: boolean;
   binary: boolean;
@@ -637,3 +649,105 @@ export interface McpDelegateTaskInput {
   /** Exact advertised effort ID; requires an explicit model ID. */
   reasoning_effort?: string;
 }
+
+export interface BuildRequest {
+  id: string; projectId: string; taskId: string; agentId: string; hostId: string; requestId: string;
+  title: string; command: string; cwd: string; targetKey: string;
+  status: 'planned' | 'ready' | 'running' | 'succeeded' | 'failed' | 'cancelled';
+  buildRunId: string | null; createdAt: number; updatedAt: number;
+}
+export interface BuildRun {
+  id: string; projectId: string; ownerTaskId: string; hostId: string; requestIds: string[];
+  command: string; cwd: string; targetKey: string;
+  status: 'running' | 'succeeded' | 'failed' | 'cancelled'; summary: string;
+  exitCode: number | null; createdAt: number; updatedAt: number; leaseExpiresAt: number;
+}
+
+/** Owner-local, bounded process-lifetime Monitter Admin timeline. */
+export interface AdminActivityEntry {
+  id: string;
+  purpose: 'autoname' | 'notification_summary' | 'admin_turn';
+  taskId: string | null;
+  paneTitle: string | null;
+  /** Explicitly labelled configured model; default does not claim a negotiated model. */
+  model: string | null;
+  status: 'queued' | 'running' | 'succeeded' | 'failed' | 'timeout';
+  createdAt: number;
+  startedAt: number | null;
+  finishedAt: number | null;
+  detail: string;
+}
+export interface AdminActivityTimeline { entries: AdminActivityEntry[]; }
+
+/** Private owner IPC only; collection never enters Snapshot or LAN refresh. */
+export interface WorkLogCollectionSettings {
+  enabled: boolean; rawRetentionDays: number; minuteRetentionDays: number;
+  softLimitBytes: number; hardLimitBytes: number;
+}
+export interface WorkLogHealth {
+  state: string; reason: string | null; lastWriteAt: number | null;
+  pendingRows: number; pendingBytes: number; droppedResources: number;
+  databaseBytes: number; walBytes: number; watermark: number;
+}
+export interface WorkLogGrant {
+  installationId: string; profileId: string; callerTaskId: string;
+  operation: 'readLog' | 'readContext' | 'report';
+  scope: {project: string} | {lineage: string} | {task: string}; revoked: boolean;
+}
+export interface WorkLogQuery {
+  timezone?: string | null; from?: number | null; through?: number | null;
+  projectId?: string | null; taskId?: string | null; agentId?: string | null;
+  hostId?: string | null; harness?: string | null; model?: string | null;
+  phase?: string | null; outcome?: string | null; cursor?: string | null; limit?: number | null;
+}
+export interface WorkLogContextPage {
+  availability: 'available' | 'deleted' | 'notRecorded' | 'unsupported' | 'temporarilyUnavailable';
+  messages: {id: string; role: 'user' | 'assistant'; text: string; createdAt: number; textOffsetBytes?: number; textComplete?: boolean}[];
+  nextCursor: string | null; sourceMessageId: string | null; throughMessageId: string | null;
+}
+export type WorkLogTokens = RunUsageSummary['tokens'];
+export interface WorkLogRun {
+  runId: string; taskId: string; projectId: string | null; agentId: string; hostId: string;
+  backendSessionId: string; parentRunId: string | null; parentTaskId: string | null; contextRef: string;
+  title: string; projectName: string | null; agentName: string; hostName: string;
+  harness: string; configuredModel: string | null; observedModel: string | null;
+  cwd?: string; repositoryRoot?: string; commitSha?: string; adapterVersion?: string;
+  reasoningSetting?: string; trigger?: string; remote: boolean;
+  startedAt: number; observedAt: number; endedAt: number | null; elapsedMs: number | null;
+  outcome: string | null; coverage: string;
+}
+export interface WorkLogEvent {
+  eventId: string; runId: string; contextRef: string; kind: string; occurredAt: number; observedAt: number;
+  phase: string | null; summary: string | null; planId: string | null; planItemId: string | null;
+  labels: string[]; source: string; coverage: string;
+}
+export interface WorkLogPage {
+  entries: {sequence: number; sourceKey: string; run: WorkLogRun; event: WorkLogEvent}[];
+  nextCursor: string | null; coverage: string[];
+}
+export interface WorkLogSummary {
+  days: {date: string; timezone: string; agentElapsedMs: number; projectCoveredMs: number}[];
+  runs: number; agentElapsedMs: number; projectCoveredMs: number;
+  knownWaitMs: number | null; runnableMs: number | null;
+  cpuMs: number | null; rssByteMs: number | null; coveredResourceMs: number;
+  sampledPeakRssBytes: number | null; tokens: WorkLogTokens; missingUsageRuns: number;
+  reportedCostUnits: number | null; costScale: number; currency: string | null;
+  coverage: string[]; resolution: string;
+}
+export interface WorkLogExportReceipt {
+  path: string; format: 'json' | 'csv'; entries: number; bytes: number;
+  resolution: string; coverage: string[];
+}
+export interface WorkLogExportStatus {
+  exportId: string; status: 'running' | 'succeeded' | 'failed' | 'cancelled';
+  cancelRequested?: boolean; receipt?: WorkLogExportReceipt; error?: string;
+}
+/** Authenticated same-user native IPC; absent from Tauri/LAN command capabilities. */
+export type WorkLogOwnerOperation =
+  | {operation: 'settings' | 'health' | 'grants' | 'flush'; args: Record<string, never>}
+  | {operation: 'configure'; args: WorkLogCollectionSettings}
+  | {operation: 'setGrants'; args: WorkLogGrant[]}
+  | {operation: 'query' | 'summary'; args: WorkLogQuery}
+  | {operation: 'deleteHistory'; args: {runIds: string[]}}
+  | {operation: 'export'; args: {query: WorkLogQuery; path: string; format: 'json' | 'csv'}}
+  | {operation: 'exportStatus' | 'cancelExport'; args: {exportId: string}};

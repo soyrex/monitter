@@ -57,7 +57,7 @@ pub struct AttachmentTarget {
     pub agent_id: Option<String>,
     pub project_id: Option<String>,
 }
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReadAttachmentFile {
     pub filename: String,

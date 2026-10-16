@@ -116,7 +116,10 @@ function inventories() {
   const lanEnd = lib.indexOf('pub(crate) fn create_approval_request', lanStart);
   if (lanStart < 0 || lanEnd < 0) fail('cannot locate explicit LAN dispatcher');
   const lanSource = lib.slice(lanStart, lanEnd);
-  const lan = [...lanSource.matchAll(/^\s*"([a-z][a-z0-9_]*)"\s*=>/gm)].map(match => match[1]);
+  // Native MCP approval bridge aliases are dispatched here but are not Tauri
+  // commands. Keep their capability handshake out of the generated command API.
+  const bridgeAliases = new Set(['read_mcp_approval_support', 'resolve_mcp_approval']);
+  const lan = [...lanSource.matchAll(/^\s*"([a-z][a-z0-9_]*)"\s*=>/gm)].map(match => match[1]).filter(name => !bridgeAliases.has(name));
   const permissions = readFileSync(join(root, 'src-tauri/permissions/default.toml'), 'utf8');
   const localAcl = /identifier\s*=\s*"allow-local-monitter"[\s\S]*?commands\.allow\s*=\s*\[([\s\S]*?)\]/.exec(permissions)?.[1];
   if (!localAcl) fail('cannot locate allow-local-monitter ACL');

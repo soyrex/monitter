@@ -598,3 +598,18 @@ fn broker_ignores_late_completion_when_a_request_was_already_timed_out() {
     assert!(owner.is_cancelled());
     assert!(!broker.complete("task-timed"));
 }
+
+#[test]
+fn admin_activity_records_early_empty_request_failure_without_provider_work() {
+    let fixture = fixture("activity-empty");
+    assert!(fixture.service.send_admin_turn("   ".into()).unwrap_err().contains("cannot be empty"));
+    let timeline = fixture.service.read_admin_activity().unwrap();
+    let entries = timeline["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["purpose"], "admin_turn");
+    assert_eq!(entries[0]["status"], "failed");
+    assert!(entries[0]["startedAt"].is_null());
+    assert!(entries[0]["finishedAt"].is_number());
+    assert!(entries[0]["taskId"].is_null());
+    assert!(fixture.service.admin_turn_broker.active_task_id().is_none());
+}

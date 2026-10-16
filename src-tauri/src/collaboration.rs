@@ -13,6 +13,7 @@ use crate::{
 };
 use serde_json::{json, Value};
 use std::{
+    collections::HashSet,
     sync::Arc,
     thread,
     time::{Duration, Instant},
@@ -26,8 +27,7 @@ const MAX_LIST_MESSAGES: usize = 20;
 const MAX_MESSAGE_RETURN: usize = 1_000;
 const MAX_RESULT_RETURN: usize = 16 * 1024;
 const MAX_DEPTH: usize = 4;
-const MAX_PER_TASK: usize = 24;
-const MAX_PER_ROOT: usize = 64;
+const MAX_PER_TURN: usize = 10;
 const MAX_ACTIVE: usize = 4;
 const MAX_TERMINAL_COMMAND: usize = 4096;
 const TERMINAL_APPROVAL_TIMEOUT: Duration = Duration::from_secs(120);
@@ -35,6 +35,23 @@ const DELIVERY_UNCERTAIN: &str =
     "Delivery was interrupted by Monitter restarting; it was not replayed because delivery is uncertain.";
 const DELIVERED_TO_ACTIVE_TURN: &str =
     "Delivered to the recipient’s active turn via its Monitter inbox.";
+
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct TurnBudget {
+    run_id: Option<String>,
+    requests: usize,
+}
+
+impl TurnBudget {
+    fn check(&self, run_id: &Option<String>) -> Result<(), String> {
+        if self.run_id == *run_id && self.requests >= MAX_PER_TURN {
+            return Err(format!(
+                "This turn has reached its limit of {MAX_PER_TURN} outgoing collaboration requests. The allowance resets when the next turn starts; retrying an existing request_id does not use another slot."
+            ));
+        }
+        Ok(())
+    }
+}
 
 impl Service {
     pub(crate) fn protocol(
@@ -65,6 +82,11 @@ impl Service {
             "cancel_delegation" => {
                 self.cancel_protocol(caller_task, required_string(args, "collaboration_id")?)
             }
+            "work_log_report"=>self.work_log_report_protocol(caller_task,crate::work_log::ReportInput{request_id:required_string(args,"request_id")?,phase:required_string(args,"phase")?,summary:required_string(args,"summary")?,plan_item_id:string_arg(args,"plan_item_id")?.map(str::to_owned),labels:args.get("labels").map(|v|serde_json::from_value(v.clone()).map_err(|_|"Invalid work log labels.")).transpose()?.unwrap_or_default()}),
+            "work_log_query"=>self.work_log_query_protocol(caller_task,serde_json::from_value(args.get("query").cloned().ok_or("Work log query is required.")?).map_err(|_|"Invalid work log query.")?),
+            "work_log_read_context"=>self.work_log_read_context_protocol(caller_task,&required_string(args,"context_ref")?,string_arg(args,"cursor")?,args.get("limit").map(|v|v.as_u64().map(|n|n as u32).ok_or("Invalid context page size.")).transpose()?),
+            "get_report_styles" => self.get_report_styles(),
+            "browser_open" => self.browser_open_protocol(caller_task, &required_string(args, "request_id")?, &required_string(args, "url")?, string_arg(args, "title")?),
             "terminal_run" => self.terminal_run_protocol(caller_task, args),
             "skills_help" => Ok(crate::shared_skills::help()),
             "list_shared_skills" => self.list_shared_skills_protocol(),
@@ -89,6 +111,8 @@ impl Service {
             }
             "list_chat_archive_rules" | "save_chat_archive_rule" | "delete_chat_archive_rule"
             | "archive_chats" => self.chat_archive_protocol(caller_task, tool, args),
+            "build_queue_list" | "build_request" | "build_request_update" | "build_claim" | "build_complete" | "build_heartbeat" => self.build_queue_protocol(caller_task, tool, args),
+            "progress_update" => self.progress_update(caller_task, &required_string(args, "summary")?),
             "work_plan_start" => self.work_plan_start(caller_task, args),
             "work_plan_update" => self.work_plan_update(caller_task, args),
             "work_plan_list" => self.work_plan_list(caller_task),
@@ -373,7 +397,7 @@ impl Service {
             return Err("Choose an explicit model before setting reasoning effort.".into());
         }
         // Idempotent retries never probe a provider or call Jev again.
-        {
+        let run_id = {
             let data = self
                 .data
                 .lock()
@@ -400,13 +424,20 @@ impl Service {
                 }
                 return Ok(collaboration_value(existing, false));
             }
-            enforce_budget(&data.snapshot, caller_task)?;
+            let run_id = self.collaboration_run_id(caller_task)?;
+            if let Some(budget) = data.collaboration_turn_budgets.get(caller_task) {
+                budget.check(&run_id)?;
+            }
+            if target_task_arg.is_none() {
+                enforce_creation_depth(&data.snapshot, caller_task)?;
+            }
             if target_task_arg.is_none()
                 && is_agent_ancestor(&data.snapshot, caller_task, &to_agent_id)
             {
                 return Err("This delegation would create an agent ancestry cycle.".into());
             }
-        }
+            run_id
+        };
         let mut target = None;
         let mut selected_settings = None;
         let mut selection = None;
@@ -476,8 +507,13 @@ impl Service {
                 })
                 .cloned()
                 .ok_or_else(|| "Recipient agent is unavailable for collaboration.".to_string())?;
-            if target_agent.id == caller.agent_id {
-                return Err("An agent cannot delegate or message itself.".into());
+            // A profile can own many independent running chats. Only an
+            // explicitly addressed peer message can reuse the caller profile;
+            // delegation and implicit new-chat routing retain their cycle guard.
+            if target_agent.id == caller.agent_id
+                && !(kind == "message" && target_task_arg.is_some())
+            {
+                return Err("Messaging another instance of this agent requires an explicit task_id; self-delegation is not supported.".into());
             }
             if let Some(existing) = data
                 .snapshot
@@ -511,7 +547,17 @@ impl Service {
                         .into(),
                 );
             }
-            enforce_budget(&data.snapshot, caller_task)?;
+            // Model selection may have yielded while the caller moved to a
+            // later turn. Never charge it or reset its budget with a stale ID.
+            if self.collaboration_run_id(caller_task)? != run_id {
+                return Err("The collaboration caller's turn changed; retry from the current turn.".into());
+            }
+            if let Some(budget) = data.collaboration_turn_budgets.get(caller_task) {
+                budget.check(&run_id)?;
+            }
+            if target_task_arg.is_none() {
+                enforce_creation_depth(&data.snapshot, caller_task)?;
+            }
             if target_task_arg.is_none()
                 && is_agent_ancestor(&data.snapshot, caller_task, &target_agent.id)
             {
@@ -526,13 +572,19 @@ impl Service {
                         .iter()
                         .find(|task| task.id == task_id)
                         .ok_or_else(|| "Recipient task was not found.".to_string())?;
-                    if target.agent_id != target_agent.id
-                        || !directly_connected(&data.snapshot, caller_task, task_id)
-                    {
-                        return Err(
-                            "Messages may only target a directly connected collaboration task."
-                                .into(),
-                        );
+                    if task_id == caller_task {
+                        return Err("A chat cannot message itself; choose another task_id.".into());
+                    }
+                    if target.agent_id != target_agent.id {
+                        return Err("Recipient task does not belong to the selected agent.".into());
+                    }
+                    if target.archived {
+                        return Err("Recipient task is archived.".into());
+                    }
+                    let same_project = caller.project_id.is_some()
+                        && caller.project_id == target.project_id;
+                    if !same_project && !directly_connected(&data.snapshot, caller_task, task_id) {
+                        return Err("Recipient task must share the caller's project or an existing collaboration connection.".into());
                     }
                     target.id.clone()
                 }
@@ -573,6 +625,12 @@ impl Service {
                 updated_at: timestamp,
             };
             data.snapshot.collaborations.push(collaboration.clone());
+            let budget = data.collaboration_turn_budgets.entry(caller_task.into())
+                .or_insert_with(|| TurnBudget { run_id: run_id.clone(), requests: 0 });
+            if budget.run_id != run_id {
+                *budget = TurnBudget { run_id: run_id.clone(), requests: 0 };
+            }
+            budget.requests += 1;
             sync_collaboration_subagent_sessions(&mut data.snapshot);
             data.snapshot.events.push(Arc::new(RunEvent {
                 id: id(),
@@ -585,6 +643,18 @@ impl Service {
             Ok(collaboration)
         })?;
         Ok(collaboration_value(&collaboration, false))
+    }
+
+    // Read during preflight and again inside the serialized queue mutation.
+    // A missing owner has one stable
+    // pending budget; timestamps, inbox messages and transport grants never
+    // replenish it. Actual turns use begin_run's fresh ID on every provider.
+    fn collaboration_run_id(&self, task_id: &str) -> Result<Option<String>, String> {
+        self.runs.lock()
+            .map_err(|_| "Monitter run registry lock failed.".to_string())?
+            .tasks.get(task_id)
+            .map(|control| control.current_run_id())
+            .transpose()
     }
 
     /// Marks queued deliveries running and starts their harness outside the persistence lock.
@@ -902,7 +972,7 @@ impl Service {
             .ok()
             .map(|data| collaboration_descendants(&data.snapshot, task_id))
             .unwrap_or_default();
-        for child in children.into_iter().take(MAX_PER_ROOT) {
+        for child in children {
             let _ = self.cancel(&child);
         }
         let _ = self.mutate(None, |snapshot| {
@@ -1081,6 +1151,35 @@ impl Service {
 }
 
 impl Service {
+    fn progress_update(&self, task_id: &str, summary: &str) -> Result<Value, String> {
+        if summary.trim().is_empty() || summary.chars().count() > 160 || summary.chars().any(char::is_control) {
+            return Err("Progress must be one sentence of at most 160 characters without control characters.".into());
+        }
+        let summary = summary.trim();
+        let run_id = self.collaboration_run_id(task_id)?;
+        self.mutate_data(Some(task_id.into()), |data| {
+            let task = data.snapshot.tasks.iter().find(|task| task.id == task_id)
+                .ok_or("Progress task not found.")?;
+            if task.status != "running" || self.collaboration_run_id(task_id)? != run_id {
+                return Err("Progress belongs to a stopped or replaced turn.".into());
+            }
+            let event_id = format!("agent-progress:{task_id}");
+            let detail = json!({"runId":run_id}).to_string();
+            if let Some(event) = data.snapshot.events.iter().find(|event| event.id == event_id) {
+                if event.title == summary && event.detail.as_ref() == detail {
+                    return Ok(json!({"updated":false}));
+                }
+            }
+            let event = Arc::new(RunEvent { id:event_id.clone(), task_id:task_id.into(),
+                kind:"agent_progress".into(), title:summary.into(), detail:detail.into(), created_at:now() });
+            let index = data.snapshot.events.iter().position(|event| event.id == event_id);
+            if let Some(index) = index {
+                data.snapshot.events.update_at(index, |row| *row = event);
+            } else { data.snapshot.events.push(event); }
+            Ok(json!({"updated":true}))
+        })
+    }
+
     fn work_plan_start(&self, task_id: &str, args: &serde_json::Map<String, Value>) -> Result<Value, String> {
         let request_id = required_string(args, "request_id")?;
         let title = required_string(args, "title")?;
@@ -1199,11 +1298,19 @@ fn validate_tool_args(tool: &str, args: &serde_json::Map<String, Value>) -> Resu
         "send_message" => &["to_agent_id", "message", "request_id", "task_id"],
         "get_task_result" | "cancel_delegation" => &["collaboration_id"],
         "wait_for_task" => &["collaboration_id", "timeout_seconds"],
-        "list_messages" | "skills_help" | "list_shared_skills" | "work_plan_list" => &[],
+        "list_messages" | "skills_help" | "list_shared_skills" | "work_plan_list" | "get_report_styles" => &[],
+        "build_queue_list" => &[],
+        "build_request" => &["request_id", "title", "command", "cwd", "target_key"],
+        "build_request_update" => &["build_request_id", "status"],
+        "build_claim" => &["request_ids"],
+        "build_complete" => &["build_run_id", "status", "summary", "exit_code"],
+        "build_heartbeat" => &["build_run_id"],
+        "progress_update" => &["summary"],
         "work_plan_start" => &["request_id", "title", "items"],
         "work_plan_update" => &["plan_id", "item_id", "status", "note"],
         "work_plan_close" => &["plan_id", "summary"],
         "install_shared_skill" => &["url", "name"],
+        "browser_open" => &["request_id", "url", "title"],
         "terminal_run" => &["command", "cwd"],
         "list_schedules" => &[],
         "save_schedule" => &[
@@ -1303,21 +1410,6 @@ fn directly_connected(snapshot: &Snapshot, first: &str, second: &str) -> bool {
         .iter()
         .any(|task| task.id == second && task.parent_task_id.as_deref() == Some(first))
 }
-fn root_task(snapshot: &Snapshot, task_id: &str) -> String {
-    let mut current = task_id;
-    for _ in 0..MAX_PER_ROOT {
-        let Some(parent) = snapshot
-            .tasks
-            .iter()
-            .find(|task| task.id == current)
-            .and_then(|task| task.parent_task_id.as_deref())
-        else {
-            break;
-        };
-        current = parent;
-    }
-    current.to_string()
-}
 fn depth(snapshot: &Snapshot, task_id: &str) -> usize {
     let mut count = 0;
     let mut current = task_id;
@@ -1335,26 +1427,7 @@ fn depth(snapshot: &Snapshot, task_id: &str) -> usize {
     }
     count
 }
-fn enforce_budget(snapshot: &Snapshot, task_id: &str) -> Result<(), String> {
-    if snapshot
-        .collaborations
-        .iter()
-        .filter(|item| item.from_task_id == task_id)
-        .count()
-        >= MAX_PER_TASK
-    {
-        return Err("This task has reached its collaboration request limit.".into());
-    }
-    let root = root_task(snapshot, task_id);
-    if snapshot
-        .collaborations
-        .iter()
-        .filter(|item| root_task(snapshot, &item.from_task_id) == root)
-        .count()
-        >= MAX_PER_ROOT
-    {
-        return Err("This collaboration chain has reached its request limit.".into());
-    }
+fn enforce_creation_depth(snapshot: &Snapshot, task_id: &str) -> Result<(), String> {
     if depth(snapshot, task_id) >= MAX_DEPTH {
         return Err("This collaboration chain has reached its maximum depth.".into());
     }
@@ -1375,6 +1448,7 @@ fn is_agent_ancestor(snapshot: &Snapshot, task_id: &str, agent_id: &str) -> bool
 }
 fn collaboration_descendants(snapshot: &Snapshot, root: &str) -> Vec<String> {
     let mut output = Vec::new();
+    let mut visited = HashSet::from([root.to_string()]);
     let mut cursor = vec![root.to_string()];
     while let Some(parent) = cursor.pop() {
         for item in snapshot
@@ -1382,10 +1456,7 @@ fn collaboration_descendants(snapshot: &Snapshot, root: &str) -> Vec<String> {
             .iter()
             .filter(|item| item.from_task_id == parent && item.kind == "delegation")
         {
-            if output.len() >= MAX_PER_ROOT {
-                return output;
-            }
-            if !output.contains(&item.to_task_id) {
+            if visited.insert(item.to_task_id.clone()) {
                 output.push(item.to_task_id.clone());
                 cursor.push(item.to_task_id.clone());
             }
@@ -1492,8 +1563,62 @@ mod tests {
     use crate::model::{Project, ProjectWorkspace};
     use std::{fs, path::PathBuf};
 
+    #[cfg(feature = "experimental-gpui")]
+    #[test]
+    fn browser_open_protocol_authority_validation_and_retry() {
+        let (service, dir) = service("browser-open"); let agent = add_agent(&service, "Browser caller");
+        service.mutate(None, |s| { s.agents.iter_mut().find(|a| a.id == agent.id).unwrap().collaboration_enabled = true; Ok(()) }).unwrap();
+        let caller = task(&service, &agent, "Browser", None, None);
+        let args = json!({"request_id":"open-1","url":"HTTPS://EXAMPLE.COM","title":"Preview"});
+        assert!(service.protocol(&caller.id, "browser_open", args.clone()).is_err());
+        running(&service, &caller.id);
+        let result = service.protocol(&caller.id, "browser_open", args.clone()).unwrap();
+        assert_eq!(result["status"], "queued"); assert_eq!(result["url"], "https://example.com/");
+        let pending = service.read_browser_open_requests().unwrap(); assert_eq!(pending.len(), 1); assert_eq!(pending[0].task_id, caller.id);
+        assert_eq!(service.protocol(&caller.id, "browser_open", args.clone()).unwrap(), result);
+        service.ack_browser_open_request(result["id"].as_str().unwrap()).unwrap();
+        assert_eq!(service.protocol(&caller.id, "browser_open", args.clone()).unwrap(), result); assert!(service.read_browser_open_requests().unwrap().is_empty());
+        let mut changed = args.clone(); changed["title"] = json!("Other"); assert!(service.protocol(&caller.id, "browser_open", changed).unwrap_err().contains("request_id"));
+        for invalid in [json!({"request_id":"x","url":"https://example.com","caller_task":"spoof"}), json!({"request_id":"x","url":"https://example.com","title":null}), json!({"request_id":"x","url":"javascript:alert(1)"}), json!({"request_id":"x","url":"https://u:secret@example.com"}), json!({"request_id":"","url":"https://example.com"})] { assert!(service.protocol(&caller.id, "browser_open", invalid).is_err()); }
+        let html = dir.join("preview.html"); fs::write(&html, "<h1>Preview</h1>").unwrap();
+        let opened = service.protocol(&caller.id, "browser_open", json!({"request_id":"file","url":html.to_str().unwrap()})).unwrap(); assert!(opened["url"].as_str().unwrap().starts_with("file:"));
+        fs::remove_file(&html).unwrap();
+        assert_eq!(service.protocol(&caller.id, "browser_open", json!({"request_id":"file","url":html.to_str().unwrap()})).unwrap(), opened);
+        service.mutate(None, |s| { let mut remote = s.hosts[0].clone(); remote.id = id(); remote.kind = "ssh".into(); s.tasks.iter_mut().find(|t| t.id == caller.id).unwrap().host_id = remote.id.clone(); s.hosts.push(remote); Ok(()) }).unwrap();
+        let error = service.protocol(&caller.id, "browser_open", json!({"request_id":"remote","url":"/does-not-exist.html"})).unwrap_err(); assert!(error.contains("Remote tasks"));
+        assert!(service.protocol(&caller.id, "browser_open", json!({"request_id":"remote-web","url":"https://example.com"})).is_ok());
+        service.mutate(None, |s| { s.agents.iter_mut().find(|a| a.id == agent.id).unwrap().collaboration_enabled = false; Ok(()) }).unwrap();
+        assert!(service.protocol(&caller.id, "browser_open", args).is_err());
+        drop(service); fs::remove_dir_all(dir).unwrap();
+    }
+
     fn temp_dir(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!("monitter-collaboration-{label}-{}", id()))
+    }
+    #[test]
+    fn report_styles_read_only_caller_authority_and_missing_publication() {
+        let (service, dir) = service("report-styles"); let agent = add_agent(&service, "Report caller");
+        let caller = task(&service, &agent, "Report", None, None);
+        assert!(service.protocol(&caller.id, "get_report_styles", json!({})).is_err());
+        service.mutate(None, |snapshot| {
+            snapshot.agents.iter_mut().find(|item| item.id == agent.id).unwrap().collaboration_enabled = true;
+            snapshot.tasks.iter_mut().find(|item| item.id == caller.id).unwrap().sandbox = "read-only".into(); Ok(())
+        }).unwrap();
+        running(&service, &caller.id);
+        assert!(service.protocol(&caller.id, "get_report_styles", json!({})).unwrap_err().contains("not published"));
+        service.publish_report_theme(&crate::report_styles::tests::theme()).unwrap();
+        let before = serde_json::to_value(service.snapshot().unwrap()).unwrap();
+        let result = service.protocol(&caller.id, "get_report_styles", json!({})).unwrap();
+        assert_eq!(result["theme"]["accent"], 0x38bfd2); assert!(result["capturedAt"].as_i64().unwrap() > 0);
+        assert_eq!(serde_json::to_value(service.snapshot().unwrap()).unwrap(), before);
+        assert!(service.protocol(&caller.id, "get_report_styles", json!({"caller_task":"spoof"})).is_err());
+        assert!(service.protocol(&caller.id, "publish_report_theme", json!({})).is_err());
+        service.mutate(None, |snapshot| { snapshot.agents.iter_mut().find(|item| item.id == agent.id).unwrap().collaboration_enabled = false; Ok(()) }).unwrap();
+        assert!(service.protocol(&caller.id, "get_report_styles", json!({})).unwrap_err().contains("disabled"));
+        service.cleanup(); drop(service);
+        let reopened = Service::open(None, dir.clone()).unwrap();
+        assert!(reopened.get_report_styles().unwrap_err().contains("not published"));
+        reopened.cleanup(); drop(reopened); let _ = fs::remove_dir_all(dir);
     }
     fn service(label: &str) -> (Arc<Service>, PathBuf) {
         let dir = temp_dir(label);
@@ -1657,6 +1782,33 @@ mod tests {
     }
 
     #[test]
+    fn progress_replaces_one_task_owned_status_without_chat_and_persists() {
+        let (service, dir) = service("progress");
+        let agent = service.snapshot().unwrap().agents[0].clone();
+        let root = task(&service, &agent, "Progress", None, None);
+        let other = task(&service, &agent, "Other", None, None);
+        running(&service, &root.id);
+        let messages = service.snapshot().unwrap().messages.len();
+        let update = |summary: &str| service.protocol(&root.id, "progress_update", json!({"summary":summary}));
+        assert_eq!(update("Checking native layout").unwrap()["updated"], true);
+        assert_eq!(update("Checking native layout").unwrap()["updated"], false);
+        update("Native checks passed; reviewing changes").unwrap();
+        let snapshot = service.snapshot().unwrap();
+        let rows:Vec<_> = snapshot.events.iter().filter(|event| event.kind == "agent_progress").collect();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].task_id, root.id);
+        assert_eq!(rows[0].title, "Native checks passed; reviewing changes");
+        assert_eq!(snapshot.messages.len(), messages);
+        assert!(!snapshot.events.iter().any(|event| event.task_id == other.id && event.kind == "agent_progress"));
+        assert!(service.protocol(&root.id,"progress_update",json!({"summary":"Spoof","task_id":other.id})).is_err());
+        for bad in ["".to_string(), "x".repeat(161), "two\nlines".into()] { assert!(update(&bad).is_err()); }
+        drop(service);
+        let reopened = Service::open(None, dir.clone()).unwrap();
+        assert_eq!(reopened.snapshot().unwrap().events.iter().filter(|event|event.kind=="agent_progress").count(),1);
+        drop(reopened); let _=fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn protocol_is_idempotent_and_rejects_mutated_or_unknown_requests() {
         let (service, dir) = service("idempotent");
         let recipient = add_agent(&service, "Reviewer");
@@ -1775,7 +1927,7 @@ mod tests {
         let host = service.snapshot().unwrap().hosts[0].clone();
         service
             .mutate(None, |snapshot| {
-                snapshot.projects.push(Project {
+                snapshot.projects.push(Project { build_management_enabled: false, agent_worktrees_enabled: false,
                     id: "p".into(),
                     name: "Project".into(),
                     description: String::new(),
@@ -1889,6 +2041,90 @@ mod tests {
                 .status,
             "queued"
         );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn independent_same_profile_chats_receive_targeted_messages_once() {
+        let (service, dir) = service("same-profile-peer");
+        let agent = service.snapshot().unwrap().agents[0].clone();
+        let sender = task(&service, &agent, "Editor work", None, None);
+        let receiver = task(&service, &agent, "Sidebar work", None, None);
+        let sibling = task(&service, &agent, "Unrelated work", None, None);
+        for id in [&sender.id, &receiver.id, &sibling.id] { running(&service, id); }
+        service.mutate(None, |s| {
+            for task in &mut s.tasks { task.project_id = Some("shared-project".into()); }
+            Ok(())
+        }).unwrap();
+        let args = json!({"to_agent_id":agent.id,"task_id":receiver.id,
+            "message":"Include the editor changes in your build","request_id":"handoff"});
+        let sent = service.protocol(&sender.id, "send_message", args.clone()).unwrap();
+        assert_eq!(sent["to_task_id"], receiver.id);
+        assert_eq!(service.protocol(&sender.id, "send_message", args).unwrap(), sent);
+        assert_eq!(service.snapshot().unwrap().tasks.len(), 3);
+        assert_eq!(service.snapshot().unwrap().collaborations.len(), 1);
+        assert!(service.incoming_messages(&sibling.id).unwrap().is_empty());
+        let inbox = service.protocol(&receiver.id, "list_messages", json!({})).unwrap();
+        assert_eq!(service.incoming_messages(&receiver.id).unwrap()[0]["from_task_id"], sender.id);
+        assert_eq!(inbox["messages"][0]["status"], "completed");
+        assert_eq!(inbox["messages"][0]["result"], DELIVERED_TO_ACTIVE_TURN);
+        assert!(!service.has_dispatchable_collaboration());
+        service.protocol(&receiver.id, "list_messages", json!({})).unwrap();
+        assert_eq!(service.snapshot().unwrap().messages.iter().filter(|m|
+            m.collaboration_id.as_deref() == sent["collaboration_id"].as_str()).count(), 1);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn targeted_peer_messages_validate_instance_ownership_and_availability() {
+        let (service, dir) = service("peer-target-guards");
+        let agent = service.snapshot().unwrap().agents[0].clone();
+        let other = add_agent(&service, "Other profile");
+        let sender = task(&service, &agent, "Sender", None, None);
+        let receiver = task(&service, &agent, "Receiver", None, None);
+        running(&service, &sender.id);
+        let args = |profile: &str, target: &str, request: &str| json!({
+            "to_agent_id":profile,"task_id":target,"message":"Context","request_id":request});
+        for (profile, target, request, expected) in [
+            (agent.id.as_str(), sender.id.as_str(), "self", "cannot message itself"),
+            (other.id.as_str(), receiver.id.as_str(), "wrong-owner", "does not belong"),
+            (agent.id.as_str(), "missing", "missing", "not found"),
+        ] {
+            assert!(service.protocol(&sender.id, "send_message", args(profile, target, request))
+                .unwrap_err().contains(expected));
+        }
+        assert!(service.protocol(&sender.id, "send_message", json!({"to_agent_id":agent.id,
+            "message":"Ambiguous","request_id":"no-target"})).is_err());
+        assert!(service.protocol(&sender.id, "delegate_task", delegate_args(&agent, "self-delegate", "Work")).is_err());
+        service.mutate(None, |s| {
+            s.tasks.iter_mut().find(|t|t.id == receiver.id).unwrap().archived = true;
+            Ok(())
+        }).unwrap();
+        assert!(service.protocol(&sender.id, "send_message", args(&agent.id, &receiver.id, "archived"))
+            .unwrap_err().contains("archived"));
+        assert!(service.snapshot().unwrap().collaborations.is_empty());
+        let foreign = task(&service, &other, "Independent recipient", None, None);
+        assert!(service.protocol(&sender.id, "send_message", args(&other.id, &foreign.id, "unscoped"))
+            .unwrap_err().contains("share the caller's project"));
+        service.mutate(None, |s| {
+            s.tasks.iter_mut().find(|t|t.id == sender.id).unwrap().project_id = Some("project-a".into());
+            s.tasks.iter_mut().find(|t|t.id == foreign.id).unwrap().project_id = Some("project-b".into());
+            Ok(())
+        }).unwrap();
+        assert!(service.protocol(&sender.id, "send_message", args(&other.id, &foreign.id, "cross-project"))
+            .unwrap_err().contains("share the caller's project"));
+        service.mutate(None, |s| {
+            s.tasks.iter_mut().find(|t|t.id == foreign.id).unwrap().project_id = Some("project-a".into());
+            Ok(())
+        }).unwrap();
+        service.protocol(&sender.id, "send_message", args(&other.id, &foreign.id, "independent")).unwrap();
+        service.mutate(None, |s| {
+            s.agents.iter_mut().find(|a|a.id == other.id).unwrap().collaboration_enabled = false;
+            Ok(())
+        }).unwrap();
+        assert!(service.protocol(&sender.id, "send_message", args(&other.id, &foreign.id, "disabled"))
+            .unwrap_err().contains("unavailable"));
+        assert_eq!(service.snapshot().unwrap().collaborations.len(), 1);
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -2096,6 +2332,154 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
+    fn budget_project(service: &Service) {
+        service.save_project(crate::model::Project {
+            id: "project".into(), name: "Budget tests".into(), description: String::new(),
+            icon: "folder".into(), color: "#3f9d6a".into(), workspaces: vec![],
+            board_guidance_text: None, build_management_enabled: false, agent_worktrees_enabled: false,
+        }).unwrap();
+    }
+
+    #[test]
+    fn outgoing_budget_resets_only_for_a_new_monitter_turn() {
+        let (service, dir) = service("turn-budget-reset");
+        budget_project(&service);
+        let agent = service.snapshot().unwrap().agents[0].clone();
+        let sender = task(&service, &agent, "Sender", None, Some("project".into()));
+        let receiver = task(&service, &agent, "Receiver", None, Some("project".into()));
+        running(&service, &sender.id);
+        running(&service, &receiver.id);
+        let control = service.reserve_run(&sender.id).unwrap();
+        let args = |request: String| json!({"to_agent_id":agent.id,"task_id":receiver.id,
+            "message":"Build status","request_id":request});
+
+        // A rejected request must not consume a slot.
+        let mut invalid = args("invalid".into());
+        invalid["task_id"] = json!("missing-task");
+        assert!(service.protocol(&sender.id, "send_message", invalid).is_err());
+        let mut first = None;
+        for turn in 0..8 {
+            if turn > 0 {
+                control.mark_idle();
+                control.begin_run().unwrap();
+                // Even an old-turn retry is free and preserves its receipt.
+                assert_eq!(service.protocol(&sender.id, "send_message", args("0-0".into())).unwrap()["collaboration_id"],
+                    first.clone().unwrap());
+            }
+            for index in 0..MAX_PER_TURN {
+                let request = args(format!("{turn}-{index}"));
+                let receipt = service.protocol(&sender.id, "send_message", request.clone()).unwrap();
+                assert_eq!(service.protocol(&sender.id, "send_message", request).unwrap(), receipt);
+                if first.is_none() { first = Some(receipt["collaboration_id"].clone()); }
+            }
+            let error = service.protocol(&sender.id, "send_message", args(format!("{turn}-over")))
+                .unwrap_err();
+            assert!(error.contains("10 outgoing"), "{error}");
+            assert!(error.contains("next turn"), "{error}");
+            if turn == 0 {
+                service.mutate(None, |snapshot| {
+                    snapshot.tasks.iter_mut().find(|task| task.id == sender.id).unwrap().updated_at += 99;
+                    // Completion and failure do not refund accepted requests.
+                    for (index, item) in snapshot.collaborations.iter_mut().enumerate() {
+                        item.status = if index % 2 == 0 { "completed" } else { "failed" }.into();
+                    }
+                    Ok(())
+                }).unwrap();
+                service.protocol(&receiver.id, "send_message", json!({"to_agent_id":agent.id,
+                    "task_id":sender.id,"message":"Incoming update","request_id":"incoming"})).unwrap();
+                service.protocol(&sender.id, "list_messages", json!({})).unwrap();
+                assert!(service.protocol(&sender.id, "send_message", args("after-inbox".into())).is_err());
+                // Provider turn metadata (and steering within that turn) does
+                // not replace Monitter's run ID or replenish its allowance.
+                control.set_app_server_turn("provider-turn".into());
+                assert!(service.protocol(&sender.id, "send_message", args("after-provider-update".into())).is_err());
+            }
+        }
+        assert_eq!(service.snapshot().unwrap().collaborations.iter()
+            .filter(|item| item.from_task_id == sender.id).count(), 80);
+        service.cleanup();
+        drop(service);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn outgoing_budget_is_shared_by_messages_and_delegations() {
+        let (service, dir) = service("turn-budget-mixed");
+        budget_project(&service);
+        let agent = service.snapshot().unwrap().agents[0].clone();
+        let peer = add_agent(&service, "Delegate");
+        let sender = task(&service, &agent, "Sender", None, Some("project".into()));
+        let receiver = task(&service, &agent, "Receiver", None, Some("project".into()));
+        running(&service, &sender.id);
+        running(&service, &receiver.id);
+        for index in 0..MAX_PER_TURN - 1 {
+            service.protocol(&sender.id, "send_message", json!({"to_agent_id":agent.id,
+                "task_id":receiver.id,"message":"Update","request_id":format!("message-{index}")})).unwrap();
+        }
+        let delegation = delegate_args(&peer, "delegation", "Review");
+        let receipt = service.protocol(&sender.id, "delegate_task", delegation.clone()).unwrap();
+        assert_eq!(service.protocol(&sender.id, "delegate_task", delegation).unwrap(), receipt);
+        assert!(service.protocol(&sender.id, "delegate_task", delegate_args(&peer, "over", "Review"))
+            .unwrap_err().contains("10 outgoing"));
+        // Another chat has an independent allowance.
+        service.protocol(&receiver.id, "send_message", json!({"to_agent_id":agent.id,
+            "task_id":sender.id,"message":"Reply","request_id":"reply"})).unwrap();
+        service.cleanup();
+        drop(service);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn simultaneous_outgoing_requests_cannot_exceed_turn_budget() {
+        let (service, dir) = service("turn-budget-concurrent");
+        budget_project(&service);
+        let agent = service.snapshot().unwrap().agents[0].clone();
+        let sender = task(&service, &agent, "Sender", None, Some("project".into()));
+        let receiver = task(&service, &agent, "Receiver", None, Some("project".into()));
+        running(&service, &sender.id);
+        let barrier = Arc::new(std::sync::Barrier::new(20));
+        let threads: Vec<_> = (0..20).map(|index| {
+            let service = service.clone();
+            let barrier = barrier.clone();
+            let sender_id = sender.id.clone();
+            let args = json!({"to_agent_id":agent.id,"task_id":receiver.id,
+                "message":"Update","request_id":format!("parallel-{index}")});
+            thread::spawn(move || {
+                barrier.wait();
+                service.protocol(&sender_id, "send_message", args)
+            })
+        }).collect();
+        let results: Vec<_> = threads.into_iter().map(|thread| thread.join().unwrap()).collect();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), MAX_PER_TURN);
+        assert!(results.iter().filter_map(|result| result.as_ref().err())
+            .all(|error| error.contains("10 outgoing")));
+        assert_eq!(service.snapshot().unwrap().collaborations.len(), MAX_PER_TURN);
+        service.cleanup();
+        drop(service);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn deepest_child_can_reply_but_cannot_create_another_child() {
+        let (service, dir) = service("turn-budget-depth");
+        budget_project(&service);
+        let agent = service.snapshot().unwrap().agents[0].clone();
+        let peer = add_agent(&service, "Delegate");
+        let root = task(&service, &agent, "Root", None, Some("project".into()));
+        let mut parent = root.id.clone();
+        for index in 0..MAX_DEPTH {
+            parent = task(&service, &agent, &format!("Child {index}"), Some(parent), Some("project".into())).id;
+        }
+        running(&service, &parent);
+        service.protocol(&parent, "send_message", json!({"to_agent_id":agent.id,
+            "task_id":root.id,"message":"Finished","request_id":"reply"})).unwrap();
+        assert!(service.protocol(&parent, "delegate_task", delegate_args(&peer, "deeper", "Review"))
+            .unwrap_err().contains("maximum depth"));
+        service.cleanup();
+        drop(service);
+        let _ = fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn chain_limits_cycles_and_response_text_are_bounded() {
         let mut snapshot = crate::model::default_snapshot();
@@ -2137,15 +2521,15 @@ mod tests {
         }
         assert_eq!(depth(&snapshot, &parent), MAX_DEPTH);
         assert!(is_agent_ancestor(&snapshot, &parent, &agent.id));
-        assert!(enforce_budget(&snapshot, &parent).is_err());
-        for index in 0..MAX_PER_TASK {
+        assert!(enforce_creation_depth(&snapshot, &parent).is_err());
+        for index in 0..100 {
             snapshot.collaborations.push(Collaboration { model_selection: None,
                 id: index.to_string(),
                 kind: "delegation".into(),
                 from_agent_id: "a".into(),
                 from_task_id: root.id.clone(),
                 to_agent_id: "b".into(),
-                to_task_id: "x".into(),
+                to_task_id: format!("child-{index}"),
                 text: String::new(),
                 request_id: index.to_string(),
                 status: "queued".into(),
@@ -2155,7 +2539,9 @@ mod tests {
                 updated_at: 0,
             });
         }
-        assert!(enforce_budget(&snapshot, &root.id).is_err());
+        assert!(enforce_creation_depth(&snapshot, &root.id).is_ok());
+        // More than the old 64-record lifetime cap must not truncate cleanup.
+        assert_eq!(collaboration_descendants(&snapshot, &root.id).len(), 100);
         let crab = "🦀".repeat(1_000);
         assert!(truncate(&crab, 999).len() <= 999);
         assert_eq!(compact_entries(&vec!["x".repeat(1_000); 12]).len(), 4);

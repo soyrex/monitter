@@ -1,0 +1,1044 @@
+{
+  "baseCommit": "557bb5e",
+  "target": "full desktop",
+  "mobilePolicy": "unchanged",
+  "features": [
+    {
+      "id": "identity_scaffold",
+      "sourcePaths": [
+        "desktop-gpui/src/main.rs",
+        "src-tauri/src/experimental_desktop.rs",
+        "src/lib/components/AppSurface.svelte",
+        "src/routes/+page.svelte"
+      ],
+      "status": "implemented_unverified",
+      "evidence": "Partial source scaffold: separate GPUI entrypoint opens the shared DesktopService, displays backend-backed chats and agents, creates a basic local Codex agent/task, and sends/stops a task. The visual cohort test log /tmp/monitter-gpui-visual-cohort-tests.log passed 14 library and 53 binary tests (0 failures; 0 doc tests), including form-input, image-preview, and response-metadata tests; rust-objcopy emitted a missing-libLLVM warning. Package artifacts/gpui/debug/build-1790947177336/Monitter GPUI.app was launched as PID 62670 for renderer-frame capture. The PNG is in artifacts/gpui/visual/gpui-frame-1790947603918262000.png; it excludes macOS chrome and native WKWebView content and is not interaction proof. Compact sidebar/toolbar changes came after the captured package. Earlier PID 38404 package SIGILL cause remains unknown. Full desktop workflows and feature-specific GUI behavior remain unverified."
+    },
+    {
+      "id": "workspace_navigation_and_layout",
+      "sourcePaths": [
+        "src/lib/components/AppSurface.svelte",
+        "src/lib/components/PaneGrid.svelte",
+        "src/lib/components/PaneSurface.svelte",
+        "src/lib/components/SidebarResize.svelte",
+        "src/lib/components/RootSurfaceLifecycle.svelte",
+        "src/lib/components/Modal.svelte",
+        "src/lib/components/PaneNotice.svelte",
+        "src/lib/components/AnimatedTitle.svelte",
+        "src/lib/components/SparkleField.svelte",
+        "src/lib/pane-lifecycle.ts",
+        "src/lib/workspace-sidebar-tabs.ts",
+        "desktop-gpui/src/main.rs",
+        "desktop-gpui/src/workspace.rs",
+        "desktop-gpui/src/plans.rs",
+        "desktop-gpui/src/docking.rs",
+        "desktop-gpui/src/chat.rs",
+        "desktop-gpui/src/split_allocation.rs",
+        "desktop-gpui/src/split_allocation_tests.rs",
+        "desktop-gpui/src/empty_session_tests.rs"
+      ],
+      "status": "implemented_unverified",
+      "evidence": "Partial native docking: retained task-specific ChatPane entities, native tabs/splits and auxiliary panels including archives, shared revision-accepted snapshot data, synchronized auxiliary panes, native child visibility/removal hooks, and custom header with integrated traffic lights. Saved layout restoration and debounced revision-guarded layout saves are in source. Task text drafts and last-route preferences are persisted in source; sidebar/workspace selection persistence, settings docking, forced/platform-quit persistence, and interactive lifecycle validation remain pending. The latest visual-cohort tests passed 14 library and 53 binary tests, but the renderer frame only shows GPUI-rendered content, excludes OS chrome/WKWebView, and is not visual acceptance. Package PID 62670 was used for capture; compact sidebar/toolbar changes came later. Saved-layout/lifecycle and full visual behavior remain unverified. Latest package adds native modern flat tabs. Five existing chat IDs were preflighted against the authoritative snapshot and restored as one group with index 3 selected; renderer export gpui-frame-1790975304763251000.png confirms this layout. A native preference conflict banner and right companion rail remain under investigation/integration. Complete pixel and lifecycle acceptance is not established. 2026-10-13: New landing panes have an always-visible close button, including the final pane with hidden tab headers. New tabs can be created again after the final group is removed. Tern new panes allocate 1/(N+1) of the dock region, shrinking existing leaf areas proportionally; equal and nested layouts balance while custom relative areas and retained entities remain intact. Ordinary tab stacking does not resize splits; explicit requested split sizes remain intentional overrides. Six native/pure allocation tests plus close/reopen and landing-layout tests passed. Installed package build-1791852731937 was checked live: three equal panes became four, its new-pane close control removed the fourth, and original chats were retained. Proof: artifacts/gpui/debug/pane-lifecycle-layout-install-latest.json."
+    },
+    {
+      "id": "task_transcripts_history_and_sync",
+      "sourcePaths": [
+        "src/lib/components/TaskTranscript.svelte",
+        "src/lib/components/MessagePane.svelte",
+        "src/lib/components/TranscriptVirtualList.svelte",
+        "src/lib/components/MessageMeta.svelte",
+        "src/lib/components/ResponseMetadata.svelte",
+        "src/lib/components/ChatDateDivider.svelte",
+        "src/lib/components/ExpandableUserRequest.svelte",
+        "src/lib/components/ArchivedChats.svelte",
+        "src/lib/components/TaskActivity.svelte",
+        "src/lib/components/RunActivity.svelte",
+        "src/lib/components/RunSummary.svelte",
+        "src/lib/components/ThinkingStatus.svelte",
+        "src/lib/components/StatusPill.svelte",
+        "src/lib/components/TimelinePane.svelte",
+        "src/lib/transcript-scroll-owner.ts",
+        "src/lib/ui-sync.ts",
+        "src-tauri/src/ui_sync.rs",
+        "src-tauri/src/app_server_service.rs",
+        "desktop-gpui/src/main.rs",
+        "desktop-gpui/src/history.rs",
+        "desktop-gpui/src/transcript.rs",
+        "desktop-gpui/src/chat.rs",
+        "desktop-gpui/src/run_activity.rs",
+        "desktop-gpui/src/native_state.rs"
+      ],
+      "status": "implemented_unverified",
+      "evidence": "Partial source: variable-height virtualized chronological message/activity rows, stable message/event IDs, revision-checked earlier pages, reader anchors, held live updates, paged selectable event details, and typed NativeState reconciliation of revisioned resets/deltas. Shared DesktopService uses the native app-server continuation path in src-tauri/src/app_server_service.rs; GPUI does not duplicate provider continuation logic. The visual-cohort log reports 14 library and 53 binary tests passed, including timeline reconciliation, form-input, image-preview, and response-metadata formatting. Native per-assistant response metadata is in source and its formatter tests passed. Grouped process/reasoning presentation, thinking elapsed status, run summaries, full GUI lifecycle and end-to-end continuation remain pending/unverified. The captured renderer frame excludes macOS chrome and native WKWebView and does not establish visual or interaction acceptance; compact sidebar/toolbar changes followed its package. The test log does not establish package or current runtime behavior."
+    },
+    {
+      "id": "composer_drafts_queues_and_commands",
+      "sourcePaths": [
+        "src/lib/components/MentionComposer.svelte",
+        "src/lib/components/HarnessInput.svelte",
+        "src/lib/components/SlashCommandPalette.svelte",
+        "src/lib/components/CommandPalette.svelte",
+        "src/lib/components/DraftPicker.svelte",
+        "src/lib/components/QueuedMessages.svelte",
+        "src/lib/components/LazyRichMarkdownComposer.svelte",
+        "src/lib/components/AppSurface.svelte",
+        "src/lib/textarea-autogrow.ts",
+        "desktop-gpui/src/main.rs",
+        "desktop-gpui/src/interactions.rs",
+        "desktop-gpui/src/chat.rs",
+        "desktop-gpui/src/chat_attachments.rs",
+        "desktop-gpui/src/command_palette.rs",
+        "desktop-gpui/src/slash_palette.rs",
+        "desktop-gpui/src/chat_slash.rs",
+        "desktop-gpui/src/task_project_picker.rs",
+        "desktop-gpui/src/composer_git.rs",
+        "desktop-gpui/src/composer_footer.rs",
+        "desktop-gpui/src/palette_catalog.rs",
+        "desktop-gpui/src/native_icons.rs"
+      ],
+      "status": "implemented_unverified",
+      "evidence": "Retained text drafts, draft-first chat tabs, plain composer without unsolicited formatting toolbar, Git strip, context edge meter, access/Jev/model footer, queued edit/remove and bounded attachment previews are implemented. Package build-1791021493945 passed 125 GUI tests and strict signing; native inspection verifies local slash catalog, Down/Enter activation opening preferences, docked command palette, project picker empty-state and Escape dismissal, unknown-command draft retention in preceding package, and preserved chat accessibility after tab reactivation. Task/project assignment with populated catalog, provider slash execution, terminal command execution, mentions, voice, attachment-draft restart persistence, and live send/upload acceptance remain incomplete or unverified. Latest proof: artifacts/gpui/debug/native-command-review-1791021493945.json. 2026-10-12: Cmd-K and Cmd-P now share the full native command catalog and retained query/category, with pill filters below search for commands, sessions, panes, terminals, agents, projects, channels and workspaces. Native actions include all seven retained-pane layouts, creation forms, settings, themes, motion, terminal themes and current-chat controls; real terminal sessions are discovered asynchronously. Nine palette checks, one icon asset check and one empty-pane layout check passed. Normal package build-1791841813623 was installed with strict signature/hash verification and unchanged backend identity; native inspection confirmed both shortcuts, 113 static commands, full-width rich rows and visible SVG icons. Saved workspace was restored after initial snapshot hydration. Individual execution of every catalog command is not claimed. Proof: artifacts/gpui/debug/unified-palette-install-latest.json."
+    },
+    {
+      "id": "rich_markdown_editor_and_documents",
+      "sourcePaths": [
+        "src/lib/components/RichMarkdownComposer.svelte",
+        "src/lib/components/Markdown.svelte",
+        "src/lib/components/TaskTranscript.svelte",
+        "src-tauri/src/markdown.rs",
+        "src-tauri/src/local_file_link.rs",
+        "src-tauri/src/report_file.rs",
+        "src-tauri/src/open_file.rs",
+        "desktop-gpui/src/main.rs",
+        "desktop-gpui/src/transcript.rs",
+        "desktop-gpui/src/history.rs"
+      ],
+      "status": "implemented_unverified",
+      "evidence": "Partial source: transcript bodies use selectable GPUI Markdown TextView. Tiptap-equivalent rich editing, complete Markdown interactions, local document/image/PDF previews, and link/file workflows remain pending. No runtime verification."
+    },
+    {
+      "id": "agents_hosts_harnesses_and_models",
+      "sourcePaths": [
+        "src/lib/components/AccessPicker.svelte",
+        "src/lib/components/AcpAgentPicker.svelte",
+        "src/lib/components/AgentModelPicker.svelte",
+        "src/lib/components/ModelPicker.svelte",
+        "src/lib/components/JevTierModelPicker.svelte",
+        "src/lib/components/ProviderIcon.svelte",
+        "src/lib/components/StartingTaskPane.svelte",
+        "src-tauri/src/runner.rs",
+        "src-tauri/src/acp_runtime.rs",
+        "src-tauri/src/model.rs",
+        "src-tauri/src/models.rs",
+        "src-tauri/src/codex_accounts.rs",
+        "src-tauri/src/acp_discovery.rs",
+        "desktop-gpui/src/main.rs",
+        "desktop-gpui/src/settings.rs",
+        "desktop-gpui/src/agents.rs"
+      ],
+      "status": "implemented_unverified",
+      "evidence": "Partial source: shell lists real agents and can create a basic local Codex agent/task; AgentHostPane provides native agent/host editing and host operations, with model/catalog choices in settings. Full ACP discovery/auth, account management, provider-specific workflows, and feature-specific runtime verification remain pending."
+    },
+    {
+      "id": "approvals_permissions_and_user_input",
+      "sourcePaths": [
+        "src/lib/components/ApprovalDock.svelte",
+        "src/lib/components/ApprovalRequestCard.svelte",
+        "src/lib/components/SavedApprovalRules.svelte",
+        "src/lib/components/JevDecisionCard.svelte",
+        "src/lib/components/AccessPicker.svelte",
+        "src/lib/components/TaskActivity.svelte",
+        "src-tauri/src/runner.rs",
+        "src-tauri/src/lib.rs",
+        "desktop-gpui/src/interactions.rs"
+      ],
+      "status": "implemented_unverified",
+      "evidence": "Partial native implementation: pending/resolved approval cards; approve once, conditional file-changes session approval, conditional rememberable exact-action approval, deny, scoped saved-rule revocation, masked question inputs and choices, and explicit validated answer submission. All commands call existing Service validation. Generic form/URL inputs and Jev cards remain pending. Source formatted only; compiler/runtime verification is not claimed. Notification bell beside usage rings with vertical divider, retained current requests and session-local reply/status alerts. Native dropdown inline approve_once/deny validates current request then uses existing authoritative ordinary/MCP/input resolver. Questions/forms review exact prompt. Fifteen focused checks passed; installed GPUI bell/dropdown and real pending controls observed without executing real decisions. Rollback and unchanged persistent backend verified in artifacts/gpui/debug/notification-bell-install-latest.json."
+    },
+    {
+      "id": "channels_and_membership",
+      "sourcePaths": [
+        "src/lib/components/ChannelTranscriptPane.svelte",
+        "src/lib/components/ChannelMembers.svelte",
+        "src/lib/components/MessagePane.svelte",
+        "src/lib/bridge.ts",
+        "src-tauri/src/lib.rs",
+        "desktop-gpui/src/channels.rs",
+        "desktop-gpui/src/main.rs",
+        "desktop-gpui/src/native_state.rs"
+      ],
+      "status": "implemented_unverified",
+      "evidence": "Partial native source: channel discovery, membership/recipient controls, transcript/history, sending, conversation controls, and per-channel drafts are integrated in the shell. Typed NativeState merges channel message changes/removals and resets channel cursors for reset or dropped channels; fetched history is revision- and channel-scoped. Full parity, delivery/race behavior, and runtime verification remain pending."
+    },
+    {
+      "id": "subagents_collaboration_and_plans",
+      "sourcePaths": [
+        "src/lib/components/UnifiedSubagentItem.svelte",
+        "src/lib/components/UnifiedSubagentSidebar.svelte",
+        "src/lib/components/UnifiedSubagentTabs.svelte",
+        "src/lib/components/UnifiedSubagentVisor.svelte",
+        "src/lib/components/SubagentActivity.svelte",
+        "src/lib/components/ObserverIndicator.svelte",
+        "src/lib/components/CompanionMode.svelte",
+        "src-tauri/src/collaboration_runtime.rs",
+        "src-tauri/src/acp_collaboration.rs",
+        "src-tauri/src/admin_turn_broker.rs",
+        "src-tauri/src/collaboration_mcp.rs",
+        "desktop-gpui/src/collaboration.rs",
+        "desktop-gpui/src/main.rs"
+      ],
+      "status": "implemented_unverified",
+      "evidence": "Partial source: SubagentPane shows real selected-task child sessions, status, assignment/result/error, task-backed transcript/activity, Codex transcript retrieval, and supported task-backed stop/follow-up actions. Work-plan summaries live in plans.rs. Nested collaboration workflows, full visor/sidebar controls, and feature-specific build/runtime verification remain pending."
+    },
+    {
+      "id": "work_plans",
+      "sourcePaths": [
+        "src/lib/components/WorkPlanPanel.svelte",
+        "src/lib/components/RunSummary.svelte",
+        "desktop-gpui/src/plans.rs",
+        "desktop-gpui/src/main.rs",
+        "src-tauri/src/model.rs"
+      ],
+      "status": "implemented_unverified",
+      "evidence": "Partial read-only source renderer filters snapshot workPlans by task, selects newest active or latest plan, and shows counts, item statuses/notes, summary, and history. Plan management remains task-scoped to collaboration tools; no owner mutations are exposed. Runtime behavior unverified."
+    },
+    {
+      "id": "projects_boards_and_git",
+      "sourcePaths": [
+        "src/lib/components/GitPane.svelte",
+        "src/lib/components/AppSurface.svelte",
+        "src-tauri/src/project_board.rs",
+        "src-tauri/src/git.rs",
+        "desktop-gpui/src/workspace.rs",
+        "desktop-gpui/src/main.rs",
+        "desktop-gpui/src/git.rs"
+      ],
+      "status": "implemented_unverified",
+      "evidence": "Partial source: WorkspacePane edits projects/workspaces/board guidance and notes; GitPane reads task-scoped branch/status and staged/unstaged/untracked diffs with selectable text. Git staging/commit/discard operations are not implemented. Full project/board parity and feature-specific runtime verification remain pending."
+    },
+    {
+      "id": "terminal_sessions",
+      "sourcePaths": [
+        "src/lib/components/TerminalPane.svelte",
+        "src/lib/terminal-runtime.ts",
+        "src/lib/terminal-theme.ts",
+        "src-tauri/src/terminal.rs",
+        "desktop-gpui/src/terminal.rs",
+        "desktop-gpui/src/main.rs",
+        "desktop-gpui/src/terminal_exit_tests.rs"
+      ],
+      "status": "implemented_unverified",
+      "evidence": "Partial source: native terminal session selection, PTY open/read/write/resize/close, retained terminal model, keyboard/paste/mouse handling, selection, and rendering are implemented. Terminal appearance/configuration parity and current-build/runtime verification remain pending. 2026-10-13: Matching pinned terminal panes close on positive backend exit status or successful manager-close acknowledgement; saved named layouts are pruned by exact terminal pane identity. Hidden/paused terminals check metadata once per second; missing rows and RPC failures do not trigger closure. Four exit regressions, seventeen existing terminal tests and five saved-layout tests passed. In installed package build-1791852731937 a newly created local terminal was exited through its shell and its pane disappeared automatically, preserving all three existing chat panes and backend identity. Proof: artifacts/gpui/debug/pane-lifecycle-layout-install-latest.json."
+    },
+    {
+      "id": "browser_tabs_and_extensions",
+      "sourcePaths": [
+        "src/lib/components/BrowserTabPanel.svelte",
+        "src/lib/browser-runtime.ts",
+        "src/lib/browser-viewport.ts",
+        "src-tauri/src/native_browser.rs",
+        "src-tauri/src/native_browser_extensions_macos.rs",
+        "src-tauri/src/native_browser_history_portable.rs",
+        "src-tauri/src/native_browser_auth_macos.rs",
+        "desktop-gpui/src/browser.rs",
+        "desktop-gpui/src/main.rs"
+      ],
+      "status": "implemented_unverified",
+      "evidence": "Native Wry isolated browser now hosts each retained BrowserTab as a main Modern dock pane. Package3382108 native explicit public load/title, two-tab same-group creation, focused-group browser/chat cycling, GUI-only restart preserving metadata/order with saved URL unloaded, and last-tab Cmd+W without placeholder replacement passed. 147 GUI tests include six bounded legacy browser-layout migration regressions. Split-browser visibility, extension loading, agent browser control, full history and unload workflows remain open. 2026-10-14: Native browser Cmd-C/V plus Cmd-A/X route through the focused WebKit responder. A native modifier-triggered floating toolbar implements Back/Refresh/Stop/Forward with an 80-percent opacity multiply surface, a 180ms slide, bottom-center 20px inset, Escape/scroll dismissal, pane hide/close cleanup and no page IPC. An isolated real WKWebView preview verified clipboard round trip, Command/Control reveal, Escape/scroll dismissal, back/forward, reload of changed local HTML and cancellation of a pending local HTTP response. Full GPUI integration check and installed-app verification are recorded separately in artifacts/browser-controls-20261014/verification.json."
+    },
+    {
+      "id": "attachments_images_audio_and_voice",
+      "sourcePaths": [
+        "src/lib/components/AttachmentList.svelte",
+        "src/lib/components/ImageLightbox.svelte",
+        "src/lib/components/VoiceRecorder.svelte",
+        "src/lib/components/NativeSpeechRecorder.svelte",
+        "src-tauri/src/attachments.rs",
+        "src-tauri/src/image_file.rs",
+        "src-tauri/src/voice.rs",
+        "desktop-gpui/src/chat_attachments.rs",
+        "desktop-gpui/src/attachment_preview.rs",
+        "desktop-gpui/src/chat_voice.rs",
+        "desktop-gpui/src/native_voice_capture.rs",
+        "src-tauri/src/experimental_desktop.rs"
+      ],
+      "status": "implemented_unverified",
+      "evidence": "Partial native attachment picker/storage/image preview and unsent draft persistence implemented. Package4771599 native harmless text fixture survived exact GUI SIGKILL/reopen with same separate server4721, then unsent reference cleared; no send. Package6261987 compact styling inspected, file/remove icon visibility defects caught and newer source corrected pending package. Native AVFoundation microphone/Whisper flow compiled and idle Record control visible, but no microphone permission, recording, transcription or send performed. Audio draft playback/full image zoom/runtime voice acceptance remain open. Backend registry remains attachment authority; UI stores IDs/display metadata/exact destination only."
+    },
+    {
+      "id": "settings_themes_fonts_and_hotkeys",
+      "sourcePaths": [
+        "src/lib/components/SettingsPane.svelte",
+        "src/lib/components/EnvironmentSecretsSettings.svelte",
+        "src/lib/components/ExtensionsSettings.svelte",
+        "src/lib/components/LanSettings.svelte",
+        "src/lib/app-theme.ts",
+        "src/lib/terminal-theme.ts",
+        "src-tauri/src/menu.rs",
+        "src-tauri/src/environment_secrets.rs",
+        "src-tauri/src/extensions.rs",
+        "desktop-gpui/src/settings.rs",
+        "desktop-gpui/src/fonts.rs",
+        "desktop-gpui/assets/fonts/IBMPlexSans-Regular.ttf",
+        "desktop-gpui/assets/fonts/IBMPlexSans-Medium.ttf",
+        "desktop-gpui/assets/fonts/IBMPlexSans-SemiBold.ttf",
+        "desktop-gpui/assets/fonts/IBMPlexMono-Regular.ttf",
+        "desktop-gpui/assets/fonts/IBMPlexMono-Medium.ttf",
+        "desktop-gpui/assets/fonts/IBMPlexMono-SemiBold.ttf",
+        "desktop-gpui/assets/fonts/IBM-Plex-Sans-LICENSE.txt",
+        "desktop-gpui/assets/fonts/IBM-Plex-Mono-LICENSE.txt",
+        "desktop-gpui/src/main.rs",
+        "desktop-gpui/src/native_menu.rs"
+      ],
+      "status": "implemented_unverified",
+      "evidence": "Partial source: user name, accent, system/light/dark appearance, selected-task model choices, and three interface/chat/terminal font family, size, weight, and line-height controls. IBM Plex Sans/Mono regular, medium, and semibold TTFs are embedded from desktop-gpui/assets/fonts with family OFL notices; registration is source-implemented for offline rendering. Full settings categories, secrets/extensions, LAN settings, complete native menus, and hotkey parity remain pending. Font/settings runtime behavior is unverified. Native application menus now wire settings, focused input edit actions, terminal copy/paste, hide/show and window controls; current source compiles. Native browser responder/menu routing and full keyboard parity still need interaction verification."
+    },
+    {
+      "id": "mail_inbox_triage_and_account_setup",
+      "sourcePaths": [
+        "src/lib/components/MailSettings.svelte",
+        "src/lib/components/NativeMailInbox.svelte",
+        "src/lib/components/MailTriageBatch.svelte",
+        "src/lib/components/TaskTranscript.svelte",
+        "src-tauri/src/mail.rs",
+        "src-tauri/src/mail_runtime.rs",
+        "src-tauri/src/mail_triage.rs",
+        "desktop-gpui/src/mail.rs",
+        "desktop-gpui/src/mail_html.rs"
+      ],
+      "status": "implemented_unverified",
+      "evidence": "Partial source: MailPane provides Gmail configuration/connect status, account-agent assignment, inbox refresh, eligible-card filtering, detail and summary requests, and plain-text plus an ephemeral HTML reader. The reader sanitizes markup, applies a restrictive content policy, and supports raster inline images/quoted text. The prior available test log passed malicious-markup and inline-image/quote sanitizer tests as part of 14 library and 24 binary tests; HTML attachments, full triage workflows, and native Gmail/runtime validation remain pending."
+    },
+    {
+      "id": "scheduler_and_automation",
+      "sourcePaths": [
+        "src/lib/components/AppSurface.svelte",
+        "src-tauri/src/scheduler.rs",
+        "src-tauri/src/scheduler_impl.rs",
+        "src-tauri/src/auto_archive.rs",
+        "desktop-gpui/src/schedules.rs",
+        "desktop-gpui/src/main.rs"
+      ],
+      "status": "implemented_unverified",
+      "evidence": "Partial source: native schedule list/editor, presets/custom cron, enablement, run-now, delete confirmation, and run history use typed DesktopService APIs. Automated archive controls and scheduler-specific build/runtime verification remain pending."
+    },
+    {
+      "id": "sharing_remote_control_and_relay",
+      "sourcePaths": [
+        "src/lib/components/ShareControl.svelte",
+        "src/lib/components/RemoteControl.svelte",
+        "src/lib/components/LanGate.svelte",
+        "src/lib/components/OwnerRelayGate.svelte",
+        "src/routes/share/+page.svelte",
+        "src/lib/controller/remote-client.ts",
+        "src-tauri/src/lan.rs",
+        "src-tauri/src/lan_sync.rs",
+        "relay-cloudflare/"
+      ],
+      "status": "pending",
+      "evidence": "Preserve the existing LAN/mobile command contract and sharing, pairing, remote control, owner relay, and visitor permissions. GPUI parity must not change mobile behavior."
+    },
+    {
+      "id": "usage_metrics_and_process_inspection",
+      "sourcePaths": [
+        "src/lib/components/ContextUsageBar.svelte",
+        "src/lib/components/UsageRings.svelte",
+        "src/lib/components/UsagePacingChart.svelte",
+        "src/lib/components/ProviderUsageModal.svelte",
+        "src/lib/components/ProcessMetricsModal.svelte",
+        "src/lib/components/SidebarClock.svelte",
+        "src-tauri/src/usage_quota.rs",
+        "src-tauri/src/process_metrics.rs",
+        "desktop-gpui/src/usage.rs",
+        "desktop-gpui/src/main.rs"
+      ],
+      "status": "implemented_unverified",
+      "evidence": "Retained sidebar quota rings/clock/resource sparklines and native backend process dialog implemented and previously inspected. Package6261987 canvas clock visible across chat/mail/attachment frames; retained widget updates avoid invalidating the whole Desktop on clock/metrics pulses. Metrics label/source reflect backend Monitter process tree. Debug idle samples are uncontrolled, exclude separate backend and possible XPC services, and do not prove a release performance improvement or pixel-perfect acceptance."
+    },
+    {
+      "id": "onboarding_loading_and_empty_states",
+      "sourcePaths": [
+        "src/lib/components/WorkspaceLoadingScreen.svelte",
+        "src/lib/components/StartingTaskPane.svelte",
+        "src/lib/components/PaneNotice.svelte",
+        "src/lib/components/ArchivedChats.svelte",
+        "desktop-gpui/src/main.rs"
+      ],
+      "status": "implemented_unverified",
+      "evidence": "Partial source: isolated backend loading, startup/backend errors, no-chat state, and no-plan state. Full setup, recovery, archive, and task-start flows remain pending. No runtime verification."
+    },
+    {
+      "id": "mobile_and_shared_clients_unchanged",
+      "sourcePaths": [
+        "src/routes/mobile/+page.svelte",
+        "src/routes/share/+page.svelte",
+        "mobile-ios/",
+        "mobile-android/",
+        "share-web/",
+        "src/lib/controller/",
+        "src-tauri/src/lan.rs",
+        "src-tauri/src/lan_sync.rs"
+      ],
+      "status": "pending",
+      "evidence": "Scope policy is to retain the existing mobile and shared clients and wire protocol. This manifest does not claim they were unchanged or regression-tested at runtime; compatibility verification remains pending."
+    },
+    {
+      "id": "independent_menu_bar_backend",
+      "sourcePaths": [
+        "src-tauri/src/experimental_desktop.rs",
+        "src-tauri/src/experimental_desktop_ipc.rs",
+        "desktop-gpui/src/backend_launcher.rs",
+        "desktop-gpui/src/bin/monitter-gpui-server.rs",
+        "desktop-gpui/src/server_menu.rs"
+      ],
+      "status": "implemented_unverified",
+      "evidence": "Existing Rust Service runs in an independent macOS accessory/menu-bar server. GUI connects via private same-user Unix IPC, disconnect does not shut down backend, and packaging leaves running immutable server untouched. Both binaries compile/sign, 18 focused IPC tests pass, and a real PTY heartbeat advances across GUI SIGKILL/absence/reopen (artifacts/gpui/server-continuity.json); terminal closed explicitly afterward. Current server PID73266 survived two subsequent GUI restarts. Menu click behavior and real provider model-turn continuity remain unverified."
+    }
+  ],
+  "latestVerification": {
+    "package": "/Users/alex/code/monitter-gpui/artifacts/gpui/release/build-1791321164222/Monitter GPUI.app",
+    "guiPid": 87820,
+    "serverPid": 9031,
+    "serverInstanceId": "80921ad9-7a28-47c5-b740-92a76a7eb49d",
+    "guiTests": 228,
+    "priorLibraryTests": 14,
+    "productionPidUnchanged": 75865,
+    "strictSignaturesVerified": true,
+    "installedHashMatches": true,
+    "fullParityVerified": false,
+    "nativeInspection": [
+      "Collapsed tool-count summary uses readable English intent/latest command",
+      "Outer turn and nested tool branch disclose real stored event",
+      "Branch has explicit accessible label and bounded text beside timestamp in narrow pane",
+      "No saved-rule cards or accounting events in visible chat",
+      "Resource modal blurs the actual workspace",
+      "72-design-pixel rings and 78-design-pixel clock visible"
+    ],
+    "remaining": [
+      "Live star continuity across tab/header while a task runs",
+      "Full pixel parity and broad provider/performance acceptance"
+    ],
+    "proof": "artifacts/gpui/release/curated-native-final.json",
+    "providerContinuityRechecked": false
+  },
+  "latestPaneLocalVerification": {
+    "app": "/Users/alex/code/monitter-gpui/artifacts/gpui/debug/build-1791017938986/Monitter GPUI.app",
+    "guiPid": 70123,
+    "serverPid": 68145,
+    "serverInstanceId": "783b18fd-578d-4e8a-9dc6-ba02ecb4183c",
+    "productionPid": 75865,
+    "guiTests": 116,
+    "nativePreferenceTests": 5,
+    "sidebarRestoration": {
+      "tab": "timeline",
+      "width": 416,
+      "referenceWidthOverride": false,
+      "sameServer": true
+    },
+    "nativeVerified": [
+      "overlay tab click no longer dismisses",
+      "Details scoped process empty state",
+      "modern close keyboard focus visible",
+      "Enter closes only temporary empty tab",
+      "original three tabs and selected chat restored"
+    ],
+    "remaining": [
+      "full pixel parity",
+      "blur",
+      "idle close pointer-event fidelity",
+      "successful provider reply continuity"
+    ]
+  },
+  "latestDetailsVerification": {
+    "app": "/Users/alex/code/monitter-gpui/artifacts/gpui/debug/build-1791018938513/Monitter GPUI.app",
+    "guiPid": 75264,
+    "serverPid": 68145,
+    "serverInstanceId": "783b18fd-578d-4e8a-9dc6-ba02ecb4183c",
+    "productionPid": 75865,
+    "guiTests": 119,
+    "nativePreferenceTests": 5,
+    "nativeVerified": [
+      "Details real Git branch and staged/changed/untracked counts",
+      "Details Git card opens real repository review",
+      "Delegate opens unsent draft with removable parent link",
+      "No task or provider run created by opening draft",
+      "Back to workspace returns without sending",
+      "Original three-tab layout and selected chat restored"
+    ],
+    "sourceVerified": [
+      "work-plan segmented statuses and expansion",
+      "linked task presence gates",
+      "existing nonempty draft not silently reassigned to parent"
+    ],
+    "pending": [
+      "work-plan native proof requires real existing data (experimental snapshot currently empty)",
+      "collaboration navigation native proof requires real existing links (snapshot empty)",
+      "slash palette parent integration/tests",
+      "Git review compact typography under Luna edit",
+      "modern close idle focus audit",
+      "voice capture",
+      "full pixel/performance/provider reply continuity"
+    ]
+  },
+  "latestComposerVerification": {
+    "checkedAt": "2026-10-03T10:07:44.643225+00:00",
+    "package": "build-1791021493945",
+    "guiPid": 87880,
+    "serverPid": 68145,
+    "serverInstanceId": "783b18fd-578d-4e8a-9dc6-ba02ecb4183c",
+    "guiTests": 125,
+    "strictPackageSignatures": true,
+    "nativeVerified": [
+      "Slash Down selects Settings; Enter opens native preferences",
+      "Slash palette docks immediately above composer with native command icons",
+      "/project opens native dialog with truthful empty-project state; Escape closes",
+      "Chat -> Repository -> Chat restores child AX controls before any child click",
+      "Original three tabs restored selected index 0; composer empty",
+      "Real repository narrow layout stacks files above diff; compact font and unboxed rows visually inspected"
+    ],
+    "taskCount": 7,
+    "messageCount": 34,
+    "runningTaskCount": 0,
+    "notClaimed": [
+      "Project assignment with populated catalog",
+      "Provider slash execution",
+      "Terminal command execution",
+      "Full pixel/feature/performance/provider-continuity parity"
+    ],
+    "pendingSource": [
+      "Explicit Cancel accessibility label",
+      "Mail batch/default rich-reader fidelity",
+      "Explicit Git file accessibility labels"
+    ],
+    "productionPid": 75865
+  },
+  "latestNativeReview": {
+    "checkedAt": "2026-10-03T17:56:09.901939+00:00",
+    "package": "build-1791049707621",
+    "guiPid": 32783,
+    "serverPid": 25080,
+    "serverInstanceId": "6611d3a3-0cf5-4c15-8488-3ba043f6c0d2",
+    "guiTests": 166,
+    "bothStrictSignaturesPass": true,
+    "layoutUnchangedAcrossGuiRestart": true,
+    "rendererFrame": "artifacts/gpui/visual/gpui-frame-1791049789355066000.png",
+    "rendererReview": {
+      "realActiveGoalRendered": true,
+      "compactGoalDockAboveComposer": true,
+      "permanentHistoryToolbarAbsent": true,
+      "borderlessNativeResourceFooterRetained": true
+    },
+    "nativeInspection": {
+      "pipeAvailable": false,
+      "goalDisclosureAndClearInteractionVerified": false,
+      "historyScrollPagingVerified": false,
+      "continuousFlickerAcceptance": false,
+      "resourceDialogOpeningVerified": false,
+      "liveBlueHoverAndResizeReleaseVerified": false
+    },
+    "sourceChanges": [
+      "Themed compact native Goal HUD with ellipsized disclosure, bounded objective scroll, grouped token counts, optional 90x5 accent meter and icon-only Clear action",
+      "Removed permanent Load earlier / Jump to live row; native scroll-driven older pages and bottom-follow release, including direction-aware short-page fallback",
+      "Removed duplicate main-chat work-plan renderer; retained existing pane-local Details view and collapsed all earlier history by default",
+      "Pane-local draft integration deferred per user; only frozen Changed event prerequisite and restored retry identity validation retained"
+    ],
+    "limits": [
+      "Renderer export is native GPUI paint output, not OS screenshot or live input proof; native inspection pipe repeatedly fails to start.",
+      "Current user workspace had changed to three split chats before restart; latest saved layout was preserved, not overwritten with earlier two-pane layout.",
+      "No live goal mutation or provider turn executed; active persisted goal does not prove an agent is currently running.",
+      "Goal sparkle animation and full desktop pixel parity remain incomplete."
+    ],
+    "fullPixelParityPassed": false,
+    "providerContinuityPassed": false,
+    "providerContinuityScope": "No new provider turn; prior bounded continuity proofs retained separately.",
+    "pending": [
+      "Full desktop pixel and interaction parity",
+      "Native history-scroll, goal disclosure and resource-dialog verification",
+      "Sustained footer flicker and live divider release checks",
+      "Hover message copy/reply/fork interactions (next source cohort)",
+      "All-provider continuity and goal auto-continuation",
+      "Matched release performance and window blur"
+    ],
+    "deferredByUser": [
+      "Pane-local New Chat draft persistence"
+    ]
+  },
+  "latestBrowserDockSourceReview": {
+    "checkedAt": "2026-10-03T13:13:27.387560+00:00",
+    "guiTests": 147,
+    "packageBuilt": true,
+    "nativeInspectionPassed": true,
+    "changes": [
+      "Individual retained BrowserTab entities hosted as canonical Modern dock panes",
+      "Legacy route:browser layout migration with bounded metadata validation and six regression tests",
+      "Preference hydration guarded before entity capture",
+      "Ctrl+Tab cycles owning dock group, including other surfaces",
+      "Independent native-view visibility and last-tab close without placeholder resurrection"
+    ],
+    "review": "Parent integration and separate Luna read-only lifecycle review; no concrete defect found in bounded scope",
+    "cacheCleanupProof": "artifacts/gpui/debug/obsolete-test-binary-cleanup.json",
+    "nativeScope": "One-group browser/chat cycling, individual Modern tabs, explicit public load, metadata/order restore with URL unloaded, and last-browser close. Split visibility and empty-tab restart not accepted."
+  },
+  "latestEmptyPaneReview": {
+    "package": "build-1791036034106",
+    "guiPid": 67655,
+    "guiTests": 149,
+    "nativeCardActions": "Browser replaces only Empty with unloaded main tab; New chat opens actual unsent form; Terminal creates one actual local PTY. Owned PTY explicitly closed via scoped IPC. Empty cards restored across GUI-only restart.",
+    "pending": "New chat is still global creation form; Terminal uses shared session route; native close paused on IPC response timeout setup race; restored Empty shortcut focus is not accepted. New source fixes pending build."
+  },
+  "previousNativeReview6034106": {
+    "checkedAt": "2026-10-03T14:15:31.415617+00:00",
+    "package": "build-1791036034106",
+    "guiPid": 67655,
+    "serverPid": 25080,
+    "serverInstanceId": "6611d3a3-0cf5-4c15-8488-3ba043f6c0d2",
+    "guiTests": 149,
+    "nativePreferenceTests": 9,
+    "focusedAppServerTests": 21,
+    "strictBothAppSignatures": true,
+    "nativeInspection": {
+      "compactBrowserChromeAndPublicPageVerified": true,
+      "attachmentXAssetAndRemoveVerified": true,
+      "newChatFullCatalogScrollAndInputReachability": true,
+      "newChatSendNotInvoked": true,
+      "successfulSentDraftClearedFromPreferences": true,
+      "sentDraftRemainsBlankAfterForcedGuiRestart": true,
+      "originalThreeTabsAndSelectionRestored": false,
+      "ownedSmokeRecoverablyArchived": true,
+      "ownedBrowserMetadataRemoved": false,
+      "noMailMutation": true,
+      "normalDensityHeaderAndBrandInspected": true,
+      "sentDraftForcedRestartRepeatedWithSoleGui": true,
+      "individualModernBrowserDockTabs": true,
+      "browserFocusedGroupCyclingIncludingChat": true,
+      "browserGuiRestartRestoresOrderAndUnloadedUrl": true,
+      "lastBrowserCloseWithoutReplacement": true,
+      "laterUserLayoutPreserved": true,
+      "composerUsesConfiguredChatTypography": true,
+      "currentUserSingleChatLayoutPreserved": true,
+      "emptyCardsRendered": true,
+      "emptyBrowserActionVerified": true,
+      "emptyNewChatUnsentFormVerified": true,
+      "emptyTerminalOpenedOneActualPty": true,
+      "ownedPtyClosedViaScopedIpc": true,
+      "emptyCardsRestoredAfterGuiRestart": true
+    },
+    "taskCount": 8,
+    "fullPixelParityPassed": false,
+    "providerContinuityPassed": true,
+    "providerContinuityScope": "One GPT-6-Luna read-only second turn survived forced GUI exit/reopen with stable server, session hash and backend PIDs; exact reply stored and rendered. Not proof for all providers or goal auto-continuation.",
+    "proofs": [
+      "artifacts/gpui/debug/traced-provider-continuity.json",
+      "artifacts/gpui/debug/draft-ack-native-review.json",
+      "artifacts/gpui/debug/codex-0160-schema-review.json",
+      "artifacts/gpui/debug/browser-dock-native-review.json",
+      "artifacts/gpui/debug/build-1791034039969-restart.json",
+      "artifacts/gpui/debug/empty-landing-native-review.json"
+    ],
+    "pending": [
+      "Full pixel/feature parity",
+      "Matched release performance",
+      "All-provider continuity and goal auto-continuation",
+      "Browser split-visibility interaction, extensions, and history workflows",
+      "Window backdrop blur",
+      "Terminal native close needs recheck after verified macOS fast-reply IPC timeout race correction",
+      "Restored empty-pane keyboard focus correction native check",
+      "Per-session terminal dock tabs and pane-local unsent chat draft creation"
+    ],
+    "guiTestsScope": "149 tests passed for EmptyPane actions, terminal adoption list-fence, browser dock and prior composer typography. New IPC timeout/focus/widget/terminal style source is pending the next package."
+  },
+  "visualPriority": {
+    "chatsAndAgentInteraction": "primary",
+    "paneLocalNewChatDrafts": "deferred by user; not present in Tauri reference either",
+    "goals": "Packaged real active Codex goal rendered in compact themed composer dock; live disclosure/clear unverified",
+    "historyNavigation": "Packaged permanent row absent in renderer frame; native scroll paging source/test suite passed, live interaction unverified",
+    "workPlans": "Removed stale central duplicate; existing pane-local Details renderer retained, earlier history collapsed by default"
+  },
+  "previousFlatFooterReview": {
+    "checkedAt": "2026-10-03T17:20:07.105727+00:00",
+    "package": "build-1791047003240",
+    "guiPid": 22515,
+    "serverPid": 25080,
+    "serverInstanceId": "6611d3a3-0cf5-4c15-8488-3ba043f6c0d2",
+    "guiTests": 165,
+    "bothStrictSignaturesPass": true,
+    "nativeInspection": {
+      "unboxedFullWidthFooterObserved": true,
+      "nativeSparklinesVisibleAcrossTwoRefreshSamples": true,
+      "continuousFlickerAcceptance": false,
+      "resourceDialogOpeningVerified": false,
+      "accessibilityResourceButtonPresent": true,
+      "idleDividerPillsAbsent": true,
+      "liveBlueHoverAndResizeReleaseVerified": false
+    },
+    "layoutUnchangedAcrossGuiRestart": true,
+    "limits": [
+      "Native inspection pipe failed twice after user steering; reset did not recover. Resource AX click had no observable effect; coordinate recheck not executed.",
+      "Two screenshots show clock/metrics changing with traces visible; this is sampled observation, not sustained frame-by-frame flicker acceptance.",
+      "Native hover/release acceptance remains open; three public GPUI resize event regressions pass."
+    ],
+    "ownedPtyCleanupProof": "owned-terminal-drag-cohort-cleanup.json",
+    "fullPixelParityPassed": false,
+    "providerContinuityPassed": false,
+    "providerContinuityScope": "No new provider turn executed in this cohort; earlier bounded Luna continuity evidence retained separately.",
+    "proofs": [
+      "artifacts/gpui/debug/flat-footer-native-review.json",
+      "artifacts/gpui/debug/build-1791047003240-restart.json"
+    ],
+    "pending": [
+      "Full desktop pixel and behavior parity",
+      "Native resource dialog and sustained flicker check after inspection pipe recovery",
+      "Live blue-divider hover/release verification",
+      "Pane-local unsent New Chat forms",
+      "All-provider continuity and goal auto-continuation",
+      "Matched release performance and window blur"
+    ]
+  },
+  "latestSourceReview": "artifacts/gpui/debug/message-actions-followup-source-review.json",
+  "currentRuntimeObservation": {
+    "at": "2026-10-07T05:38:48.001684+00:00",
+    "experimentalGuiRunning": true,
+    "experimentalGuiPid": 56077,
+    "experimentalServerRunning": true,
+    "experimentalServerPid": 9031,
+    "experimentalServerInstanceId": "80921ad9-7a28-47c5-b740-92a76a7eb49d",
+    "productionPid": 75865,
+    "freshServerInstance": false,
+    "runningExperimentalTasks": 0,
+    "newSourcePackaged": true
+  },
+  "messageActions": {
+    "sourceImplemented": true,
+    "packaged": false,
+    "nativeInputVerified": false,
+    "proof": "artifacts/gpui/debug/message-actions-source-review.json",
+    "priorSourceGuiTestsPassed": 167,
+    "currentSourceTestsRun": false,
+    "followupProof": "artifacts/gpui/debug/message-actions-followup-source-review.json"
+  },
+  "screenshotDelivery": {
+    "rawLimitBytes": 307200,
+    "inlineLimitBytes": 460800,
+    "latest": "artifacts/gpui/visual/curated-20261006/final.jpg",
+    "latestImageBytes": 211842,
+    "latestEstimatedInlineBytes": 283480,
+    "nativeInspectionRecovered": true,
+    "footerCrop": "artifacts/gpui/visual/share/sidebar-footer-20261005.jpg",
+    "deliveryMethod": "Direct CUA native MCP ImageContent with explicit JPEG MIME",
+    "storedAttachmentsVerified": true,
+    "phoneRenderingConfirmed": false,
+    "lastResendRawBytes": [
+      31019,
+      176214
+    ]
+  },
+  "latestNativeResourceReview": "artifacts/gpui/debug/native-resource-and-image-review-20261005.json",
+  "latestReasoningSourceReview": "artifacts/gpui/debug/reasoning-and-image-source-review-20261005.json",
+  "preferencesNavigationCohort": {
+    "date": "2026-10-06",
+    "status": "partial_native_review",
+    "libraryTests": 14,
+    "desktopTests": 201,
+    "nativeVerified": [
+      "90-percent preferences geometry and category navigation",
+      "Appearance page scrolling to real Motion policy",
+      "ten terminal palette controls exposed",
+      "Modern chat type icons visible",
+      "centered native sidebar branding and real provider icons",
+      "CmdB compact rail and expanded restore",
+      "CmdT empty tab and CmdW scoped close",
+      "CmdShiftRight moves owned empty tab between panes",
+      "CmdOptionLeft/Right cycles owning group from composer",
+      "preferences blocks CmdW to hidden workspace",
+      "Access popup above button with left alignment",
+      "Model popup above button with right alignment and wrapped notes",
+      "blank Modern tab strip double-click zoomed native window"
+    ],
+    "pending": [
+      "native blank-tab-bar window drag proof",
+      "live divider hover/release/resize proof",
+      "full-pane working animation renderer",
+      "encrypted Remote Control implementation",
+      "new owner extension/secret commands activating on a future server update",
+      "broad settings mutation/native shortcut acceptance"
+    ],
+    "serverPreserved": 9031,
+    "productionPreserved": 75865,
+    "package": "/Users/alex/code/monitter-gpui/artifacts/gpui/release/build-1791311065568/Monitter GPUI.app",
+    "guiPid": 48970,
+    "evidence": "artifacts/gpui/release/native-ui-after.json"
+  },
+  "historicalVerificationBeforeCurated": {
+    "package": "artifacts/gpui/debug/build-1790982309109",
+    "guiPid": 20069,
+    "serverPid": 73266,
+    "guiTests": 114,
+    "ipcTests": 18,
+    "productionPidUnchanged": 75865,
+    "fullParityVerified": false,
+    "nativeInspection": "Pane-local four tabs, independent two-pane selection/visibility and single-tab Modern strip verified in prior package0712049. Current package2309109 verifies owning-pane <700 design-px overlay below full-width header, click/Escape dismissal, retained Timeline selection after reopen, dark backdrop, real Timeline events, and wide fullscreen split with no backdrop. Exiting fullscreen auto-hides narrow local sidebar and restores regular window. Composer full width after dismissal; exact native Tauri localStorage left354.979187/right416 reference applied at125%. Sidebar width/tab/visibility restart persistence, blur, modern close focus, full process summary, complete pixel/performance/provider continuity remain gaps.",
+    "providerContinuityPassed": false
+  },
+  "curatedActivity": {
+    "accountingHidden": true,
+    "savedRuleCardsHidden": true,
+    "nestedBranches": true,
+    "nativeNarrowBranchVerified": true,
+    "tabHeaderSharedCoordinates": true,
+    "starContinuationLiveVerified": false,
+    "proof": "artifacts/gpui/release/curated-native-final.json"
+  },
+  "latestRingsVerification": {
+    "source": "/Users/alex/code/monitter-gpui/artifacts/gpui/release/build-1791322208823/Monitter GPUI.app",
+    "installed": "/Applications/Monitter GPUI.app",
+    "backup": "/Users/alex/code/monitter-gpui/artifacts/gpui/install-backups/Monitter-GPUI-before-rings-1791322214872393000.app",
+    "replacedApp": "/Applications/.Monitter-GPUI-replaced-1791322216000907000.app",
+    "stoppedGuiPids": [
+      87820
+    ],
+    "serverPidPreserved": 9031,
+    "serverBinaryUnchanged": true,
+    "productionPidPreserved": 75865,
+    "sha256": "7a94f09830f9c10f9a7f9e41c8e6522dc38dba730f3590f79f63992482fdb761",
+    "strictSignature": true,
+    "priorDesktopTests": 228,
+    "optimizedBuildPassed": true,
+    "sameServer": true,
+    "tasksPreserved": true,
+    "tasksBefore": 12,
+    "tasksAfter": 12,
+    "messagesPreserved": true,
+    "messagesBefore": 140,
+    "messagesAfter": 140,
+    "guiPid": 90192,
+    "nativeVerified": "All five usage rings and both Codex account arrows fit in one row with visible spacing; provider icons proportionally sized. Clock remains78 design pixels.",
+    "resizing": "Source uses actual retained sidebar resize width; live gesture resizing not rechecked in this pass.",
+    "image": "artifacts/gpui/visual/curated-20261006/rings-row.jpg",
+    "imageBytes": 23631,
+    "fullParityVerified": false
+  },
+  "latestClockVerification": {
+    "source": "/Users/alex/code/monitter-gpui/artifacts/gpui/release/build-1791323135528/Monitter GPUI.app",
+    "installed": "/Applications/Monitter GPUI.app",
+    "backup": "/Users/alex/code/monitter-gpui/artifacts/gpui/install-backups/Monitter-GPUI-before-clock-1791323151460710000.app",
+    "replacedApp": "/Applications/.Monitter-GPUI-replaced-1791323152884403000.app",
+    "stoppedGuiPids": [
+      90192
+    ],
+    "serverPidPreserved": 9031,
+    "serverBinaryUnchanged": true,
+    "productionPidPreserved": 75865,
+    "sha256": "369b6595470fe258d5f3f540216f3a1c89589d7365f7bb6668d29557c92a7417",
+    "strictSignature": true,
+    "priorDesktopTests": 228,
+    "optimizedBuildPassed": true,
+    "sameServer": true,
+    "tasksPreserved": true,
+    "tasksBefore": 12,
+    "tasksAfter": 12,
+    "messagesPreserved": true,
+    "messagesBefore": 140,
+    "messagesAfter": 140,
+    "guiPid": 93106,
+    "clockDesignPixels": 56,
+    "previousClockDesignPixels": 78,
+    "nativeVerified": "Compact clock beside wider CPU/RAM graphs; all five usage rings still in one row.",
+    "image": "artifacts/gpui/visual/curated-20261006/clock-compact.jpg",
+    "imageBytes": 23027,
+    "fullParityVerified": false
+  },
+  "latestRelativeClockVerification": {
+    "source": "/Users/alex/code/monitter-gpui/artifacts/gpui/release/build-1791328311162/Monitter GPUI.app",
+    "installed": "/Applications/Monitter GPUI.app",
+    "backup": "/Users/alex/code/monitter-gpui/artifacts/gpui/install-backups/Monitter-GPUI-before-relative-clock-1791328373512770000.app",
+    "replacedApp": "/Applications/.Monitter-GPUI-replaced-1791328374764551000.app",
+    "stoppedGuiPids": [
+      93106
+    ],
+    "serverPidPreserved": 9031,
+    "serverBinaryUnchanged": true,
+    "productionPidPreserved": 75865,
+    "sha256": "6c1ed89fc18ce910511c8198c37f87fa625b76a6790a69cd561f045878874b94",
+    "strictSignature": true,
+    "priorDesktopTests": 228,
+    "optimizedBuildPassed": true,
+    "sameServer": true,
+    "tasksPreserved": true,
+    "tasksBefore": 12,
+    "tasksAfter": 12,
+    "messagesPreserved": true,
+    "messagesBefore": 140,
+    "messagesAfter": 140,
+    "guiPid": 6143,
+    "clockDesignPixels": "ring diameter + 4",
+    "ringVerticalPaddingDesignPixels": 5,
+    "nativeVerified": "Smaller relative clock and all five rings in one padded row, beside CPU/RAM graphs.",
+    "image": "artifacts/gpui/visual/curated-20261006/relative-clock-share.jpg",
+    "imageBytes": 21588,
+    "currentSourceTestsRun": false,
+    "fullParityVerified": false
+  },
+  "latestFooterPaddingVerification": {
+    "source": "/Users/alex/code/monitter-gpui/artifacts/gpui/release/build-1791329125081/Monitter GPUI.app",
+    "installed": "/Applications/Monitter GPUI.app",
+    "backup": "/Users/alex/code/monitter-gpui/artifacts/gpui/install-backups/Monitter-GPUI-before-footer-padding10-1791329143664320000.app",
+    "replacedApp": "/Applications/.Monitter-GPUI-replaced-1791329145361662000.app",
+    "stoppedGuiPids": [
+      6143
+    ],
+    "serverPidPreserved": 9031,
+    "serverBinaryUnchanged": true,
+    "productionPidPreserved": 75865,
+    "sha256": "33ee26d6583d32f9664a7128dd3a4509ac53dcf96e1fed825173572196529487",
+    "strictSignature": true,
+    "priorDesktopTests": 228,
+    "optimizedBuildPassed": true,
+    "sameServer": true,
+    "tasksPreserved": true,
+    "tasksBefore": 12,
+    "tasksAfter": 12,
+    "messagesPreserved": true,
+    "messagesBefore": 140,
+    "messagesAfter": 140,
+    "guiPid": 8222,
+    "clockDesignPixels": "ring diameter + 4",
+    "ringVerticalPaddingDesignPixels": 10,
+    "resourcesPaddingDesignPixels": 10,
+    "nativeVerified": "All five rings in one row with 10px top/bottom padding; clock/resources inset by 10px on all sides, full-width divider retained.",
+    "image": "artifacts/gpui/visual/curated-20261006/footer-padding10-share.jpg",
+    "imageBytes": 22609,
+    "currentSourceTestsRun": false,
+    "fullParityVerified": false
+  },
+  "latestStyleGuideVerification": {
+    "source": "/Users/alex/code/monitter-gpui/artifacts/gpui/release/build-1791331003284/Monitter GPUI.app",
+    "installed": "/Applications/Monitter GPUI.app",
+    "backup": "/Users/alex/code/monitter-gpui/artifacts/gpui/install-backups/Monitter-GPUI-before-style-guide-1791331007349528000.app",
+    "replacedApp": "/Applications/.Monitter-GPUI-replaced-1791331008429919000.app",
+    "stoppedGuiPids": [
+      12716
+    ],
+    "serverPidPreserved": 9031,
+    "serverBinaryUnchanged": true,
+    "productionPidPreserved": 75865,
+    "sha256": "929399830ec59c64f34ba234a9995d86a1825a1b3d8616348f444fa6769756bd",
+    "strictSignature": true,
+    "currentDesktopTests": 229,
+    "optimizedBuildPassed": true,
+    "sameServer": true,
+    "tasksPreserved": true,
+    "tasksBefore": 12,
+    "tasksAfter": 12,
+    "messagesPreserved": true,
+    "messagesBefore": 140,
+    "messagesAfter": 140,
+    "guiPid": 13881,
+    "guide": "desktop-gpui/UX_STYLE_GUIDE.md",
+    "spacingDesignPixels": [
+      5,
+      10,
+      15,
+      20,
+      30
+    ],
+    "controlRadiusDesignPixels": 5,
+    "cardRadiusDesignPixels": 10,
+    "tests": {
+      "library": 14,
+      "desktop": 229,
+      "failed": 0,
+      "log": "/tmp/gpui-style-guide-tests-repaired.log"
+    },
+    "currentSourceTestsRun": true,
+    "fontWeightSliderCrashFixed": true,
+    "authoritativeSettingsUnchanged": true,
+    "phoneImagesEmitted": [
+      "style-guide-chat-share.jpg",
+      "style-guide-typography-share.jpg",
+      "style-guide-menu-share.jpg"
+    ],
+    "images": [
+      {
+        "path": "artifacts/gpui/visual/curated-20261006/style-guide-chat-share.jpg",
+        "bytes": 216511
+      },
+      {
+        "path": "artifacts/gpui/visual/curated-20261006/style-guide-preferences-share.jpg",
+        "bytes": 154809
+      },
+      {
+        "path": "artifacts/gpui/visual/curated-20261006/style-guide-menu-share.jpg",
+        "bytes": 90776
+      },
+      {
+        "path": "artifacts/gpui/visual/curated-20261006/style-guide-typography-share.jpg",
+        "bytes": 136176
+      },
+      {
+        "path": "artifacts/gpui/visual/curated-20261006/style-guide-general-share.jpg",
+        "bytes": 153313
+      }
+    ],
+    "nativeVerified": [
+      "Chat header/composer/message spacing and one-row padded usage footer",
+      "General/Appearance/Typography form layout and text-field accessible labels",
+      "Typography field focus, slider render and lower controls reachable by native wheel",
+      "Left-anchored Access menu with wrapped notes and shared padding"
+    ],
+    "remaining": [
+      "All density/narrow combinations and ancillary dialogs",
+      "Specialized color/numeric/filesystem widgets remain parity gaps",
+      "Full slider accessibility and complete desktop parity"
+    ],
+    "fullParityVerified": false
+  },
+  "latestLogoSizeVerification": {
+    "source": "/Users/alex/code/monitter-gpui/artifacts/gpui/release/build-1791351504309/Monitter GPUI.app",
+    "installed": "/Applications/Monitter GPUI.app",
+    "backup": "/Users/alex/code/monitter-gpui/artifacts/gpui/install-backups/Monitter-GPUI-before-logo70-1791351510586168000.app",
+    "replacedApp": "/Applications/.Monitter-GPUI-replaced-1791351511684663000.app",
+    "stoppedGuiPids": [
+      55346
+    ],
+    "serverPidPreserved": 9031,
+    "serverBinaryUnchanged": true,
+    "productionPidPreserved": 75865,
+    "sha256": "0b44bbd2ffc19ca8726b100503c9d28b5e50288a35ebb532e162567f53a9b10a",
+    "strictSignature": true,
+    "priorDesktopTests": 229,
+    "currentSourceTestsRun": false,
+    "optimizedBuildPassed": true,
+    "sameServer": true,
+    "tasksPreserved": true,
+    "tasksBefore": 12,
+    "tasksAfter": 12,
+    "messagesPreserved": true,
+    "messagesBefore": 140,
+    "messagesAfter": 140,
+    "guiPid": 56077,
+    "beforeBounds": [
+      163,
+      27,
+      477,
+      87
+    ],
+    "afterBounds": [
+      211,
+      36,
+      430,
+      78
+    ],
+    "nativeWidthRatio": 0.697452229299363,
+    "nativeHeightRatio": 0.7,
+    "centerPreserved": true,
+    "authoritativeSettingsUnchanged": true,
+    "sourceBox": [
+      91.2,
+      30.4
+    ],
+    "image": "artifacts/gpui/visual/curated-20261006/logo70-share.jpg",
+    "imageBytes": 17423,
+    "nativeVerified": true,
+    "fullParityVerified": false
+  }
+}

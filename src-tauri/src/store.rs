@@ -28,6 +28,7 @@ struct UsageState {
     committed: crate::history::History<RunUsageSample>,
     staged: crate::history::History<RunUsageSample>,
     captured_since: Option<i64>,
+    removed: Vec<RunUsageSample>,
 }
 
 pub struct Store {
@@ -55,7 +56,7 @@ impl Store {
         let lease = migration::Lease::acquire(&dir)?;
         let database = migration::open_database(&dir)?;
         let (mut snapshot, mut hosts, attachments, samples, captured_since) =
-            database.read_snapshot()?;
+            database.read_resident_snapshot()?;
         let previous = snapshot.clone();
         let previous_hosts = hosts.clone();
         // Preserve immutable task host snapshots when importing older state.
@@ -83,6 +84,7 @@ impl Store {
                 committed: samples.clone(),
                 staged: samples,
                 captured_since,
+                removed: Vec::new(),
             }),
             poisoned: AtomicBool::new(false),
             _lease: lease,
@@ -90,6 +92,15 @@ impl Store {
         Ok((store, snapshot, hosts, attachments))
     }
 
+
+    pub(crate) fn channel_messages(&self,channel_id:&str,before_id:Option<&str>,limit:Option<u32>,revision:String)->Result<crate::ui_sync::ChannelMessagesPage,String>{self.database.channel_page(channel_id,before_id,limit,revision)}
+    pub(crate) fn task_messages(&self, task_id:&str, before_id:Option<&str>,limit:Option<u32>,revision:String)->Result<crate::ui_sync::TaskMessagesPage,String> { self.database.message_page(task_id,before_id,limit,revision) }
+    pub(crate) fn messages_through(&self, task_id:&str, through_id:&str)->Result<Vec<crate::model::Message>,String> { self.database.messages_through(task_id,through_id) }
+    pub(crate) fn task_message(&self, task_id: &str, message_id: &str) -> Result<crate::model::Message, String> {
+        self.database.task_message(task_id, message_id)
+    }
+    pub(crate) fn task_events(&self,task_id:&str,before:Option<i64>,limit:Option<u32>)->Result<crate::lan_sync::TaskEventsPage,String>{self.database.event_page(task_id,before,limit)}
+    pub(crate) fn task_event(&self,task_id:&str,event_id:&str)->Result<crate::model::RunEvent,String>{self.database.task_event(task_id,event_id)}
     fn require_writable(&self) -> Result<(), String> {
         if self.poisoned.load(Ordering::Acquire) {
             Err("Monitter persistence failed; reopen the app to reconcile durable state before making further changes.".into())
@@ -107,7 +118,7 @@ impl Store {
         attachments: &HashMap<String, StoredAttachment>,
     ) -> Result<(), String> {
         self.require_writable()?;
-        let previous = self.database.read_snapshot()?;
+        let previous = self.database.read_resident_snapshot()?;
         self.save_update(
             (&previous.0, &previous.1, &previous.2),
             (snapshot, hosts, attachments),
@@ -115,6 +126,9 @@ impl Store {
     }
 
     pub fn save_update(&self, before: StateRef<'_>, after: StateRef<'_>) -> Result<(), String> {
+        self.save_update_work_log(before,after,&[])
+    }
+    pub(crate) fn save_update_work_log(&self,before:StateRef<'_>,after:StateRef<'_>,records:&[crate::work_log::PendingRecord])->Result<(),String>{
         self.require_writable()?;
         let mut usage = self
             .usage
@@ -125,9 +139,10 @@ impl Store {
             .or_else(|| (!usage.staged.is_empty()).then(now));
         let result =
             self.database
-                .apply_update_history_usage(before, after, &usage.committed, &usage.staged, captured);
+                .apply_update_history_usage(before, after, &usage.committed, &usage.staged, captured, records, &usage.removed);
         match result {
             Ok(()) => {
+                usage.removed.clear();
                 usage.committed = usage.staged.clone();
                 // Start a new direct lineage for the next usage transaction.
                 usage.staged = usage.committed.clone();
@@ -158,13 +173,28 @@ impl Store {
 
     pub fn remove_task_usage(&self, task_id: &str) -> Result<(), String> {
         self.require_writable()?;
-        self.usage
-            .lock()
-            .map_err(|_| "Monitter usage state lock failed.".to_string())?
-            .staged
-            .retain(|sample| sample.task_id != task_id);
+        let mut usage=self.usage.lock().map_err(|_| "Monitter usage state lock failed.".to_string())?;
+        let removed=usage.staged.iter().filter(|sample|sample.task_id==task_id).cloned().collect::<Vec<_>>();
+        usage.removed.extend(removed);
+        usage.staged.retain(|sample| sample.task_id != task_id);
         Ok(())
     }
+
+    pub(crate) fn work_log_active_context(&self,run:&str)->Result<Option<crate::work_log::ContextRef>,String>{self.database.work_log_active_context(run)}
+    pub(crate) fn work_log_segment_through(&self,reference:&crate::work_log::ContextRef)->Result<Option<String>,String>{self.database.work_log_segment_through(reference)}
+    pub(crate) fn work_log_context_anchors(&self,task:&str)->Result<(Option<String>,Option<String>),String>{self.database.work_log_context_anchors(task)}
+    pub(crate) fn work_log_lineage(&self,task:&str)->Result<(Option<String>,Option<String>,Option<String>,Option<String>),String>{self.database.work_log_lineage(task)}
+    pub(crate) fn work_log_stats(&self)->Result<(u64,u64,Option<String>),String>{self.database.work_log_stats()}
+    pub(crate) fn work_log_grants_json(&self)->Result<Option<String>,String>{self.database.work_log_grants_json()}
+    pub(crate) fn work_log_set_grants_json(&self,value:&str)->Result<(),String>{self.require_writable()?;self.database.work_log_set_grants_json(value)}
+    pub(crate) fn work_log_settings(&self)->Result<crate::work_log::CollectionSettings,String>{self.database.work_log_settings()}
+    pub(crate) fn work_log_identity(&self)->Result<(String,String),String>{self.database.work_log_identity()}
+    pub(crate) fn work_log_active(&self)->Result<Vec<crate::work_log::WorkRun>,String>{self.database.work_log_active()}
+    pub(crate) fn work_log_append(&self,records:&[crate::work_log::PendingRecord])->Result<(),String>{self.require_writable()?;self.database.work_log_append(records).inspect_err(|_|{self.poisoned.store(true,Ordering::Release);})}
+    pub(crate) fn work_log_configure(&self,settings:&crate::work_log::CollectionSettings)->Result<(),String>{self.require_writable()?;self.database.work_log_configure(settings).inspect_err(|_|{self.poisoned.store(true,Ordering::Release);})}
+    pub(crate) fn work_log_configure_with_records(&self,settings:&crate::work_log::CollectionSettings,records:&mut [crate::work_log::PendingRecord])->Result<(),String>{self.require_writable()?;self.database.work_log_configure_with_records(settings,records).inspect_err(|_|{self.poisoned.store(true,Ordering::Release);})}
+    pub(crate) fn work_log_append_recovery(&self,records:&[crate::work_log::PendingRecord])->Result<(),String>{self.require_writable()?;self.database.work_log_append_recovery(records).inspect_err(|_|{self.poisoned.store(true,Ordering::Release);})}
+    pub(crate) fn work_log_report(&self,run:&crate::work_log::WorkRun,input:&crate::work_log::ReportInput)->Result<crate::work_log::ReportReceipt,String>{self.require_writable()?;self.database.work_log_report(run,input).inspect_err(|e|{if e.starts_with("Cannot commit work log report"){self.poisoned.store(true,Ordering::Release);}})}
 
     pub fn usage_overview(&self) -> Result<UsageOverview, String> {
         let usage = self
@@ -332,3 +362,8 @@ fn aggregate_usage(samples: Vec<RunUsageSample>, captured_since: Option<i64>) ->
 #[cfg(test)]
 #[path = "store_tests.rs"]
 mod tests;
+
+impl crate::work_log::OutboxSource for Store {
+ fn pending(&self,limit:usize)->Result<Vec<crate::work_log::CommittedRecord>,String>{self.database.work_log_pending(limit)}
+ fn acknowledge(&self,through:i64)->Result<(),String>{self.require_writable()?;self.database.work_log_acknowledge(through)}
+}

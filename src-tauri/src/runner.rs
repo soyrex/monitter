@@ -256,13 +256,14 @@ fn merge_opencode_mcp_config(existing: Option<&str>, endpoint: &str) -> Result<S
 }
 
 fn codex_args(task: &Task, collaboration_endpoint: Option<&str>) -> Vec<String> {
-    codex_args_with_jev(task, collaboration_endpoint, None)
+    codex_args_with_jev(task, collaboration_endpoint, None, true)
 }
 
 fn codex_args_with_jev(
     task: &Task,
     collaboration_endpoint: Option<&str>,
     jev_decisions_endpoint: Option<&str>,
+    auto_approve_monitter_mcp: bool,
 ) -> Vec<String> {
     // These are exec options and must precede the optional resume subcommand.
     let mut args = vec!["exec".into()];
@@ -312,7 +313,7 @@ fn codex_args_with_jev(
             "-c".into(),
             format!("mcp_servers.monitter.enabled_tools={tools}"),
             "-c".into(),
-            "mcp_servers.monitter.default_tools_approval_mode=\"approve\"".into(),
+            format!("mcp_servers.monitter.default_tools_approval_mode={:?}", if auto_approve_monitter_mcp { "approve" } else { "prompt" }),
             "-c".into(),
             "mcp_servers.monitter.tools.install_shared_skill.approval_mode=\"prompt\"".into(),
         ]);
@@ -696,7 +697,7 @@ fn build_command_with_options(
     collaboration: Option<&SessionGrant>,
     claude_mcp_config_path: Option<&std::path::Path>,
 ) -> Result<Command, String> {
-    build_command_with_jev_options(host, task, collaboration, None, claude_mcp_config_path)
+    build_command_with_jev_options(host, task, collaboration, None, claude_mcp_config_path, true)
 }
 
 fn build_command_with_jev_options(
@@ -705,6 +706,7 @@ fn build_command_with_jev_options(
     collaboration: Option<&SessionGrant>,
     jev_decisions: Option<&SessionGrant>,
     claude_mcp_config_path: Option<&std::path::Path>,
+    auto_approve_monitter_mcp: bool,
 ) -> Result<Command, String> {
     if jev_decisions.is_some() && host.kind != "local" {
         return Err("Jev Decisions MCP is not supported on SSH hosts until a dedicated secure tunnel is available.".into());
@@ -740,12 +742,13 @@ fn build_command_with_jev_options(
             task,
             collaboration.map(|grant| grant.endpoint.as_str()),
             jev_decisions.map(|grant| grant.endpoint.as_str()),
+            auto_approve_monitter_mcp,
         ),
         "claude" => {
             let mut args = adapters::claude::args(task);
             if let Some(path) = claude_mcp_config_path {
                 args.extend(["--mcp-config".into(), path.to_string_lossy().into_owned()]);
-                if collaboration.is_some() {
+                if collaboration.is_some() && auto_approve_monitter_mcp {
                     args.extend(["--allowedTools".into(), claude_tool_names()]);
                 }
             } else if let Some(grant) = collaboration {
@@ -754,9 +757,10 @@ fn build_command_with_jev_options(
                 args.extend([
                     "--mcp-config".into(),
                     claude_mcp_config(&grant.endpoint),
-                    "--allowedTools".into(),
-                    claude_tool_names(),
                 ]);
+                if auto_approve_monitter_mcp {
+                    args.extend(["--allowedTools".into(), claude_tool_names()]);
+                }
             }
             args
         }
@@ -1730,10 +1734,19 @@ pub struct RunControl {
     // must retain the original session-ready baseline. This prevents a tool
     // from making its own background child look like infrastructure.
     tool_work_observed: AtomicBool,
+    runtime_launch_templates: Mutex<HashSet<Vec<(String, Vec<String>)>>>,
+    runtime_ownership_capture_enabled: AtomicBool,
+    runtime_background_processes: Mutex<HashSet<String>>,
+    // Exact configured stdio MCP launches; never serialized (argv may be secret).
+    runtime_infrastructure_launches: Mutex<Vec<(String, Vec<String>)>>,
+    runtime_npm_wrapper_titles: Mutex<Vec<(String, String, Vec<String>)>>,
+    runtime_config_discovered: AtomicBool,
+    runtime_node_repl_specs: Mutex<Vec<(String, String, Option<String>)>>,
     // A Claude stream-json process survives between user turns. It remains in
     // the registry while its task is completed so a later message can use the
     // same native context rather than creating a --resume subprocess.
     resident: AtomicBool,
+    launch_model_settings: Mutex<Option<(String, Option<crate::model::ModelSettings>)>>,
     /// Monitter-owned identity for the current provider turn. It is minted on
     /// every send, including later turns on resident transports.
     run_id: Mutex<String>,
@@ -1754,6 +1767,8 @@ pub struct RunControl {
     app_server_turn_requests: Mutex<HashSet<i64>>,
     app_server_native_turn_requests: Mutex<HashMap<i64, NativeTurnCommand>>,
     app_server_pending_native_turn: Mutex<Option<NativeTurnCommand>>,
+    // Retain timed-out queries until their response arrives: a late reply is
+    // still correlated even after its caller has dropped the receiver.
     app_server_queries: Mutex<HashMap<i64, mpsc::SyncSender<Value>>>,
     // Steers share the current turn instead of beginning a new one. Keep the
     // durable queue record and its expected native turn together so the
@@ -1867,6 +1882,24 @@ fn codex_native_turn_frame(
     Ok(serde_json::json!({"id":request_id,"method":method,"params":params}))
 }
 
+fn runtime_launch_chain(
+    root: libc::pid_t,
+    mut pid: libc::pid_t,
+    launches: &HashMap<libc::pid_t, crate::process_metrics::RetirementLaunch>,
+) -> Option<Vec<(String, Vec<String>)>> {
+    let mut chain = Vec::new();
+    let mut seen = HashSet::new();
+    loop {
+        if !seen.insert(pid) || seen.len() > 128 { return None; }
+        let launch = launches.get(&pid)?;
+        chain.push((launch.executable.clone(), launch.arguments.clone()));
+        if pid == root { break; }
+        pid = launch.parent_pid;
+    }
+    chain.reverse();
+    Some(chain)
+}
+
 impl RunControl {
     /// PID of the owned child process currently attached to this run.
     pub(crate) fn root_pid(&self) -> Option<libc::pid_t> {
@@ -1876,6 +1909,23 @@ impl RunControl {
             .as_ref()
             .map(Child::id)
             .map(|pid| pid as libc::pid_t)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn work_log_fixture_child(&self, child: Child) {
+        *self.child.lock().unwrap()=Some(child);
+    }
+    #[cfg(test)]
+    pub(crate) fn work_log_stop_fixture_child(&self) {
+        if let Some(mut child)=self.child.lock().unwrap().take() {let _=child.kill();let _=child.wait();}
+    }
+    pub(crate) fn work_log_root(&self) -> Option<(libc::pid_t,i64)> {
+        let mut guard=self.child.lock().ok()?;let child=guard.as_mut()?;
+        if child.try_wait().ok()?.is_some(){return None}
+        let pid=child.id() as libc::pid_t;
+        let started=crate::process_metrics::work_log_process_started_at(pid)?;
+        if child.try_wait().ok()?.is_some(){return None}
+        Some((pid,started))
     }
 
     pub fn new(remote_supervised: bool) -> Arc<Self> {
@@ -1894,7 +1944,15 @@ impl RunControl {
             acp_permission_waits: AtomicUsize::new(0),
             runtime_process_baseline: Mutex::new(None),
             tool_work_observed: AtomicBool::new(false),
+            runtime_launch_templates: Mutex::new(HashSet::new()),
+            runtime_ownership_capture_enabled: AtomicBool::new(true),
+            runtime_background_processes: Mutex::new(HashSet::new()),
+            runtime_infrastructure_launches: Mutex::new(Vec::new()),
+            runtime_npm_wrapper_titles: Mutex::new(Vec::new()),
+            runtime_config_discovered: AtomicBool::new(false),
+            runtime_node_repl_specs: Mutex::new(Vec::new()),
             resident: AtomicBool::new(false),
+            launch_model_settings: Mutex::new(None),
             run_id: Mutex::new(crate::model::id()),
             run_started_at: Mutex::new(crate::model::now()),
             child: Mutex::new(None),
@@ -2103,14 +2161,443 @@ impl RunControl {
     }
 
     fn capture_runtime_process_baseline_for_pid(&self, root: libc::pid_t) -> Result<(), String> {
+        // Keep ownership locks in the same order as collector refreshes.
+        let mut owned = self.runtime_process_baseline.lock()
+            .map_err(|_| "Monitter runtime ownership lock failed.".to_string())?;
+        if !self.runtime_ownership_capture_enabled.load(Ordering::SeqCst) {
+            return Err("Runtime startup ownership readiness was not verified.".into());
+        }
         let baseline = crate::process_metrics::retirement_process_tree(root)?
             .into_iter()
             .collect::<HashSet<_>>();
-        *self
-            .runtime_process_baseline
-            .lock()
-            .map_err(|_| "Monitter runtime ownership lock failed.".to_string())? = Some(baseline);
+        let launches = baseline.iter().filter_map(|&(pid, start)| {
+            crate::process_metrics::retirement_launch(pid, start).map(|launch| (pid, launch))
+        }).collect::<HashMap<_, _>>();
+        let templates = baseline.iter().filter_map(|&(pid, _)| {
+            runtime_launch_chain(root, pid, &launches)
+        }).collect();
+        *self.runtime_launch_templates.lock()
+            .map_err(|_| "Monitter runtime launch ownership lock failed.".to_string())? = templates;
+        *owned = Some(baseline);
         Ok(())
+    }
+
+    fn resolve_runtime_command(&self, command: &str) -> Result<std::path::PathBuf, String> {
+        if !command.contains('/') {
+            if let Some(root) = self.root_pid() {
+                if let Ok(tree) = crate::process_metrics::retirement_process_tree(root) {
+                    if let Some((_, start)) = tree.iter().find(|(pid, _)| *pid == root) {
+                        if let Some(path) = crate::process_metrics::retirement_runtime_path(root, *start) {
+                            for directory in path {
+                                let candidate = std::path::Path::new(&directory).join(command);
+                                if let Ok(path) = crate::acp_discovery::resolve_command(&candidate.to_string_lossy()) { return Ok(path); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        crate::acp_discovery::resolve_command(command)
+    }
+
+    /// Resolve existing npm cache package bins without executing npm or
+    /// installing anything. Unsupported invocation forms remain pinned.
+    fn cached_npm_launches(program: &str, args: &[String], runtime_node: Option<&str>) -> Vec<(String, Vec<String>)> {
+        let name = std::path::Path::new(program).file_name().and_then(|name| name.to_str()).unwrap_or("");
+        let mut invocation = args;
+        if name == "npm" {
+            if invocation.first().map(String::as_str) != Some("exec") { return Vec::new() }
+            invocation = &invocation[1..];
+        } else if name != "npx" { return Vec::new() }
+        while invocation.first().is_some_and(|arg| matches!(arg.as_str(), "-y" | "--yes" | "--")) { invocation = &invocation[1..]; }
+        let Some(first) = invocation.first() else { return Vec::new() };
+        let (spec, explicit_bin, tail_args) = if let Some(package) = first.strip_prefix("--package=") {
+            let Some(bin) = invocation.get(1).filter(|bin| !bin.starts_with('-') && !bin.contains('/')) else { return Vec::new() };
+            (package, Some(bin.as_str()), &invocation[2..])
+        } else { (first.as_str(), None, &invocation[1..]) };
+        if spec.starts_with('-') || spec.contains('/') && !spec.starts_with('@') { return Vec::new() }
+        let version_index = if spec.starts_with('@') { spec[1..].rfind('@').map(|index| index + 1) } else { spec.rfind('@') };
+        let (package, version) = version_index.map(|index| (&spec[..index], Some(&spec[index+1..]))).unwrap_or((spec, None));
+        if package.split('/').any(|part| part.is_empty() || part == "." || part == "..")
+            || package.starts_with('@') && package.split('/').count() != 2 { return Vec::new() }
+        let Ok(node) = crate::acp_discovery::resolve_command(runtime_node.unwrap_or("node")) else { return Vec::new() };
+        let node = std::fs::canonicalize(&node).unwrap_or(node).to_string_lossy().into_owned();
+        let Some(home) = std::env::var_os("HOME") else { return Vec::new() };
+        let cache = std::path::PathBuf::from(home).join(".npm/_npx");
+        let Ok(entries) = std::fs::read_dir(cache) else { return Vec::new() };
+        let mut result = Vec::new();
+        for entry in entries.flatten().take(256) {
+            let directory = entry.path().join("node_modules").join(package);
+            let Ok(bytes) = std::fs::read(directory.join("package.json")) else { continue };
+            if bytes.len() > 1024 * 1024 { continue; }
+            let Ok(metadata) = serde_json::from_slice::<Value>(&bytes) else { continue };
+            if metadata.get("name").and_then(Value::as_str) != Some(package) { continue; }
+            if let Some(version) = version {
+                // Tags/ranges cannot prove which cached version was selected.
+                if version != "latest" && metadata.get("version").and_then(Value::as_str) != Some(version) { continue; }
+            }
+            let default_bin_name = explicit_bin.unwrap_or_else(|| package.rsplit('/').next().unwrap_or(package));
+            let bin_name = metadata.get("bin").and_then(Value::as_object)
+                .filter(|bins| explicit_bin.is_none() && !bins.contains_key(default_bin_name) && bins.len() == 1)
+                .and_then(|bins| bins.keys().next()).map(String::as_str).unwrap_or(default_bin_name);
+            let bin = match metadata.get("bin") {
+                Some(Value::String(bin)) => Some(bin.as_str()),
+                Some(Value::Object(bins)) => bins.get(bin_name).and_then(Value::as_str).or_else(|| {
+                    (explicit_bin.is_none() && bins.len() == 1).then(|| bins.values().next().and_then(Value::as_str)).flatten()
+                }),
+                _ => None,
+            };
+            let Some(bin) = bin else { continue };
+            let Ok(script) = std::fs::canonicalize(directory.join(bin)) else { continue };
+            let Ok(package_root) = std::fs::canonicalize(&directory) else { continue };
+            if !script.starts_with(package_root) { continue; }
+            let mut tail = tail_args.to_vec();
+            if tail.first().map(String::as_str) == Some("--") { tail.remove(0); }
+            tail.insert(0, script.to_string_lossy().into_owned());
+            // npm's installed @npmcli/promise-spawn uses sh -c and
+            // escape.sh for arguments; libnpmexec quotes the bin name.
+            // Reject characters requiring complicated cleanup transformations.
+            let safe_tail = if tail_args.first().map(String::as_str) == Some("--") { &tail_args[1..] } else { tail_args };
+            if safe_tail.iter().all(|arg| !arg.contains('\'')) {
+                let mut command = format!("'{bin_name}'");
+                for arg in safe_tail {
+                    command.push(' ');
+                    if arg.is_empty() || arg.chars().any(|ch| "\t\n\r \"#$&'()*;<>?\\`|~".contains(ch)) {
+                        command.push('\''); command.push_str(arg); command.push('\'');
+                    } else { command.push_str(arg); }
+                }
+                if let Ok(shell) = crate::acp_discovery::resolve_command("sh") {
+                    let shell = std::fs::canonicalize(&shell).unwrap_or(shell).to_string_lossy().into_owned();
+                    result.push((shell, vec!["-c".into(), command]));
+                }
+            }
+            result.push((node.clone(), tail));
+        }
+        result
+    }
+
+    /// Map a configured script's simple shebang into the actual process
+    /// executable and argv. Shell/env option parsing is deliberately rejected.
+    fn script_launch(program: &str, args: &[String]) -> Option<(String, Vec<String>)> {
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        std::fs::File::open(program).ok()?.take(4096).read_to_end(&mut bytes).ok()?;
+        let line = std::str::from_utf8(&bytes).ok()?.lines().next()?;
+        let parts = line.strip_prefix("#!")?.split_whitespace().collect::<Vec<_>>();
+        let interpreter = match parts.as_slice() {
+            [interpreter] => *interpreter,
+            ["/usr/bin/env", interpreter] if !interpreter.starts_with('-') => *interpreter,
+            _ => return None,
+        };
+        let executable = crate::acp_discovery::resolve_command(interpreter).ok()?;
+        let executable = std::fs::canonicalize(&executable).unwrap_or(executable).to_string_lossy().into_owned();
+        let mut arguments = vec![std::fs::canonicalize(program).ok()?.to_string_lossy().into_owned()];
+        arguments.extend_from_slice(args);
+        Some((executable, arguments))
+    }
+
+    fn npm_wrapper_titles(program: &str, args: &[String], bins: &[(String, Vec<String>)]) -> Vec<(String, String, Vec<String>)> {
+        let name = std::path::Path::new(program).file_name().and_then(|name| name.to_str()).unwrap_or("");
+        let mut invocation = args;
+        if name == "npm" {
+            if invocation.first().map(String::as_str) != Some("exec") { return Vec::new() }
+            invocation = &invocation[1..];
+        } else if name != "npx" { return Vec::new() }
+        while invocation.first().is_some_and(|arg| matches!(arg.as_str(), "-y" | "--yes")) { invocation = &invocation[1..]; }
+        // Only simple positional invocations have an unambiguous npm title;
+        // npm scrubs flags/credentials and may truncate longer titles.
+        let command = match invocation {
+            [command] if !command.starts_with('-') => command,
+            [package, command] if package.starts_with("--package=") && !command.starts_with('-') => command,
+            _ => return Vec::new(),
+        };
+        let title = format!("npm exec {command}");
+        bins.iter().filter(|(_, argv)| argv.first().is_some_and(|arg| std::path::Path::new(arg).is_absolute()))
+            .map(|(executable, argv)| (executable.clone(), title.clone(), argv.clone())).collect()
+    }
+
+    pub(crate) fn set_runtime_infrastructure_launches(&self, launches: Vec<(String, Vec<String>)>) {
+        if let Ok(mut current) = self.runtime_infrastructure_launches.lock() {
+            current.clear();
+            let Ok(mut titles) = self.runtime_npm_wrapper_titles.lock() else { return };
+            titles.clear();
+            for (program, args) in launches {
+                let bins = Self::cached_npm_launches(&program, &args, self.resolve_runtime_command("node").ok().as_deref().and_then(|path| path.to_str()));
+                titles.extend(Self::npm_wrapper_titles(&program, &args, &bins));
+                current.extend(bins);
+                if let Some(script) = Self::script_launch(&program, &args) { current.push(script); }
+                let executable = std::fs::canonicalize(&program).map(|path| path.to_string_lossy().into_owned()).unwrap_or(program);
+                current.push((executable, args));
+            }
+        }
+    }
+
+    pub(crate) fn extend_runtime_infrastructure_launches_from_config(&self, response: &Value) {
+        if !response.get("config").is_some_and(Value::is_object) { return; }
+        self.runtime_config_discovered.store(true, Ordering::SeqCst);
+        let Some(servers) = response.pointer("/config/mcp_servers").and_then(Value::as_object) else { return };
+        let Ok(mut launches) = self.runtime_infrastructure_launches.lock() else { return };
+        for server in servers.values() {
+            if server.get("enabled").and_then(Value::as_bool) == Some(false) { continue; }
+            let Some(command) = server.get("command").and_then(Value::as_str) else { continue };
+            let Ok(executable) = self.resolve_runtime_command(command) else { continue };
+            let args = match server.get("args") {
+                None => Vec::new(),
+                Some(Value::Array(args)) if args.iter().all(Value::is_string) => args.iter().filter_map(Value::as_str).map(str::to_owned).collect(),
+                _ => continue,
+            };
+            let program = executable.to_string_lossy().into_owned();
+            if std::path::Path::new(command).file_name().and_then(|name| name.to_str()) == Some("uvx") {
+                let mut expanded = vec!["tool".into(), "uvx".into()];
+                expanded.extend(args.clone());
+                // uvx is an installed bootstrap that reexecs its paired uv binary.
+                // Resolve only that sibling, never an unrelated PATH executable.
+                let paired_uv = executable.with_file_name("uv");
+                let expanded_executable = std::fs::canonicalize(&paired_uv)
+                    .unwrap_or_else(|_| std::fs::canonicalize(&executable).unwrap_or(executable.clone()));
+                let launch = (expanded_executable.to_string_lossy().into_owned(), expanded);
+                if !launches.contains(&launch) { launches.push(launch); }
+            }
+            if executable.file_name().and_then(|name| name.to_str()) == Some("node_repl") {
+                if let Some(node) = server.pointer("/env/NODE_REPL_NODE_PATH").and_then(Value::as_str).and_then(|path| self.resolve_runtime_command(path).ok()).and_then(|path| std::fs::canonicalize(path).ok()) {
+                    let codex = server.pointer("/env/CODEX_CLI_PATH").and_then(Value::as_str).and_then(|path| self.resolve_runtime_command(path).ok()).and_then(|path| std::fs::canonicalize(path).ok()).map(|path| path.to_string_lossy().into_owned());
+                    if let Ok(mut specs) = self.runtime_node_repl_specs.lock() {
+                        let spec = (std::fs::canonicalize(&executable).unwrap_or(executable.clone()).to_string_lossy().into_owned(), node.to_string_lossy().into_owned(), codex);
+                        if !specs.contains(&spec) { specs.push(spec); }
+                    }
+                }
+            }
+            let bins = Self::cached_npm_launches(&program, &args, self.resolve_runtime_command("node").ok().as_deref().and_then(|path| path.to_str()));
+            if let Ok(mut titles) = self.runtime_npm_wrapper_titles.lock() {
+                for title in Self::npm_wrapper_titles(&program, &args, &bins) {
+                    if !titles.contains(&title) { titles.push(title); }
+                }
+            }
+            for launch in bins.into_iter()
+                .chain(Self::script_launch(&program, &args))
+                .chain(Some((std::fs::canonicalize(&executable).unwrap_or(executable).to_string_lossy().into_owned(), args))) {
+                if !launches.contains(&launch) { launches.push(launch); }
+            }
+        }
+    }
+
+    fn chrome_package(bin_args: &[String]) -> Option<(String, String)> {
+        let script = std::path::Path::new(bin_args.first()?);
+        for directory in script.ancestors().skip(1).take(6) {
+            let Ok(bytes) = std::fs::read(directory.join("package.json")) else { continue };
+            let Ok(metadata) = serde_json::from_slice::<Value>(&bytes) else { continue };
+            if metadata.get("name").and_then(Value::as_str) != Some("chrome-devtools-mcp") { continue; }
+            let version = metadata.get("version")?.as_str()?.to_owned();
+            let watchdog = std::fs::canonicalize(directory.join("build/src/telemetry/watchdog/main.js")).ok()?.to_string_lossy().into_owned();
+            return Some((watchdog, version));
+        }
+        None
+    }
+
+    fn chrome_title_proved(launch: &crate::process_metrics::RetirementLaunch, pid: libc::pid_t,
+        current: &[(libc::pid_t, i64)], bin_args: &[String]) -> bool {
+        if launch.arguments.first().map(String::as_str) != Some("chrome-devtools-mcp")
+            || !launch.arguments[1..].iter().all(String::is_empty) { return false; }
+        let Some((watchdog, version)) = Self::chrome_package(bin_args) else { return false };
+        current.iter().any(|&(child_pid, started)| {
+            let Some(child) = crate::process_metrics::retirement_launch(child_pid, started) else { return false };
+            child.parent_pid == pid && child.executable == launch.executable
+                && child.arguments.get(1..) == Some([watchdog.clone(), format!("--parent-pid={pid}"), format!("--app-version={version}"), "--os-type=2".into()].as_slice())
+        })
+    }
+
+    fn embedded_runtime_worker(repl: &str, script: &str, kind: &str) -> bool {
+        let Ok(bytes) = std::fs::read(script) else { return false };
+        if bytes.len() < 4096 || bytes.len() > 1024 * 1024 { return false; }
+        let (header, ending): (&[u8], &[u8]) = match kind {
+            "kernel.js" => (b"// Node-based kernel for node_repl.\n", b"  runtime.settle(message);\n});\n"),
+            "trusted-worker.js" => (b"// Trusted service host. JSONL on stdout is reserved for the Rust supervisor.\n", b"  handleNodeReplMessage(message);\n});\n"),
+            _ => return false,
+        };
+        if !bytes.starts_with(header) || !bytes.ends_with(ending) { return false; }
+        std::fs::read(repl).ok().is_some_and(|binary| binary.windows(bytes.len()).any(|candidate| candidate == bytes))
+    }
+
+    fn configured_auxiliary_matches(&self, launch: &crate::process_metrics::RetirementLaunch,
+        identity: (libc::pid_t, i64), root: libc::pid_t, current: &[(libc::pid_t, i64)],
+        configured: &[(String, Vec<String>)]) -> bool {
+        let parent_identity = current.iter().find(|(pid, _)| *pid == launch.parent_pid).copied();
+        let parent = parent_identity.and_then(|(pid, start)| crate::process_metrics::retirement_launch(pid, start));
+        let argv = launch.arguments.get(1..).unwrap_or_default();
+        if launch.parent_pid == root && argv.iter().all(String::is_empty) {
+            if let Some(root_launch) = parent.as_ref() {
+                let sibling = std::path::Path::new(&root_launch.executable).with_file_name("codex-code-mode-host");
+                if std::path::Path::new(&root_launch.executable).file_name().and_then(|name| name.to_str()) == Some("codex")
+                    && std::fs::canonicalize(sibling).ok().is_some_and(|path| path.to_string_lossy() == launch.executable) { return true; }
+            }
+        }
+        if let Some(parent) = parent.as_ref() {
+            if self.runtime_node_repl_specs.lock().ok().is_some_and(|specs| specs.iter().any(|(repl, node, codex)| {
+                if parent.executable != *repl { return false; }
+                if codex.as_ref() == Some(&launch.executable) && argv == ["app-server", "--listen", "stdio://"] { return true; }
+                if launch.executable != *node { return false; }
+                let script = match argv {
+                    [flag, script, session_flag, session, cwd_flag, cwd] if flag == "--experimental-vm-modules" && session_flag == "--session-id" && !session.is_empty() && cwd_flag == "--working-dir" && std::path::Path::new(cwd).is_absolute() => Some((script, "kernel.js")),
+                    [script, cwd] if std::path::Path::new(cwd).is_absolute() => Some((script, "trusted-worker.js")),
+                    _ => None,
+                };
+                let Some((script, expected)) = script else { return false };
+                if std::path::Path::new(script).file_name().and_then(|name| name.to_str()) != Some(expected) { return false; }
+                Self::embedded_runtime_worker(repl, script, expected)
+            })) { return true; }
+            // uv's generated console entrypoint must have the configured package
+            // name/version and exact remaining argv, plus its own interpreter.
+            let parent_args = parent.arguments.get(1..).unwrap_or_default();
+            if configured.iter().any(|(exe, args)| *exe == parent.executable && args.as_slice() == parent_args)
+                && parent_args.get(0).map(String::as_str) == Some("tool") && parent_args.get(1).map(String::as_str) == Some("uvx") {
+                if let Some(spec) = parent_args.get(2) {
+                    let (package, version) = spec.rsplit_once('@').map(|(name, version)| (name, Some(version))).unwrap_or((spec.as_str(), None));
+                    if let Some(script) = argv.first() {
+                        let path = std::path::Path::new(script);
+                        if path.file_name().and_then(|name| name.to_str()) == Some(package) && argv.get(1..) == parent_args.get(3..) {
+                            if let Some((interpreter, expected)) = Self::script_launch(script, &argv[1..]) {
+                                if interpreter == launch.executable && expected == argv {
+                                    if let Some(environment) = path.parent().and_then(|bin| bin.parent()) {
+                                        let lib = environment.join("lib");
+                                        if std::fs::read_dir(lib).ok().is_some_and(|versions| versions.flatten().any(|python| {
+                                            std::fs::read_dir(python.path().join("site-packages")).ok().is_some_and(|entries| entries.flatten().any(|entry| {
+                                                if !entry.file_name().to_string_lossy().ends_with(".dist-info") { return false; }
+                                                let Ok(metadata) = std::fs::read_to_string(entry.path().join("METADATA")) else { return false };
+                                                metadata.lines().any(|line| line.strip_prefix("Name: ").is_some_and(|name| name.replace('_', "-") == package.replace('_', "-")))
+                                                    && version.is_none_or(|version| version == "latest" || metadata.lines().any(|line| line == format!("Version: {version}")))
+                                                    && std::fs::read_to_string(entry.path().join("entry_points.txt")).ok().is_some_and(|text| text.lines().any(|line| line.starts_with(&format!("{package} = "))))
+                                            }))
+                                        })) { return true; }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Chrome rewrites its argv. Its exact package watchdog proves both
+        // the package's canonical code and concrete parent identity/version.
+        configured.iter().any(|(exe, args)| *exe == launch.executable && (
+            Self::chrome_title_proved(launch, identity.0, current, args)
+            || Self::chrome_package(args).is_some_and(|(watchdog, version)| parent.as_ref().is_some_and(|parent| {
+                parent.arguments.first().map(String::as_str) == Some("chrome-devtools-mcp")
+                    && parent.arguments[1..].iter().all(String::is_empty)
+                    && argv == [watchdog, format!("--parent-pid={}", launch.parent_pid), format!("--app-version={version}"), "--os-type=2".into()]
+            }))
+        ))
+    }
+
+    /// Adopt only exact configured MCP executable/argv identities directly
+    /// spawned through verified infrastructure parents. Descendants must each
+    /// match an exact configured or installed package-bin launch; never adopt
+    /// an entire matching subtree (MCPs may spawn background user work).
+    pub(crate) fn refresh_configured_runtime_infrastructure(&self) -> Result<usize, String> {
+        let lifecycle = self.lifecycle.lock().map_err(|_| "Runtime lifecycle unavailable.")?;
+        if !matches!(lifecycle.phase, RuntimePhase::Idle { .. }) || lifecycle.inflight_events != 0
+            || self.has_pending_runtime_request() || self.has_app_server_turn_request()
+            || self.acp_permission_waits.load(Ordering::SeqCst) != 0 || self.is_cancelled() {
+            return Ok(0);
+        }
+        let root = self.root_pid().ok_or("Runtime root unavailable.")?;
+        let launches = self.runtime_infrastructure_launches.lock().map_err(|_| "Runtime launch ownership unavailable.")?;
+        let mut baseline = self.runtime_process_baseline.lock().map_err(|_| "Runtime ownership unavailable.")?;
+        let current = crate::process_metrics::retirement_process_tree(root)?;
+        if baseline.is_none() {
+            if !self.runtime_config_discovered.load(Ordering::SeqCst) { return Ok(0); }
+            let root_identity = current.iter().find(|(pid, _)| *pid == root).copied().ok_or("Runtime root identity unavailable.")?;
+            // A failed startup inventory cannot authorize a broad snapshot.
+            // Recover from the owned root and individually configured launches.
+            *baseline = Some([root_identity].into_iter().collect());
+        }
+        let baseline = baseline.as_mut().unwrap();
+        let mut adopted = 0;
+        for &identity in &current {
+            if baseline.contains(&identity) { continue; }
+            let Some(launch) = crate::process_metrics::retirement_launch(identity.0, identity.1) else { continue };
+            let parent_verified = current.iter().find(|(pid, _)| *pid == launch.parent_pid)
+                .is_some_and(|identity| baseline.contains(identity));
+            let mut arguments = launch.arguments.get(1..).unwrap_or_default().to_vec();
+            // Node may retain the package .bin symlink as argv[1]. Compare its
+            // canonical script identity rather than guessing package names.
+            if let Some(script) = arguments.first_mut() {
+                if let Ok(path) = std::fs::canonicalize(&*script) { *script = path.to_string_lossy().into_owned(); }
+            }
+            let exact_launch = launches.iter().any(|(executable, args)| launch.executable == *executable && arguments == *args);
+            // npm overwrites argv with a security-scrubbed process title.
+            // Require the exact configured title AND a direct child matching
+            // that package's canonical installed bin before trusting it.
+            let npm_wrapper = self.runtime_npm_wrapper_titles.lock().ok().is_some_and(|titles| titles.iter().any(|(executable, title, bin_args)| {
+                launch.executable == *executable && launch.arguments.first() == Some(title)
+                    && launch.arguments[1..].iter().all(String::is_empty)
+                    && current.iter().any(|&(pid, started)| {
+                        let Some(child) = crate::process_metrics::retirement_launch(pid, started) else { return false };
+                        if child.parent_pid != identity.0 || child.executable != *executable { return false; }
+                        let mut argv = child.arguments.get(1..).unwrap_or_default().to_vec();
+                        if let Some(script) = argv.first_mut() {
+                            if let Ok(path) = std::fs::canonicalize(&*script) { *script = path.to_string_lossy().into_owned(); }
+                        }
+                        argv == *bin_args || Self::chrome_title_proved(&child, pid, &current, bin_args)
+                    })
+            }));
+            let auxiliary = self.configured_auxiliary_matches(&launch, identity, root, &current, &launches);
+            if parent_verified && (exact_launch || npm_wrapper || auxiliary) {
+                baseline.insert(identity);
+                adopted += 1;
+            }
+        }
+        if !self.runtime_ownership_capture_enabled.load(Ordering::SeqCst)
+            && current.iter().all(|identity| baseline.contains(identity)) {
+            self.record_runtime_launch_templates(root, baseline)?;
+            self.runtime_ownership_capture_enabled.store(true, Ordering::SeqCst);
+        }
+        Ok(adopted)
+    }
+
+    pub(crate) fn disable_runtime_process_baseline(&self) {
+        self.runtime_ownership_capture_enabled.store(false, Ordering::SeqCst);
+        if let Ok(mut baseline) = self.runtime_process_baseline.lock() {
+            *baseline = None;
+            if let Ok(mut templates) = self.runtime_launch_templates.lock() {
+                templates.clear();
+            }
+        }
+    }
+
+    fn record_runtime_launch_templates(
+        &self,
+        root: libc::pid_t,
+        identities: &HashSet<(libc::pid_t, i64)>,
+    ) -> Result<(), String> {
+        let launches = identities.iter().filter_map(|&(pid, start)| {
+            crate::process_metrics::retirement_launch(pid, start).map(|launch| (pid, launch))
+        }).collect::<HashMap<_, _>>();
+        self.runtime_launch_templates.lock()
+            .map_err(|_| "Monitter runtime launch ownership lock failed.".to_string())?
+            .extend(identities.iter().filter_map(|&(pid, _)| runtime_launch_chain(root, pid, &launches)));
+        Ok(())
+    }
+
+    /// Native PTY identifiers are provider handles, not OS PIDs. A command
+    /// without an exit code may outlive a completed model turn; keep its owner
+    /// until an authoritative item update confirms exit/failure.
+    pub(crate) fn observe_runtime_command(&self, item: &Value) {
+        if item.get("type").and_then(Value::as_str) != Some("commandExecution") { return; }
+        let Some(process) = item.get("processId").and_then(Value::as_str).filter(|id| !id.is_empty()) else { return };
+        let Ok(mut processes) = self.runtime_background_processes.lock() else { return };
+        let terminal = item.get("exitCode").is_some_and(|exit| !exit.is_null())
+            || item.get("status").and_then(Value::as_str).is_some_and(|status| matches!(status, "failed" | "declined"));
+        if terminal { processes.remove(process); } else { processes.insert(process.to_owned()); }
+    }
+
+    pub(crate) fn observe_runtime_command_exit(&self, item: &Value) {
+        if item.get("type").and_then(Value::as_str) != Some("commandExecution") { return; }
+        let terminal = item.get("exitCode").is_some_and(|exit| !exit.is_null())
+            || item.get("status").and_then(Value::as_str).is_some_and(|status| matches!(status, "failed" | "declined"));
+        if !terminal { return; }
+        if let Some(process) = item.get("processId").and_then(Value::as_str) {
+            if let Ok(mut processes) = self.runtime_background_processes.lock() { processes.remove(process); }
+        }
     }
 
     /// Freeze descendant ownership after the provider reports tool work. The
@@ -2143,25 +2630,31 @@ impl RunControl {
             .runtime_process_baseline
             .lock()
             .map_err(|_| "Monitter runtime ownership lock failed.".to_string())?;
+        if !self.runtime_ownership_capture_enabled.load(Ordering::SeqCst) {
+            return Ok(false);
+        }
         if self.tool_work_observed.load(Ordering::SeqCst) {
             return Ok(false);
         }
         let refreshed = crate::process_metrics::retirement_process_tree(root)?
             .into_iter()
             .collect::<HashSet<_>>();
+        self.record_runtime_launch_templates(root, &refreshed)?;
         // Keep earlier identities as well: a verified startup helper may
         // have detached since capture, but teardown still owns its lifetime.
         baseline.get_or_insert_with(HashSet::new).extend(refreshed);
         Ok(true)
     }
 
-    /// Adopt lazily initialized provider infrastructure only while this owner
-    /// remains conclusively idle. Holding the lifecycle lock across the
+    /// Adopt the current descendant identities for explicitly authorized idle
+    /// retirement, including idle computer-use/MCP helpers after tool work.
+    /// Active turns and tracked background jobs must never enter this path.
+    /// This owner must remain conclusively idle. Holding the lifecycle lock across the
     /// sample prevents a later send from changing the owner to Active between
     /// the no-tool check and ownership capture. This is deliberately stricter
     /// than the completed-turn refresh above: collectors run concurrently
     /// with new accepted sends.
-    pub(crate) fn refresh_runtime_process_baseline_while_idle_if_no_tool_work(
+    pub(crate) fn refresh_runtime_process_baseline_while_idle(
         &self,
     ) -> Result<bool, String> {
         if self.is_cancelled()
@@ -2176,8 +2669,7 @@ impl RunControl {
             .lock()
             .map_err(|_| "Monitter runtime lifecycle lock failed.".to_string())?;
         if !matches!(lifecycle.phase, RuntimePhase::Idle { .. })
-            || lifecycle.inflight_events != 0
-            || self.tool_work_observed.load(Ordering::SeqCst)
+            || lifecycle.inflight_events != 0 || !lifecycle.resume_supported
         {
             return Ok(false);
         }
@@ -2193,16 +2685,15 @@ impl RunControl {
             .runtime_process_baseline
             .lock()
             .map_err(|_| "Monitter runtime ownership lock failed.".to_string())?;
-        // `mark_tool_work_observed` serializes on this same lock. Checking
-        // again immediately before extending prevents an observed tool from
-        // being adopted if it arrived while this method waited for ownership.
-        if self.tool_work_observed.load(Ordering::SeqCst) {
-            return Ok(false);
-        }
+        // The user authorizes retiring every quiescent owner descendant. This
+        // exact PID/start sample is taken under lifecycle + ownership locks,
+        // not inferred from names or a process group. Pending native background
+        // jobs are excluded by has_pending_runtime_request above.
         let refreshed = crate::process_metrics::retirement_process_tree(root)?
-            .into_iter()
-            .collect::<HashSet<_>>();
+            .into_iter().collect::<HashSet<_>>();
+        self.record_runtime_launch_templates(root, &refreshed)?;
         baseline.get_or_insert_with(HashSet::new).extend(refreshed);
+        self.runtime_ownership_capture_enabled.store(true, Ordering::SeqCst);
         drop(baseline);
         drop(lifecycle);
         Ok(true)
@@ -2211,6 +2702,7 @@ impl RunControl {
     /// This deliberately does OS I/O and must be called outside service/data
     /// locks. New descendants or a failed sample mean retirement is unsafe.
     pub(crate) fn retirement_process_tree_is_safe(&self) -> bool {
+        if !self.runtime_ownership_capture_enabled.load(Ordering::SeqCst) { return false; }
         let root = match self.child.lock() {
             Ok(child) => child.as_ref().map(Child::id).map(|pid| pid as libc::pid_t),
             Err(_) => return false,
@@ -2248,6 +2740,57 @@ impl RunControl {
         )
     }
 
+    /// Redacted owner-local diagnostics only. No thread IDs, prompts, command
+    /// arguments, environment or credentials. OS inspection stays outside
+    /// service locks; this is a sample, never authority to retire a runtime.
+    #[cfg(feature = "experimental-gpui")]
+    pub(crate) fn idle_retirement_status(&self, now: Instant) -> Value {
+        let Ok(lifecycle) = self.lifecycle.lock() else {
+            return serde_json::json!({"state":"unavailable"});
+        };
+        let (state, idle_ms) = match lifecycle.phase {
+            RuntimePhase::Dormant => ("dormant", None),
+            RuntimePhase::Active => ("active", None),
+            RuntimePhase::Idle { since } => ("idle", Some(now.saturating_duration_since(since).as_millis().min(u64::MAX as u128) as u64)),
+            RuntimePhase::Retiring => ("retiring", None),
+        };
+        let resume_supported = lifecycle.resume_supported;
+        let event_count = lifecycle.inflight_events;
+        drop(lifecycle);
+        let baseline = self.runtime_process_baseline.lock().ok().and_then(|value| value.clone());
+        let unknown_process_count = self.root_pid().and_then(|root| crate::process_metrics::retirement_process_tree(root).ok())
+            .and_then(|current| baseline.as_ref().map(|known| current.iter().filter(|identity| !known.contains(identity)).count()));
+        let background_tool_processes = self.runtime_background_processes.lock().map(|processes| processes.len()).ok();
+        let pending_approval = self.acp_permission_waits.load(Ordering::SeqCst) != 0;
+        let pending_request = self.has_app_server_turn_request() || self.has_pending_runtime_request();
+        let mut pin_reasons = Vec::new();
+        if !self.runtime_ownership_capture_enabled.load(Ordering::SeqCst) { pin_reasons.push("startupOwnershipUnverified"); }
+        if !resume_supported { pin_reasons.push("resumeUnsupported"); }
+        if pending_approval { pin_reasons.push("pendingApproval"); }
+        if pending_request { pin_reasons.push("pendingWorkRequest"); }
+        if background_tool_processes.is_some_and(|count| count != 0) { pin_reasons.push("backgroundToolProcess"); }
+        if event_count != 0 { pin_reasons.push("protocolEventInFlight"); }
+        if self.is_cancelled() { pin_reasons.push("cancelledOwner"); }
+        match unknown_process_count {
+            Some(count) if count != 0 => pin_reasons.push("unknownLiveDescendants"),
+            None => pin_reasons.push("ownershipUninspectable"),
+            _ => {}
+        }
+        serde_json::json!({
+            "backgroundToolProcesses": background_tool_processes,
+            "pinReasons": pin_reasons,
+            "unknownProcessCount": unknown_process_count,
+            "state": state, "idleForMs": idle_ms,
+            "rootPid": self.root_pid(), "resumeSupported": resume_supported,
+            "eventCount": event_count,
+            "pendingApproval": self.acp_permission_waits.load(Ordering::SeqCst) != 0,
+            "pendingRequest": self.has_app_server_turn_request() || self.has_pending_runtime_request(),
+            "cancelled": self.is_cancelled(),
+            "toolWorkObserved": self.tool_work_observed.load(Ordering::SeqCst),
+            "processTreeVerified": self.retirement_process_tree_is_safe(),
+        })
+    }
+
     /// Atomically claim an eligible idle runtime for planned retirement. The
     /// service still performs durable queue/request checks under its
     /// data-then-runs lock; these local checks fence in-flight protocol work.
@@ -2279,7 +2822,8 @@ impl RunControl {
     }
 
     fn has_pending_runtime_request(&self) -> bool {
-        self.current_app_server_turn().is_some()
+        self.runtime_background_processes.lock().map(|processes| !processes.is_empty()).unwrap_or(true)
+            || self.current_app_server_turn().is_some()
             || self
                 .acp_turn_reserved
                 .lock()
@@ -2588,10 +3132,18 @@ impl RunControl {
     ) -> Result<Value, String> {
         let request_id = self.next_app_server_request_id()?;
         let (sender, receiver) = mpsc::sync_channel(1);
-        self.app_server_queries
-            .lock()
-            .map_err(|_| "Codex query request lock failed.".to_string())?
-            .insert(request_id, sender);
+        {
+            let mut queries = self
+                .app_server_queries
+                .lock()
+                .map_err(|_| "Codex query request lock failed.".to_string())?;
+            // Never evict issued IDs: late responses must remain recognizable.
+            // Bound stalled transports by refusing more queries instead.
+            if queries.len() >= 128 {
+                return Err("Codex app-server has too many unanswered queries.".into());
+            }
+            queries.insert(request_id, sender);
+        }
         let frame = serde_json::json!({"id":request_id,"method":method,"params":params});
         if let Err(error) = self.send_control(&frame.to_string()) {
             let _ = self.take_app_server_query(request_id);
@@ -2600,7 +3152,9 @@ impl RunControl {
         let response = match receiver.recv_timeout(timeout) {
             Ok(response) => response,
             Err(_) => {
-                let _ = self.take_app_server_query(request_id);
+                // The request was sent. Keep its ID until the sole reader
+                // consumes the reply; sending to this dropped receiver is
+                // harmless and must not fail the active model turn.
                 return Err(format!("Codex app-server {method} request timed out."));
             }
         };
@@ -3260,6 +3814,18 @@ impl RunControl {
         format!("{}:{turn_id}:{rpc_id}", self.app_server_instance_id)
     }
 
+    pub(crate) fn record_launch_model_settings(&self, task: &Task) {
+        if let Ok(mut settings) = self.launch_model_settings.lock() {
+            *settings = Some((task.model.clone(), task.model_settings.clone()));
+        }
+    }
+
+    pub(crate) fn needs_model_relaunch(&self, task: &Task) -> Result<bool, String> {
+        if !self.is_resident() || matches!(task.provider.as_str(), "codex" | "acp") { return Ok(false); }
+        let settings = self.launch_model_settings.lock().map_err(|_| "Runtime model settings lock failed.")?;
+        Ok(settings.as_ref().is_some_and(|(model, settings)| model != &task.model || settings != &task.model_settings))
+    }
+
     pub(crate) fn mark_resident(&self) {
         self.resident.store(true, Ordering::SeqCst);
     }
@@ -3469,7 +4035,8 @@ impl RunControl {
             self.cleanup_auxiliary();
             return Ok(());
         }
-        self.signal_owned(libc::SIGTERM)?;
+        // Idle cleanup signals exact PID/start identities only. An unknown
+        // detached tool may still share our process group after reparenting.
         self.signal_verified_baseline(&baseline, libc::SIGTERM)?;
         if self.wait_for_owned_exit_until(
             Instant::now() + Duration::from_secs(2),
@@ -3479,7 +4046,6 @@ impl RunControl {
             self.cleanup_auxiliary();
             return Ok(());
         }
-        self.signal_owned(libc::SIGKILL)?;
         self.signal_verified_baseline(&baseline, libc::SIGKILL)?;
         if self.wait_for_owned_exit_until(
             Instant::now() + Duration::from_secs(1),
@@ -3490,28 +4056,6 @@ impl RunControl {
             return Ok(());
         }
         Err("Idle runtime did not exit within the owned teardown deadline.".into())
-    }
-
-    fn signal_owned(&self, signal: i32) -> Result<(), String> {
-        let process_group = self.owned_process_group.load(Ordering::SeqCst);
-        #[cfg(unix)]
-        if process_group > 0 {
-            // Every launched harness is isolated into this process group.
-            // Signalling it covers a helper which survived after its direct
-            // parent consumed EOF, without reaching any unrelated terminal.
-            unsafe {
-                libc::kill(-process_group, signal);
-            }
-            return Ok(());
-        }
-        let mut child = self
-            .child
-            .lock()
-            .map_err(|_| "Codex child lock failed.".to_string())?;
-        if let Some(child) = child.as_mut() {
-            signal_child(child, signal);
-        }
-        Ok(())
     }
 
     fn signal_verified_baseline(
@@ -3563,7 +4107,7 @@ impl RunControl {
                 slot.take();
             }
             drop(slot);
-            if root_exited && self.owned_process_group_exited() {
+            if root_exited {
                 match self.verified_baseline_exited(baseline) {
                     Ok(true) => return Ok(true),
                     Ok(false) => {}
@@ -4409,6 +4953,7 @@ fn cleanup_remote_helper(host: &Host, helper_dir: &str) {
 }
 
 pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Arc<RunControl>) {
+    service.work_log_register_run(&task_id,&control);
     thread::spawn(move || {
         let (mut task, host) = match service.task_and_host(&task_id) {
             Ok(value) => value,
@@ -4586,6 +5131,7 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
             grant_for_command,
             jev_decisions_grant.as_ref(),
             claude_config.as_ref().map(|file| file.path()),
+            extensions.auto_approve_monitter_mcp,
         ) {
             Ok(command) => command,
             Err(error) => {
@@ -4720,6 +5266,7 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
             return;
         }
         if task.provider == "claude" {
+            control.record_launch_model_settings(&task);
             control.mark_resident();
             // Claude's stream-json session can cold-resume through its saved
             // native session ID. The collector additionally requires that ID
@@ -5190,9 +5737,77 @@ for line in sys.stdin.buffer:
             sandbox: "read-only".into(),
             project_id: None,
             acp: None,
-            archived_agent_name: None,
+            archived_agent_name: None, agent_worktree: None,
             codex_home: None,
         }
+    }
+
+    #[test]
+    fn model_settings_launch_bound_change_preserves_resume_command_and_rejects_active_retirement() {
+        let control = RunControl::new(false);
+        let mut current = task(Some("saved-claude-session"), "old-model");
+        current.provider = "claude".into();
+        control.record_launch_model_settings(&current);
+        control.mark_resident();
+        assert!(!control.needs_model_relaunch(&current).unwrap());
+        current.model = "new-model".into();
+        assert!(control.needs_model_relaunch(&current).unwrap());
+        let args = crate::adapters::claude::args(&current);
+        assert!(args.windows(2).any(|pair| pair == ["--resume", "saved-claude-session"]));
+        assert!(args.windows(2).any(|pair| pair == ["--model", "new-model"]));
+        assert!(!control.try_retire_idle(Instant::now(), Duration::ZERO), "active/dormant owner cannot be retired for a model switch");
+        current.model = "old-model".into();
+        assert!(!control.needs_model_relaunch(&current).unwrap(), "selecting the original model does not restart it");
+        current.model = "new-model".into();
+        for provider in ["codex", "acp"] {
+            current.provider = provider.into();
+            assert!(!control.needs_model_relaunch(&current).unwrap(), "per-turn transports retain their owner");
+        }
+    }
+
+    #[test]
+    fn app_server_query_timeout_preserves_late_response_correlation() {
+        let control = RunControl::new(false);
+        *control.control_stdin.lock().unwrap() = Some(OutboundWriter::spawn(std::io::sink()).unwrap());
+        let error = control.query_app_server(
+            "mcpServerStatus/list", serde_json::json!({}), Duration::ZERO,
+        ).unwrap_err();
+        assert!(error.contains("timed out"));
+        let waiter = control.take_app_server_query(10)
+            .expect("late startup response must still be recognized");
+        assert!(waiter.send(serde_json::json!({"id":10,"result":{}})).is_err());
+        assert!(control.take_app_server_query(10).is_none());
+        assert!(control.take_app_server_query(999).is_none());
+        control.mark_app_server_turn_request(11).unwrap();
+        assert!(control.take_app_server_turn_request(11));
+    }
+
+    #[test]
+    fn app_server_query_unanswered_requests_are_bounded_without_eviction() {
+        let control = RunControl::new(false);
+        *control.control_stdin.lock().unwrap() = Some(OutboundWriter::spawn(std::io::sink()).unwrap());
+        for _ in 0..128 {
+            assert!(control.query_app_server(
+                "config/read", serde_json::json!({}), Duration::ZERO,
+            ).unwrap_err().contains("timed out"));
+        }
+        assert!(control.query_app_server(
+            "config/read", serde_json::json!({}), Duration::ZERO,
+        ).unwrap_err().contains("too many unanswered"));
+        assert!(control.take_app_server_query(10).is_some());
+        assert_eq!(control.app_server_queries.lock().unwrap().len(), 127);
+        assert!(control.query_app_server(
+            "config/read", serde_json::json!({}), Duration::ZERO,
+        ).unwrap_err().contains("timed out"));
+    }
+
+    #[test]
+    fn app_server_query_send_failure_removes_unsent_id() {
+        let control = RunControl::new(false);
+        assert!(control.query_app_server(
+            "config/read", serde_json::json!({}), Duration::ZERO,
+        ).is_err());
+        assert!(control.take_app_server_query(10).is_none());
     }
 
     #[test]
@@ -5384,10 +5999,9 @@ for line in sys.stdin.buffer:
     fn planned_retirement_reaps_an_isolated_owned_process_group() {
         let mut command = Command::new("sh");
         command
-            // The shell is the owned root captured in the baseline. EOF makes
-            // it leave a background helper behind, exercising the exact race
-            // where waiting only for the root would leak a process.
-            .args(["-c", "read ignored; sleep 30 & exit 0"])
+            // Capture the helper before tool work. EOF may reparent it, but
+            // its verified PID/start identity remains owned and is reaped.
+            .args(["-c", "sleep 30 & read ignored; exit 0"])
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -5396,6 +6010,10 @@ for line in sys.stdin.buffer:
         let stdin = child.stdin.take();
         let control = RunControl::new(false);
         control.install(child, stdin).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while crate::process_metrics::retirement_process_tree(control.root_pid().unwrap()).unwrap().len() < 2 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
         control.capture_runtime_process_baseline().unwrap();
         control.set_resume_supported(true);
         control.begin_run().unwrap();
@@ -5492,9 +6110,347 @@ for line in sys.stdin.buffer:
         control
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn idle_retirement_preserves_unknown_reparented_process_group_member() {
+        use std::os::unix::process::CommandExt;
+        let mut root_command = Command::new("/bin/cat");
+        root_command.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
+        isolate_child(&mut root_command);
+        let mut child = root_command.spawn().unwrap();
+        let stdin = child.stdin.take();
+        let control = RunControl::new(false);
+        control.install(child, stdin).unwrap();
+        control.capture_runtime_process_baseline().unwrap();
+        let root = control.root_pid().unwrap();
+        // Stand in for a tool that reparented but retained the provider group.
+        let mut command = Command::new("/bin/sleep");
+        command.arg("30").process_group(root);
+        let mut background = command.spawn().unwrap();
+        control.set_resume_supported(true);
+        control.begin_run().unwrap();
+        control.mark_tool_work_observed();
+        control.mark_idle();
+        assert!(control.retirement_process_tree_is_safe());
+        assert!(control.try_retire_idle(Instant::now() + Duration::from_secs(6), Duration::from_secs(5)));
+        let retired = control.retire_owned();
+        let survived = background.try_wait().unwrap().is_none();
+        let _ = background.kill();
+        let _ = background.wait();
+        assert!(retired.is_ok(), "{retired:?}");
+        assert!(survived, "idle collection killed an unowned detached background job");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn npm_title_requires_configured_canonical_package_child() {
+        let node = crate::acp_discovery::resolve_command("node").unwrap();
+        let node = std::fs::canonicalize(node).unwrap();
+        let directory = std::env::temp_dir().join(format!("monitter-npm-ownership-{}", crate::model::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let script = directory.join("owned.js");
+        std::fs::write(&script, "setInterval(()=>{}, 1000)").unwrap();
+        let script = std::fs::canonicalize(script).unwrap();
+        let wrapper = format!("process.title='npm exec monitter-fixture';require('child_process').spawn(process.execPath,[{}],{{stdio:'ignore'}});setInterval(()=>{{}},1000)", serde_json::to_string(&script.to_string_lossy()).unwrap());
+        let provider = format!("process.stdin.once('data',()=>require('child_process').spawn(process.execPath,['-e',{}],{{stdio:'ignore'}}));setInterval(()=>{{}},1000)", serde_json::to_string(&wrapper).unwrap());
+        let mut command = Command::new(&node);
+        command.args(["-e", &provider]).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
+        isolate_child(&mut command);
+        let mut child = command.spawn().unwrap();
+        let stdin = child.stdin.take();
+        let control = RunControl::new(false);
+        control.install(child, stdin).unwrap();
+        control.capture_runtime_process_baseline().unwrap();
+        control.begin_run().unwrap();
+        control.mark_tool_work_observed();
+        control.mark_idle();
+        let executable = node.to_string_lossy().into_owned();
+        let bin_args = vec![script.to_string_lossy().into_owned()];
+        control.runtime_infrastructure_launches.lock().unwrap().push((executable.clone(), bin_args.clone()));
+        // The same wrapper name without the configured package identity cannot
+        // establish ownership, even though its process title looks familiar.
+        control.runtime_npm_wrapper_titles.lock().unwrap().push((executable.clone(), "npm exec monitter-fixture".into(), vec!["/missing/package.js".into()]));
+        control.send_control("ready").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while crate::process_metrics::retirement_process_tree(control.root_pid().unwrap()).unwrap().len() < 3 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        let mismatch_adopted = control.refresh_configured_runtime_infrastructure().unwrap();
+        let mismatch_safe = control.retirement_process_tree_is_safe();
+        *control.runtime_npm_wrapper_titles.lock().unwrap() = vec![(executable, "npm exec monitter-fixture".into(), bin_args)];
+        let adopted = control.refresh_configured_runtime_infrastructure().unwrap();
+        let safe = control.retirement_process_tree_is_safe();
+        control.cancel();
+        let _ = control.wait();
+        let _ = std::fs::remove_dir_all(directory);
+        assert_eq!(mismatch_adopted, 0);
+        assert!(!mismatch_safe);
+        assert_eq!(adopted, 2);
+        assert!(safe);
+    }
+
+    #[test]
+    fn background_pty_process_pins_completed_turn_until_authoritative_exit() {
+        let control = RunControl::new(false);
+        control.set_resume_supported(true);
+        control.begin_run().unwrap();
+        control.observe_runtime_command(&serde_json::json!({"type":"commandExecution","processId":"pty-1","status":"completed","exitCode":null}));
+        control.mark_idle();
+        let now = Instant::now() + Duration::from_secs(6);
+        assert!(!control.try_retire_idle(now, Duration::from_secs(5)));
+        // Observational metadata does not clear the outstanding native job.
+        control.observe_runtime_command(&serde_json::json!({"type":"mcpToolCall","processId":"pty-1","exitCode":0}));
+        assert!(!control.try_retire_idle(now, Duration::from_secs(5)));
+        control.observe_runtime_command(&serde_json::json!({"type":"commandExecution","processId":"pty-1","status":"completed","exitCode":0}));
+        assert!(control.try_retire_idle(now, Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn failed_startup_quiescent_idle_recovers_after_prior_tool_work() {
+        for tool_work in [false, true] {
+            let control = lazy_helper_control();
+            control.set_app_server_thread("fixture-thread".into());
+            control.set_resume_supported(true);
+            control.begin_run().unwrap();
+            control.disable_runtime_process_baseline();
+            if tool_work { control.mark_tool_work_observed(); }
+            control.mark_idle();
+            control.send_control("start helper").unwrap();
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while crate::process_metrics::retirement_process_tree(control.root_pid().unwrap()).unwrap().len() < 2 && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(10));
+            }
+            let recovered = control.refresh_runtime_process_baseline_while_idle().unwrap();
+            let safe = control.retirement_process_tree_is_safe();
+            control.cancel(); let _ = control.wait();
+            assert!(recovered);
+            assert!(safe);
+        }
+    }
+
+    #[test]
+    fn failed_startup_idle_recovery_requires_resumable_owner_and_no_event() {
+        let control = lazy_helper_control();
+        control.set_resume_supported(true);
+        control.begin_run().unwrap();
+        control.disable_runtime_process_baseline();
+        control.mark_idle();
+        control.set_resume_supported(false);
+        assert!(!control.refresh_runtime_process_baseline_while_idle().unwrap());
+        control.set_resume_supported(true);
+        let permit = control.begin_event_processing().unwrap();
+        assert!(!control.refresh_runtime_process_baseline_while_idle().unwrap());
+        drop(permit);
+        assert!(control.refresh_runtime_process_baseline_while_idle().unwrap());
+        control.mark_tool_work_observed();
+        assert!(!control.refresh_runtime_process_baseline_if_no_tool_work().unwrap());
+        control.cancel(); let _ = control.wait();
+    }
+
+    #[test]
+    fn failed_startup_can_recover_only_from_individually_proved_configuration() {
+        let control = lazy_helper_control();
+        control.begin_run().unwrap();
+        control.mark_tool_work_observed();
+        control.mark_idle();
+        control.disable_runtime_process_baseline();
+        assert_eq!(control.refresh_configured_runtime_infrastructure().unwrap(), 0);
+        assert!(!control.retirement_process_tree_is_safe());
+        control.extend_runtime_infrastructure_launches_from_config(&serde_json::json!({"config":{}}));
+        // The only live process is the owned provider root, so no unrelated
+        // helper/background work can be swept into a readiness recovery.
+        let recovered = control.refresh_configured_runtime_infrastructure();
+        let safe = control.retirement_process_tree_is_safe();
+        control.cancel();
+        let _ = control.wait();
+        assert!(recovered.is_ok());
+        assert!(safe);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "explicit read-only audit of supplied live owner PIDs/config; never signals them"]
+    fn live_runtime_ownership_audit_read_only() {
+        let config: Value = serde_json::from_slice(&std::fs::read(std::env::var("MONITTER_OWNERSHIP_AUDIT_CONFIG").unwrap()).unwrap()).unwrap();
+        for root in std::env::var("MONITTER_OWNERSHIP_AUDIT_PIDS").unwrap().split(',').map(|pid| pid.parse::<libc::pid_t>().unwrap()) {
+            let current = crate::process_metrics::retirement_process_tree(root).unwrap();
+            let root_identity = *current.iter().find(|(pid, _)| *pid == root).unwrap();
+            let path = crate::process_metrics::retirement_runtime_path(root, root_identity.1).unwrap().join(":");
+            let mut command = Command::new("/bin/cat");
+            command.env("PATH", path).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
+            isolate_child(&mut command);
+            let mut child = command.spawn().unwrap();
+            let stdin = child.stdin.take();
+            let control = RunControl::new(false);
+            control.install(child, stdin).unwrap();
+            control.extend_runtime_infrastructure_launches_from_config(&config);
+            let configured = control.runtime_infrastructure_launches.lock().unwrap().clone();
+            let titles = control.runtime_npm_wrapper_titles.lock().unwrap().clone();
+            let mut known = HashSet::from([root_identity]);
+            let mut unresolved = Vec::new();
+            for &identity in &current {
+                if identity == root_identity { continue; }
+                let Some(launch) = crate::process_metrics::retirement_launch(identity.0, identity.1) else { unresolved.push((identity.0, "uninspectable".to_string())); continue };
+                let parent = current.iter().find(|(pid, _)| *pid == launch.parent_pid).is_some_and(|identity| known.contains(identity));
+                let mut argv = launch.arguments.get(1..).unwrap_or_default().to_vec();
+                if let Some(script) = argv.first_mut() { if let Ok(path) = std::fs::canonicalize(&*script) { *script = path.to_string_lossy().into_owned(); } }
+                let exact = configured.iter().any(|(exe, args)| *exe == launch.executable && *args == argv);
+                let npm = titles.iter().any(|(exe, title, bin_args)| *exe == launch.executable && launch.arguments.first() == Some(title) && launch.arguments[1..].iter().all(String::is_empty)
+                    && current.iter().any(|&(pid, start)| crate::process_metrics::retirement_launch(pid, start).is_some_and(|child| {
+                        if child.parent_pid != identity.0 || child.executable != *exe { return false; }
+                        let mut argv = child.arguments.get(1..).unwrap_or_default().to_vec();
+                        if let Some(script) = argv.first_mut() { if let Ok(path) = std::fs::canonicalize(&*script) { *script = path.to_string_lossy().into_owned(); } }
+                        argv == *bin_args || RunControl::chrome_title_proved(&child, pid, &current, bin_args)
+                    })));
+                if parent && (exact || npm || control.configured_auxiliary_matches(&launch, identity, root, &current, &configured)) { known.insert(identity); }
+                else { unresolved.push((identity.0, std::path::Path::new(&launch.executable).file_name().unwrap_or_default().to_string_lossy().into_owned())); }
+            }
+            control.cancel(); let _ = control.wait();
+            eprintln!("owner={root} verified={} live={} unresolved={unresolved:?}", known.len(), current.len());
+            assert!(unresolved.is_empty(), "owner {root} still has unverified live descendants");
+        }
+    }
+
+    #[test]
+    fn embedded_worker_proof_rejects_modified_truncated_or_unrelated_scripts() {
+        let directory = std::env::temp_dir().join(format!("monitter-worker-proof-{}", crate::model::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let binary = directory.join("node_repl");
+        let script = directory.join("trusted-worker.js");
+        let body = format!("// Trusted service host. JSONL on stdout is reserved for the Rust supervisor.\n{}  handleNodeReplMessage(message);\n}});\n", "// fixed native runtime code\n".repeat(200));
+        std::fs::write(&binary, format!("native-prefix{body}native-suffix")).unwrap();
+        std::fs::write(&script, &body).unwrap();
+        let proven = RunControl::embedded_runtime_worker(binary.to_str().unwrap(), script.to_str().unwrap(), "trusted-worker.js");
+        std::fs::write(&script, body.replace("fixed native runtime code", "user injected replacement")).unwrap();
+        let modified = RunControl::embedded_runtime_worker(binary.to_str().unwrap(), script.to_str().unwrap(), "trusted-worker.js");
+        std::fs::write(&script, "fixed native runtime code").unwrap();
+        let truncated = RunControl::embedded_runtime_worker(binary.to_str().unwrap(), script.to_str().unwrap(), "trusted-worker.js");
+        std::fs::write(&script, &body).unwrap();
+        let unrelated = RunControl::embedded_runtime_worker(binary.to_str().unwrap(), script.to_str().unwrap(), "user.js");
+        std::fs::remove_dir_all(directory).unwrap();
+        assert!(proven); assert!(!modified); assert!(!truncated); assert!(!unrelated);
+    }
+
+    #[test]
+    fn infrastructure_config_rejects_disabled_or_malformed_launches() {
+        let control = RunControl::new(false);
+        control.extend_runtime_infrastructure_launches_from_config(&serde_json::json!({"config":{"mcp_servers":{
+            "disabled":{"enabled":false,"command":"/usr/bin/true"},
+            "malformed":{"command":"/usr/bin/true","args":[7]},
+            "http":{"url":"https://example.invalid"},
+            "valid":{"command":"/usr/bin/true","args":["--owned-helper"]}
+        }}}));
+        let launches = control.runtime_infrastructure_launches.lock().unwrap();
+        assert_eq!(launches.len(), 1);
+        assert_eq!(launches[0].1, vec!["--owned-helper"]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn configured_helper_after_tool_work_is_adopted_but_observation_preserves_idle_clock() {
+        let control = lazy_helper_control();
+        control.begin_run().unwrap();
+        control.mark_tool_work_observed();
+        control.mark_idle();
+        control.send_control("ready").unwrap();
+        thread::sleep(Duration::from_millis(60));
+        let root = control.root_pid().unwrap();
+        let current = crate::process_metrics::retirement_process_tree(root).unwrap();
+        let identity = current.into_iter().find(|(pid, _)| *pid != root).unwrap();
+        let launch = crate::process_metrics::retirement_launch(identity.0, identity.1).unwrap();
+        // Deliberately wrong argv cannot classify even the right executable.
+        control.set_runtime_infrastructure_launches(vec![(launch.executable.clone(), vec!["wrong".into()])]);
+        assert_eq!(control.refresh_configured_runtime_infrastructure().unwrap(), 0);
+        assert!(!control.retirement_process_tree_is_safe());
+        control.set_runtime_infrastructure_launches(vec![(launch.executable, launch.arguments[1..].to_vec())]);
+        assert_eq!(control.refresh_configured_runtime_infrastructure().unwrap(), 1);
+        assert!(control.retirement_process_tree_is_safe());
+        // Repeated process observations/adoption do not reset the idle timer.
+        assert_eq!(control.refresh_configured_runtime_infrastructure().unwrap(), 0);
+        assert!(control.idle_timeout_elapsed(Instant::now() + Duration::from_secs(6), Duration::from_secs(5)));
+        control.cancel();
+        let _ = control.wait();
+    }
+
+    #[test]
+    fn startup_launch_chain_matches_replacement_helpers_but_not_user_work() {
+        use crate::process_metrics::RetirementLaunch;
+        let launch = |parent_pid, executable: &str, arguments: &[&str]| RetirementLaunch {
+            parent_pid, executable: executable.into(),
+            arguments: arguments.iter().map(|value| (*value).into()).collect(),
+        };
+        let initial = HashMap::from([
+            (1, launch(0, "/trusted/codex", &["codex", "app-server"])),
+            (2, launch(1, "/trusted/node", &["node", "/trusted/mcp.js"])),
+            (3, launch(2, "/trusted/node", &["node", "/trusted/worker.js"])),
+        ]);
+        let templates = initial.keys().filter_map(|&pid| runtime_launch_chain(1, pid, &initial))
+            .collect::<HashSet<_>>();
+        let later = HashMap::from([
+            (1, initial[&1].clone()),
+            (20, launch(1, "/trusted/node", &["node", "/trusted/mcp.js"])),
+            (30, launch(20, "/trusted/node", &["node", "/trusted/worker.js"])),
+            (40, launch(20, "/bin/sh", &["sh", "-c", "background-user-job"])),
+            (50, launch(40, "/trusted/node", &["node", "/trusted/worker.js"])),
+            (60, launch(20, "/trusted/node", &["node", "/user/server.js"])),
+            (70, launch(70, "/trusted/node", &["node", "/trusted/mcp.js"])),
+        ]);
+        for pid in [20, 30] {
+            assert!(templates.contains(&runtime_launch_chain(1, pid, &later).unwrap()));
+        }
+        for pid in [40, 50, 60] {
+            assert!(!templates.contains(&runtime_launch_chain(1, pid, &later).unwrap()));
+        }
+        assert!(runtime_launch_chain(1, 70, &later).is_none());
+    }
+
+    #[test]
+    fn idle_tool_runtime_can_adopt_an_exact_startup_helper_chain() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 30 & helper=$!; sleep 0.06; echo ready; read ignored; kill \"$helper\"; wait \"$helper\" 2>/dev/null; sleep 30 & wait"])
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+        isolate_child(&mut command);
+        let mut child = command.spawn().unwrap();
+        let stdin = child.stdin.take();
+        let mut line = String::new();
+        BufReader::new(child.stdout.take().unwrap()).read_line(&mut line).unwrap();
+        let control = RunControl::new(false);
+        control.install(child, stdin).unwrap();
+        control.capture_runtime_process_baseline().unwrap();
+        control.set_resume_supported(true);
+        control.begin_run().unwrap();
+        control.mark_tool_work_observed();
+        control.mark_idle();
+        control.send_control("ready").unwrap();
+        thread::sleep(Duration::from_millis(60));
+        assert!(control.refresh_runtime_process_baseline_while_idle().unwrap());
+        assert!(control.retirement_process_tree_is_safe());
+        let identities = control.runtime_process_baseline.lock().unwrap().clone().unwrap();
+        assert!(control.try_retire_idle(Instant::now() + Duration::from_secs(6), Duration::from_secs(5)));
+        control.retire_owned().unwrap();
+        for (pid, started_at) in identities {
+            assert!(!crate::process_metrics::retirement_process_identity_alive(pid, started_at).unwrap());
+        }
+    }
+
+    #[test]
+    fn failed_readiness_nonresumable_owner_stays_unverified() {
+        let control = lazy_helper_control();
+        control.disable_runtime_process_baseline();
+        control.begin_run().unwrap();
+        control.mark_idle();
+        assert!(!control.refresh_runtime_process_baseline_if_no_tool_work().unwrap());
+        assert!(!control.refresh_runtime_process_baseline_while_idle().unwrap());
+        assert!(control.capture_runtime_process_baseline().is_err());
+        assert!(!control.retirement_process_tree_is_safe());
+        control.cancel();
+        let _ = control.wait();
+    }
+
     #[test]
     fn no_tool_turn_can_adopt_a_delayed_provider_helper() {
         let control = lazy_helper_control();
+        control.set_resume_supported(true);
         control.begin_run().unwrap();
         control.mark_idle();
         control.send_control("ready").unwrap();
@@ -5502,12 +6458,29 @@ for line in sys.stdin.buffer:
 
         assert!(
             control
-                .refresh_runtime_process_baseline_while_idle_if_no_tool_work()
+                .refresh_runtime_process_baseline_while_idle()
                 .unwrap()
         );
         assert!(control.retirement_process_tree_is_safe());
         control.cancel();
         let _ = control.wait();
+    }
+
+    #[test]
+    fn aggressive_idle_refresh_preserves_tracked_background_jobs() {
+        let control = lazy_helper_control();
+        control.set_resume_supported(true);
+        control.begin_run().unwrap();
+        control.mark_tool_work_observed();
+        control.disable_runtime_process_baseline();
+        control.observe_runtime_command(&serde_json::json!({"type":"commandExecution","processId":"live-job","status":"completed","exitCode":null}));
+        control.mark_idle();
+        assert!(!control.refresh_runtime_process_baseline_while_idle().unwrap());
+        assert!(!control.retirement_process_tree_is_safe());
+        control.observe_runtime_command_exit(&serde_json::json!({"type":"commandExecution","processId":"live-job","exitCode":0}));
+        assert!(control.refresh_runtime_process_baseline_while_idle().unwrap());
+        assert!(control.retirement_process_tree_is_safe());
+        control.cancel(); let _ = control.wait();
     }
 
     #[test]
@@ -5519,7 +6492,7 @@ for line in sys.stdin.buffer:
 
         assert!(
             !control
-                .refresh_runtime_process_baseline_while_idle_if_no_tool_work()
+                .refresh_runtime_process_baseline_while_idle()
                 .unwrap()
         );
         assert!(!control.retirement_process_tree_is_safe());
@@ -5830,6 +6803,7 @@ for line in sys.stdin.buffer:
             &task(None, ""),
             Some("http://127.0.0.1:4444/mcp"),
             Some("http://127.0.0.1:4555/mcp"),
+            true,
         );
         let joined = args.join(" ");
         assert!(joined.contains("mcp_servers.monitter.url"));
@@ -5883,6 +6857,40 @@ for line in sys.stdin.buffer:
                 .any(|(key, value)| key == "MONITTER_ENDPOINT"
                     && value.as_deref() == Some("http://127.0.0.1:4444/mcp"))
         );
+    }
+
+    #[test]
+    fn monitter_mcp_auto_approval_launch_policy_gates_only_builtin_tools() {
+        let mut host = host("local");
+        host.claude_path = std::env::current_exe().unwrap().display().to_string();
+        let mut task = task(None, "");
+        let grant = SessionGrant {
+            endpoint: "http://127.0.0.1:4444/mcp".into(),
+            token: "not-in-argv".into(),
+        };
+        for enabled in [true, false] {
+            task.provider = "codex".into();
+            task.sandbox = "workspace-write".into();
+            let args = codex_args_with_jev(&task, Some(&grant.endpoint), None, enabled);
+            assert!(args.contains(&format!("mcp_servers.monitter.default_tools_approval_mode={:?}",
+                if enabled { "approve" } else { "prompt" })));
+            assert!(args.contains(&"mcp_servers.monitter.tools.install_shared_skill.approval_mode=\"prompt\"".into()));
+            assert!(!args.iter().any(|arg| arg.contains("dangerously")));
+            task.provider = "claude".into();
+            task.sandbox = "harness-configured".into();
+            for config_path in [None, Some(std::path::Path::new("/tmp/fixture-mcp.json"))] {
+                let command = build_command_with_jev_options(&host, &task, Some(&grant), None, config_path, enabled).unwrap();
+                let args = command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect::<Vec<_>>();
+                assert!(args.contains(&"--mcp-config".into()));
+                assert_eq!(args.contains(&"--allowedTools".into()), enabled);
+                if enabled {
+                    let allowed = args.iter().position(|arg| arg == "--allowedTools").unwrap();
+                    assert_eq!(args[allowed + 1], claude_tool_names());
+                    assert!(!args[allowed + 1].contains("install_shared_skill"));
+                }
+                assert!(!args.iter().any(|arg| arg.contains("not-in-argv")));
+            }
+        }
     }
 
     #[test]

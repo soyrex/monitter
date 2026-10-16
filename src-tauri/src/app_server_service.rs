@@ -4,7 +4,7 @@ use crate::{
     runner::{Parsed, RunControl},
     *,
 };
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::sync::{atomic::Ordering, Arc, Weak};
 
 impl Service {
@@ -419,16 +419,41 @@ impl Service {
             }
             if let Some((kind, title, detail)) = parsed.event {
                 if kind == "computer_image" {
-                    let image = attachments::generated_image(&detail)?;
-                    let mut pending = self
-                        .pending_codex_images
-                        .lock()
-                        .map_err(|_| "Image state unavailable")?;
-                    let images = pending.entry(task_id.into()).or_default();
-                    if images.len() >= 4 {
-                        return Err("Too many pending Codex images.".into());
+                    match attachments::generated_image(&detail) {
+                        Ok(image) => {
+                            let mut pending = self
+                                .pending_codex_images
+                                .lock()
+                                .map_err(|_| "Image state unavailable")?;
+                            let images = pending.entry(task_id.into()).or_default();
+                            if images.len() >= 4 {
+                                data.snapshot.events.push(Arc::new(RunEvent {
+                                    id: id(),
+                                    task_id: task_id.into(),
+                                    kind: "warning".into(),
+                                    title: "Codex image preview omitted".into(),
+                                    detail: "Four image previews are already pending. The provider turn continues.".into(),
+                                    created_at: now(),
+                                }));
+                            } else {
+                                images.push(image);
+                            }
+                        }
+                        Err(_) => {
+                            // Keep the rejected image bytes out of durable
+                            // events. Rendering limits and malformed previews
+                            // are visible warnings; authority and write errors
+                            // from this fenced mutation still propagate.
+                            data.snapshot.events.push(Arc::new(RunEvent {
+                                id: id(),
+                                task_id: task_id.into(),
+                                kind: "warning".into(),
+                                title: "Codex image preview omitted".into(),
+                                detail: "An image preview exceeded the inline limits or could not be decoded. The provider turn continues.".into(),
+                                created_at: now(),
+                            }));
+                        }
                     }
-                    images.push(image);
                 } else {
                     data.snapshot.events.push(Arc::new(RunEvent {
                         id: id(),
@@ -1075,6 +1100,37 @@ impl Service {
         }
     }
 
+    pub(crate) fn resolve_mcp_approval_request(
+        &self,
+        approval_id: &str,
+        decision: &str,
+    ) -> Result<Snapshot, String> {
+        let response = match decision {
+            "approve_once" => json!({}),
+            "approve_session" => json!({"monitterMcpApprovalPersist":"session"}),
+            "approve_always" => json!({"monitterMcpApprovalPersist":"always"}),
+            _ => return Err("Unsupported MCP approval decision.".into()),
+        };
+        let snapshot = self.mutate(None, |snapshot| {
+            let index = snapshot.approval_requests.iter().position(|request| request.id == approval_id)
+                .ok_or("Input request not found")?;
+            let request = &snapshot.approval_requests[index];
+            if request.status != "pending" {
+                return Err("Input request is no longer pending.".into());
+            }
+            self.validate_app_server_approval(request, snapshot)?;
+            validate_mcp_approval(request, decision)?;
+            let request = &mut snapshot.approval_requests[index];
+            request.status = "approved".into();
+            request.decision = Some(decision.into());
+            request.response = Some(response.clone());
+            request.resolved_at = Some(now());
+            Ok(snapshot.clone())
+        })?;
+        self.notify_input_waiter(approval_id, Ok(response));
+        Ok(snapshot)
+    }
+
     pub(crate) fn resolve_input_request(
         &self,
         approval_id: &str,
@@ -1122,6 +1178,32 @@ fn expire_inputs(snapshot: &mut Snapshot, task_id: &str) -> Vec<String> {
             request.id.clone()
         })
         .collect()
+}
+
+fn validate_mcp_approval(request: &ApprovalRequest, decision: &str) -> Result<(), String> {
+    if request.provider != "codex" || request.tool != "MCP elicitation"
+        || !request.input.as_ref().is_some_and(|input| input.kind == "form") {
+        return Err("This request is not a Codex MCP tool approval.".into());
+    }
+    let params: Value = serde_json::from_str(&request.detail)
+        .map_err(|_| "Invalid MCP approval metadata.")?;
+    if !crate::codex_app_server::mcp_tool_consent(&params)
+        || request.input.as_ref().and_then(|input| input.schema.as_ref()) != params.get("requestedSchema")
+    {
+        return Err("This request is not a fieldless MCP tool approval.".into());
+    }
+    match decision {
+        "approve_once" => Ok(()),
+        "approve_session" | "approve_always" => {
+            let scope = if decision == "approve_session" { "session" } else { "always" };
+            if crate::codex_app_server::mcp_tool_consent_allows(&params, scope) {
+                Ok(())
+            } else {
+                Err("The MCP server did not offer this approval scope.".into())
+            }
+        }
+        _ => Err("Unsupported MCP approval decision.".into()),
+    }
 }
 
 fn validate_response(input: &InteractionInput, response: &Value) -> Result<(), String> {
@@ -1204,4 +1286,47 @@ fn validate_form(schema: &Value, value: &Value) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod mcp_approval_tests {
+    use super::*;
+
+    fn request() -> ApprovalRequest {
+        let schema = json!({"type":"object","properties":{}});
+        let params = json!({"mode":"form","serverName":"chrome-devtools","message":"Allow tool?",
+            "requestedSchema":schema,"_meta":{"codex_approval_kind":"mcp_tool_call","persist":["session","always"]}});
+        serde_json::from_value(json!({"id":"approval","taskId":"task","provider":"codex",
+            "runId":"run","tool":"MCP elicitation","summary":"Allow tool?","detail":params.to_string(),
+            "risk":"unknown","status":"pending","createdAt":0,
+            "input":{"kind":"form","questions":[],"schema":schema,"url":null}})).unwrap()
+    }
+
+    #[test]
+    fn mcp_approval_validates_scopes_and_form_identity() {
+        let mut request = request();
+        for decision in ["approve_once", "approve_session", "approve_always"] {
+            assert!(validate_mcp_approval(&request, decision).is_ok());
+        }
+        assert!(validate_mcp_approval(&request, "deny").is_err());
+        let mut params: Value = serde_json::from_str(&request.detail).unwrap();
+        params["_meta"]["persist"] = json!("session");
+        request.detail = params.to_string();
+        assert!(validate_mcp_approval(&request, "approve_session").is_ok());
+        assert!(validate_mcp_approval(&request, "approve_always").is_err());
+        params["_meta"].as_object_mut().unwrap().remove("persist");
+        request.detail = params.to_string();
+        assert!(validate_mcp_approval(&request, "approve_once").is_ok());
+        assert!(validate_mcp_approval(&request, "approve_session").is_err());
+        request.input.as_mut().unwrap().schema = Some(json!({"type":"object","properties":{"value":{"type":"string"}}}));
+        assert!(validate_mcp_approval(&request, "approve_once").is_err());
+    }
+
+    #[test]
+    fn mcp_approval_envelope_cannot_be_submitted_as_form_data() {
+        let request = request();
+        let input = request.input.unwrap();
+        assert!(validate_response(&input, &json!({})).is_ok());
+        assert!(validate_response(&input, &json!({"monitterMcpApprovalPersist":"always"})).is_err());
+    }
 }

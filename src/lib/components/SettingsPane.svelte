@@ -535,9 +535,9 @@
 
 
         <section class="setting-card" aria-labelledby="activity-animation-heading">
-          <div class="card-heading"><h2 id="activity-animation-heading">Working animation</h2><p>Choose the accent effect shown while an agent is working.</p></div>
+          <div class="card-heading"><h2 id="activity-animation-heading">Working animation</h2><p>Choose one accent effect shown while an agent is working.</p></div>
           <div class="segmented activity-animation" aria-label="Working animation">
-            {#each [{ id: 'sparkles', label: 'Sparkles' }, { id: 'grid', label: 'Pulse grid' }, { id: 'matrix', label: 'Letter stream' }] as option}
+            {#each [{ id: 'sparkles', label: 'Sparkles' }, { id: 'liquid', label: 'Liquid wave' }, { id: 'grid', label: 'Pulse grid' }, { id: 'matrix', label: 'Letter stream' }] as option}
               <button type="button" class:chosen={(settings.activityAnimation ?? 'sparkles') === option.id} aria-pressed={(settings.activityAnimation ?? 'sparkles') === option.id}
                 onclick={() => void save({ activityAnimation: option.id as NonNullable<Settings['activityAnimation']> })}>{option.label}</button>
             {/each}
@@ -674,6 +674,11 @@
           <label class="switch-row"><span><strong>Compress tool calls</strong><small>Combine calls of the same kind across thinking time within each turn. Open the summary to see every call.</small></span><input type="checkbox" role="switch" aria-label="Compress tool calls" checked={settings.compressToolCalls === true} onchange={(event) => void save({ compressToolCalls: event.currentTarget.checked })} /></label>
           <label class="switch-row"><span><strong>Tint my messages</strong><small>Use the accent colour for your message bubbles.</small></span><input type="checkbox" role="switch" aria-label="Tint my messages" checked={settings.tintUserMessages ?? false} onchange={event=>void save({tintUserMessages:event.currentTarget.checked})}/></label>
           <label class="switch-row"><span><strong>Show reasoning summaries</strong><small>Show summaries supplied by the harness.</small></span><input type="checkbox" role="switch" aria-label="Show reasoning summaries" checked={settings.showReasoningSummaries !== false} onchange={(event) => void save({ showReasoningSummaries: event.currentTarget.checked })} /></label>
+        </section>
+        <section class="setting-card" aria-labelledby="monitter-mcp-approval-heading">
+          <div class="card-heading"><h2 id="monitter-mcp-approval-heading">Monitter MCP approvals</h2><p>Choose whether built-in Monitter tools run without a harness approval prompt.</p></div>
+          <label class="switch-row"><span><strong>Automatically approve Monitter tools</strong><small>Let Codex and Claude use built-in Monitter tools without asking each time. Host terminal commands and skill installation still need approval. Changes apply when the agent process next starts; running agents keep their current setting.</small></span><input type="checkbox" role="switch" aria-label="Automatically approve Monitter tools" checked={settings.autoApproveMonitterMcp === true} disabled={pending > 0 || settings.autoApproveMonitterMcp === undefined} onchange={(event) => void save({ autoApproveMonitterMcp: event.currentTarget.checked })} /></label>
+          {#if settings.autoApproveMonitterMcp === undefined}<p class="hint">This setting requires a Monitter backend update.</p>{/if}
         </section>
       </div>
     {/if}

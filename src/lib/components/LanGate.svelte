@@ -1,12 +1,19 @@
 <script lang="ts">
   import { onMount, type Snippet } from 'svelte';
-  import { accessKey, isLanBrowser, lanInvoke, setAccessKey, lanAccessCodeRequired } from '$lib/lan';
+  import { accessKey, isLanBrowser, lanInvoke, setAccessKey, rememberAccessKey, lanAccessCodeRequired } from '$lib/lan';
   let { children }: { children: Snippet } = $props();
   let ready = $state(!isLanBrowser()), key = $state(''), error = $state(''), pending = $state(false);
   let checking = $state(isLanBrowser());
   async function connect() {
+    if (pending) return;
+    const connectingKey = key.trim();
     pending = true; error = '';
-    try { setAccessKey(key); await lanInvoke('get_snapshot'); ready = true; }
+    try {
+      setAccessKey(connectingKey);
+      await lanInvoke('get_snapshot');
+      rememberAccessKey(connectingKey);
+      ready = true;
+    }
     catch (reason) { error = String(reason instanceof Error ? reason.message : reason); }
     finally { pending = false; }
   }
