@@ -131,6 +131,11 @@ impl Render for WorkingBubble {
         let compact_controls = column.is_some_and(|column|
             column.size.width < px(280. * self.font_ratio.max(1.)));
         let status = if self.stop_requested { "Stop queued…" } else if self.starting { "Starting…" } else { self.progress.as_deref().unwrap_or("Working…") }.to_owned();
+        let status_preview = if status.chars().count() > 32 {
+            format!("{}…", status.chars().take(31).collect::<String>())
+        } else {
+            status.clone()
+        };
         let mut pill = div()
             .id("working-bubble")
             .debug_selector(|| "working-bubble".into())
@@ -195,7 +200,7 @@ impl Render for WorkingBubble {
             .child(div().flex_shrink_0().child(Spinner::new().xsmall().color(rgb(p.accent).into())))
             .child(div().id("working-status").min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap()
                 .debug_selector(|| "working-progress-status".into())
-                .aria_label(status.clone()).child(status))
+                .aria_label(status.clone()).child(status_preview))
             .child(
                 div().flex_shrink_0().debug_selector(|| "working-stop-control".into()).child(Button::new("working-stop")
                     .compact()

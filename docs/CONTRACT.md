@@ -1602,7 +1602,14 @@ The same Rust catalogue supplies the native harness tool allowlists:
   recipient task IDs must differ. Messaging the same profile requires an explicit `task_id`.
   Profile eligibility, request deduplication, delivery limits, and delegation cycle guards remain
   enforced. Running recipients receive the brief through their existing inbox, without a second
-  concurrent turn.
+  concurrent turn. Targeted messages to idle chats stay queued until the next active turn;
+  they never start acknowledgement-only turns. The next accepted user request consumes pending
+  bounded peer context before its prompt is assembled; messages beyond that prompt budget remain
+  pending, with an explicit inbox reminder. Peer transcript records use `role: "system"`
+  plus sender/collaboration provenance, never impersonating a user request. Existing peer history
+  remains readable. Legacy untargeted messages may start their newly created empty child chat;
+  use `delegate_task` for new work. Routine acknowledgements and coordination belong in the
+  inbox, not user-facing responses; surface only changed results, user decisions, or material blockers.
 - `get_task_result`, `wait_for_task`: read the actual result and incoming peer messages.
 - `list_messages`: deliver queued messages to this active turn and return its durable inbox.
 - `cancel_delegation`: cancel an active delegation owned by this task.

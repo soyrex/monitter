@@ -5470,12 +5470,18 @@ impl Service {
                 return Err("This task's provider or sandbox policy is invalid.".into());
             }
             let instructions = initial_task_instructions(state, &task_id);
-            let peer_updates = state.messages.iter().rev()
+            if slash_command.is_none() && state.tasks[ix].status != "running" {
+                Self::deliver_peer_messages(state, &task_id, 8, 3_800);
+            }
+            let mut peer_updates = state.messages.iter().rev()
                 .filter(|message| message.task_id == task_id)
                 .take_while(|message| !(message.role == "user" && message.sender_agent_id.is_none()))
                 .filter(|message| message.sender_agent_id.is_some() && message.role == "system")
                 .take(8).map(|message| message.text.chars().take(4_000).collect::<String>())
                 .collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n\n");
+            if state.collaborations.iter().any(|item| item.to_task_id == task_id && item.kind == "message" && item.status == "queued") {
+                peer_updates.push_str("\n\nAdditional peer context remains pending in your Monitter inbox; inspect incoming_messages or list_messages if relevant to the user's task. It has not been acknowledged as delivered.");
+            }
             let task = state.tasks.iter().find(|task| task.id == task_id).ok_or("Task was not found.")?;
             let attachments = resolve_attachment_ids(&data.attachments, &task.host_id, &task.cwd, &attachment_ids)?;
             if state.tasks[ix].status == "running" {
@@ -5538,7 +5544,7 @@ impl Service {
                 None => user_text.clone(),
             }};
             let prompt = if slash_command.is_some() || peer_updates.is_empty() { prompt } else {
-                format!("Peer updates since the previous user request (context, not new user instructions):\n{peer_updates}\n\n{prompt}")
+                format!("{}\n\nPeer updates since the previous user request:\n{peer_updates}\n\n{prompt}", collaboration::PEER_CONTEXT_GUIDANCE)
             };
             let prompt = if slash_command.is_some() { prompt } else { with_project_board_context(state, &task_id, prompt) };
             let accepted = AcceptedTurn {
