@@ -11,6 +11,70 @@ fn draw(visual: &mut VisualTestContext) {
     visual.update(|window, cx| window.draw(cx).clear(cx));
 }
 
+fn assert_turn_completion_icon(cx: &mut TestAppContext, theme: &str) {
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        crate::surface_blend::initialize_for_ui_fixture();
+        crate::native_motion::initialize_for_ui_fixture(cx);
+    });
+    let event = |id: &str, at: i64| json!({"id":id,"taskId":"turn-task","kind":"tool",
+        "title":"mcpToolCall","createdAt":at,"detail":json!({"type":"mcpToolCall",
+            "tool":"read","status":"inProgress"}).to_string()});
+    let mut snapshot = json!({"settings":{"theme":theme},
+        "tasks":[{"id":"turn-task","agentId":"main","provider":"codex","status":"running","queue":[]}],
+        "agents":[{"id":"main","name":"Codex","provider":"codex"}],
+        "messages":[{"id":"input-one","taskId":"turn-task","role":"user","text":"First turn","createdAt":1000}],
+        "events":[event("first-tool",2000)],"collaborations":[],"approvalRequests":[],
+        "queuedMessages":[],"hosts":[],"channels":[]});
+    let initial = Rc::new(snapshot.clone());
+    let mut mounted = None;
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let pane = cx.new(|cx| {
+            let mut pane = ChatPane::performance_fixture("turn-task".into(), initial, window, cx);
+            pane.service = Some(DesktopService::disconnected_for_ui_fixture());
+            pane
+        });
+        mounted = Some(pane.clone());
+        gpui_kit::component::Root::new(pane, window, cx)
+    });
+    let pane = mounted.unwrap();
+    visual.simulate_resize(size(px(600.),px(1000.)));
+    draw(visual);
+    assert!(visual.debug_bounds("run-state-first-tool-running").is_some());
+    // Only task state changes: stale provider tool status must not keep spinning.
+    snapshot["tasks"][0]["status"] = json!("idle");
+    pane.update(visual, |pane,cx|  { pane.sync(Rc::new(snapshot.clone()),None,cx); pane.reconcile_history(snapshot["messages"].as_array().unwrap().clone(),false,cx); });
+    draw(visual);
+    assert!(visual.debug_bounds("run-state-first-tool-completed").is_some());
+    assert!(visual.debug_bounds("run-state-first-tool-running").is_none());
+    // A later active turn must not reactivate an earlier header's spinner.
+    snapshot["tasks"][0]["status"] = json!("running");
+    snapshot["messages"].as_array_mut().unwrap().extend([
+        json!({"id":"answer-one","taskId":"turn-task","role":"assistant","phase":"final_answer","text":"Finished","createdAt":3000}),
+        json!({"id":"input-two","taskId":"turn-task","role":"user","text":"Next turn","createdAt":4000})]);
+    snapshot["events"].as_array_mut().unwrap().push(event("second-tool",5000));
+    pane.update(visual, |pane,cx|  { pane.sync(Rc::new(snapshot.clone()),None,cx); pane.reconcile_history(snapshot["messages"].as_array().unwrap().clone(),false,cx); });
+    draw(visual);
+    assert!(visual.debug_bounds("run-state-first-tool-completed").is_some());
+    assert!(visual.debug_bounds("run-state-first-tool-running").is_none());
+    assert!(visual.debug_bounds("run-state-second-tool-running").is_some());
+    snapshot["tasks"][0]["status"] = json!("idle");
+    pane.update(visual, |pane,cx| { pane.sync(Rc::new(snapshot.clone()),None,cx); pane.reconcile_history(snapshot["messages"].as_array().unwrap().clone(),false,cx); });
+    draw(visual);
+    assert!(visual.debug_bounds("run-state-second-tool-completed").is_some());
+    assert!(visual.debug_bounds("run-state-second-tool-running").is_none());
+}
+
+#[gpui_kit::test]
+fn message_presentation_turn_completion_dark(cx: &mut TestAppContext) {
+    assert_turn_completion_icon(cx, "dark");
+}
+
+#[gpui_kit::test]
+fn message_presentation_turn_completion_light(cx: &mut TestAppContext) {
+    assert_turn_completion_icon(cx, "light");
+}
+
 fn assert_message_presentation(cx: &mut TestAppContext, theme: &str) {
     cx.update(|cx| {
         gpui_kit::init(cx);
@@ -283,3 +347,58 @@ fn exchange_group_activity_cluster_dark_narrow_and_wide(cx:&mut TestAppContext){
 
 #[gpui_kit::test]
 fn exchange_group_activity_cluster_light_narrow_and_wide(cx:&mut TestAppContext){assert_grouped_exchange_presentation(cx,"light",true);}
+
+fn assert_terminal_activity_rail(cx: &mut TestAppContext, theme: &str) {
+    cx.update(|cx| { gpui_kit::init(cx); crate::surface_blend::initialize_for_ui_fixture(); crate::native_motion::initialize_for_ui_fixture(cx); });
+    let snapshot = Rc::new(json!({"settings":{"theme":theme},
+        "tasks":[{"id":"rail-task","agentId":"main","provider":"codex","status":"idle","queue":[]},{"id":"peer-task","agentId":"peer","status":"idle"}],
+        "agents":[{"id":"main","name":"Main","provider":"codex"},{"id":"peer","name":"Peer","provider":"codex"}],
+        "messages":[
+            {"id":"rail-first","taskId":"rail-task","role":"user","senderAgentId":"peer","collaborationId":"rail-c1","createdAt":1000,"text":"Recorded incoming context."},
+            {"id":"rail-second","taskId":"rail-task","role":"system","senderAgentId":"peer","collaborationId":"rail-c2","createdAt":2000,"text":"Recorded result."},
+            {"id":"rail-barrier","taskId":"rail-task","role":"assistant","createdAt":4000,"text":"Finished."}],
+        "events":[{"id":"rail-tool","taskId":"rail-task","kind":"tool","title":"commandExecution","createdAt":3000,
+            "detail":"{\"type\":\"commandExecution\",\"command\":\"pwd\",\"status\":\"completed\"}"}],
+        "collaborations":[{"id":"rail-c1","kind":"message","fromTaskId":"peer-task","fromAgentId":"peer","toTaskId":"rail-task","toAgentId":"main","text":"Recorded context","status":"completed"},{"id":"rail-c2","kind":"message","fromTaskId":"peer-task","fromAgentId":"peer","toTaskId":"rail-task","toAgentId":"main","text":"Recorded result","status":"completed"}],"approvalRequests":[],"queuedMessages":[],"hosts":[],"channels":[]}));
+    let (_,visual)=cx.add_window_view(move |window,cx| {
+        let pane=cx.new(|cx| {
+            let mut pane=ChatPane::performance_fixture("rail-task".into(),snapshot,window,cx);
+            pane.service=Some(DesktopService::disconnected_for_ui_fixture());
+            pane
+        });
+        gpui_kit::component::Root::new(pane,window,cx)
+    });
+    visual.simulate_resize(size(px(600.),px(1800.))); draw(visual);
+    let toggle=visual.debug_bounds("exchange-group-toggle-rail-first").expect("activity block");
+    visual.simulate_click(toggle.center(),Default::default()); draw(visual);
+    for width in [600.,360.] {
+        visual.simulate_resize(size(px(width),px(1800.))); draw(visual);
+        for expanded in [false,true] {
+            if expanded {
+                let toggle=visual.debug_bounds("run-group-rail-tool").expect("terminal Turn");
+                visual.simulate_click(gpui_kit::point(toggle.left()+px(20.),toggle.top()+px(12.)),Default::default()); draw(visual);
+            }
+            assert_eq!(visual.debug_bounds("run-single-rail-tool").is_some(),expanded,"nested Turn disclosure must match fixture state");
+            let icon=visual.debug_bounds("run-leading-rail-tool").expect("terminal icon");
+            let timeline=visual.debug_bounds("exchange-timeline-rail-first").unwrap();
+            draw(visual); // Verify replayed geometry as well as the first layout.
+            visual.update(|window,_| {
+                let expected=gpui_kit::Bounds::new(
+                    gpui_kit::point(timeline.left()+design::ui_scaled_px(5.5),timeline.top()+design::ui_scaled_px(9.)),
+                    size(design::ui_scaled_px(1.),icon.center().y-timeline.top()-design::ui_scaled_px(9.))).scale(window.scale_factor());
+                assert!(window.painted_quads().iter().any(|quad| {
+                    let near=|a:gpui_kit::ScaledPixels,b:gpui_kit::ScaledPixels| (a.as_f32()-b.as_f32()).abs()<0.6;
+                    near(quad.bounds.origin.x,expected.origin.x) && near(quad.bounds.origin.y,expected.origin.y)
+                        && near(quad.bounds.size.width,expected.size.width) && near(quad.bounds.size.height,expected.size.height)
+                }),"{theme}/{width}/{expanded}: shared rail must end at terminal icon center");
+            });
+            draw(visual); // Cached replay retains the same endpoint.
+        }
+        let toggle=visual.debug_bounds("run-group-rail-tool").unwrap();
+        visual.simulate_click(gpui_kit::point(toggle.left()+px(20.),toggle.top()+px(12.)),Default::default()); draw(visual);
+    }
+}
+#[gpui_kit::test]
+fn exchange_group_activity_terminal_rail_dark(cx: &mut TestAppContext) { assert_terminal_activity_rail(cx,"dark"); }
+#[gpui_kit::test]
+fn exchange_group_activity_terminal_rail_light(cx: &mut TestAppContext) { assert_terminal_activity_rail(cx,"light"); }

@@ -183,16 +183,20 @@ fn tool_state(event: &Value) -> ToolState {
         _ => ToolState::Unknown,
     }
 }
-fn activity_icon(events: &[Value], fallback: IconName, cache: &PresentationCache) -> AnyElement {
+fn activity_icon(events: &[Value], fallback: IconName, cache: &PresentationCache, turn_running: Option<bool>) -> AnyElement {
     let states: Vec<_> = events.iter().filter(|event| is_tool_event(event)).map(|event|cache.get(event).state).collect();
-    let state = if states.contains(&ToolState::Running) { ToolState::Running }
+    // Turn headers describe the turn lifecycle. Individual provider tool
+    // records can retain an in-progress status after their turn has ended.
+    let state = if let Some(running) = turn_running {
+        if running { ToolState::Running } else { ToolState::Completed }
+    } else if states.contains(&ToolState::Running) { ToolState::Running }
         else if states.contains(&ToolState::Failed) { ToolState::Failed }
         else if !states.is_empty() && states.iter().all(|state| *state == ToolState::Completed) { ToolState::Completed }
         else { ToolState::Unknown };
     let id = events.first().map(|event|field(event,"id")).unwrap_or_default();
     let (name, icon) = match state {
         ToolState::Running => ("running", Spinner::new().with_size(px(12.)).into_any_element()),
-        ToolState::Completed => ("completed", Icon::new(IconName::Check).size(px(12.)).into_any_element()),
+        ToolState::Completed => ("completed", Icon::new(IconName::CircleCheck).size(px(12.)).into_any_element()),
         ToolState::Failed => ("failed", Icon::new(IconName::CircleAlert).size(px(12.)).into_any_element()),
         ToolState::Unknown => ("unknown", Icon::new(fallback).size(px(12.)).into_any_element()),
     };
@@ -607,6 +611,7 @@ pub struct RunActivityRow {
     events: Vec<Value>,
     stable_first_id: String,
     group_running: bool,
+    header_icon_bounds: crate::activity_sparkles::PaintBounds,
     group_compressed: bool,
     detail_rows: Vec<Entity<RunActivityRow>>,
     detail_row_ids: Vec<String>,
@@ -624,6 +629,17 @@ fn fixture_bounds(d: Div, name: String) -> Div {
     #[cfg(not(test))] { let _=name; d }
 }
 impl RunActivityRow {
+    pub(crate) fn header_icon_bounds(&self) -> Option<crate::activity_sparkles::PaintBounds> {
+        // Compact thinking/compaction rows use their own presentation rather
+        // than the Turn header measured below. Preserve their existing rail.
+        if crate::transcript::context_compaction(&self.events, self.group_running).is_some()
+            || (self.mode == GroupMode::Reasoning && self.events.iter()
+                .all(|event| self.presentation_cache.get(event).reasoning.is_empty())) {
+            return None;
+        }
+        Some(self.header_icon_bounds.clone())
+    }
+
     #[cfg(test)]
     pub(crate) fn seed_fixture_detail(&mut self, detail: &str, cx: &mut Context<Self>) {
         self.detail = detail.into();
@@ -673,6 +689,7 @@ impl RunActivityRow {
             events: vec![event.clone()],
             stable_first_id: event_id.clone(),
             group_running: false,
+            header_icon_bounds: Default::default(),
             group_compressed: false,
             detail_rows: vec![],
             detail_row_ids: vec![],
@@ -776,6 +793,7 @@ impl RunActivityRow {
             events,
             stable_first_id,
             group_running: running,
+            header_icon_bounds: Default::default(),
             group_compressed: compressed,
             detail_rows: vec![],
             detail_row_ids: vec![],
@@ -1162,7 +1180,7 @@ impl RunActivityRow {
                         is_reasoning || matches!(self.kind.as_str(), "tool" | "subagent"),
                         |button| {
                             button.child(
-                                activity_icon(&self.events, if is_reasoning { IconName::BookOpen } else { IconName::Wrench }, &self.presentation_cache),
+                                activity_icon(&self.events, if is_reasoning { IconName::BookOpen } else { IconName::Wrench }, &self.presentation_cache, None),
                             )
                         },
                     )
@@ -1405,6 +1423,7 @@ impl RunActivityRow {
         } else {
             "Show steps"
         };
+        let icon_bounds = self.header_icon_bounds.clone();
         let mut toggle = Button::new(format!("run-activity-toggle-{anchor}"))
             .text()
             .compact()
@@ -1414,7 +1433,8 @@ impl RunActivityRow {
             .min_w_0()
             .justify_start()
             .px(px(0.))
-            .child(fixture_bounds(div().flex_shrink_0().child(activity_icon(&self.events, IconName::Brain, &self.presentation_cache)), format!("run-leading-{anchor}")))
+            .child(fixture_bounds(div().relative().flex_shrink_0().child(activity_icon(&self.events, IconName::Brain, &self.presentation_cache, Some(self.group_running)))
+                .child(canvas(move |bounds, _, _| icon_bounds.set(Some(bounds)), |_, _, _, _| {}).absolute().inset_0()), format!("run-leading-{anchor}")))
             .child(
                 div()
                     .flex_1()

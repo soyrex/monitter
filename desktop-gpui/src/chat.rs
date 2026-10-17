@@ -3029,7 +3029,9 @@ impl Render for ChatPane {
                     if let Some((events, mode)) = group {
                         let running = transcript::context_compaction_running(
                             field(task, "status") == "running", events, latest_input_at,
-                        );
+                        ) && latest_input_at.is_none_or(|boundary| events.iter()
+                            .filter_map(|event| event["createdAt"].as_i64())
+                            .max().is_some_and(|at| at > boundary));
                         let entity = if let Some(entity) = self.grouped_rows.get(&key) {
                             entity.clone()
                         } else {
@@ -3838,7 +3840,9 @@ impl Render for ChatPane {
                         let disclosure=first.exchange_disclosure_key();
                         let disclosure_ids:Vec<_>=members.iter().map(|member|member.exchange_disclosure_key()).collect();
                         let expanded=disclosure_ids.iter().any(|id|peer_details_expanded.borrow().contains(id))||preview;
-                        let mut details=agent_exchange::timeline(&disclosure);
+                        let terminal_icon = members.last().and_then(|member| grouped.get(&member.stable_key()))
+                            .and_then(|row| row.read(cx).header_icon_bounds());
+                        let mut details=agent_exchange::timeline_ending_at(&disclosure, terminal_icon);
                         let mut exchanges=Vec::new();
                         for member in members {
                             let (row,is_event)=match member{transcript::ConversationItem::Message(row)=>(row,false),transcript::ConversationItem::Activity(row)=>(row,true),_=>{if expanded {details=details.child(render_item(member,true,cx));} continue;}};

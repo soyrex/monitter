@@ -375,6 +375,11 @@ pub(crate) fn render_group(
 /// The group owns the rail so member gaps and nested tool turns cannot break it.
 /// Its 12px marker column also centers the native Turn icon on the same axis.
 pub(crate) fn timeline(id: &str) -> Div {
+    timeline_ending_at(id, None)
+}
+
+/// A terminal Turn ends the rail at its icon, even when its details expand.
+pub(crate) fn timeline_ending_at(id: &str, endpoint: Option<crate::activity_sparkles::PaintBounds>) -> Div {
     let timeline_selector = format!("exchange-timeline-{id}");
     let rail_selector = format!("exchange-rail-{id}");
     div()
@@ -385,7 +390,19 @@ pub(crate) fn timeline(id: &str) -> Div {
         .flex_col()
         .gap(px(12.))
         .debug_selector(move || timeline_selector.clone())
-        .child(
+        .when_some(endpoint.clone(), |this, endpoint| this.child(
+            canvas(|_, _, _| (), move |bounds, _, window, _| {
+                // Descendant prepaint records this frame's actual icon position.
+                let bottom = endpoint.get().map(|icon| icon.center().y)
+                    .unwrap_or(bounds.top()).clamp(bounds.top(), bounds.bottom());
+                let top = bounds.top() + px(9.);
+                if bottom > top {
+                    window.paint_quad(fill(Bounds::new(point(bounds.left() + px(5.5), top),
+                        size(px(1.), bottom - top)), rgb(0x6594db).opacity(0.25)));
+                }
+            }).absolute().inset_0()
+        ))
+        .when(endpoint.is_none(), |this| this.child(
             div()
                 .absolute()
                 .left(px(5.5))
@@ -394,7 +411,7 @@ pub(crate) fn timeline(id: &str) -> Div {
                 .w(px(1.))
                 .bg(rgb(0x6594db).opacity(0.25))
                 .debug_selector(move || rail_selector.clone()),
-        )
+        ))
 }
 /// Each member keeps its own direction, observed label and second-resolution time.
 pub(crate) fn render_step(
