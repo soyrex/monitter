@@ -179,7 +179,6 @@ impl Render for WorkingBubble {
                         .when(!compact_controls, |button| button.child("Work Plan"))
                         .when(compact_controls, |button| button.w(px(28.)).h(px(24.)).px_0().py_0())
                         .debug_selector(|| "working-plan-toggle".into())
-                        .bg(rgba(0xffffff1a))
                         .tooltip("Show active work plan")
                         .accessibility_label("Show active work plan"))
                     .on_open_change(move |open, _, cx| {
