@@ -136,6 +136,14 @@ fn set_placement(root: &mut Value, id: &WindowId, value: Value) {
         root["windows"][id.as_str()] = value;
     }
 }
+/// The initial native host follows the persisted primary role.
+pub fn primary_window_id() -> WindowId {
+    // Fixtures share no production placement/profile and start with main.
+    #[cfg(test)]
+    return WindowId::main();
+    #[cfg(not(test))]
+    load_workspace_windows().map(|state| state.primary_window_id().clone()).unwrap_or_else(WindowId::main)
+}
 pub fn load_workspace_windows() -> Option<WorkspaceWindowState> {
     let root = read()?;
     let bytes = serde_json::to_vec(root.get("workspaceWindows")?).ok()?;
@@ -173,7 +181,7 @@ pub fn remove_placement_for(id: &WindowId) -> Result<(), String> {
     )
 }
 pub fn restore_native(window: &Window, cx: &App) {
-    restore_native_for(&WindowId::main(), window, cx);
+    restore_native_for(&primary_window_id(), window, cx);
 }
 pub fn restore_native_for(id: &WindowId, window: &Window, cx: &App) {
     let Some(root) = read() else {
@@ -213,7 +221,7 @@ pub fn restore_native_for(id: &WindowId, window: &Window, cx: &App) {
     }
 }
 pub fn save_native(window: &Window, cx: &App) {
-    save_native_for(&WindowId::main(), window, cx);
+    save_native_for(&primary_window_id(), window, cx);
 }
 pub fn save_native_for(id: &WindowId, window: &Window, cx: &App) {
     save_inner(id, window, cx, true);
@@ -275,7 +283,7 @@ fn clamp(mut bounds: Bounds<Pixels>, visible: Bounds<Pixels>) -> Bounds<Pixels> 
     bounds
 }
 pub fn display_id(cx: &App) -> Option<DisplayId> {
-    display_id_for(&WindowId::main(), cx)
+    display_id_for(&primary_window_id(), cx)
 }
 pub fn display_id_for(id: &WindowId, cx: &App) -> Option<DisplayId> {
     let root = read()?;
@@ -287,7 +295,7 @@ pub fn display_id_for(id: &WindowId, cx: &App) -> Option<DisplayId> {
         .map(|d| d.id())
 }
 pub fn initial(cx: &App) -> Option<WindowBounds> {
-    initial_for(&WindowId::main(), cx)
+    initial_for(&primary_window_id(), cx)
 }
 pub fn initial_for(id: &WindowId, cx: &App) -> Option<WindowBounds> {
     let root = read()?;
@@ -314,7 +322,7 @@ pub fn initial_for(id: &WindowId, cx: &App) -> Option<WindowBounds> {
     })
 }
 pub fn save(window: &Window, cx: &App) {
-    save_for(&WindowId::main(), window, cx);
+    save_for(&primary_window_id(), window, cx);
 }
 pub fn save_for(id: &WindowId, window: &Window, cx: &App) {
     save_inner(id, window, cx, false);

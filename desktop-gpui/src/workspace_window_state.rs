@@ -97,7 +97,6 @@ impl TryFrom<WireState> for WorkspaceWindowState {
     type Error = String;
     fn try_from(s: WireState) -> Result<Self, Self::Error> {
         if s.version != 1
-            || s.primary_window_id != WindowId::main()
             || s.windows.is_empty()
             || s.windows.len() > MAX_WINDOWS
             || s.next_window_number == 0
@@ -277,6 +276,24 @@ impl WorkspaceWindowState {
     pub fn reattach_workspace(&mut self, workspace: &str) -> Result<(), String> {
         self.transfer_workspace(workspace, &self.primary_window_id.clone(), usize::MAX)
     }
+    /// Retire an empty source only after the native transfer has committed.
+    /// The destination inherits the primary role when the original main empties.
+    pub fn retire_empty_window(&mut self, source: &WindowId, target: &WindowId) -> Result<(), String> {
+        if source == target || self.window(target).is_none_or(|w| w.workspace_ids.is_empty()) {
+            return Err("A surviving workspace window is required".into());
+        }
+        if self.window(source).is_some_and(|w| !w.workspace_ids.is_empty()) {
+            return Err("The source window still owns workspaces".into());
+        }
+        self.windows.retain(|w| &w.window_id != source);
+        if source == &self.primary_window_id {
+            self.primary_window_id = target.clone();
+            let index = self.windows.iter().position(|w| &w.window_id == target).unwrap();
+            let primary = self.windows.remove(index);
+            self.windows.insert(0, primary);
+        }
+        Ok(())
+    }
     /// Closing a secondary window appends all its workspaces to the primary.
     pub fn close_window(&mut self, id: &WindowId) -> Result<Vec<String>, String> {
         if id == &self.primary_window_id {
@@ -395,6 +412,29 @@ mod tests {
         let second = s.detach_workspace("a").unwrap();
         assert_ne!(window, second);
     }
+    #[test]
+    fn final_workspace_transfer_retires_source_and_persists_promoted_primary() {
+        let mut s = WorkspaceWindowState::new(&ids(&["a", "b"])).unwrap();
+        let target = s.detach_workspace("a").unwrap();
+        let unchanged = s.clone();
+        assert!(s.retire_empty_window(&WindowId::main(), &target).is_err());
+        assert_eq!(s, unchanged, "a nonempty source must remain open");
+        s.transfer_workspace("b", &target, usize::MAX).unwrap();
+        s.retire_empty_window(&WindowId::main(), &target).unwrap();
+        assert_eq!(s.primary_window_id(), &target);
+        assert_eq!(s.windows().len(), 1);
+        assert!(s.window(&WindowId::main()).is_none());
+        assert_eq!(s.windows()[0].workspace_ids(), ids(&["a", "b"]));
+        s = WorkspaceWindowState::decode(&s.encode().unwrap()).unwrap();
+        s.reconcile(&ids(&["a", "b", "new"])).unwrap();
+        assert_eq!(s.windows()[0].workspace_ids(), ids(&["a", "b", "new"]));
+        let secondary = s.detach_workspace("a").unwrap();
+        s.reattach_workspace("a").unwrap();
+        s.retire_empty_window(&secondary, &target).unwrap();
+        assert_eq!(s.windows().len(), 1);
+        assert!(s.close_window(&target).is_err(), "the promoted primary uses app close");
+    }
+
     #[test]
     fn ensuring_persisted_window_ids_is_idempotent_bounded_and_monotonic() {
         let mut s = WorkspaceWindowState::new(&ids(&["a"])).unwrap();

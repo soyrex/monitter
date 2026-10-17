@@ -119,6 +119,13 @@ impl DerefMut for Desktop {
     }
 }
 
+// The controller outlives its original native window. Hosts retain only weak
+// references, so the application owns this one strong reference without a cycle.
+pub(super) struct DesktopControllerOwner {
+    pub(super) _desktop: Entity<Desktop>,
+}
+impl Global for DesktopControllerOwner {}
+
 pub(super) struct WorkspaceHost {
     pub(super) handle: AnyWindowHandle,
     pub(super) root: Option<Entity<WorkspaceWindowRoot>>,
@@ -762,7 +769,77 @@ impl Desktop {
         self.queue_preferences_save(cx);
         cx.notify();
         eprintln!("[workspace-window] operation=transfer workspace={workspace_id} result=success");
+        if self.window.active_workspace_id.is_none() {
+            let source = self.current_workspace_window.clone();
+            let target = target.clone();
+            let handle = source_window.window_handle();
+            let weak = cx.weak_entity();
+            cx.defer(move |cx| {
+                // A close action can already have removed this host. Recheck
+                // after dispatch; no failed or cancelled drag reaches here.
+                let _ = handle.update(cx, |_, window, cx| {
+                    let _ = weak.update(cx, |desktop, cx| {
+                        if desktop.window_hosts.contains_key(&source) {
+                            desktop.retire_empty_workspace_host(&source, &target, window, cx);
+                        }
+                    });
+                });
+            });
+        }
         Ok(())
+    }
+    fn retire_empty_workspace_host(
+        &mut self,
+        source: &WorkspaceWindowId,
+        target: &WorkspaceWindowId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let empty = if &self.current_workspace_window == source {
+            self.window.active_workspace_id.is_none()
+        } else {
+            self.parked_window_views.get(source).is_some_and(|view| view.active_workspace_id.is_none())
+        };
+        if !empty || self.closing {
+            return;
+        }
+        let Some(handle) = self.window_hosts.get(target).map(|host| host.handle) else {
+            return;
+        };
+        let mut assignments = self.workspace_window_assignments.clone();
+        if assignments.retire_empty_window(source, target).is_err() {
+            return;
+        }
+        if source == self.workspace_window_assignments.primary_window_id() {
+            let lock = self.session_lock.clone();
+            let controller = cx.entity_id();
+            let result = handle.update(cx, |_, destination, cx| {
+                lock.update(cx, |lock, cx| lock.rehost_to_window(destination, cx))?;
+                cx.rehost_entity_window(controller, destination).map_err(|error| error.to_string())
+            }).map_err(|error| error.to_string()).and_then(|result| result);
+            if let Err(error) = result {
+                self.preferences_error = Some(error);
+                cx.notify();
+                return;
+            }
+        }
+        if &self.current_workspace_window == source {
+            let Some(view) = self.parked_window_views.remove(target) else { return; };
+            self.window = view;
+            self.current_workspace_window = target.clone();
+        }
+        self.workspace_window_assignments = assignments;
+        self.parked_window_views.remove(source);
+        self.window_hosts.remove(source);
+        if let Some(set) = &mut self.named_workspaces {
+            set.active_id = self.window.active_workspace_id.clone().unwrap_or_default();
+        }
+        vim_command::forget_window(window.window_handle().window_id(), cx);
+        if let Err(error) = self.persist_workspace_window_assignments(false) {
+            self.preferences_error = Some(error);
+        }
+        window.remove_window();
+        cx.notify();
     }
     fn validate_workspace_assignments(
         &self,
@@ -914,7 +991,7 @@ impl Desktop {
             return;
         }
         let mut assignments = self.workspace_window_assignments.clone();
-        let primary = WorkspaceWindowId::main();
+        let primary = self.workspace_window_assignments.primary_window_id().clone();
         let result = assignments
             .reattach_workspace(&id)
             .and_then(|_| self.transfer_current_workspace(&primary, assignments, window, cx));
@@ -946,6 +1023,10 @@ impl Desktop {
             window_state::save_native_for(id, window, cx);
             return true;
         }
+        if id == self.workspace_window_assignments.primary_window_id() {
+            self.with_workspace_window(window, cx, |desktop, window, cx| desktop.request_close(window, cx));
+            return false;
+        }
         if session_lock::locked(cx) {
             self.focus_primary_workspace_window(cx);
             return false;
@@ -955,7 +1036,7 @@ impl Desktop {
             if desktop.workspace_window_transfer || !desktop.workspace_ready() {
                 return;
             }
-            let primary = WorkspaceWindowId::main();
+            let primary = desktop.workspace_window_assignments.primary_window_id().clone();
             let Some(main) = desktop.window_hosts.get(&primary).map(|host| host.handle) else {
                 return;
             };
@@ -1239,8 +1320,11 @@ impl Desktop {
             self.window.channels_revision = self.revision.clone();
         }
     }
+    pub(super) fn primary_workspace_window(&self) -> Option<AnyWindowHandle> {
+        self.window_hosts.get(self.workspace_window_assignments.primary_window_id()).map(|host| host.handle)
+    }
     pub(super) fn focus_primary_workspace_window(&self, cx: &mut App) {
-        if let Some(host) = self.window_hosts.get(&WorkspaceWindowId::main()) {
+        if let Some(host) = self.window_hosts.get(self.workspace_window_assignments.primary_window_id()) {
             let _ = host
                 .handle
                 .update(cx, |_, window, _| window.activate_window());
@@ -1538,11 +1622,9 @@ impl Desktop {
         result
     }
     pub(super) fn active_workspace_window(&self, cx: &App) -> Option<AnyWindowHandle> {
-        let active = cx.active_window()?;
-        self.window_hosts
-            .values()
-            .find(|host| host.handle == active)
-            .map(|host| host.handle)
+        cx.active_window().and_then(|active| {
+            self.window_hosts.values().find(|host| host.handle == active).map(|host| host.handle)
+        }).or_else(|| self.primary_workspace_window())
     }
     pub(super) fn ensure_workspace_window_registry(
         &mut self,
@@ -1552,7 +1634,7 @@ impl Desktop {
         Self::install_workspace_vim_bar(window, cx);
         if self.window_hosts.is_empty() {
             self.window_hosts.insert(
-                WorkspaceWindowId::main(),
+                self.current_workspace_window.clone(),
                 WorkspaceHost {
                     handle: window.window_handle(),
                     root: None,
@@ -1592,9 +1674,18 @@ impl Desktop {
         }
         let active = self
             .workspace_window_assignments
-            .window(&WorkspaceWindowId::main())
+            .window(self.workspace_window_assignments.primary_window_id())
             .and_then(|host| host.active_workspace_id())
             .map(str::to_owned);
+        // The first native host restores the saved primary, even if the
+        // original main window was retired after its last tab moved.
+        let primary = self.workspace_window_assignments.primary_window_id().clone();
+        if self.current_workspace_window != primary {
+            if let Some(host) = self.window_hosts.remove(&self.current_workspace_window) {
+                self.window_hosts.insert(primary.clone(), host);
+            }
+            self.current_workspace_window = primary;
+        }
         self.window.active_workspace_id = active.clone();
         self.window.workspace_switch = active.clone();
         self.window.preferences_restore = active.is_some();
@@ -1628,9 +1719,13 @@ impl Desktop {
                 .map(|item| item.id.clone())
                 .collect::<Vec<_>>();
             self.workspace_window_assignments = WorkspaceWindowState::new(&ids).unwrap_or_default();
+            if let Some(host) = self.window_hosts.remove(&self.current_workspace_window) {
+                self.window_hosts.insert(WorkspaceWindowId::main(), host);
+            }
+            self.current_workspace_window = WorkspaceWindowId::main();
             let active = self
                 .workspace_window_assignments
-                .window(&WorkspaceWindowId::main())
+                .window(self.workspace_window_assignments.primary_window_id())
                 .and_then(|host| host.active_workspace_id())
                 .map(str::to_owned);
             self.window.active_workspace_id = active.clone();
@@ -1642,7 +1737,7 @@ impl Desktop {
             .workspace_window_assignments
             .windows()
             .iter()
-            .filter(|host| host.window_id() != &WorkspaceWindowId::main())
+            .filter(|host| host.window_id() != self.workspace_window_assignments.primary_window_id())
             .cloned()
             .collect::<Vec<_>>();
         for host in hosts {

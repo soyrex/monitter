@@ -125,6 +125,15 @@ impl SessionLock {
             lock_generation: 0,
         }
     }
+    /// Keep the one PIN form and its input observers on the surviving primary.
+    pub(crate) fn rehost_to_window(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Result<(), String> {
+        let id = cx.entity_id();
+        cx.rehost_entity_window(id, window).map_err(|error| error.to_string())?;
+        for input in [&self.pin, &self.current, &self.confirmation] {
+            input.update(cx, |input, cx| input.rehost_to_window(window, cx))?;
+        }
+        Ok(())
+    }
     pub fn is_locked(&self) -> bool {
         self.locked
     }

@@ -9,6 +9,8 @@ moves its retained UI; it does not launch a second backend or restart agents.
 - In a detached window, choose **Return to Main Window** to return that workspace.
 - On macOS, drag a workspace tab outside the open Monitter windows and release it
   to create a window. Drop it on another window's tab strip to move it there.
+- Moving the final workspace tab out closes its empty source window. If that was
+  the main window, the destination becomes the main window.
 - Closing a detached window returns all its workspaces to the main window.
   Closing the main window follows the existing whole-application close flow.
 
@@ -38,8 +40,8 @@ Windows and Linux runtime behavior still needs testing on those platforms.
 
 A chat, draft or native browser pane cannot be mounted in two native windows.
 If multiple workspace layouts contain that same pane, movement is rejected with
-an explanation; remove the duplicate pane from one workspace first. Empty
-windows can accept another workspace through their tab strip. Closing a window
+an explanation; remove the duplicate pane from one workspace first. An empty startup
+window can accept a workspace through its tab strip. Closing a window
 or removing a workspace does not terminate its agents or terminal sessions.
 
 Normal application quit waits for restoration and the single preference writer,

@@ -134,6 +134,7 @@ fn fixture(cx: &mut TestAppContext) -> (Fixture, &mut VisualTestContext) {
             desktop
         });
         let (drafts, docks, forms) = retained.unwrap();
+        cx.set_global(workspace_windows::DesktopControllerOwner { _desktop: desktop.clone() });
         fixture = Some(Fixture {
             desktop,
             drafts,
@@ -328,7 +329,9 @@ fn workspace_window_detach_return_retains_docks_drafts_and_one_controller(cx: &m
             })
         })
         .unwrap();
-    handle
+    assert!(handle.update(visual, |_, _, _| ()).is_err(), "empty detached source closes");
+    let probe = visual.add_window(|window, cx| Root::new(cx.new(|_| OfflineHost), window, cx));
+    probe
         .update(visual, |_, _, cx| {
             assert_eq!(
                 cx.with_window(fixture.drafts[0].entity_id(), |window, _| window
@@ -368,9 +371,117 @@ fn workspace_window_detach_return_retains_docks_drafts_and_one_controller(cx: &m
             });
         })
         .unwrap();
-    handle
+    probe
         .update(visual, |_, window, _| window.remove_window())
         .unwrap();
+}
+
+#[gpui_kit::test]
+fn workspace_window_final_tab_closes_original_main_and_keeps_controller_and_lock(cx: &mut TestAppContext) {
+    let (fixture, visual) = fixture(cx);
+    let (target, handle) = detach(&fixture, visual);
+    assert!(fixture.main.update(visual, |_, _, _| ()).is_ok(), "two tabs remain in source");
+    for workspace in ["b", "c"] {
+        visual.update(|window, cx| {
+            fixture.desktop.update(cx, |desktop, cx| {
+                assert_eq!(desktop.window.active_workspace_id.as_deref(), Some(workspace));
+                let mut assignments = desktop.workspace_window_assignments.clone();
+                assignments.transfer_workspace(workspace, &target, usize::MAX).unwrap();
+                desktop.transfer_current_workspace(&target, assignments, window, cx).unwrap();
+            });
+        });
+        if workspace == "b" {
+            assert!(fixture.main.update(visual, |_, _, _| ()).is_ok(), "nonfinal source stays open");
+        }
+    }
+    assert!(fixture.main.update(visual, |_, _, _| ()).is_err(), "empty original main is removed");
+    let lock = fixture.desktop.read_with(visual, |desktop, _| desktop.session_lock.clone());
+    let probe = visual.add_window(|window, cx| Root::new(cx.new(|_| OfflineHost), window, cx));
+    probe.update(visual, |_, _, cx| {
+        fixture.desktop.read_with(cx, |desktop, cx| {
+            assert_eq!(desktop.workspace_window_assignments.primary_window_id(), &target);
+            assert_eq!(desktop.current_workspace_window, target);
+            assert_eq!(desktop.window_hosts.len(), 1);
+            assert!(desktop.parked_window_views.is_empty());
+            assert_eq!(desktop.window.dock.entity_id(), fixture.docks[2].entity_id());
+            assert_eq!(desktop.active_workspace_window(cx), Some(handle));
+            assert!(!desktop.closing);
+            for i in 0..3 { assert_form(&fixture, i, cx); }
+        });
+        for id in [fixture.desktop.entity_id(), lock.entity_id()] {
+            assert_eq!(cx.with_window(id, |window, _| window.window_handle()), Some(handle));
+        }
+        for draft in &fixture.drafts {
+            assert_eq!(cx.with_window(draft.entity_id(), |window, _| window.window_handle()), Some(handle));
+        }
+    }).unwrap();
+    // The promoted host must follow the whole-app close path; the offline
+    // preference writer intentionally holds it pending without quitting tests.
+    handle.update(visual, |_, window, cx| {
+        fixture.desktop.update(cx, |desktop, cx| {
+            assert!(!desktop.request_workspace_window_close(&target, window, cx));
+            assert!(desktop.close_pending);
+            desktop.close_pending = false;
+        });
+    }).unwrap();
+    let weak = fixture.desktop.downgrade();
+    drop(fixture);
+    assert!(weak.upgrade().is_some(), "application retains one controller after original root drops");
+    probe.update(visual, |_, window, _| window.remove_window()).unwrap();
+    handle.update(visual, |_, window, _| window.remove_window()).unwrap();
+}
+
+#[gpui_kit::test]
+fn workspace_window_last_tab_detach_retires_secondary_after_new_host_commit(cx: &mut TestAppContext) {
+    let (fixture, visual) = fixture(cx);
+    let (source, source_handle) = detach(&fixture, visual);
+    let (assignments, target) = fixture.desktop.read_with(visual, |desktop, _| {
+        let mut assignments = desktop.workspace_window_assignments.clone();
+        let target = assignments.detach_workspace("a").unwrap();
+        (assignments, target)
+    });
+    let target_handle = destination(&fixture, visual, &target);
+    source_handle.update(visual, |_, window, cx| {
+        fixture.desktop.update(cx, |desktop, cx| desktop.with_workspace_window(window, cx, |desktop, window, cx| {
+            desktop.transfer_current_workspace(&target, assignments, window, cx).unwrap();
+        }));
+    }).unwrap();
+    assert!(source_handle.update(visual, |_, _, _| ()).is_err());
+    target_handle.update(visual, |_, _, cx| {
+        fixture.desktop.read_with(cx, |desktop, cx| {
+            assert!(!desktop.window_hosts.contains_key(&source));
+            assert!(!desktop.parked_window_views.contains_key(&source));
+            assert_eq!(desktop.workspace_window_assignments.window_for_workspace("a"), Some(&target));
+            assert_form(&fixture, 0, cx);
+        });
+    }).unwrap();
+    target_handle.update(visual, |_, window, _| window.remove_window()).unwrap();
+}
+
+#[gpui_kit::test]
+fn workspace_window_rejected_final_tab_transfer_keeps_source_open(cx: &mut TestAppContext) {
+    let (fixture, visual) = fixture(cx);
+    let (source, source_handle) = detach(&fixture, visual);
+    visual.update(|_, cx| {
+        fixture.desktop.update(cx, |desktop, _| desktop.window.preferences_open = true);
+    });
+    source_handle.update(visual, |_, window, cx| {
+        fixture.desktop.update(cx, |desktop, cx| desktop.with_workspace_window(window, cx, |desktop, window, cx| {
+            let before = desktop.workspace_window_assignments.clone();
+            let mut assignments = before.clone();
+            assignments.reattach_workspace("a").unwrap();
+            assert!(desktop.transfer_current_workspace(&WorkspaceWindowId::main(), assignments, window, cx).is_err());
+            assert_eq!(desktop.workspace_window_assignments, before);
+        }));
+    }).unwrap();
+    source_handle.update(visual, |_, _, cx| {
+        fixture.desktop.read_with(cx, |desktop, cx| {
+            assert_eq!(desktop.workspace_window_assignments.window_for_workspace("a"), Some(&source));
+            assert_eq!(desktop.parked_window_views[&source].dock.entity_id(), fixture.docks[0].entity_id());
+            assert_form(&fixture, 0, cx);
+        });
+    }).unwrap();
+    source_handle.update(visual, |_, window, _| window.remove_window()).unwrap();
 }
 
 #[gpui_kit::test]

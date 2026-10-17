@@ -130,12 +130,12 @@ pub(super) fn render_security(
     cx: &mut Context<Desktop>,
     palette: Palette,
 ) -> AnyElement {
-    if desktop.current_workspace_window != crate::workspace_window_state::WindowId::main() {
+    if desktop.current_workspace_window != *desktop.workspace_window_assignments.primary_window_id() {
         return stack().child(settings_card("Session lock", "Manage the shared session lock in the main window.", palette)
             .child(Button::new("session-lock-main-window").label("Open in Main Window")
                 .on_click(cx.workspace_listener(|desktop, _, window, cx| {
                     desktop.close_preferences(window, cx);
-                    let Some(handle)=desktop.window_hosts.get(&crate::workspace_window_state::WindowId::main()).map(|host|host.handle) else{return;};
+                    let Some(handle)=desktop.window_hosts.get(desktop.workspace_window_assignments.primary_window_id()).map(|host|host.handle) else{return;};
                     let weak=cx.weak_entity();
                     cx.defer(move|cx| {let _=handle.update(cx,|_,window,cx| {let _=weak.update(cx,|desktop,cx| {
                         desktop.with_workspace_window(window,cx,|desktop,window,cx| {

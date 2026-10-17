@@ -243,6 +243,7 @@ pub(super) fn open_if_requested(cx: &mut App) -> bool {
         },
     )
     .expect("open disconnected native workspace preview");
+    cx.set_global(workspace_windows::DesktopControllerOwner { _desktop: desktop.clone() });
     // open_window installs its component Root after the constructor returns.
     // Draft creation and browser input require that per-window state, and an
     // erased update avoids holding the root lease while those inputs use it.

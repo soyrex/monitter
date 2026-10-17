@@ -487,7 +487,7 @@ impl Desktop {
             window_hosts: HashMap::new(),
             parked_window_views: HashMap::new(),
             workspace_view_cache: HashMap::new(),
-            current_workspace_window: workspace_window_state::WindowId::main(),
+            current_workspace_window: window_state::primary_window_id(),
             workspace_window_assignments: Default::default(),
             workspace_window_restore_pending: true,
             workspace_window_transfer: false,
@@ -4733,7 +4733,7 @@ impl Render for Desktop {
             native_pane_highlight::clear(window);
             native_popup_occlusion::clear(window);
             let palette=self.apply_native_theme(window,cx);
-            if self.current_workspace_window!=workspace_window_state::WindowId::main() {
+            if self.current_workspace_window!=*self.workspace_window_assignments.primary_window_id() {
                 self.window.dock.update(cx,|dock,cx|dock.set_shown(false,window,cx));
                 window.close_dialog(cx);native_popup_occlusion::clear(window);
                 return div().size_full().flex().items_center().justify_center().bg(rgb(palette.paper)).child(
@@ -5357,6 +5357,7 @@ fn main() {
                 },
             )
             .expect("open GPUI desktop window");
+            cx.set_global(workspace_windows::DesktopControllerOwner { _desktop: desktop.clone() });
             let _ = window_handle.update(cx, |_, window, cx| dialog_backdrop::install(window, cx));
             #[cfg(feature = "visual-export")]
             visual_export::schedule(window_handle, cx);
@@ -5379,7 +5380,7 @@ fn main() {
                         .read_with(cx, |desktop, cx| {
                             // The one lock entity keeps its focus authority in main.
                             if desktop.session_lock.read(cx).configured() {
-                                None
+                                desktop.primary_workspace_window()
                             } else {
                                 desktop.active_workspace_window(cx)
                             }

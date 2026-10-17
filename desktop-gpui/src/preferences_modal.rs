@@ -37,7 +37,7 @@ impl Desktop {
         cx.notify();
     }
     pub(super) fn close_preferences(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.current_workspace_window == crate::workspace_window_state::WindowId::main() {
+        if self.current_workspace_window == *self.workspace_window_assignments.primary_window_id() {
             self.session_lock.update(cx,|lock,cx|lock.clear_fields(window,cx));
         }
         self.window.preferences_open = false;
