@@ -108,14 +108,33 @@ fn prepare(mut rgba: image::RgbaImage) -> Option<image::RgbaImage> {
     for pixel in rgba.pixels_mut() { pixel.0.swap(0, 2); }
     Some(rgba)
 }
-pub fn needed(fullscreen: bool, surface: &str) -> bool { fullscreen && matches!(surface, "glass" | "translucent") }
+pub fn needed(fullscreen: bool, surface: &str) -> bool {
+    // AppKit supplies its native material in fullscreen too. Painting the raw
+    // wallpaper above it bypasses the material's tint and luminance treatment,
+    // making the same translucent surfaces much brighter after entering a Space.
+    needs_wallpaper_fallback(cfg!(target_os = "macos"), fullscreen, surface)
+}
+fn needs_wallpaper_fallback(native_material: bool, fullscreen: bool, surface: &str) -> bool {
+    !native_material && fullscreen && matches!(surface, "glass" | "translucent")
+}
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn wallpaper_backdrop_only_replaces_fullscreen_transparency() {
-        assert!(needed(true, "glass")); assert!(needed(true, "translucent"));
-        assert!(!needed(false, "glass")); assert!(!needed(true, "opaque"));
+    fn wallpaper_backdrop_preserves_native_material_across_fullscreen_transitions() {
+        for surface in ["glass", "translucent", "opaque"] {
+            for fullscreen in [false, true] {
+                assert!(!needs_wallpaper_fallback(true, fullscreen, surface));
+                assert_eq!(needed(fullscreen, surface), needs_wallpaper_fallback(cfg!(target_os = "macos"), fullscreen, surface));
+            }
+        }
+    }
+    #[test]
+    fn wallpaper_backdrop_retains_other_platform_fullscreen_fallback() {
+        assert!(needs_wallpaper_fallback(false, true, "glass"));
+        assert!(needs_wallpaper_fallback(false, true, "translucent"));
+        assert!(!needs_wallpaper_fallback(false, false, "glass"));
+        assert!(!needs_wallpaper_fallback(false, true, "opaque"));
     }
     #[test]
     fn wallpaper_backdrop_is_bounded_blurred_and_bgra() {

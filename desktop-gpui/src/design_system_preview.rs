@@ -75,6 +75,10 @@ impl Render for Preview {
 
 pub(super) fn open_if_requested(cx: &mut App) -> bool {
     let Ok(mode) = std::env::var("MONITTER_GPUI_DESIGN_SYSTEM_PREVIEW") else { return false; };
+    if mode == "surface" {
+        crate::surface_preview::open(cx);
+        return true;
+    }
     let mode = if matches!(mode.as_str(), "overview" | "light") { mode } else { "overview".into() };
     let _ = monitter_gpui_desktop::fonts::register(cx);
     Theme::change(if mode == "light" { ThemeMode::Light } else { ThemeMode::Dark }, None, cx);
