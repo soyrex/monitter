@@ -1,4 +1,5 @@
 //! Native sidebar with agent, project and activity views plus route controls.
+use crate::workspace_windows::DesktopContextExt as _;
 use super::*;
 use crate::design::ui_scaled_px as px;
 
@@ -224,9 +225,9 @@ impl Desktop {
     ) -> AnyElement {
         let task_id = field(task, "id");
         let older = task_is_older(task, sidebar_now_ms());
-        let active = self.selected.as_ref() == Some(&task_id);
+        let active = self.window.selected.as_ref() == Some(&task_id);
         let status = field(task, "status");
-        let completion_marker = task_marker(task, self.sidebar_view, palette, cx);
+        let completion_marker = task_marker(task, self.window.sidebar_view, palette, cx);
         let provider = provider_label(&self.snapshot, task);
         let model = field(task, "model");
         let project_name = context.filter(|name| !name.is_empty());
@@ -372,10 +373,10 @@ impl Desktop {
                 ),
                 |row| row.child(completion_marker),
             )
-            .on_click(cx.listener(move |view, _, window, cx| {
+            .on_click(cx.workspace_listener(move |view, _, window, cx| {
                 view.navigate_sidebar_task(task_id.clone(), window, cx);
             }))
-            .on_hover(cx.listener(move |_, hovered, _, cx| {
+            .on_hover(cx.workspace_listener(move |_, hovered, _, cx| {
                 sidebar_hover::set(&hover_state, *hovered, cx);
             }))
             .into_any_element()
@@ -515,7 +516,7 @@ impl Desktop {
                 count
             ))
             .cursor_pointer()
-            .on_click(cx.listener(move |_, _, _, cx| {
+            .on_click(cx.workspace_listener(move |_, _, _, cx| {
                 collapse.update(cx, |state, _| state.collapsed = !state.collapsed);
                 cx.notify();
             }))
@@ -563,10 +564,10 @@ impl Desktop {
             .px(px(design::space::INSET))
             .py(px(design::space::INSET))
             .when(tern, |tree| tree.pt_0());
-        if self.sidebar_view == SidebarView::Agents {
+        if self.window.sidebar_view == SidebarView::Agents {
             for agent in agents {
                 let id = field(agent, "id");
-                let collapsed = self.collapsed_agents.contains(&id);
+                let collapsed = self.window.collapsed_agents.contains(&id);
                 let color = design::parse_color(&field(agent, "color"), palette.accent);
                 let owned: Vec<_> = tasks
                     .iter()
@@ -609,9 +610,9 @@ impl Desktop {
                                 .justify_center()
                                 .cursor_pointer()
                                 .child(if collapsed { "›".into() } else { avatar })
-                                .on_click(cx.listener(move |view, _, _, cx| {
-                                    if !view.collapsed_agents.remove(&toggle) {
-                                        view.collapsed_agents.insert(toggle.clone());
+                                .on_click(cx.workspace_listener(move |view, _, _, cx| {
+                                    if !view.window.collapsed_agents.remove(&toggle) {
+                                        view.window.collapsed_agents.insert(toggle.clone());
                                     }
                                     cx.notify();
                                 })),
@@ -639,12 +640,12 @@ impl Desktop {
                             Button::new(SharedString::from(format!("new-{id}")))
                                 .compact()
                                 .label("+")
-                                .disabled(self.busy)
-                                .on_click(cx.listener(move |view, _, window, cx| {
+                                .disabled(self.window.busy)
+                                .on_click(cx.workspace_listener(move |view, _, window, cx| {
                                     view.open_chat_draft(Some(new_id.clone()), window, cx);
                                 })),
                         )
-                        .on_hover(cx.listener(move |_, hovered, _, cx| {
+                        .on_hover(cx.workspace_listener(move |_, hovered, _, cx| {
                             sidebar_hover::set(&agent_hover_state, *hovered, cx);
                         })),
                 );
@@ -679,7 +680,7 @@ impl Desktop {
                         .child("No chats yet. Use + beside an agent to start one."),
                 );
             }
-        } else if self.sidebar_view == SidebarView::Projects {
+        } else if self.window.sidebar_view == SidebarView::Projects {
             let projects = rows(&self.snapshot, "projects");
             let mut seen_project_ids = std::collections::HashSet::new();
             for project in &projects {
@@ -820,15 +821,15 @@ impl Desktop {
         // Three primary sidebar tabs (Agents / Projects / Activity) — match the
         // These views change the sidebar listing while leaving the selected
         // main content surface intact.
-        let active_view = self.sidebar_view;
-        self.sidebar_tabs_motion
+        let active_view = self.window.sidebar_view;
+        self.window.sidebar_tabs_motion
             .borrow_mut()
             .observe(match active_view {
                 SidebarView::Agents => 0,
                 SidebarView::Projects => 1,
                 SidebarView::Activity => 2,
             });
-        let tree = self.sidebar_tabs_motion.borrow().body(
+        let tree = self.window.sidebar_tabs_motion.borrow().body(
             "primary-sidebar",
             tree.into_any_element(),
             cx.reduce_motion(),
@@ -928,8 +929,8 @@ impl Desktop {
                             .font_family(design::FONT_MONO)
                             .child(label),
                     )
-                    .on_click(cx.listener(move |desktop, _, _, cx| {
-                        desktop.sidebar_view = next_view;
+                    .on_click(cx.workspace_listener(move |desktop, _, _, cx| {
+                        desktop.window.sidebar_view = next_view;
                         cx.notify();
                     })),
             );
@@ -977,9 +978,9 @@ impl Desktop {
                         .accessibility_label(tab.label)
                         .toggled(active)
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_click(cx.listener(
+                        .on_click(cx.workspace_listener(
                             move |desktop, _, _, cx| {
-                                desktop.sidebar_view = next_view;
+                                desktop.window.sidebar_view = next_view;
                                 cx.notify();
                             },
                         )),
@@ -1035,12 +1036,11 @@ impl Desktop {
                 .object_fit(ObjectFit::Contain),
             );
 
-        let usage_width = self
-            .sidebar_resize
+        let usage_width = self.window.sidebar_resize
             .read(cx)
             .sizes()
             .first()
-            .map(|width| *width / design::ui_px(1., self.sidebar_scale))
+            .map(|width| *width / design::ui_px(1., self.window.sidebar_scale))
             .filter(|width| width.is_finite() && *width > 0.)
             .unwrap_or_else(|| self.current_sidebar_width(cx));
         let usage_width = if tern {
@@ -1048,7 +1048,7 @@ impl Desktop {
         } else {
             usage_width
         };
-        let usage_stats = self.sidebar_usage.as_ref().map(|usage| {
+        let usage_stats = self.window.sidebar_usage.as_ref().map(|usage| {
             usage.update(cx, |usage, cx| {
                 usage.set_composed_palette(palette, usage_width, cx)
             });
@@ -1110,9 +1110,9 @@ impl Desktop {
                                 .truncate()
                                 .child(format!("Review approval · {title}")),
                         )
-                        .on_click(cx.listener(move |view, _, window, cx| {
+                        .on_click(cx.workspace_listener(move |view, _, window, cx| {
                             view.switch_surface(Sidebar::Chats, window, cx);
-                            view.selected = Some(task_id.clone());
+                            view.window.selected = Some(task_id.clone());
                             let pane = view.chat_panes.borrow().get(&task_id).cloned();
                             if let Some(pane) = pane {
                                 pane.update(cx, |pane, cx| {
@@ -1128,15 +1128,15 @@ impl Desktop {
         let sidebar = div()
             .id("sidebar-root")
             .text_size(cx.theme().font_size * 0.9)
-            .on_scroll_wheel(cx.listener(|desktop, event: &ScrollWheelEvent, _, cx| {
+            .on_scroll_wheel(cx.workspace_listener(|desktop, event: &ScrollWheelEvent, _, cx| {
                 let delta = event.delta.pixel_delta(gpui_kit::px(20.));
-                if let Some(index) = desktop.sidebar_tabs_motion.borrow_mut().wheel(
+                if let Some(index) = desktop.window.sidebar_tabs_motion.borrow_mut().wheel(
                     delta.x.into(),
                     delta.y.into(),
                     3,
                     std::time::Instant::now(),
                 ) {
-                    desktop.sidebar_view = [
+                    desktop.window.sidebar_view = [
                         SidebarView::Agents,
                         SidebarView::Projects,
                         SidebarView::Activity,

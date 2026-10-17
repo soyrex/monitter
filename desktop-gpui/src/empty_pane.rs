@@ -58,6 +58,12 @@ pub struct EmptyPane {
 }
 
 impl EmptyPane {
+    /// Retained input callbacks also follow the landing pane to its new host,
+    /// even when the pane is an inactive tab during the transfer.
+    pub(crate) fn child_entity_ids(&self) -> Vec<EntityId> {
+        vec![self.query.entity_id()]
+    }
+
     pub fn new(id: impl Into<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let query =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search all unarchived chats…"));

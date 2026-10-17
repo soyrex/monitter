@@ -48,7 +48,7 @@ pub enum VimCommandBarEvent {
 
 #[derive(Default)]
 struct VimCommandRegistry {
-    bar: Option<Entity<VimCommandBar>>,
+    bars: std::collections::HashMap<WindowId, Entity<VimCommandBar>>,
 }
 impl Global for VimCommandRegistry {}
 
@@ -63,6 +63,9 @@ impl EventEmitter<VimCommandBarEvent> for VimCommandBar {}
 
 impl VimCommandBar {
     pub fn new(window: &mut Window, cx: &mut Context<crate::Desktop>) -> Entity<Self> {
+        if let Some(bar) = bar_for(window, cx) {
+            return bar;
+        }
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("Monitter command"));
         let bar = cx.new(|_| Self {
             input: input.clone(),
@@ -86,9 +89,12 @@ impl VimCommandBar {
                 })
                 .detach();
         });
-        cx.set_global(VimCommandRegistry {
-            bar: Some(bar.clone()),
-        });
+        if cx.try_global::<VimCommandRegistry>().is_none() {
+            cx.set_global(VimCommandRegistry::default());
+        }
+        cx.global_mut::<VimCommandRegistry>()
+            .bars
+            .insert(window.window_handle().window_id(), bar.clone());
         bar
     }
 
@@ -225,12 +231,35 @@ impl Render for VimCommandBar {
     }
 }
 
+/// Lookup by the actual GPUI window, so detached hosts retain independent input,
+/// focus, errors and open state. Creation/event subscriptions remain explicit.
+pub fn bar_for(window: &Window, cx: &App) -> Option<Entity<VimCommandBar>> {
+    bar_for_id(window.window_handle().window_id(), cx)
+}
+
+pub fn bar_for_id(window_id: WindowId, cx: &App) -> Option<Entity<VimCommandBar>> {
+    cx.try_global::<VimCommandRegistry>()?
+        .bars
+        .get(&window_id)
+        .cloned()
+}
+
+/// Compatibility for callers without a Window. Never selects another host's bar.
 pub fn bar(cx: &App) -> Option<Entity<VimCommandBar>> {
-    cx.try_global::<VimCommandRegistry>()?.bar.clone()
+    bar_for_id(cx.active_window()?.window_id(), cx)
+}
+
+/// Release retained input/entities when their native host closes.
+pub fn forget_window(window_id: WindowId, cx: &mut App) {
+    if cx.try_global::<VimCommandRegistry>().is_some() {
+        cx.global_mut::<VimCommandRegistry>()
+            .bars
+            .remove(&window_id);
+    }
 }
 
 pub fn open(cx: &mut Context<crate::Desktop>, window: &mut Window) -> bool {
-    let Some(bar) = bar(cx) else {
+    let Some(bar) = bar_for(window, cx) else {
         return false;
     };
     bar.update(cx, |bar, cx| bar.open(window, cx));

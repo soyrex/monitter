@@ -723,7 +723,6 @@ pub struct ChatPane {
     pending_fork_open: Option<String>,
     pub(super) refreshing: bool,
     pub(super) clear_sent: Option<(String, String)>,
-    composer_window: gpui_kit::AnyWindowHandle,
     pub(super) transcripts: HashMap<String, TranscriptState>,
     /// True after a current-revision latest page has been accepted, including
     /// an empty page that proves this task has no history yet.
@@ -1199,7 +1198,6 @@ impl ChatPane {
             pending_fork_open: None,
             refreshing: false,
             clear_sent: None,
-            composer_window: window.window_handle(),
             transcripts,
             latest_history_loaded: false,
             latest_history_inflight: false,
@@ -1346,15 +1344,50 @@ impl ChatPane {
             cwd: task.map(|task| field(task, "cwd")).unwrap_or_default(),
         }
     }
-    /// Apply acceptance outside painting so the retained editor and persisted
-    /// draft change together, even when this pane is hidden or showing its map.
-    fn clear_acknowledged_composer(
-        &mut self, task_id: &str, sent: &str, window: &mut Window, cx: &mut Context<Self>,
+    /// Assign retained children before mounting this pane in another native
+    /// host. Hidden inputs can receive async paste/acceptance callbacks before
+    /// their first destination frame, so a render-derived association is late.
+    /// Reusing this method also supports returning the same pane to its host.
+    pub(crate) fn rehost_to_window(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Result<(), String> {
+        let mut ids = vec![
+            cx.entity_id(), self.composer.entity_id(), self.queue_editor.entity_id(),
+            self.composer_git.entity_id(), self.composer_footer.entity_id(), self.composer_context_bar.entity_id(),
+            self.attachments.entity_id(), self.voice.entity_id(), self.slash.entity_id(),
+            self.project_picker.entity_id(), self.activity.entity_id(), self.computer_bubble.entity_id(),
+            self.working_bubble.entity_id(), self.companion.entity_id(), self.agent_graph.entity_id(),
+            self.details.entity_id(), self.approvals.entity_id(), self.companion_resize.entity_id(),
+        ];
+        ids.extend(self.answers.values().map(Entity::entity_id));
+        ids.extend(self.activity_rows.values().map(Entity::entity_id));
+        ids.extend(self.grouped_rows.values().map(Entity::entity_id));
+        ids.extend(self.message_attachment_rows.values().map(Entity::entity_id));
+        ids.extend(self.copy_controls.values().map(Entity::entity_id));
+        ids.extend(self.streaming_bodies.values().map(Entity::entity_id));
+        ids.extend(self.task_actions.iter().map(Entity::entity_id));
+        ids.extend(self.fork_dialog.iter().map(Entity::entity_id));
+        ids.extend(self.detail_transcript_cache.iter().map(Entity::entity_id));
+        ids.extend(self.transcript_viewport.iter().map(Entity::entity_id));
+        for id in ids { cx.rehost_entity_window(id, window).map_err(|error| error.to_string())?; }
+        self.composer.update(cx, |input, cx| input.rehost_to_window(window, cx))?;
+        self.queue_editor.update(cx, |input, cx| input.rehost_to_window(window, cx))?;
+        for input in self.answers.values() {
+            input.update(cx, |input, cx| input.rehost_to_window(window, cx))?;
+        }
+        if let Some(actions) = &self.task_actions {
+            actions.update(cx, |actions, cx| actions.rehost_to_window(window, cx))?;
+        }
+        Ok(())
+    }
+
+    /// Persist acceptance even between native hosts. The retained editor is
+    /// cleared in its current window, or on its next render if no host exists.
+    fn stage_acknowledged_composer(
+        &mut self, task_id: &str, sent: &str, cx: &mut Context<Self>,
     ) -> bool {
         if self.task_id() != task_id || self.composer.read(cx).value().as_ref() != sent {
             return false;
         }
-        self.composer.update(cx, |input, cx| input.set_value("", window, cx));
+        self.clear_sent = Some((task_id.to_owned(), sent.to_owned()));
         self.voice.update(cx, |voice, cx| voice.set_context(task_id.to_owned(), String::new(), cx));
         self.slash.update(cx, |slash, cx| slash.set_input(String::new(), cx));
         self.draft_touched = true;
@@ -1362,13 +1395,35 @@ impl ChatPane {
         cx.notify();
         true
     }
+
+    fn apply_acknowledged_composer_clear(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some((task_id, sent)) = self.clear_sent.take() else { return false; };
+        if self.task_id() != task_id || self.composer.read(cx).value().as_ref() != sent {
+            return false;
+        }
+        self.composer.update(cx, |input, cx| input.set_value("", window, cx));
+        cx.notify();
+        true
+    }
+
+    /// Apply acceptance without requiring a ChatPane render; hidden editors
+    /// still clear immediately whenever their current native host is available.
+    #[cfg(all(test, feature = "visual-export"))]
+    fn clear_acknowledged_composer(
+        &mut self, task_id: &str, sent: &str, window: &mut Window, cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.stage_acknowledged_composer(task_id, sent, cx) {
+            return false;
+        }
+        self.apply_acknowledged_composer_clear(window, cx)
+    }
     /// Reads only the explicit unsent composer, never transcripts/attachments.
     pub fn draft(&self, cx: &App) -> String {
         let value = self.composer.read(cx).value().to_string();
         if self
             .clear_sent
             .as_ref()
-            .is_some_and(|(_, sent)| *sent == value)
+            .is_some_and(|(task_id, sent)| *task_id == self.task_id() && *sent == value)
         {
             String::new()
         } else {
@@ -2186,49 +2241,52 @@ impl ChatPane {
             });
         self.await_command_acceptance(task, CommandAcceptance { command, resolved_request, sent_attachments, sent }, cx);
     }
-    /// The same async window delivery handles real IPC results and synthetic
-    /// acknowledgement futures in native regression tests.
+    /// Finish domain state without a window first: a pane can be hidden or
+    /// between native hosts while its backend accepts a command.
     fn await_command_acceptance(
         &mut self, task: gpui_kit::Task<Result<Value, String>>, acceptance: CommandAcceptance, cx: &mut Context<Self>,
     ) {
         let CommandAcceptance { command, resolved_request, sent_attachments, sent } = acceptance;
-        let composer_window = self.composer_window;
         cx.spawn(async move |pane, cx| {
             let result = task.await;
-            let _ = cx.update_window(composer_window, |_, window, cx| {
-                pane.update(cx, |pane, cx| {
-                    pane.busy = false;
-                    pane.composer_footer
-                        .update(cx, |footer, cx| footer.set_busy(false, cx));
-                    pane.starting_turn = false;
-                    if command == "cancel_task" { pane.stop_requests.complete(); }
-                    match result {
-                        Ok(_) => {
-                            if let Some(id) = resolved_request {
-                                pane.answers.retain(|(request_id, _), _| request_id != &id);
-                                pane.form_choices
-                                    .retain(|(request_id, _), _| request_id != &id);
-                            }
-                            if command == "edit_queued_message" {
-                                pane.queue_edit = None;
-                            }
-                            if let Some(ids) = sent_attachments {
-                                pane.attachments
-                                    .update(cx, |attachments, cx| attachments.acknowledge(&ids, cx));
-                            }
-                            if let Some((task_id, text)) = sent {
-                                pane.clear_acknowledged_composer(&task_id, &text, window, cx);
-                            }
-                            pane.refresh(cx);
+            let _ = pane.update(cx, |pane, cx| {
+                pane.busy = false;
+                pane.composer_footer
+                    .update(cx, |footer, cx| footer.set_busy(false, cx));
+                pane.starting_turn = false;
+                if command == "cancel_task" { pane.stop_requests.complete(); }
+                match result {
+                    Ok(_) => {
+                        if let Some(id) = resolved_request {
+                            pane.answers.retain(|(request_id, _), _| request_id != &id);
+                            pane.form_choices
+                                .retain(|(request_id, _), _| request_id != &id);
                         }
-                        Err(error) => {
-                            pane.error = Some(error);
-                            pane.refresh(cx);
+                        if command == "edit_queued_message" {
+                            pane.queue_edit = None;
                         }
+                        if let Some(ids) = sent_attachments {
+                            pane.attachments
+                                .update(cx, |attachments, cx| attachments.acknowledge(&ids, cx));
+                        }
+                        if let Some((task_id, text)) = sent {
+                            pane.stage_acknowledged_composer(&task_id, &text, cx);
+                        }
+                        pane.refresh(cx);
                     }
-                    pane.drive_stop_requests(cx);
-                    cx.notify();
-                })
+                    Err(error) => {
+                        pane.error = Some(error);
+                        pane.refresh(cx);
+                    }
+                }
+                pane.drive_stop_requests(cx);
+                cx.notify();
+            });
+            // Resolve at delivery, never capture the creation window. If the
+            // pane is temporarily unhosted, clear_sent remains durable UI state
+            // and the next host render clears only the still-matching input.
+            let _ = cx.with_window(pane.entity_id(), |window, cx| {
+                let _ = pane.update(cx, |pane, cx| pane.apply_acknowledged_composer_clear(window, cx));
             });
         })
         .detach();
@@ -2640,9 +2698,7 @@ impl Render for ChatPane {
         let (chat_family, chat_size, chat_weight, chat_line_height) =
             self.apply_chat_typography(cx);
         let composer_chat_family = chat_family.clone();
-        if let Some((task_id, sent)) = self.clear_sent.take() {
-            self.clear_acknowledged_composer(&task_id, &sent, window, cx);
-        }
+        self.apply_acknowledged_composer_clear(window, cx);
         // Borrow chrome records from a shared snapshot; ancestor redraws do
         // not clone every task and agent just to find the selected task.
         let render_snapshot = self.snapshot.clone();

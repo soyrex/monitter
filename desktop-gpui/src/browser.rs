@@ -351,11 +351,36 @@ fn create_native(
     }
 }
 
+/// Retain the destination while native ownership changes. A raw AppKit view
+/// alone is insufficient: a detached window may still be opening or closing.
+#[cfg(target_os = "macos")]
+fn reparent_target(window: &Window) -> Result<objc2::rc::Retained<objc2::runtime::AnyObject>, String> {
+    use objc2::{msg_send, rc::Retained, runtime::AnyObject};
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let handle = HasWindowHandle::window_handle(window).map_err(|error| error.to_string())?;
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        return Err("Browser transfer requires a native AppKit window.".into());
+    };
+    unsafe {
+        let view = handle.ns_view.as_ptr().cast::<AnyObject>();
+        let native: *mut AnyObject = msg_send![view, window];
+        let native = Retained::retain(native).ok_or("The destination browser window is unavailable.")?;
+        let content: *mut AnyObject = msg_send![&*native, contentView];
+        if content.is_null() { return Err("The destination browser content view is unavailable.".into()); }
+        Ok(native)
+    }
+}
+
 #[cfg(feature = "performance-profiling")]
 fn create_performance_native(window: &Window) -> Result<wry::WebView, String> {
+    create_private_static_native(window, "<!doctype html><meta charset=utf-8><title>Fixture</title><body>Static browser fixture</body>")
+}
+
+#[cfg(feature = "performance-profiling")]
+fn create_private_static_native(window: &Window, html: &'static str) -> Result<wry::WebView, String> {
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = window;
+        let _ = (window, html);
         Err("The native browser performance fixture requires macOS.".into())
     }
     #[cfg(target_os = "macos")]
@@ -363,10 +388,12 @@ fn create_performance_native(window: &Window) -> Result<wry::WebView, String> {
         // In-memory/private WKWebView with static content; it never touches
         // Monitter's browser datastore or requests a network resource.
         wry::WebViewBuilder::new()
-            .with_html("<!doctype html><meta charset=utf-8><title>Fixture</title><body>Static browser fixture</body>")
+            .with_html(html)
             .with_incognito(true)
             .with_visible(false)
             .with_focused(false)
+            .with_navigation_handler(|location| location == "about:blank")
+            .with_new_window_req_handler(|_, _| wry::NewWindowResponse::Deny)
             .build_as_child(window)
             .map_err(|error| format!("Cannot create private performance browser: {error}"))
     }
@@ -376,6 +403,7 @@ pub(crate) struct BrowserTab {
     focus: FocusHandle,
     address: Entity<InputState>,
     webview: Option<Entity<WebView>>,
+    host_window: AnyWindowHandle,
     #[cfg(target_os = "macos")]
     applied_corner_radius: Option<f64>,
     location: String,
@@ -881,6 +909,7 @@ impl BrowserTab {
             focus,
             address,
             webview,
+            host_window: window.window_handle(),
             #[cfg(target_os = "macos")]
             applied_corner_radius: None,
             location: "about:blank".into(),
@@ -1092,6 +1121,61 @@ impl BrowserTab {
                     view.update(cx, |view, _| view.show());
                 }
             }
+        }
+    }
+
+    pub(crate) fn is_hosted_in(&self, window: &Window) -> bool {
+        self.host_window == window.window_handle()
+    }
+
+    /// Validate without hiding, navigating, changing ownership or clearing a
+    /// pending address. Every tab in a batch is checked before any tab moves.
+    pub(crate) fn preflight_reparent_to_window(&self, window: &Window) -> Result<(), String> {
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = window;
+            return Err("Moving browser tabs between windows is supported only on macOS.".into());
+        }
+        #[cfg(target_os = "macos")]
+        {
+            if self.webview.is_none() { return Err("The browser tab has no native view to transfer.".into()); }
+            reparent_target(window)?;
+            Ok(())
+        }
+    }
+
+    /// Move the existing native page rather than reload its URL. The owning
+    /// dock shows it after layout in the new host, including on a return move.
+    pub(crate) fn reparent_to_window(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Result<(), String> {
+        self.preflight_reparent_to_window(window)?;
+        #[cfg(not(target_os = "macos"))]
+        { let _ = cx; unreachable!("unsupported transfer was rejected by preflight"); }
+        #[cfg(target_os = "macos")]
+        {
+            let target = reparent_target(window)?;
+            let view = self.webview.clone().ok_or("The browser tab has no native view to transfer.")?;
+            let was_visible = self.visible;
+            self.hide(cx);
+            if let Err(error) = view.read(cx).raw().set_visible(false) {
+                if was_visible { self.show(cx); }
+                return Err(format!("Cannot hide the browser page before transfer: {error}"));
+            }
+            if let Err(error) = view.read(cx).raw().reparent(objc2::rc::Retained::as_ptr(&target).cast_mut().cast()) {
+                if was_visible { self.show(cx); }
+                return Err(format!("Cannot move the retained browser page: {error}"));
+            }
+            self.host_window = window.window_handle();
+            self.dock_group = None;
+            self.context_pane_size.set(Size::default());
+            view.update(cx, |view, _| view.invalidate_native_bounds());
+            // Pane-owned callbacks resolve their subscriber's current window.
+            // Pin hidden children too; they need not wait for their first draw.
+            let tab_id = cx.entity_id();
+            cx.rehost_entity_window(tab_id, window).map_err(|error| error.to_string())?;
+            self.address.update(cx, |input, cx| input.rehost_to_window(window, cx))?;
+            cx.rehost_entity_window(view.entity_id(), window).map_err(|error| error.to_string())?;
+            cx.notify();
+            Ok(())
         }
     }
 
@@ -1405,6 +1489,37 @@ pub struct BrowserPane {
 impl EventEmitter<BrowserPaneEvent> for BrowserPane {}
 
 impl BrowserPane {
+    /// A single private, static page for the disconnected native transfer
+    /// preview. This bypasses BrowserPane::new and the persistent native store.
+    #[cfg(feature = "performance-profiling")]
+    pub(crate) fn workspace_window_fixture(window: &mut Window, cx: &mut Context<Self>) -> Result<Self, String> {
+        let native = create_private_static_native(window, r#"<!doctype html>
+<html lang="en"><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'none'; form-action 'none'; base-uri 'none'">
+<title>Retained browser preview</title>
+<style>html{color-scheme:dark}body{margin:40px;max-width:760px;font:17px system-ui;background:#14191f;color:#edf2f8}h1{font-size:28px}p{line-height:1.5;color:#b9c7d7}label{display:block;margin-top:28px}input,button{font:inherit;padding:12px;border:1px solid #60758f;border-radius:8px;background:#232f3d;color:#fff}input{display:block;margin-top:10px;width:90%}button{margin-top:24px;cursor:pointer}output{display:block;margin-top:18px;font-size:24px;color:#74d8ea}</style>
+<h1>Retained browser preview</h1>
+<p>Offline private page. No network, browser profile, backend, or agent connection.</p>
+<p>Edit the value and increment the counter. Move the Browser workspace to a new window, return it, or close its detached window. Both values should remain unchanged.</p>
+<label for="retained-value">Unsent browser input</label>
+<input id="retained-value" value="Retain this browser value" autocomplete="off">
+<button id="increment" type="button">Increment local counter</button>
+<output id="counter" aria-live="polite">Counter: 0</output>
+<script>let count=0;document.getElementById('increment').addEventListener('click',()=>{document.getElementById('counter').textContent='Counter: '+(++count)});</script>
+</html>"#)?;
+        let tab = cx.new(|cx| {
+            let mut tab = BrowserTab::new_with_native(window, cx, Ok(native), None);
+            tab.unloaded = false;
+            tab.title = "Retained browser preview".into();
+            tab.docked_mode = true;
+            tab.initial_address_pending = false;
+            tab
+        });
+        let mut manager = Self::with_initial_tab(tab, cx);
+        manager.set_docked_mode(true, cx);
+        Ok(manager)
+    }
+
     fn new_tab(&self, window: &mut Window, cx: &mut Context<Self>) -> Entity<BrowserTab> {
         let palette = self.palette;
         let ratio = self.interface_font_ratio;
@@ -1468,6 +1583,10 @@ impl BrowserPane {
             KeyBinding::new("ctrl-shift-tab", PreviousTab, Some("MonitterNativeBrowser")),
         ]);
         let tab = cx.new(|cx| BrowserTab::new(window, cx));
+        Self::with_initial_tab(tab, cx)
+    }
+
+    fn with_initial_tab(tab: Entity<BrowserTab>, cx: &mut Context<Self>) -> Self {
         let observation = cx.observe(&tab, |_, _, cx| cx.notify());
         let metadata_subscription =
             cx.subscribe(&tab, |pane, _, event: &BrowserTabEvent, cx| match event {
@@ -1544,6 +1663,68 @@ impl BrowserPane {
             .iter()
             .find(|(tab_id, _)| *tab_id == id)
             .map(|(_, tab)| tab.clone())
+    }
+
+    fn scoped_tabs(&self, ids: &[u64]) -> Result<Vec<(u64, Entity<BrowserTab>)>, String> {
+        let mut seen = HashSet::new();
+        ids.iter().map(|id| {
+            if !seen.insert(*id) { return Err(format!("Browser tab {id} occurs twice in the transfer scope.")); }
+            self.tab_entity(*id).map(|tab| (*id, tab)).ok_or_else(|| format!("Browser tab {id} is unavailable."))
+        }).collect()
+    }
+
+    pub(crate) fn preflight_tab_transfer(&self, ids: &[u64], window: &Window, cx: &App) -> Result<(), String> {
+        for (_, tab) in self.scoped_tabs(ids)? { tab.read(cx).preflight_reparent_to_window(window)?; }
+        Ok(())
+    }
+
+    /// Keep one global manager and all tab entities/metadata. If a native move
+    /// fails, return prior pages to their original live windows before reporting
+    /// the error; a rollback failure is explicit and never recreates a page.
+    pub(crate) fn transfer_tabs_to_window(&mut self, ids: &[u64], window: &mut Window, cx: &mut Context<Self>) -> Result<(), String> {
+        self.preflight_tab_transfer(ids, window, cx)?;
+        let plan: Vec<_> = self.scoped_tabs(ids)?.into_iter().map(|(id, tab)| {
+            let state = tab.read(cx);
+            let source = state.host_window;
+            let visible = state.visible;
+            (id, tab, source, visible)
+        }).collect();
+        for (index, (id, tab, _, _)) in plan.iter().enumerate() {
+            if let Err(error) = tab.update(cx, |tab, cx| tab.reparent_to_window(window, cx)) {
+                let mut failures = Vec::new();
+                for (id, tab, source, visible) in plan[..=index].iter().rev() {
+                    let restore = if source.window_id() == window.window_handle().window_id() {
+                        tab.update(cx, |tab, cx| tab.reparent_to_window(window, cx))
+                    } else {
+                        source.update(cx, |_, original, cx| tab.update(cx, |tab, cx| tab.reparent_to_window(original, cx)))
+                            .map_err(|error| error.to_string()).and_then(|result| result)
+                    };
+                    if let Err(error) = restore { failures.push(format!("tab {id}: {error}")); }
+                    else if *visible { tab.update(cx, |tab, cx| tab.show(cx)); }
+                }
+                return Err(if failures.is_empty() { format!("Cannot transfer browser tab {id}: {error}") }
+                    else { format!("Cannot transfer browser tab {id}: {error}. Rollback incomplete: {}", failures.join("; ")) });
+            }
+        }
+        Ok(())
+    }
+
+    /// Window hosts must scope visibility to their own tabs. Manager-wide hide
+    /// and close remain intentional application shutdown/security operations.
+    pub(crate) fn hide_tabs(&self, ids: &[u64], cx: &mut App) -> Result<(), String> {
+        for (_, tab) in self.scoped_tabs(ids)? { tab.update(cx, |tab, cx| tab.hide(cx)); }
+        Ok(())
+    }
+
+    pub(crate) fn show_tabs(&self, ids: &[u64], cx: &mut App) -> Result<(), String> {
+        for (_, tab) in self.scoped_tabs(ids)? { tab.update(cx, |tab, cx| tab.show(cx)); }
+        Ok(())
+    }
+
+    pub(crate) fn close_tabs(&mut self, ids: &[u64], cx: &mut Context<Self>) -> Result<(), String> {
+        self.scoped_tabs(ids)?;
+        for id in ids { self.remove_docked(*id, cx); }
+        Ok(())
     }
 
     /// Create a blank, unloaded browser tab for the owning DockWorkspace.
@@ -2023,6 +2204,91 @@ mod tests {
         is_stale_initial_blank, is_stale_initial_title, restore_plan, restore_revision_is_current,
         validated_url,
     };
+
+    /// Real retained manager/tab entities with no WKWebView, network or profile.
+    fn offline_transfer_fixture(cx: &mut gpui_kit::TestAppContext) -> (
+        gpui_kit::Entity<super::BrowserPane>,
+        [gpui_kit::Entity<super::BrowserTab>; 2],
+        &mut gpui_kit::VisualTestContext,
+    ) {
+        use gpui_kit::{AppContext as _, component::Root};
+        use std::{cell::RefCell, rc::Rc};
+        cx.update(|cx| gpui_kit::init(cx));
+        let slot = Rc::new(RefCell::new(None));
+        let output = slot.clone();
+        let (_, visual) = cx.add_window_view(move |window, cx| {
+            let tabs: [_; 2] = std::array::from_fn(|index| cx.new(|cx| {
+                let mut tab = super::BrowserTab::new_with_native(window, cx, Err("offline fixture".into()), None);
+                tab.error = None;
+                tab.docked_mode = true;
+                tab.visible = true;
+                tab.unloaded = false;
+                tab.loading = true;
+                tab.requested_url = format!("https://example.invalid/page/{index}");
+                tab.location = tab.requested_url.clone();
+                tab.actual_url = Some(tab.location.clone());
+                tab.title = format!("Retained page {index}");
+                tab
+            }));
+            let manager = cx.new(|cx| {
+                let mut manager = super::BrowserPane::with_initial_tab(tabs[0].clone(), cx);
+                manager.attach_tab(2, &tabs[1], cx);
+                manager.tabs.push((2, tabs[1].clone()));
+                manager.next_id = 3;
+                manager.docked_mode = true;
+                manager
+            });
+            *output.borrow_mut() = Some((manager.clone(), tabs));
+            Root::new(manager, window, cx)
+        });
+        let (manager, tabs) = slot.borrow_mut().take().unwrap();
+        (manager, tabs, visual)
+    }
+
+    #[gpui_kit::test]
+    fn browser_transfer_preflight_rejects_batch_without_mutating_retained_pages(cx: &mut gpui_kit::TestAppContext) {
+        use gpui_kit::AppContext as _;
+        let (manager, tabs, visual) = offline_transfer_fixture(cx);
+        visual.update(|window, cx| {
+            let before = manager.read(cx).metadata_snapshot(cx);
+            let revision = manager.read(cx).metadata_revision();
+            for ids in [&[1, 999][..], &[1, 1][..], &[1, 2][..]] {
+                assert!(manager.update(cx, |manager, cx| manager.transfer_tabs_to_window(ids, window, cx)).is_err());
+                assert_eq!(manager.read(cx).metadata_snapshot(cx), before);
+                assert_eq!(manager.read(cx).metadata_revision(), revision);
+                for (index, tab) in tabs.iter().enumerate() {
+                    let tab_state = tab.read(cx);
+                    assert!(tab_state.visible && tab_state.loading && !tab_state.unloaded);
+                    assert_eq!(manager.read(cx).tab_entity(index as u64 + 1).unwrap().entity_id(), tab.entity_id());
+                    assert_eq!(tab_state.host_window.window_id(), window.window_handle().window_id());
+                }
+            }
+        });
+    }
+
+    #[gpui_kit::test]
+    fn browser_scoped_visibility_and_close_preserve_unselected_tab(cx: &mut gpui_kit::TestAppContext) {
+        use gpui_kit::AppContext as _;
+        let (manager, tabs, visual) = offline_transfer_fixture(cx);
+        visual.update(|_, cx| {
+            // Invalid scope is rejected before an earlier valid tab can hide.
+            assert!(manager.update(cx, |manager, cx| manager.hide_tabs(&[1, 999], cx)).is_err());
+            assert!(tabs[0].read(cx).visible && tabs[1].read(cx).visible);
+            let peer_url = tabs[1].read(cx).location.clone();
+            manager.update(cx, |manager, cx| manager.hide_tabs(&[1], cx)).unwrap();
+            assert!(!tabs[0].read(cx).visible && tabs[1].read(cx).visible);
+            manager.update(cx, |manager, cx| manager.show_tabs(&[1], cx)).unwrap();
+            assert!(tabs[0].read(cx).visible && tabs[1].read(cx).visible);
+            manager.update(cx, |manager, cx| manager.close_tabs(&[1], cx)).unwrap();
+            assert!(manager.read(cx).tab_entity(1).is_none());
+            assert_eq!(manager.read(cx).tab_entity(2).unwrap().entity_id(), tabs[1].entity_id());
+            assert!(!tabs[0].read(cx).loading);
+            let peer = tabs[1].read(cx);
+            assert!(peer.visible && peer.loading && !peer.unloaded);
+            assert_eq!(peer.location, peer_url);
+            assert_eq!(manager.read(cx).tabs.len(), 1, "closing one host creates no replacement native tab");
+        });
+    }
 
     #[gpui_kit::test]
     fn empty_browser_opens_focused_address_once_on_first_display(cx: &mut gpui_kit::TestAppContext) {

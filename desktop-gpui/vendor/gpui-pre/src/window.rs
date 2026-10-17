@@ -2849,6 +2849,13 @@ impl Window {
         self.platform_window.bounds()
     }
 
+    /// Actual global logical screen bounds, in the same coordinate space as
+    /// [`crate::DragCompletion::screen_position`]. Includes native window chrome.
+    /// Returns None when the platform cannot expose a global origin (Wayland).
+    pub fn global_bounds(&self) -> Option<Bounds<Pixels>> {
+        self.platform_window.global_bounds()
+    }
+
     /// Renders the current frame's scene to a texture and returns the pixel data as an RGBA image.
     /// This does not present the frame to screen - useful for visual testing where we want
     /// to capture what would be rendered without displaying it or requiring the window to be visible.
@@ -3973,7 +3980,10 @@ impl Window {
     }
 
     pub(crate) fn reuse_prepaint(&mut self, range: Range<PrepaintStateIndex>) {
-        self.a11y.replay_nodes(range.start.a11y_nodes_index..range.end.a11y_nodes_index);
+        self.a11y.replay_nodes(
+            range.start.a11y_nodes_index..range.end.a11y_nodes_index,
+            self.focus,
+        );
         if !self.content_inert {
         self.next_frame.hitboxes.extend(
             self.rendered_frame.hitboxes[range.start.hitboxes_index..range.end.hitboxes_index]
@@ -5695,6 +5705,20 @@ impl Window {
             // Translate dragging and dropping of external files from the operating system
             // to internal drag and drop events.
             PlatformInput::FileDrop(file_drop) => match file_drop {
+                FileDropEvent::InternalEntered { position } => {
+                    self.mouse_position = position;
+                    cx.restore_internal_platform_drag(self.handle.window_id());
+                    PlatformInput::MouseMove(MouseMoveEvent {
+                        position,
+                        pressed_button: Some(MouseButton::Left),
+                        modifiers: Modifiers::default(),
+                    })
+                }
+                FileDropEvent::Completed(result) => {
+                    cx.complete_platform_drag(self.handle.window_id(), result);
+                    self.refresh();
+                    PlatformInput::FileDrop(FileDropEvent::Completed(result))
+                }
                 FileDropEvent::Entered { position, paths } => {
                     self.mouse_position = position;
                     let source_window = self.handle.window_id();
@@ -5705,6 +5729,7 @@ impl Window {
                             cursor_offset: position,
                             cursor_style: None,
                             external_payload_source: None,
+                            completion: None,
                         });
                     }
                     PlatformInput::MouseMove(MouseMoveEvent {
@@ -5760,7 +5785,18 @@ impl Window {
                 self.mouse_position = touch_drag.start_position;
                 PlatformInput::TouchDrag(touch_drag)
             }
-            PlatformInput::KeyDown(_) | PlatformInput::KeyUp(_) => event,
+            PlatformInput::KeyDown(ref key) => {
+                if key.keystroke.key == "escape"
+                    && cx
+                        .active_drag
+                        .as_ref()
+                        .is_some_and(|drag| drag.completion.is_some())
+                {
+                    cx.stop_active_drag(self);
+                }
+                event
+            }
+            PlatformInput::KeyUp(_) => event,
         };
 
         if let Some(any_mouse_event) = event.mouse_event() {
@@ -5823,7 +5859,10 @@ impl Window {
             return;
         };
         if self.platform_window.start_external_drag(&payload)
-            && cx.hand_active_drag_to_platform(self.handle.window_id())
+            && cx.hand_active_drag_to_platform(
+                self.handle.window_id(),
+                matches!(payload, crate::ExternalDragPayload::Internal),
+            )
         {
             self.refresh();
         }
@@ -6013,7 +6052,21 @@ impl Window {
             } else if event.is::<MouseUpEvent>() {
                 // If this was a mouse up event, cancel the active drag and redraw
                 // the window.
-                cx.active_drag = None;
+                if let Some(mut drag) = cx.active_drag.take() {
+                    // Platform Submit is translated to MouseUp too. Its completion
+                    // remains owned by the native source until Completed arrives.
+                    if let Some(completion) = drag.completion.take() {
+                        completion(
+                            crate::DragCompletion {
+                                outcome: crate::DragCompletionOutcome::Released,
+                                screen_position: self
+                                    .global_bounds()
+                                    .map(|bounds| bounds.origin + self.mouse_position()),
+                            },
+                            cx,
+                        );
+                    }
+                }
                 self.refresh();
             }
         }
@@ -8566,6 +8619,294 @@ mod tests {
         .unwrap();
 
         assert_eq!(child_bounds.get().size, size(px(300.), px(200.)));
+    }
+
+    struct RetainedDragView {
+        completions: Rc<RefCell<Vec<(crate::WindowId, u32, crate::DragCompletion)>>>,
+        drops: Rc<Cell<usize>>,
+        accept: bool,
+    }
+
+    impl Render for RetainedDragView {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let completions = self.completions.clone();
+            let drops = self.drops.clone();
+            let accept = self.accept;
+            div()
+                .id("retained-drag")
+                .size_full()
+                .on_drag(42_u32, |_, _, _, cx| cx.new(|_| Empty))
+                .external_drag_payload::<u32>(|_, _, _| Some(ExternalDragPayload::Internal))
+                .on_drag_complete::<u32>(move |value, result, window, _| {
+                    completions.borrow_mut().push((
+                        window.window_handle().window_id(),
+                        *value,
+                        *result,
+                    ));
+                })
+                .can_drop(move |_, _, _| accept)
+                .on_drop(move |value: &u32, _, _| {
+                    assert_eq!(*value, 42);
+                    drops.set(drops.get() + 1);
+                })
+        }
+    }
+
+    fn retained_drag_window(
+        cx: &mut TestAppContext,
+        completions: Rc<RefCell<Vec<(crate::WindowId, u32, crate::DragCompletion)>>>,
+        drops: Rc<Cell<usize>>,
+        accept: bool,
+    ) -> AnyWindowHandle {
+        cx.add_window(move |_, _| RetainedDragView {
+            completions,
+            drops,
+            accept,
+        })
+        .into()
+    }
+
+    fn start_retained_drag(cx: &mut TestAppContext, source: AnyWindowHandle, native: bool) {
+        cx.test_window(source)
+            .set_start_external_drag_result(native);
+        cx.update_window(source, |_, window, cx| {
+            window.draw(cx).clear(cx);
+            window.dispatch_event(
+                MouseDownEvent {
+                    position: point(px(10.), px(10.)),
+                    button: MouseButton::Left,
+                    modifiers: Default::default(),
+                    click_count: 1,
+                    first_mouse: false,
+                }
+                .to_platform_input(),
+                cx,
+            );
+            for position in [point(px(20.), px(20.)), point(px(-10.), px(20.))] {
+                window.dispatch_event(
+                    MouseMoveEvent {
+                        position,
+                        pressed_button: Some(MouseButton::Left),
+                        modifiers: Default::default(),
+                    }
+                    .to_platform_input(),
+                    cx,
+                );
+            }
+            assert_eq!(cx.active_drag.is_none(), native);
+        })
+        .unwrap();
+    }
+
+    #[gpui::test]
+    fn internal_native_drag_restores_across_windows_and_completes_once_in_source(
+        cx: &mut TestAppContext,
+    ) {
+        let completions = Rc::new(RefCell::new(Vec::new()));
+        let drops = Rc::new(Cell::new(0));
+        let source = retained_drag_window(cx, completions.clone(), drops.clone(), true);
+        let destination = retained_drag_window(cx, completions.clone(), drops.clone(), true);
+        start_retained_drag(cx, source, true);
+        assert!(completions.borrow().is_empty(), "leaving is not completion");
+        assert!(
+            cx.test_window(source).external_drag_files().is_empty(),
+            "internal drag must not offer files"
+        );
+        let position = point(px(30.), px(30.));
+        for host in [destination, source, destination] {
+            cx.update_window(host, |_, window, cx| {
+                window.draw(cx).clear(cx);
+                window.dispatch_event(
+                    FileDropEvent::InternalEntered { position }.to_platform_input(),
+                    cx,
+                );
+                assert_eq!(
+                    cx.active_drag.as_ref().unwrap().value.downcast_ref::<u32>(),
+                    Some(&42)
+                );
+                window.dispatch_event(FileDropEvent::Exited.to_platform_input(), cx);
+                assert!(cx.active_drag.is_none());
+            })
+            .unwrap();
+        }
+        cx.update_window(destination, |_, window, cx| {
+            window.dispatch_event(
+                FileDropEvent::InternalEntered { position }.to_platform_input(),
+                cx,
+            );
+            window.draw(cx).clear(cx);
+            window.dispatch_event(FileDropEvent::Submit { position }.to_platform_input(), cx);
+            assert!(cx.active_drag.is_none());
+        })
+        .unwrap();
+        assert_eq!(drops.get(), 1);
+        assert!(
+            completions.borrow().is_empty(),
+            "native source has not completed yet"
+        );
+        cx.update_window(source, |_, window, cx| {
+            let result = crate::DragCompletion {
+                outcome: crate::DragCompletionOutcome::Accepted { destination: None },
+                screen_position: Some(point(px(500.), px(300.))),
+            };
+            window.dispatch_event(FileDropEvent::Completed(result).to_platform_input(), cx);
+            window.dispatch_event(FileDropEvent::Completed(result).to_platform_input(), cx);
+        })
+        .unwrap();
+        assert_eq!(
+            completions.borrow().as_slice(),
+            &[(
+                source.window_id(),
+                42,
+                crate::DragCompletion {
+                    outcome: crate::DragCompletionOutcome::Accepted {
+                        destination: Some(destination.window_id())
+                    },
+                    screen_position: Some(point(px(500.), px(300.))),
+                }
+            )]
+        );
+    }
+
+    #[gpui::test]
+    fn internal_native_drag_distinguishes_cancel_release_and_rejected_target(
+        cx: &mut TestAppContext,
+    ) {
+        for native_outcome in [
+            crate::DragCompletionOutcome::Cancelled,
+            crate::DragCompletionOutcome::Released,
+            crate::DragCompletionOutcome::Accepted { destination: None },
+        ] {
+            let completions = Rc::new(RefCell::new(Vec::new()));
+            let drops = Rc::new(Cell::new(0));
+            let source = retained_drag_window(cx, completions.clone(), drops.clone(), false);
+            start_retained_drag(cx, source, true);
+            if matches!(
+                native_outcome,
+                crate::DragCompletionOutcome::Accepted { .. }
+            ) {
+                cx.update_window(source, |_, window, cx| {
+                    let position = point(px(30.), px(30.));
+                    window.dispatch_event(
+                        FileDropEvent::InternalEntered { position }.to_platform_input(),
+                        cx,
+                    );
+                    window.draw(cx).clear(cx);
+                    window
+                        .dispatch_event(FileDropEvent::Submit { position }.to_platform_input(), cx);
+                })
+                .unwrap();
+            }
+            cx.update_window(source, |_, window, cx| {
+                window.dispatch_event(
+                    FileDropEvent::Completed(crate::DragCompletion {
+                        outcome: native_outcome,
+                        screen_position: Some(point(px(500.), px(300.))),
+                    })
+                    .to_platform_input(),
+                    cx,
+                );
+                assert!(cx.active_drag.is_none());
+            })
+            .unwrap();
+            assert_eq!(drops.get(), 0);
+            assert_eq!(completions.borrow().len(), 1);
+            let expected = if matches!(
+                native_outcome,
+                crate::DragCompletionOutcome::Accepted { .. }
+            ) {
+                crate::DragCompletionOutcome::Cancelled
+            } else {
+                native_outcome
+            };
+            assert_eq!(completions.borrow()[0].2.outcome, expected);
+        }
+    }
+
+    #[gpui::test]
+    fn stopping_restored_internal_drag_waits_for_native_completion(cx: &mut TestAppContext) {
+        let completions = Rc::new(RefCell::new(Vec::new()));
+        let source = retained_drag_window(cx, completions.clone(), Rc::new(Cell::new(0)), false);
+        start_retained_drag(cx, source, true);
+        cx.update_window(source, |_, window, cx| {
+            window.dispatch_event(FileDropEvent::InternalEntered {
+                position: point(px(30.), px(30.)),
+            }.to_platform_input(), cx);
+            assert!(cx.stop_active_drag(window));
+            assert!(cx.has_platform_owned_drag());
+        }).unwrap();
+        assert!(completions.borrow().is_empty());
+        cx.update_window(source, |_, window, cx| {
+            window.dispatch_event(FileDropEvent::Completed(crate::DragCompletion {
+                outcome: crate::DragCompletionOutcome::Released,
+                screen_position: Some(point(px(500.), px(300.))),
+            }).to_platform_input(), cx);
+            assert!(!cx.has_platform_owned_drag());
+        }).unwrap();
+        assert_eq!(completions.borrow().len(), 1);
+        assert_eq!(completions.borrow()[0].2.outcome, crate::DragCompletionOutcome::Cancelled);
+    }
+
+    #[gpui::test]
+    fn pointer_only_drag_completes_on_actual_mouse_up(cx: &mut TestAppContext) {
+        let completions = Rc::new(RefCell::new(Vec::new()));
+        let source = retained_drag_window(cx, completions.clone(), Rc::new(Cell::new(0)), false);
+        start_retained_drag(cx, source, false);
+        assert!(completions.borrow().is_empty());
+        cx.update_window(source, |_, window, cx| {
+            window.dispatch_event(
+                crate::MouseUpEvent {
+                    position: point(px(-10.), px(20.)),
+                    button: MouseButton::Left,
+                    modifiers: Default::default(),
+                    click_count: 1,
+                }
+                .to_platform_input(),
+                cx,
+            );
+            assert!(cx.active_drag.is_none());
+        })
+        .unwrap();
+        assert_eq!(completions.borrow().len(), 1);
+        assert_eq!(
+            completions.borrow()[0].2.outcome,
+            crate::DragCompletionOutcome::Released
+        );
+    }
+
+    #[gpui::test]
+    fn pointer_drag_escape_cancels_before_later_mouse_up(cx: &mut TestAppContext) {
+        let completions = Rc::new(RefCell::new(Vec::new()));
+        let source = retained_drag_window(cx, completions.clone(), Rc::new(Cell::new(0)), false);
+        start_retained_drag(cx, source, false);
+        cx.update_window(source, |_, window, cx| {
+            window.dispatch_event(
+                KeyDownEvent {
+                    keystroke: Keystroke::parse("escape").unwrap(),
+                    is_held: false,
+                    prefer_character_input: false,
+                }
+                .to_platform_input(),
+                cx,
+            );
+            assert!(cx.active_drag.is_none());
+            window.dispatch_event(
+                crate::MouseUpEvent {
+                    position: point(px(-10.), px(20.)),
+                    button: MouseButton::Left,
+                    modifiers: Default::default(),
+                    click_count: 1,
+                }
+                .to_platform_input(),
+                cx,
+            );
+        })
+        .unwrap();
+        assert_eq!(completions.borrow().len(), 1);
+        assert_eq!(
+            completions.borrow()[0].2.outcome,
+            crate::DragCompletionOutcome::Cancelled
+        );
     }
 
     struct FileDragView {

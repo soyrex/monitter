@@ -1,5 +1,6 @@
 //! Profile, keyboard, conversation and board controls use the canonical save_settings path.
 use super::*;
+use crate::workspace_windows::DesktopContextExt as _;
 use gpui_kit::component::{Selectable as _, switch::Switch};
 
 fn stack() -> Div {
@@ -129,6 +130,25 @@ pub(super) fn render_security(
     cx: &mut Context<Desktop>,
     palette: Palette,
 ) -> AnyElement {
+    if desktop.current_workspace_window != crate::workspace_window_state::WindowId::main() {
+        return stack().child(settings_card("Session lock", "Manage the shared session lock in the main window.", palette)
+            .child(Button::new("session-lock-main-window").label("Open in Main Window")
+                .on_click(cx.workspace_listener(|desktop, _, window, cx| {
+                    desktop.close_preferences(window, cx);
+                    let Some(handle)=desktop.window_hosts.get(&crate::workspace_window_state::WindowId::main()).map(|host|host.handle) else{return;};
+                    let weak=cx.weak_entity();
+                    cx.defer(move|cx| {let _=handle.update(cx,|_,window,cx| {let _=weak.update(cx,|desktop,cx| {
+                        desktop.with_workspace_window(window,cx,|desktop,window,cx| {
+                            desktop.show_preferences(window,cx);
+                            if desktop.window.native_settings.is_none() {
+                                desktop.window.native_settings=Some(crate::settings::NativeSettings::new(&desktop.snapshot["settings"],window,cx));
+                            }
+                            if let Some(settings)=&mut desktop.window.native_settings {settings.select_security();}
+                            window.activate_window();cx.notify();
+                        });
+                    });});});
+                })))).into_any_element();
+    }
     let lock = desktop.session_lock.update(cx, |lock, cx| {
         lock.set_palette(palette);
         lock.render_settings(window, cx)

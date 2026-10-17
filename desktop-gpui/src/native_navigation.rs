@@ -59,36 +59,45 @@ impl NativeNavigation {
         + 'static,
     ) {
         let weak = self.weak.clone();
-        let handle = window_handle.clone();
+        let handle = self
+            .weak
+            .read_with(cx, |desktop, cx| desktop.active_workspace_window(cx))
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| window_handle.clone());
         // Defer until global action dispatch releases its App borrow.
         cx.defer(move |cx| {
             match handle.update(cx, |_root, window, cx| {
                 weak.update(cx, |desktop, cx| {
-                    // Native App actions bypass the inert startup paint tree.
-                    // Cached presentation cannot authorize workspace mutations.
-                    if desktop.startup_pending { return; }
-                    if crate::shortcut_desktop::workspace_shortcuts_blocked(
-                        window.has_active_dialog(cx),
-                        desktop.preferences_open || crate::session_lock::locked(cx),
-                        desktop
-                            .palette
-                            .as_ref()
-                            .is_some_and(|palette| palette.read(cx).is_open()),
-                        desktop.closing,
-                        crate::vim_command::bar(cx)
-                            .is_some_and(|bar| bar.read(cx).is_open()),
-                        desktop.draft_creation_open,
-                        desktop.focused_composer_is_composing(window, cx),
-                    ) {
-                        return;
-                    }
-                    match apply(desktop, window, cx) {
-                        Ok(()) => {}
-                        Err(error) => {
-                            desktop.error = Some(error);
-                            cx.notify();
+                    desktop.with_workspace_window(window, cx, |desktop, window, cx| {
+                        // Native App actions bypass the inert startup paint tree.
+                        // Cached presentation cannot authorize workspace mutations.
+                        if desktop.startup_pending {
+                            return;
                         }
-                    }
+                        if crate::shortcut_desktop::workspace_shortcuts_blocked(
+                            window.has_active_dialog(cx),
+                            desktop.preferences_open || crate::session_lock::locked(cx),
+                            desktop
+                                .palette
+                                .as_ref()
+                                .is_some_and(|palette| palette.read(cx).is_open()),
+                            desktop.closing,
+                            crate::vim_command::bar_for(window, cx)
+                                .is_some_and(|bar| bar.read(cx).is_open()),
+                            desktop.draft_creation_open,
+                            desktop.focused_composer_is_composing(window, cx),
+                        ) {
+                            return;
+                        }
+                        match apply(desktop, window, cx) {
+                            Ok(()) => {}
+                            Err(error) => {
+                                desktop.error = Some(error);
+                                cx.notify();
+                            }
+                        }
+                    });
                 })
             }) {
                 Ok(Ok(())) => {}
@@ -104,7 +113,11 @@ pub fn install(window_handle: AnyWindowHandle, navigation: NativeNavigation, cx:
         let navigation = navigation.clone();
         move |_: &OpenVerticalSplit, cx| {
             navigation.dispatch(&window_handle, cx, |desktop, window, cx| {
-                if desktop.neovim_split_focused(true, window, cx) { Ok(()) } else { desktop.open_focused_empty_split(true, window, cx) }
+                if desktop.neovim_split_focused(true, window, cx) {
+                    Ok(())
+                } else {
+                    desktop.open_focused_empty_split(true, window, cx)
+                }
             });
         }
     });
@@ -112,7 +125,11 @@ pub fn install(window_handle: AnyWindowHandle, navigation: NativeNavigation, cx:
         let navigation = navigation.clone();
         move |_: &OpenHorizontalSplit, cx| {
             navigation.dispatch(&window_handle, cx, |desktop, window, cx| {
-                if desktop.neovim_split_focused(false, window, cx) { Ok(()) } else { desktop.open_focused_empty_split(false, window, cx) }
+                if desktop.neovim_split_focused(false, window, cx) {
+                    Ok(())
+                } else {
+                    desktop.open_focused_empty_split(false, window, cx)
+                }
             });
         }
     });

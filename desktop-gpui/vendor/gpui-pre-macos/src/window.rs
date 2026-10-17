@@ -24,13 +24,13 @@ use cocoa::{
 };
 use dispatch2::DispatchQueue;
 use gpui::{
-    AnyWindowHandle, BackgroundExecutor, Bounds, Capslock, CursorStyle, ExternalDragPayload,
-    ExternalPaths, FileDropEvent, ForegroundExecutor, KeyDownEvent, Keystroke, Modifiers,
-    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
-    PromptButton, PromptLevel, RequestFrameOptions, SharedString, Size, SystemWindowTab,
-    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowKind,
-    WindowParams, WindowVisibility, point, px, size,
+    AnyWindowHandle, BackgroundExecutor, Bounds, Capslock, CursorStyle, DragCompletion,
+    DragCompletionOutcome, ExternalDragPayload, ExternalPaths, FileDropEvent, ForegroundExecutor,
+    KeyDownEvent, Keystroke, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput,
+    PlatformInputHandler, PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions,
+    SharedString, Size, SystemWindowTab, WindowAppearance, WindowBackgroundAppearance,
+    WindowBounds, WindowControlArea, WindowKind, WindowParams, WindowVisibility, point, px, size,
 };
 #[cfg(any(test, feature = "test-support", feature = "frame-capture"))]
 use image::RgbaImage;
@@ -81,6 +81,8 @@ use std::{
 };
 
 const WINDOW_STATE_IVAR: &str = "windowState";
+// Only the dragging pasteboard carries this marker. The typed value remains in App.
+const INTERNAL_DRAG_TYPE: &str = "dev.gpui.retained-internal-drag";
 
 static RESTORES_WORKSPACE_AT_LAUNCH_DEFAULT: Once = Once::new();
 
@@ -677,6 +679,10 @@ struct MacWindowState {
     input_handler: Option<PlatformInputHandler>,
     last_key_equivalent: Option<KeyDownEvent>,
     last_left_mouse_down_event: Option<Retained<Objc2Object>>,
+    native_drag_monitor: Option<Retained<Objc2Object>>,
+    native_drag_released: bool,
+    native_drag_cancelled: bool,
+    native_drag_internal: bool,
     synthetic_drag_counter: usize,
     traffic_light_position: Option<Point<Pixels>>,
     traffic_light_frames: Option<TrafficLightFrames>,
@@ -1068,11 +1074,11 @@ impl MacWindow {
                 target_screen,
             );
             assert!(!native_window.is_null());
-            let () = msg_send![
-                native_window,
-                registerForDraggedTypes:
-                    NSArray::arrayWithObject(nil, NSFilenamesPboardType)
-            ];
+            let drag_types = NSArray::arrayWithObjects(
+                nil,
+                &[NSFilenamesPboardType, ns_string(INTERNAL_DRAG_TYPE)],
+            );
+            let () = msg_send![native_window, registerForDraggedTypes: drag_types];
             let () = msg_send![
                 native_window,
                 setReleasedWhenClosed: NO
@@ -1114,6 +1120,10 @@ impl MacWindow {
                 input_handler: None,
                 last_key_equivalent: None,
                 last_left_mouse_down_event: None,
+                native_drag_monitor: None,
+                native_drag_released: false,
+                native_drag_cancelled: false,
+                native_drag_internal: false,
                 synthetic_drag_counter: 0,
                 traffic_light_position: titlebar
                     .as_ref()
@@ -1388,6 +1398,11 @@ impl Drop for MacWindow {
             this.native_window.setDelegate_(nil);
         }
         this.input_handler.take();
+        if let Some(monitor) = this.native_drag_monitor.take() {
+            unsafe {
+                let _: () = objc2::msg_send![objc2::class!(NSEvent), removeMonitor: &*monitor];
+            }
+        }
         // A delivery task queued by `report_visibility` may still run after the
         // GPUI window is gone; without a callback it has nothing to notify.
         this.visibility_callback.take();
@@ -1419,6 +1434,25 @@ fn if_window_not_closed(closed: Arc<AtomicBool>, f: impl FnOnce()) {
 impl PlatformWindow for MacWindow {
     fn bounds(&self) -> Bounds<Pixels> {
         self.0.as_ref().lock().bounds()
+    }
+
+    fn global_bounds(&self) -> Option<Bounds<Pixels>> {
+        let state = self.0.lock();
+        let window_frame = unsafe { NSWindow::frame(state.native_window) };
+        let primary = primary_screen_frame()?;
+        Some(Bounds::new(
+            appkit_global_point_to_gpui(
+                NSPoint::new(
+                    window_frame.origin.x,
+                    window_frame.origin.y + window_frame.size.height,
+                ),
+                primary,
+            ),
+            size(
+                px(window_frame.size.width as f32),
+                px(window_frame.size.height as f32),
+            ),
+        ))
     }
 
     fn window_bounds(&self) -> WindowBounds {
@@ -2223,8 +2257,7 @@ impl PlatformWindow for MacWindow {
     fn start_external_drag(&self, payload: &ExternalDragPayload) -> bool {
         use objc2_foundation::{NSArray, NSPoint, NSRect, NSSize, NSString};
 
-        let ExternalDragPayload::Files(paths) = payload;
-        if paths.entries().is_empty() {
+        if matches!(payload, ExternalDragPayload::Files(paths) if paths.entries().is_empty()) {
             log::warn!("start_external_drag declined: no paths");
             return false;
         }
@@ -2259,7 +2292,29 @@ impl PlatformWindow for MacWindow {
                 NSSize::new(32., 32.),
             );
 
-            for (path, is_directory) in paths.entries() {
+            if matches!(payload, ExternalDragPayload::Internal) {
+                // A private drag-only pasteboard item is sufficient to start AppKit's
+                // cross-window tracking. No file path or general clipboard is involved.
+                let writer: id = msg_send![class!(NSPasteboardItem), new];
+                let _: BOOL = msg_send![writer, setString: ns_string("retained") forType: ns_string(INTERNAL_DRAG_TYPE)];
+                let item: id = msg_send![class!(NSDraggingItem), alloc];
+                let item: id = msg_send![item, initWithPasteboardWriter: writer];
+                let image: id =
+                    msg_send![class!(NSImage), imageNamed: ns_string("NSApplicationIcon")];
+                let _: () = msg_send![item, setDraggingFrame: cocoa::foundation::NSRect::new(
+                    cocoa::foundation::NSPoint::new(location.x - 16., location.y - 16.),
+                    cocoa::foundation::NSSize::new(32., 32.)
+                ) contents: image];
+                let _: () = msg_send![dragging_items, addObject: item];
+                let _: () = msg_send![item, release];
+                let _: () = msg_send![writer, release];
+            }
+
+            let entries = match payload {
+                ExternalDragPayload::Files(paths) => paths.entries(),
+                ExternalDragPayload::Internal => &[],
+            };
+            for (path, is_directory) in entries {
                 // Preserve non-UTF-8 paths
                 let Ok(path_bytes) = CString::new(path.as_os_str().as_bytes()) else {
                     log::warn!("start_external_drag skipped path containing an interior nul byte");
@@ -2319,6 +2374,38 @@ impl PlatformWindow for MacWindow {
                 return false;
             }
 
+            {
+                let mut state = self.0.lock();
+                state.native_drag_released = false;
+                state.native_drag_cancelled = false;
+                state.native_drag_internal = matches!(payload, ExternalDragPayload::Internal);
+            }
+            // AppKit's operation None means both cancellation and an unaccepted
+            // release. Observe actual mouse-up/Escape rather than guessing from None.
+            let weak_state = Arc::downgrade(&self.0);
+            let monitor = RcBlock::new(move |event: *mut Objc2Object| -> *mut Objc2Object {
+                let native_event = event.cast::<Object>();
+                let event_type: NSUInteger = msg_send![native_event, type];
+                if let Some(state) = weak_state.upgrade() {
+                    let mut state = state.lock();
+                    if event_type == NSEventType::NSLeftMouseUp as NSUInteger {
+                        state.native_drag_released = true;
+                    } else if event_type == NSEventType::NSKeyDown as NSUInteger {
+                        let key_code: u16 = msg_send![native_event, keyCode];
+                        if key_code == 53 {
+                            state.native_drag_cancelled = true;
+                        }
+                    }
+                }
+                event
+            });
+            let mask: u64 =
+                (1 << NSEventType::NSLeftMouseUp as u64) | (1 << NSEventType::NSKeyDown as u64);
+            let monitor_token: Option<Retained<Objc2Object>> = objc2::msg_send![
+                objc2::class!(NSEvent), addLocalMonitorForEventsMatchingMask: mask, handler: &*monitor
+            ];
+            self.0.lock().native_drag_monitor = monitor_token;
+
             let session: id = msg_send![
                 native_view,
                 beginDraggingSessionWithItems: dragging_items
@@ -2329,6 +2416,8 @@ impl PlatformWindow for MacWindow {
             let started = !session.is_null();
             if started {
                 self.0.lock().synthetic_drag_counter += 1;
+            } else if let Some(monitor) = self.0.lock().native_drag_monitor.take() {
+                let _: () = objc2::msg_send![objc2::class!(NSEvent), removeMonitor: &*monitor];
             }
             log::debug!(
                 "start_external_drag completed: started={}, item_count={}",
@@ -3541,15 +3630,38 @@ fn is_drag_from_this_window(this: &Object, dragging_info: id) -> bool {
     std::ptr::eq(source as *const Object, this as *const Object)
 }
 
+fn is_internal_gpui_drag(dragging_info: id) -> bool {
+    unsafe {
+        let source: id = msg_send![dragging_info, draggingSource];
+        if source.is_null() {
+            return false;
+        }
+        let is_window: BOOL = msg_send![source, isKindOfClass: WINDOW_CLASS];
+        let is_panel: BOOL = msg_send![source, isKindOfClass: PANEL_CLASS];
+        if is_window == NO && is_panel == NO {
+            return false;
+        }
+        let pasteboard: id = msg_send![dragging_info, draggingPasteboard];
+        let value: id = msg_send![pasteboard, stringForType: ns_string(INTERNAL_DRAG_TYPE)];
+        !value.is_null()
+    }
+}
+
 extern "C" fn dragging_entered(this: &Object, _: Sel, dragging_info: id) -> NSDragOperation {
     let is_source_window = is_drag_from_this_window(this, dragging_info);
     let window_state = unsafe { get_window_state(this) };
     let position = drag_event_position(&window_state, dragging_info);
-    let paths = external_paths_from_event(dragging_info);
-    if let Some(event) = paths.map(|paths| FileDropEvent::Entered { position, paths })
+    let internal = is_internal_gpui_drag(dragging_info);
+    let event = if internal {
+        Some(FileDropEvent::InternalEntered { position })
+    } else {
+        external_paths_from_event(dragging_info)
+            .map(|paths| FileDropEvent::Entered { position, paths })
+    };
+    if let Some(event) = event
         && send_file_drop_event(window_state, event)
     {
-        if is_source_window {
+        if internal || is_source_window {
             return NSDragOperationMove;
         }
         return NSDragOperationCopy;
@@ -3562,7 +3674,7 @@ extern "C" fn dragging_updated(this: &Object, _: Sel, dragging_info: id) -> NSDr
     let window_state = unsafe { get_window_state(this) };
     let position = drag_event_position(&window_state, dragging_info);
     if send_file_drop_event(window_state, FileDropEvent::Pending { position }) {
-        if is_source_window {
+        if is_internal_gpui_drag(dragging_info) || is_source_window {
             NSDragOperationMove
         } else {
             NSDragOperationCopy
@@ -3606,11 +3718,21 @@ extern "C" fn conclude_drag_operation(this: &Object, _: Sel, _: id) {
 }
 
 extern "C" fn dragging_session_source_operation_mask(
-    _: &Object,
+    this: &Object,
     _: Sel,
     _: id,
     context: NSInteger,
 ) -> NSDragOperation {
+    let internal = unsafe { get_window_state(this) }
+        .lock()
+        .native_drag_internal;
+    if internal {
+        return if context == NSDRAGGING_CONTEXT_WITHIN_APPLICATION {
+            NSDragOperationMove
+        } else {
+            NSDragOperationNone
+        };
+    }
     let operation = match context {
         NSDRAGGING_CONTEXT_OUTSIDE_APPLICATION => NSDragOperationCopy,
         NSDRAGGING_CONTEXT_WITHIN_APPLICATION => NSDragOperationCopy | NSDragOperationMove,
@@ -3624,23 +3746,94 @@ extern "C" fn dragging_session_source_operation_mask(
     operation
 }
 
+fn primary_screen_frame() -> Option<NSRect> {
+    unsafe {
+        let screens: id = msg_send![class!(NSScreen), screens];
+        let primary: id = msg_send![screens, firstObject];
+        if primary.is_null() {
+            None
+        } else {
+            Some(NSScreen::frame(primary))
+        }
+    }
+}
+
+fn appkit_global_point_to_gpui(position: NSPoint, primary: NSRect) -> Point<Pixels> {
+    // AppKit uses bottom-left; global logical GPUI positions use the primary
+    // screen's top-left. The same transform must serve window and drag bounds.
+    point(
+        px((position.x - primary.origin.x) as f32),
+        px((primary.origin.y + primary.size.height - position.y) as f32),
+    )
+}
+
+fn native_drag_completion_outcome(
+    accepted: bool,
+    released: bool,
+    cancelled: bool,
+) -> DragCompletionOutcome {
+    if cancelled {
+        DragCompletionOutcome::Cancelled
+    } else if accepted {
+        DragCompletionOutcome::Accepted { destination: None }
+    } else if released {
+        DragCompletionOutcome::Released
+    } else {
+        DragCompletionOutcome::Cancelled
+    }
+}
+
 extern "C" fn dragging_session_ended(
     this: &Object,
     _: Sel,
     _: id,
-    _: NSPoint,
+    position: NSPoint,
     operation: NSDragOperation,
 ) {
-    log::debug!("dragging_session_ended operation={operation}");
-    // SAFETY: AppKit invokes this selector on the GPUIWindow instance registered in build_classes,
-    // which always has WINDOW_STATE_IVAR initialized to the owning MacWindowState.
+    // The native source owns the retained payload until this actual session end.
     let window_state = unsafe { get_window_state(this) };
-    {
-        let mut lock = window_state.lock();
-        lock.synthetic_drag_counter += 1;
-        lock.last_left_mouse_down_event = None;
-    }
-    send_file_drop_event(window_state, FileDropEvent::Ended);
+    let (monitor, released, cancelled) = {
+        let mut state = window_state.lock();
+        state.synthetic_drag_counter += 1;
+        state.last_left_mouse_down_event = None;
+        (
+            state.native_drag_monitor.take(),
+            state.native_drag_released,
+            state.native_drag_cancelled,
+        )
+    };
+    let (screen_position, ended_on_mouse_up) = unsafe {
+        if let Some(monitor) = monitor {
+            let _: () = objc2::msg_send![objc2::class!(NSEvent), removeMonitor: &*monitor];
+        }
+        let app = NSApplication::sharedApplication(nil);
+        let current: id = msg_send![app, currentEvent];
+        let event_type: NSUInteger = if current.is_null() {
+            0
+        } else {
+            msg_send![current, type]
+        };
+        (
+            primary_screen_frame().map(|frame| appkit_global_point_to_gpui(position, frame)),
+            event_type == NSEventType::NSLeftMouseUp as NSUInteger,
+        )
+    };
+    let outcome = native_drag_completion_outcome(
+        operation != NSDragOperationNone,
+        released || ended_on_mouse_up,
+        cancelled,
+    );
+    send_file_drop_event(
+        window_state,
+        FileDropEvent::Completed(DragCompletion {
+            outcome,
+            screen_position: if matches!(outcome, DragCompletionOutcome::Cancelled) {
+                None
+            } else {
+                screen_position
+            },
+        }),
+    );
 }
 
 fn synthetic_drag_button_is_pressed(button: Option<MouseButton>, pressed: NSUInteger) -> bool {
@@ -3692,8 +3885,8 @@ fn send_file_drop_event(
     file_drop_event: FileDropEvent,
 ) -> bool {
     let external_files_dragged = match file_drop_event {
-        FileDropEvent::Entered { .. } => Some(true),
-        FileDropEvent::Exited | FileDropEvent::Ended => Some(false),
+        FileDropEvent::Entered { .. } | FileDropEvent::InternalEntered { .. } => Some(true),
+        FileDropEvent::Exited | FileDropEvent::Ended | FileDropEvent::Completed(_) => Some(false),
         _ => None,
     };
 
@@ -3840,6 +4033,44 @@ extern "C" fn toggle_tab_bar(this: &Object, _sel: Sel, _id: id) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_window_and_drag_points_share_global_coordinates_across_displays() {
+        let primary = NSRect::new(NSPoint::new(0., 0.), NSSize::new(1920., 1080.));
+        // A window on the monitor to the left, and one above the primary.
+        assert_eq!(
+            appkit_global_point_to_gpui(NSPoint::new(-1200., 900.), primary),
+            point(px(-1200.), px(180.))
+        );
+        assert_eq!(
+            appkit_global_point_to_gpui(NSPoint::new(300., 1800.), primary),
+            point(px(300.), px(-720.))
+        );
+    }
+
+    #[test]
+    fn native_drag_end_requires_release_evidence_and_cancel_wins() {
+        assert_eq!(
+            native_drag_completion_outcome(false, false, false),
+            DragCompletionOutcome::Cancelled
+        );
+        assert_eq!(
+            native_drag_completion_outcome(false, true, false),
+            DragCompletionOutcome::Released
+        );
+        assert_eq!(
+            native_drag_completion_outcome(false, true, true),
+            DragCompletionOutcome::Cancelled
+        );
+        assert_eq!(
+            native_drag_completion_outcome(true, true, false),
+            DragCompletionOutcome::Accepted { destination: None }
+        );
+        assert_eq!(
+            native_drag_completion_outcome(true, false, true),
+            DragCompletionOutcome::Cancelled
+        );
+    }
 
     #[test]
     fn display_id_for_screen_returns_none_for_null_screen() {

@@ -1,5 +1,6 @@
 //! Bridge real Neovim windows to retained Monitter dock panes.
 //! Neovim owns buffers; Monitter owns physical placement and keyboard focus.
+use crate::workspace_windows::DesktopContextExt as _;
 use crate::*;
 use gpui_kit::component::{
     Placement,
@@ -78,12 +79,12 @@ impl Desktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
-        if self.neovim_pending {
+        if self.window.neovim_pending {
             return Ok(());
         }
         let service = self.service.clone().ok_or("Native backend is not ready.")?;
         // Resolve a local task/project only; never interpret an SSH path locally.
-        let task = self.selected.as_ref().and_then(|id| {
+        let task = self.window.selected.as_ref().and_then(|id| {
             rows(&self.snapshot, "tasks")
                 .into_iter()
                 .find(|task| field(task, "id") == *id)
@@ -97,27 +98,27 @@ impl Desktop {
                 .then(|| field(&task, "cwd"))
                 .filter(|cwd| !cwd.is_empty())
         });
-        let origin = origin.or_else(|| self.dock.read(cx).focused_pane_id(window, cx));
-        self.neovim_pending = true;
+        let origin = origin.or_else(|| self.window.dock.read(cx).focused_pane_id(window, cx));
+        self.window.neovim_pending = true;
         let request = cx.background_executor().spawn(async move {
             service.invoke("open_neovim", json!({"cwd":cwd,"cols":100,"rows":32}))
         });
-        cx.spawn_in(window, async move |view, cx| {
+        self.spawn_workspace(window, cx, async move |view, cx| {
             let result = request.await;
             let _ = view.update_in(cx, |view, window, cx| {
-                view.neovim_pending = false;
+                view.window.neovim_pending = false;
                 match result {
                     Ok(value) => {
                         let id = field(&value, "id");
                         if id.is_empty() {
-                            view.error = Some("Neovim session response omitted its ID.".into());
+                            view.window.error = Some("Neovim session response omitted its ID.".into());
                         } else if !view.closing {
-                            view.neovim_origins
+                            view.window.neovim_origins
                                 .insert(id.clone(), origin.unwrap_or_default());
                             view.ensure_neovim_session(&id, window, cx);
                         }
                     }
-                    Err(error) => view.error = Some(error),
+                    Err(error) => view.window.error = Some(error),
                 }
                 cx.notify();
             });
@@ -132,7 +133,7 @@ impl Desktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<Entity<neovim::NeovimSession>> {
-        if let Some(session) = self.neovim_sessions.get(id) {
+        if let Some(session) = self.window.neovim_sessions.get(id) {
             session.update(cx, |session, cx| session.set_workspace(&self.snapshot, cx));
             return Some(session.clone());
         }
@@ -140,20 +141,20 @@ impl Desktop {
         let session = cx.new(|cx| neovim::NeovimSession::new(service, id.to_owned(), cx));
         session.update(cx, |session, cx| session.set_workspace(&self.snapshot, cx));
         let id_owned = id.to_owned();
-        cx.subscribe_in(
+        cx.subscribe_workspace(
             &session,
             window,
             move |view, _, _: &neovim::NeovimSessionEvent, window, cx| {
-                if !view.closing && !view.preferences_restoring {
+                if !view.closing && !view.window.preferences_restoring {
                     if let Err(error) = view.reconcile_neovim(&id_owned, window, cx) {
-                        view.error = Some(error);
+                        view.window.error = Some(error);
                     }
                     cx.notify();
                 }
             },
         )
         .detach();
-        self.neovim_sessions.insert(id.to_owned(), session.clone());
+        self.window.neovim_sessions.insert(id.to_owned(), session.clone());
         Some(session)
     }
 
@@ -162,13 +163,11 @@ impl Desktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
-        let key = self
-            .dock
+        let key = self.window.dock
             .read(cx)
             .focused_pane_id(window, cx)
             .ok_or("Focus a Neovim editor first.")?;
-        let pane = self
-            .neovim_panes
+        let pane = self.window.neovim_panes
             .get(&key)
             .ok_or("Focus a Neovim editor first.")?;
         pane.update(cx, |pane, cx| pane.show_files(window, cx));
@@ -186,8 +185,7 @@ impl Desktop {
         let session = self
             .ensure_neovim_session(id, window, cx)
             .ok_or("Neovim backend unavailable.")?;
-        let pane = self
-            .neovim_panes
+        let pane = self.window.neovim_panes
             .entry(key.clone())
             .or_insert_with(|| {
                 cx.new(|cx| neovim::NeovimPane::new(session.clone(), win, window, cx))
@@ -201,6 +199,7 @@ impl Desktop {
         let weak = cx.weak_entity();
         let active_key = key.clone();
         let visible_pane = pane.downgrade();
+        let pane_entity_id = pane.entity_id();
         let lifecycle: docking::LifecycleHook = Rc::new(move |event, _, cx| {
             match event {
                 docking::PaneLifecycle::Visible(visible) => { let _ = visible_pane.update(cx, |pane, cx| pane.set_visible(visible, cx)); }
@@ -211,12 +210,16 @@ impl Desktop {
                 let weak = weak.clone();
                 let key = active_key.clone();
                 cx.defer(move |cx| {
-                    let _ = weak.update(cx, |view, cx| {
-                        if !view.closing && view.dock.read(cx).contains(&key) {
-                            view.sidebar = Sidebar::Chats;
-                            view.dock_current = Some(key);
-                            cx.notify();
-                        }
+                    // The dock can move before this deferred activation runs.
+                    // Follow the retained pane, then enter its actual host view.
+                    cx.with_window(pane_entity_id, |window, cx| {
+                        let _ = weak.update(cx, |view, cx| view.with_workspace_window(window, cx, |view, _, cx| {
+                            if !view.closing && view.window.dock.read(cx).contains(&key) {
+                                view.window.sidebar = Sidebar::Chats;
+                                view.window.dock_current = Some(key);
+                                cx.notify();
+                            }
+                        }));
                     });
                 });
             }
@@ -238,8 +241,8 @@ impl Desktop {
     /// panes in inactive named workspaces remain cached. Their saved layout
     /// can also recreate a released pane later from the live session snapshot.
     pub(super) fn release_removed_neovim_pane(&mut self, key: &str, cx: &App) {
-        if parse_id(key).is_some() && !self.dock.read(cx).contains(key) {
-            self.neovim_panes.remove(key);
+        if parse_id(key).is_some() && !self.window.dock.read(cx).contains(key) {
+            self.window.neovim_panes.remove(key);
         }
     }
 
@@ -249,7 +252,7 @@ impl Desktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
-        let Some(session) = self.neovim_sessions.get(id).cloned() else {
+        let Some(session) = self.window.neovim_sessions.get(id).cloned() else {
             return Ok(());
         };
         session.update(cx, |session, cx| session.set_workspace(&self.snapshot, cx));
@@ -262,8 +265,7 @@ impl Desktop {
             return Ok(());
         }
         let wanted: HashSet<i64> = leaves(&layout).into_iter().collect();
-        let mut existing: HashSet<i64> = self
-            .neovim_panes
+        let mut existing: HashSet<i64> = self.window.neovim_panes
             .keys()
             .filter_map(|key| {
                 parse_id(key)
@@ -271,18 +273,18 @@ impl Desktop {
                     .map(|(_, win)| win)
             })
             .filter(|win| {
-                self.dock
+                self.window.dock
                     .read(cx)
                     .group_for_pane(&pane_id(id, *win), cx)
                     .is_some()
             })
             .collect();
-        let focused = self.dock.read(cx).focused_pane_id(window, cx);
+        let focused = self.window.dock.read(cx).focused_pane_id(window, cx);
         let owns_focus = focused
             .as_ref()
             .and_then(|key| parse_id(key))
             .is_some_and(|(session, _)| session == id);
-        let origin = self.neovim_origins.get(id).cloned();
+        let origin = self.window.neovim_origins.get(id).cloned();
         let opening = origin.is_some();
         if existing.is_empty() && !opening {
             return Ok(());
@@ -301,11 +303,11 @@ impl Desktop {
                 .map(|(win, direction)| (pane_id(id, win), direction));
             let group = anchor
                 .as_ref()
-                .and_then(|(key, _)| self.dock.read(cx).group_for_pane(key, cx));
+                .and_then(|(key, _)| self.window.dock.read(cx).group_for_pane(key, cx));
             let origin_group = origin
                 .as_ref()
-                .and_then(|key| self.dock.read(cx).group_for_pane(key, cx));
-            self.dock.update(cx, |dock, cx| {
+                .and_then(|key| self.window.dock.read(cx).group_for_pane(key, cx));
+            self.window.dock.update(cx, |dock, cx| {
                 dock.add(spec, DockPlacement::Center, None, window, cx)?;
                 if let (Some(group), Some((_, direction))) = (group, anchor) {
                     let placement = match direction {
@@ -343,18 +345,17 @@ impl Desktop {
         }
         for win in existing.difference(&wanted).copied().collect::<Vec<_>>() {
             let key = pane_id(id, win);
-            self.dock.update(cx, |dock, cx| {
+            self.window.dock.update(cx, |dock, cx| {
                 dock.remove(&key, window, cx);
             });
-            self.neovim_panes.remove(&key);
+            self.window.neovim_panes.remove(&key);
         }
         if !wanted.is_empty() {
-            if let Some(origin) = self
-                .neovim_origins
+            if let Some(origin) = self.window.neovim_origins
                 .remove(id)
                 .filter(|key| key.starts_with("empty:"))
             {
-                self.dock.update(cx, |dock, cx| {
+                self.window.dock.update(cx, |dock, cx| {
                     dock.remove(&origin, window, cx);
                 });
             }
@@ -362,7 +363,7 @@ impl Desktop {
         if let Some(windows) = snapshot["windows"].as_array() {
             for row in windows {
                 if let Some(win) = row["id"].as_i64() {
-                    self.dock.update(cx, |dock, cx| {
+                    self.window.dock.update(cx, |dock, cx| {
                         dock.set_title(&pane_id(id, win), editor_title(row).into(), cx)
                     });
                 }
@@ -372,26 +373,26 @@ impl Desktop {
             .as_i64()
             .filter(|win| wanted.contains(win))
         {
-            let changed = self.neovim_focus_windows.get(id) != Some(&current);
+            let changed = self.window.neovim_focus_windows.get(id) != Some(&current);
             if session.read(cx).pending_focus.is_none() {
-                self.neovim_focus_windows.insert(id.into(), current);
+                self.window.neovim_focus_windows.insert(id.into(), current);
             }
             if (opening || (owns_focus && changed && session.read(cx).pending_focus.is_none()))
-                && (self.neovim_layouts.get(id) != Some(&layout) || changed)
+                && (self.window.neovim_layouts.get(id) != Some(&layout) || changed)
             {
                 let key = pane_id(id, current);
-                self.dock.update(cx, |dock, cx| {
+                self.window.dock.update(cx, |dock, cx| {
                     dock.focus(&key, window, cx);
                     dock.set_shown(true, window, cx);
                 });
-                self.sidebar = Sidebar::Chats;
-                self.dock_current = Some(key);
+                self.window.sidebar = Sidebar::Chats;
+                self.window.dock_current = Some(key);
             }
         }
         // A redraw/plugin in an unfocused editor must never steal chat focus.
         if added && !owns_focus && !opening {
             if let Some(key) = focused {
-                self.dock.update(cx, |dock, cx| {
+                self.window.dock.update(cx, |dock, cx| {
                     dock.focus(&key, window, cx);
                 });
             }
@@ -399,12 +400,12 @@ impl Desktop {
         // Removing the final editor window can leave GPUI without a focused
         // pane. Hand focus back to the remaining workspace so navigation and
         // typing continue immediately after a successful guarded close.
-        if owns_focus && self.dock.read(cx).focused_pane_id(window, cx).is_none() {
-            self.dock.update(cx, |dock, cx| {
+        if owns_focus && self.window.dock.read(cx).focused_pane_id(window, cx).is_none() {
+            self.window.dock.update(cx, |dock, cx| {
                 dock.focus_relative_pane("first", window, cx);
             });
         }
-        self.neovim_layouts.insert(id.into(), layout);
+        self.window.neovim_layouts.insert(id.into(), layout);
         Ok(())
     }
 
@@ -415,17 +416,17 @@ impl Desktop {
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
         // Include retained panes in inactive workspaces, not just docked panes.
-        let mut obsolete: HashSet<String> = self.neovim_panes.keys()
+        let mut obsolete: HashSet<String> = self.window.neovim_panes.keys()
             .filter(|key| parse_id(key).is_some_and(|(session, _)| session == id))
             .cloned().collect();
-        obsolete.extend(docking::DockWorkspace::saved_ids(&self.dock.read(cx).serialize(cx)?)?
+        obsolete.extend(docking::DockWorkspace::saved_ids(&self.window.dock.read(cx).serialize(cx)?)?
             .into_iter().filter(|key| parse_id(key).is_some_and(|(session, _)| session == id)));
         obsolete.insert(files_id(id));
-        let focused = self.dock.read(cx).focused_pane_id(window, cx);
+        let focused = self.window.dock.read(cx).focused_pane_id(window, cx);
         let owned_focus = focused.as_ref().is_some_and(|key| obsolete.contains(key));
         for key in &obsolete {
-            self.dock.update(cx, |dock, cx| { dock.remove(key, window, cx); });
-            self.neovim_panes.remove(key);
+            self.window.dock.update(cx, |dock, cx| { dock.remove(key, window, cx); });
+            self.window.neovim_panes.remove(key);
         }
         if let Some(set) = &mut self.named_workspaces {
             for item in &mut set.items {
@@ -442,14 +443,14 @@ impl Desktop {
                 }
             }
         }
-        self.neovim_sessions.remove(id);
-        self.neovim_layouts.remove(id);
-        self.neovim_origins.remove(id);
-        self.neovim_focus_windows.remove(id);
+        self.window.neovim_sessions.remove(id);
+        self.window.neovim_layouts.remove(id);
+        self.window.neovim_origins.remove(id);
+        self.window.neovim_focus_windows.remove(id);
         if owned_focus {
-            self.dock.update(cx, |dock, cx| { dock.focus_relative_pane("first", window, cx); });
+            self.window.dock.update(cx, |dock, cx| { dock.focus_relative_pane("first", window, cx); });
         }
-        self.dock_current = self.dock.read(cx).focused_pane_id(window, cx);
+        self.window.dock_current = self.window.dock.read(cx).focused_pane_id(window, cx);
         self.preferences_dirty = true;
         self.queue_preferences_save(cx);
         cx.notify();
@@ -462,13 +463,13 @@ impl Desktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(key) = self.dock.read(cx).focused_pane_id(window, cx) else {
+        let Some(key) = self.window.dock.read(cx).focused_pane_id(window, cx) else {
             return false;
         };
         let Some((id, win)) = parse_id(&key) else {
             return false;
         };
-        if let Some(session) = self.neovim_sessions.get(id) {
+        if let Some(session) = self.window.neovim_sessions.get(id) {
             session.update(cx, |session, cx| {
                 session.command(win, if vertical { "vsplit" } else { "split" }, cx)
             });
@@ -480,18 +481,18 @@ impl Desktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(key) = self.dock.read(cx).focused_pane_id(window, cx) else {
+        let Some(key) = self.window.dock.read(cx).focused_pane_id(window, cx) else {
             return false;
         };
         let Some((id, win)) = parse_id(&key) else {
             return false;
         };
-        if let Some(session) = self.neovim_sessions.get(id) {
+        if let Some(session) = self.window.neovim_sessions.get(id) {
             session.update(cx, |session, cx| session.close_window(win, cx));
         } else {
             // A stale restored identity has no editor that could acknowledge close.
             if let Err(error) = self.remove_neovim_session_panes(id, window, cx) {
-                self.error = Some(error);
+                self.window.error = Some(error);
             }
         }
         true

@@ -245,7 +245,8 @@ impl A11y {
     /// Report `node_id` as the currently-focused node, if it is present in the
     /// tree.
     ///
-    /// Must only be called once per frame.
+    /// Only one distinct node may claim focus per frame. Repeated claims by
+    /// that same node are idempotent.
     pub(crate) fn set_focus(&mut self, node_id: NodeId) {
         // A focused node must have been registered as focusable this frame.
         if !self.focus_ids.contains_key(&node_id) {
@@ -262,6 +263,17 @@ impl A11y {
             // The focused element is properly exposed; reset the dedup so a
             // later focus on a node-less element logs again.
             self.last_focus_without_node = None;
+            #[cfg(debug_assertions)]
+            if let Some(existing) = self.nodes.focus.filter(|existing| *existing != node_id) {
+                let provenance = |id| self.nodes.node_info.get(&id).map(|info| {
+                    (info.view, info.element_id.as_deref(), info.source_location)
+                });
+                eprintln!(
+                    "[a11y-focus-conflict] existing={existing:?} existing_focus={:?} existing_source={:?} requested={node_id:?} requested_focus={:?} requested_source={:?}",
+                    self.focus_ids.get(&existing), provenance(existing),
+                    self.focus_ids.get(&node_id), provenance(node_id),
+                );
+            }
             self.nodes.set_focus(node_id);
         } else {
             // The element registered a focus handle and an id, but never got a
@@ -319,7 +331,11 @@ impl A11y {
 
     /// Replay a completed subtree while reattaching its roots to today's parent.
     /// The range uses postorder node insertion, matching normal prepaint.
-    pub(crate) fn replay_nodes(&mut self, range: std::ops::Range<usize>) {
+    pub(crate) fn replay_nodes(
+        &mut self,
+        range: std::ops::Range<usize>,
+        current_focus: Option<FocusId>,
+    ) {
         if !self.is_active() { return; }
         let records = &self.previous_nodes[range];
         let ids = records.iter().map(|(id, _)| *id).collect::<FxHashSet<_>>();
@@ -330,12 +346,26 @@ impl A11y {
         for (id, node) in records {
             if self.nodes.seen_ids.insert(*id) {
                 self.nodes.all_nodes.push((*id, node.clone()));
-                if let Some(focus) = self.previous_focus_ids.get(id) { self.focus_ids.insert(*id, *focus); }
+                if let Some(focus) = self.previous_focus_ids.get(id) {
+                    self.focus_ids.insert(*id, *focus);
+                    // Cached nodes retain their focus handles, but focus itself
+                    // belongs to this frame. The old target may have blurred,
+                    // or a previously unfocused cached node may now be focused.
+                    if current_focus == Some(*focus) {
+                        self.nodes.set_focus(*id);
+                    }
+                }
                 if let Some(bounds) = self.previous_node_bounds.get(id) { self.node_bounds.insert(*id, *bounds); }
             }
         }
-        if self.previous_focus.is_some_and(|id| ids.contains(&id)) { self.nodes.focus = self.previous_focus; }
-        if self.previous_active_descendant.is_some_and(|id| ids.contains(&id)) { self.nodes.active_descendant = self.previous_active_descendant; }
+        let previous_container_still_focused = current_focus.is_some()
+            && self.previous_focus.and_then(|id| self.previous_focus_ids.get(&id).copied())
+                == current_focus;
+        if previous_container_still_focused {
+            if let Some(id) = self.previous_active_descendant.filter(|id| ids.contains(id)) {
+                self.nodes.set_active_descendant(id);
+            }
+        }
     }
 
     pub(crate) fn replay_actions(&mut self, range: std::ops::Range<usize>) {
@@ -580,13 +610,20 @@ impl A11yNodeBuilder {
     }
 
     pub(crate) fn set_focus(&mut self, id: NodeId) {
-        if self.focus.is_some() {
+        if let Some(existing) = self.focus {
+            // Replaying or revisiting a registered node does not introduce a
+            // second focus target. Distinct targets remain an invalid frame.
+            if existing == id {
+                return;
+            }
             if cfg!(debug_assertions) {
-                panic!("set_focus called more than once in a single frame");
+                panic!(
+                    "set_focus called more than once in a single frame: existing={existing:?}, requested={id:?}"
+                );
             } else {
                 log::warn!(
-                    "a11y: set_focus called more than once in a single frame; \
-                     using last-wins ({id:?})"
+                    "a11y: set_focus called more than once in a single frame: \
+                     existing={existing:?}, requested={id:?}; using last-wins"
                 );
             }
         }
@@ -861,12 +898,20 @@ mod tests {
         builder.set_active_descendant(NodeId(2));
     }
 
-    // Setting focus twice in one frame means two elements both claimed window
-    // focus; that panics in debug and falls back to last-wins in release.
+    #[test]
+    fn setting_focus_twice_for_same_node_is_idempotent() {
+        let mut builder = new_builder();
+        builder.set_focus(NodeId(1));
+        builder.set_focus(NodeId(1));
+        assert_eq!(builder.focus, Some(NodeId(1)));
+    }
+
+    // Two distinct focus targets still panic in debug and fall back to
+    // last-wins in release, with both node IDs in the diagnostic.
     #[test]
     #[cfg_attr(
         debug_assertions,
-        should_panic(expected = "set_focus called more than once")
+        should_panic(expected = "existing=#1, requested=#2")
     )]
     fn setting_focus_twice_panics_in_debug() {
         let mut builder = new_builder();
@@ -984,7 +1029,7 @@ mod cached_a11y_tests {
         a11y.previous_nodes = a11y.nodes.all_nodes.clone();
         a11y.begin_frame();
         assert!(a11y.nodes.push(parent, accesskit::Node::new(accesskit::Role::Group)));
-        a11y.replay_nodes(node_range);
+        a11y.replay_nodes(node_range, Some(focus));
         a11y.replay_actions(0..1);
         assert_eq!(a11y.nodes.current_node_mut().unwrap().children(), &[group]);
         assert_eq!(a11y.nodes.all_nodes.iter().find(|(id, _)| *id == group).unwrap().1.children(), &[button]);
@@ -997,9 +1042,85 @@ mod cached_a11y_tests {
         a11y.previous_nodes = a11y.nodes.all_nodes.clone();
         a11y.begin_frame();
         assert!(a11y.nodes.push(parent, accesskit::Node::new(accesskit::Role::Group)));
-        a11y.replay_nodes(0..2);
+        a11y.replay_nodes(0..2, Some(focus));
         a11y.replay_actions(0..1);
         assert_eq!(a11y.nodes.current_node_mut().unwrap().children(), &[group]);
         assert!(std::rc::Rc::ptr_eq(&a11y.action_listeners[&button][0].1, &listener));
     }
+
+    fn cached_focus_fixture() -> (A11y, std::ops::Range<usize>, FocusId, FocusId) {
+        let mut handles = slotmap::SlotMap::<FocusId, ()>::with_key();
+        let old_focus = handles.insert(());
+        let other_focus = handles.insert(());
+        let mut a11y = A11y::new(Arc::new(AtomicBool::new(true)), false, None);
+        a11y.sync_active_flag();
+        a11y.begin_frame();
+        let menu = NodeId(20);
+        let item = NodeId(21);
+        let other = NodeId(22);
+        assert!(a11y.nodes.push(menu, accesskit::Node::new(accesskit::Role::Menu)));
+        a11y.set_focusable(menu, old_focus);
+        a11y.set_focus(menu);
+        assert!(a11y.nodes.push_leaf(item, accesskit::Node::new(accesskit::Role::MenuItem)));
+        a11y.nodes.set_active_descendant(item);
+        a11y.nodes.pop();
+        assert!(a11y.nodes.push_leaf(other, accesskit::Node::new(accesskit::Role::Button)));
+        a11y.set_focusable(other, other_focus);
+        let range = 0..a11y.node_index();
+        a11y.previous_nodes = a11y.nodes.all_nodes.clone();
+        a11y.begin_frame();
+        (a11y, range, old_focus, other_focus)
+    }
+
+    #[::core::prelude::v1::test]
+    fn cached_a11y_replay_keeps_active_descendant_only_for_current_container() {
+        let (mut a11y, range, old_focus, _) = cached_focus_fixture();
+        a11y.replay_nodes(range, Some(old_focus));
+        assert_eq!(a11y.nodes.focus, Some(NodeId(20)));
+        assert_eq!(a11y.nodes.active_descendant, Some(NodeId(21)));
+        assert_eq!(a11y.nodes.finalize().focus, NodeId(21));
+    }
+
+    #[::core::prelude::v1::test]
+    fn cached_a11y_replay_clears_blurred_focus_and_active_descendant() {
+        let (mut a11y, range, _, _) = cached_focus_fixture();
+        a11y.replay_nodes(range, None);
+        assert_eq!(a11y.nodes.focus, None);
+        assert_eq!(a11y.nodes.active_descendant, None);
+        assert_eq!(a11y.nodes.finalize().focus, ROOT_NODE_ID);
+    }
+
+    #[::core::prelude::v1::test]
+    fn cached_a11y_replay_focuses_previously_unfocused_cached_node() {
+        let (mut a11y, range, _, other_focus) = cached_focus_fixture();
+        a11y.replay_nodes(range, Some(other_focus));
+        assert_eq!(a11y.nodes.focus, Some(NodeId(22)));
+        assert_eq!(a11y.nodes.active_descendant, None);
+        assert_eq!(a11y.nodes.finalize().focus, NodeId(22));
+    }
+
+    #[::core::prelude::v1::test]
+    fn cached_a11y_replay_does_not_claim_focus_from_new_popup() {
+        // Deferred popups can prepaint before or after a cached subtree. Both
+        // orders must retain the new popup's focus without a duplicate claim.
+        for popup_first in [false, true] {
+            let (mut a11y, range, _, popup_focus) = cached_focus_fixture();
+            // Exclude the cached alternate button: the new popup owns this
+            // handle instead, as it would when opening outside the cache.
+            let range = range.start..range.end - 1;
+            let popup = NodeId(30);
+            let paint_popup = |a11y: &mut A11y| {
+                assert!(a11y.nodes.push_leaf(popup, accesskit::Node::new(accesskit::Role::Menu)));
+                a11y.set_focusable(popup, popup_focus);
+                a11y.set_focus(popup);
+            };
+            if popup_first { paint_popup(&mut a11y); }
+            a11y.replay_nodes(range, Some(popup_focus));
+            if !popup_first { paint_popup(&mut a11y); }
+            assert_eq!(a11y.nodes.focus, Some(popup));
+            assert_eq!(a11y.nodes.active_descendant, None);
+            assert_eq!(a11y.nodes.finalize().focus, popup);
+        }
+    }
+
 }

@@ -46,15 +46,16 @@ use crate::asset_cache::CachedLoad;
 use crate::{
     Action, ActionBuildError, ActionRegistry, ActivityGuard, Any, AnyView, AnyWindowHandle,
     AppContext, Arena, ArenaBox, Asset, AssetSource, BackgroundExecutor, Bounds, ClipboardItem,
-    ClipboardReadError, CursorStyle, DispatchPhase, DisplayId, EventEmitter, ExternalDragPayload,
-    FocusHandle, FocusMap, ForegroundExecutor, Global, KeyBinding, KeyContext, Keymap, Keystroke,
-    LayoutId, Menu, MenuItem, MissingGlyph, OwnedMenu, PathPromptOptions, Pixels, Platform,
-    PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper, Point, Priority,
-    PromptBuilder, PromptButton, PromptHandle, PromptLevel, Render, RenderImage,
-    RenderablePromptHandle, Reservation, ScreenCaptureSource, SharedString, SubscriberSet,
-    Subscription, SvgRenderer, SystemNotification, SystemNotificationResponse, Task,
-    TextRenderingMode, TextSystem, ThermalState, Window, WindowAppearance, WindowButtonLayout,
-    WindowHandle, WindowId, WindowInvalidator,
+    ClipboardReadError, CursorStyle, DispatchPhase, DisplayId, DragCompletion,
+    DragCompletionOutcome, EventEmitter, ExternalDragPayload, FocusHandle, FocusMap,
+    ForegroundExecutor, Global, KeyBinding, KeyContext, Keymap, Keystroke, LayoutId, Menu,
+    MenuItem, MissingGlyph, OwnedMenu, PathPromptOptions, Pixels, Platform, PlatformDisplay,
+    PlatformKeyboardLayout, PlatformKeyboardMapper, Point, Priority, PromptBuilder, PromptButton,
+    PromptHandle, PromptLevel, Render, RenderImage, RenderablePromptHandle, Reservation,
+    ScreenCaptureSource, SharedString, SubscriberSet, Subscription, SvgRenderer,
+    SystemNotification, SystemNotificationResponse, Task, TextRenderingMode, TextSystem,
+    ThermalState, Window, WindowAppearance, WindowButtonLayout, WindowHandle, WindowId,
+    WindowInvalidator,
     colors::{Colors, GlobalColors},
     hash, init_app_menus,
 };
@@ -732,13 +733,16 @@ impl GpuiMode {
 struct PlatformOwnedDrag {
     source_window: WindowId,
     state: PlatformOwnedDragState,
+    internal: bool,
+    completion: Option<DragCompletionCallback>,
+    accepted_in: Option<WindowId>,
+    cancelled: bool,
 }
 
 enum PlatformOwnedDragState {
     Suspended(AnyDrag),
-    // A source-window drop consumes `active_drag` before AppKit ends the dragging session, so this
-    // marker can outlive the active drag and is cleaned up by `FileDropEvent::Ended`.
-    RestoredInSourceWindow,
+    // A typed drop consumes active_drag before the native source session ends.
+    RestoredInWindow(WindowId),
 }
 
 /// Contains the state of the full application, and passed as a reference to a variety of callbacks.
@@ -813,6 +817,10 @@ pub struct App {
         FxHashMap<EntityId, FxHashMap<WindowId, WindowInvalidator>>,
     pub(crate) tracked_entities: FxHashMap<WindowId, FxHashSet<EntityId>>,
     pub(crate) current_window_by_entity: FxHashMap<EntityId, WindowId>,
+    /// Explicit UI ownership survives reads from shared application controllers.
+    /// Inferred render dependencies must not move a retained view back to the
+    /// window that merely inspected its model.
+    explicit_window_by_entity: FxHashMap<EntityId, WindowId>,
     #[cfg(any(feature = "inspector", debug_assertions))]
     pub(crate) inspector_renderer: Option<crate::InspectorRenderer>,
     #[cfg(any(feature = "inspector", debug_assertions))]
@@ -904,6 +912,7 @@ impl App {
                 tracked_entities: FxHashMap::default(),
                 window_invalidators_by_entity: FxHashMap::default(),
                 current_window_by_entity: FxHashMap::default(),
+                explicit_window_by_entity: FxHashMap::default(),
                 event_listeners: SubscriberSet::new(),
                 release_listeners: SubscriberSet::new(),
                 keystroke_observers: SubscriberSet::new(),
@@ -1230,8 +1239,10 @@ impl App {
                 .entry(*entity)
                 .or_default()
                 .insert(window_handle.id, invalidator.clone());
-            self.current_window_by_entity
-                .insert(*entity, window_handle.id);
+            if !self.explicit_window_by_entity.contains_key(entity) {
+                self.current_window_by_entity
+                    .insert(*entity, window_handle.id);
+            }
         }
         tracked_entities.clear();
         tracked_entities.extend(entities.iter().copied());
@@ -1865,6 +1876,7 @@ impl App {
                 self.event_listeners.remove(&entity_id);
                 self.window_invalidators_by_entity.remove(&entity_id);
                 self.current_window_by_entity.remove(&entity_id);
+                self.explicit_window_by_entity.remove(&entity_id);
                 for release_callback in self.release_listeners.remove(&entity_id) {
                     release_callback(entity.as_mut(), self);
                 }
@@ -1945,7 +1957,12 @@ impl App {
         // `with_window` resolves correctly before the entity has ever been
         // rendered.
         if let Some(id) = window {
-            self.current_window_by_entity.insert(entity.entity_id(), id);
+            if !self
+                .explicit_window_by_entity
+                .contains_key(&entity.entity_id())
+            {
+                self.current_window_by_entity.insert(entity.entity_id(), id);
+            }
         }
 
         self.new_entity_observers.clone().retain(&tid, |observer| {
@@ -1976,6 +1993,21 @@ impl App {
         let window_id = *self.current_window_by_entity.get(&entity_id)?;
         self.update_window_id(window_id, |_, window, cx| f(window, cx))
             .ok()
+    }
+
+    /// Assign a retained view to its native host before the first destination
+    /// frame. This also works for inactive tabs whose async callbacks may fire
+    /// before they are rendered. The caller must stop mounting the entity in its
+    /// old host and assign any separately retained window-bound child entities.
+    pub fn rehost_entity_window(&mut self, entity_id: EntityId, window: &Window) -> Result<()> {
+        let id = window.handle.id;
+        anyhow::ensure!(
+            self.windows.contains_key(id),
+            "Destination window is closed"
+        );
+        self.explicit_window_by_entity.insert(entity_id, id);
+        self.current_window_by_entity.insert(entity_id, id);
+        Ok(())
     }
 
     fn ensure_window(&mut self, entity_id: EntityId, window: WindowId) {
@@ -2631,6 +2663,13 @@ impl App {
         self.active_drag.is_some()
     }
 
+    /// Whether a native drag session currently owns a retained GPUI drag.
+    /// Focus can move between windows during that session; activation-loss
+    /// handlers should not cancel it via `stop_active_drag`.
+    pub fn has_platform_owned_drag(&self) -> bool {
+        self.platform_owned_drag.is_some()
+    }
+
     /// Gets the cursor style of the currently active drag operation.
     pub fn active_drag_cursor_style(&self) -> Option<CursorStyle> {
         self.active_drag.as_ref().and_then(|drag| drag.cursor_style)
@@ -2638,55 +2677,84 @@ impl App {
 
     /// Stops active drag and clears any related effects.
     pub fn stop_active_drag(&mut self, window: &mut Window) -> bool {
-        if self.active_drag.is_some() {
-            self.active_drag = None;
-            if self.platform_owned_drag.as_ref().is_some_and(|drag| {
-                drag.source_window == window.window_handle().window_id()
-                    && matches!(&drag.state, PlatformOwnedDragState::RestoredInSourceWindow)
-            }) {
-                self.platform_owned_drag = None;
-            }
-            window.refresh();
-            true
-        } else {
-            false
-        }
-    }
-
-    pub(crate) fn hand_active_drag_to_platform(&mut self, source_window: WindowId) -> bool {
-        let Some(drag) = self.active_drag.take() else {
+        let Some(mut drag) = self.active_drag.take() else {
             return false;
         };
+        if self.platform_owned_drag.as_ref().is_some_and(|drag| {
+            matches!(drag.state, PlatformOwnedDragState::RestoredInWindow(id) if id == window.window_handle().window_id())
+        }) {
+            let platform_drag = self.platform_owned_drag.as_mut().unwrap();
+            if platform_drag.internal {
+                // Cancellation does not end AppKit tracking. Retain the callback
+                // until the source receives the actual native completion.
+                platform_drag.cancelled = true;
+            } else {
+                let source = platform_drag.source_window;
+                self.end_platform_drag(source);
+            }
+        } else if let Some(completion) = drag.completion.take() {
+            completion(DragCompletion {
+                outcome: DragCompletionOutcome::Cancelled,
+                screen_position: None,
+            }, self);
+        }
+        window.refresh();
+        true
+    }
+
+    pub(crate) fn hand_active_drag_to_platform(
+        &mut self,
+        source_window: WindowId,
+        internal: bool,
+    ) -> bool {
+        let Some(mut drag) = self.active_drag.take() else {
+            return false;
+        };
+        let completion = drag.completion.take();
         self.platform_owned_drag = Some(PlatformOwnedDrag {
             source_window,
             state: PlatformOwnedDragState::Suspended(drag),
+            internal,
+            completion,
+            accepted_in: None,
+            cancelled: false,
         });
         true
     }
 
-    pub(crate) fn restore_platform_drag(&mut self, source_window: WindowId) -> bool {
+    pub(crate) fn restore_platform_drag(&mut self, window: WindowId) -> bool {
+        self.restore_platform_drag_in_window(window, false)
+    }
+
+    pub(crate) fn restore_internal_platform_drag(&mut self, window: WindowId) -> bool {
+        self.restore_platform_drag_in_window(window, true)
+    }
+
+    fn restore_platform_drag_in_window(&mut self, window: WindowId, internal: bool) -> bool {
         let Some(platform_drag) = self
             .platform_owned_drag
             .as_mut()
-            .filter(|drag| drag.source_window == source_window)
+            .filter(|drag| drag.internal == internal && (internal || drag.source_window == window))
         else {
             return false;
         };
+        if !matches!(platform_drag.state, PlatformOwnedDragState::Suspended(_)) {
+            return false;
+        }
         let state = std::mem::replace(
             &mut platform_drag.state,
-            PlatformOwnedDragState::RestoredInSourceWindow,
+            PlatformOwnedDragState::RestoredInWindow(window),
         );
         let PlatformOwnedDragState::Suspended(drag) = state else {
-            return false;
+            unreachable!()
         };
         self.active_drag = Some(drag);
         true
     }
 
-    pub(crate) fn hand_restored_drag_to_platform(&mut self, source_window: WindowId) -> bool {
+    pub(crate) fn hand_restored_drag_to_platform(&mut self, window: WindowId) -> bool {
         let Some(platform_drag) = self.platform_owned_drag.as_mut().filter(|drag| {
-            drag.source_window == source_window
-                && matches!(&drag.state, PlatformOwnedDragState::RestoredInSourceWindow)
+            matches!(drag.state, PlatformOwnedDragState::RestoredInWindow(id) if id == window)
         }) else {
             return false;
         };
@@ -2697,17 +2765,59 @@ impl App {
         true
     }
 
-    pub(crate) fn end_platform_drag(&mut self, source_window: WindowId) -> bool {
+    pub(crate) fn accept_drag(&mut self, mut drag: AnyDrag, destination: WindowId) {
+        if let Some(platform_drag) = self.platform_owned_drag.as_mut().filter(|drag| {
+            matches!(drag.state, PlatformOwnedDragState::RestoredInWindow(id) if id == destination)
+        }) {
+            platform_drag.accepted_in = Some(destination);
+        } else if let Some(completion) = drag.completion.take() {
+            completion(DragCompletion {
+                outcome: DragCompletionOutcome::Accepted { destination: Some(destination) },
+                screen_position: None,
+            }, self);
+        }
+    }
+
+    pub(crate) fn complete_platform_drag(
+        &mut self,
+        source: WindowId,
+        mut result: DragCompletion,
+    ) -> bool {
         if !self
             .platform_owned_drag
             .as_ref()
-            .is_some_and(|drag| drag.source_window == source_window)
+            .is_some_and(|drag| drag.source_window == source)
         {
             return false;
         }
-        self.platform_owned_drag = None;
+        let drag = self.platform_owned_drag.take().unwrap();
         self.active_drag = None;
+        if drag.cancelled {
+            result.outcome = DragCompletionOutcome::Cancelled;
+            result.screen_position = None;
+        } else if let Some(destination) = drag.accepted_in {
+            result.outcome = DragCompletionOutcome::Accepted {
+                destination: Some(destination),
+            };
+        } else if drag.internal && matches!(result.outcome, DragCompletionOutcome::Accepted { .. })
+        {
+            // A native operation alone is insufficient proof of a typed internal drop.
+            result.outcome = DragCompletionOutcome::Cancelled;
+        }
+        if let Some(completion) = drag.completion {
+            completion(result, self);
+        }
         true
+    }
+
+    pub(crate) fn end_platform_drag(&mut self, source_window: WindowId) -> bool {
+        self.complete_platform_drag(
+            source_window,
+            DragCompletion {
+                outcome: DragCompletionOutcome::Cancelled,
+                screen_position: None,
+            },
+        )
     }
 
     /// Sets the cursor style for the currently active drag operation.
@@ -2901,6 +3011,13 @@ impl App {
                     cx.end_platform_drag(window_id);
                     cx.window_handles.remove(&window_id);
                     cx.windows.remove(window_id);
+                    // Explicitly owned inactive views may not occur in the
+                    // final frame's dependency set. Never leave a closed host
+                    // recorded for those views.
+                    cx.explicit_window_by_entity
+                        .retain(|_, host| *host != window_id);
+                    cx.current_window_by_entity
+                        .retain(|_, host| *host != window_id);
                     if let Some(tracked) = cx.tracked_entities.remove(&window_id) {
                         for entity_id in tracked {
                             if let Some(windows) =
@@ -3177,7 +3294,13 @@ pub struct AnyDrag {
     /// Resolves the payload to offer the platform if the drag leaves the window.
     /// Invoked at most once per drag gesture, at promotion time.
     pub external_payload_source: Option<ExternalDragPayloadSource>,
+
+    /// Completion retained independently when the platform takes ownership.
+    pub completion: Option<DragCompletionCallback>,
 }
+
+/// An exactly-once completion callback, normally constructed by an element.
+pub type DragCompletionCallback = Box<dyn FnOnce(DragCompletion, &mut App) + 'static>;
 
 /// Lazily resolves the payload handed to the platform when an internal drag is
 /// promoted to a native drag session.

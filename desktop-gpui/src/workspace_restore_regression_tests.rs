@@ -350,37 +350,149 @@ fn desktop_workspace_restore_keeps_running_and_exited_terminals(cx: &mut TestApp
 }
 
 #[gpui_kit::test]
-fn desktop_workspace_restore_explicit_failure_preserves_active_workspace_and_allows_next_switch(cx: &mut TestAppContext) {
+fn desktop_workspace_restore_explicit_failure_preserves_active_workspace_and_allows_next_switch(
+    cx: &mut TestAppContext,
+) {
     use monitter_lib::experimental_desktop::{NativeWorkspace, NativeWorkspaceSet};
     let (desktop, visual) = desktop_restore_fixture(cx);
-    visual.update(|window, cx| desktop.update(cx, |view, cx| {
-        view.dock.update(cx, |dock, cx| {
-            dock.add(retained_placeholder("chat:outgoing", cx), gpui_kit::component::dock::DockPlacement::Center, None, window, cx).unwrap();
-            dock.register(retained_placeholder("chat:fixture-task", cx), cx).unwrap();
-        });
-        let current = view.dock.read(cx).serialize(cx).unwrap();
-        let valid = layout(vec![tab(&["chat:fixture-task"], 0)], "chat:fixture-task");
-        view.named_workspaces = Some(NativeWorkspaceSet {
-            active_id: "current".into(),
-            items: [("current", current.clone()), ("invalid", json!({"version":999})), ("valid", valid.clone())].into_iter().map(|(id, layout)| NativeWorkspace {
-                id: id.into(), name: id.into(), icon: "folder".into(), color: "#38BFD2".into(), url: None, layout: Some(layout),
-            }).collect(),
-        });
-        // Exercise validation failure and pane-preparation failure separately.
-        for invalid in [json!({"version":999}), layout(vec![tab(&["terminal:malformed"], 0)], "terminal:malformed")] {
-            view.workspace_switch = Some("invalid".into());
-            view.finish_workspace_restore(invalid, vec![], vec![], 0, window, cx);
-            assert_eq!(view.named_workspaces.as_ref().unwrap().active_id, "current");
-            assert_eq!(view.dock.read(cx).serialize(cx).unwrap(), current);
-            assert!(view.preferences_error.is_some());
-            assert!(!view.preferences_blocked, "an explicit failure must leave workspace controls usable");
-            assert!(view.workspace_switch.is_none());
-        }
-        view.switch_named_workspace("valid".into(), window, cx);
-        assert_eq!(view.workspace_switch.as_deref(), Some("valid"), "next workspace click queues a new restore");
-        view.finish_workspace_restore(valid, vec![], vec![], 0, window, cx);
-        assert_eq!(view.named_workspaces.as_ref().unwrap().active_id, "valid");
-        assert!(view.preferences_error.is_none());
-        assert!(!view.preferences_blocked);
-    }));
+    visual.update(|window, cx| {
+        desktop.update(cx, |view, cx| {
+            view.dock.update(cx, |dock, cx| {
+                dock.add(
+                    retained_placeholder("chat:outgoing", cx),
+                    gpui_kit::component::dock::DockPlacement::Center,
+                    None,
+                    window,
+                    cx,
+                )
+                .unwrap();
+            });
+            let outgoing = view.window.dock.clone();
+            let outgoing_key = outgoing.read(cx).panel_key("chat:outgoing").unwrap();
+            let current = outgoing.read(cx).serialize(cx).unwrap();
+            let valid = layout(vec![tab(&["chat:fixture-task"], 0)], "chat:fixture-task");
+            view.named_workspaces = Some(NativeWorkspaceSet {
+                active_id: "current".into(),
+                items: [
+                    ("current", current.clone()),
+                    ("invalid", json!({"version":999})),
+                    ("valid", valid.clone()),
+                ]
+                .into_iter()
+                .map(|(id, layout)| NativeWorkspace {
+                    id: id.into(),
+                    name: id.into(),
+                    icon: "folder".into(),
+                    color: "#38BFD2".into(),
+                    url: None,
+                    layout: Some(layout),
+                })
+                .collect(),
+            });
+            // Startup normally establishes these identities. Exercise an actual
+            // explicit switch, which parks the outgoing full view before restore.
+            view.window.active_workspace_id = Some("current".into());
+            view.workspace_window_restore_pending = false;
+            view.workspace_window_assignments =
+                crate::workspace_window_state::WorkspaceWindowState::new(&[
+                    "current".into(),
+                    "invalid".into(),
+                    "valid".into(),
+                ])
+                .unwrap();
+            for invalid in [
+                json!({"version":999}),
+                layout(vec![tab(&["terminal:malformed"], 0)], "terminal:malformed"),
+            ] {
+                view.named_workspaces
+                    .as_mut()
+                    .unwrap()
+                    .items
+                    .iter_mut()
+                    .find(|item| item.id == "invalid")
+                    .unwrap()
+                    .layout = Some(invalid.clone());
+                view.switch_named_workspace("invalid".into(), window, cx);
+                assert_eq!(view.window.workspace_switch.as_deref(), Some("invalid"));
+                assert_ne!(
+                    view.window.dock.entity_id(),
+                    outgoing.entity_id(),
+                    "uncached restore has its own destination dock"
+                );
+                assert_eq!(
+                    view.workspace_view_cache["current"].dock.entity_id(),
+                    outgoing.entity_id()
+                );
+                view.finish_workspace_restore(invalid.clone(), vec![], vec![], 0, window, cx);
+                assert_eq!(view.named_workspaces.as_ref().unwrap().active_id, "current");
+                assert_eq!(view.window.active_workspace_id.as_deref(), Some("current"));
+                assert_eq!(
+                    view.window.dock.entity_id(),
+                    outgoing.entity_id(),
+                    "both failure paths reactivate the exact retained source"
+                );
+                assert_eq!(
+                    view.dock.read(cx).panel_key("chat:outgoing"),
+                    Some(outgoing_key)
+                );
+                assert_eq!(view.dock.read(cx).serialize(cx).unwrap(), current);
+                assert_eq!(
+                    view.named_workspaces
+                        .as_ref()
+                        .unwrap()
+                        .items
+                        .iter()
+                        .find(|item| item.id == "invalid")
+                        .unwrap()
+                        .layout
+                        .as_ref(),
+                    Some(&invalid),
+                    "failed transient UI never replaces the saved target"
+                );
+                assert!(
+                    !view.workspace_view_cache.contains_key("invalid"),
+                    "a failed target cannot be selected as a successful retained view"
+                );
+                assert!(view.preferences_error.is_some());
+                assert!(
+                    !view.preferences_blocked,
+                    "an explicit failure must leave workspace controls usable"
+                );
+                assert!(
+                    !view.window.preferences_restore
+                        && !view.window.preferences_restoring
+                        && !view.window.preferences_restore_suppressed
+                );
+                assert!(view.workspace_switch.is_none());
+            }
+            view.switch_named_workspace("valid".into(), window, cx);
+            assert_eq!(
+                view.workspace_switch.as_deref(),
+                Some("valid"),
+                "next workspace click queues a new restore"
+            );
+            // The offline fixture provides its placeholder to the new dock, as
+            // prepare_saved_panes normally constructs content from the snapshot.
+            view.window
+                .dock
+                .update(cx, |dock, cx| {
+                    dock.register(retained_placeholder("chat:fixture-task", cx), cx)
+                })
+                .unwrap();
+            view.finish_workspace_restore(valid, vec![], vec![], 0, window, cx);
+            assert_eq!(view.named_workspaces.as_ref().unwrap().active_id, "valid");
+            assert_eq!(view.window.active_workspace_id.as_deref(), Some("valid"));
+            assert_eq!(
+                view.workspace_view_cache["current"].dock.entity_id(),
+                outgoing.entity_id()
+            );
+            assert_eq!(
+                outgoing.read(cx).serialize(cx).unwrap(),
+                current,
+                "successful next restore still retains the source unchanged"
+            );
+            assert!(view.preferences_error.is_none());
+            assert!(!view.preferences_blocked);
+        })
+    });
 }

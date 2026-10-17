@@ -162,6 +162,12 @@ mod tests {
                 .as_nanos();
             Self(
                 std::env::temp_dir()
+                    // macOS commonly supplies /var/folders through the /var
+                    // symlink. SQLite NOFOLLOW checks the complete filename;
+                    // canonicalize only the trusted existing temp parent so
+                    // the explicit file/parent symlink rejection tests remain.
+                    .canonicalize()
+                    .expect("canonical temporary directory")
                     .join(format!("monitter-drawer-{}-{nonce}", std::process::id()))
                     .join(DATABASE),
             )

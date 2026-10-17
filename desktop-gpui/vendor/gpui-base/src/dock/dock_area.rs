@@ -10,7 +10,7 @@ use std::{
 
 use anyhow::Result;
 use gpui::{
-    AnyElement, AnyView, App, AppContext as _, Axis, Bounds, Context, Div, Empty, Entity,
+    AnyElement, AnyView, App, AppContext as _, Axis, Bounds, Context, Div, Empty, Entity, EntityId,
     EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, ParentElement,
     Pixels, Point, Render, SharedString, Stateful, Styled as _, Subscription, WeakEntity, Window,
     deferred, div, prelude::FluentBuilder as _, px,
@@ -170,6 +170,20 @@ impl DockArea {
     pub fn with_renderer(mut self, renderer: Rc<dyn DockAreaRenderer>) -> Self {
         self.renderer = renderer;
         self
+    }
+
+    /// All retained container and panel views, including inactive tabs and
+    /// cached split state. Hosts moving an intact dock between native windows
+    /// must rehost these before any destination-frame callbacks can run.
+    /// This only observes the caches; it never edits or reconciles the tree.
+    pub fn retained_entity_ids(&self) -> Vec<EntityId> {
+        let mut ids = vec![self.this.entity_id()];
+        ids.extend(self.groups.values().map(|cached| cached.entity.entity_id()));
+        ids.extend(self.splits.values().map(|cached| cached.entity.entity_id()));
+        ids.extend(self.panels.values().map(|panel| panel.view().entity_id()));
+        ids.sort_by_key(|id| id.as_u64());
+        ids.dedup();
+        ids
     }
 
     pub fn id(&self) -> SharedString {

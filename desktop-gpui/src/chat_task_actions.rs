@@ -35,6 +35,14 @@ pub struct ChatTaskActionsPane {
 }
 
 impl ChatTaskActionsPane {
+    /// Keep an open rename editor, including its undo/selection state, attached
+    /// to the same native host as its owning retained chat pane.
+    pub(crate) fn rehost_to_window(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Result<(), String> {
+        let id = cx.entity_id();
+        cx.rehost_entity_window(id, window).map_err(|error| error.to_string())?;
+        self.title.update(cx, |input, cx| input.rehost_to_window(window, cx))
+    }
+
     /// Create an action entity bound to one owning chat pane.
     pub fn new(
         service: DesktopService,

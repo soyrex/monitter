@@ -706,6 +706,9 @@ impl ExternalPaths {
 pub enum ExternalDragPayload {
     /// Real on-disk paths, handed to the platform as an outbound file drag.
     Files(FileDragPaths),
+    /// An application-local drag. The typed value remains in GPUI; the native
+    /// session offers only a private marker, never file URLs or clipboard data.
+    Internal,
 }
 
 /// Paths handed to the platform for a native file drag. Directory metadata is
@@ -732,9 +735,43 @@ impl Render for ExternalPaths {
     }
 }
 
-/// A file drop event from the platform, generated when files are dragged and dropped onto the window.
+/// The result of a completed drag gesture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DragCompletionOutcome {
+    /// A typed GPUI drop target (or an external native target) accepted the drag.
+    Accepted {
+        /// The accepting GPUI window, when known.
+        destination: Option<crate::WindowId>,
+    },
+    /// The pointer was released without an accepting target. Callers must check
+    /// the release position before treating this as a drop outside their windows.
+    Released,
+    /// Cancellation, or a native end without positive evidence of pointer release.
+    Cancelled,
+}
+
+/// Completion of a drag started by an element. Delivered once, in the source
+/// window, after the pointer release or native session completion.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DragCompletion {
+    /// Whether the drag was accepted, released without a target, or cancelled.
+    pub outcome: DragCompletionOutcome,
+    /// Release position in global logical screen coordinates, when supplied by
+    /// the platform. Cancellation and legacy native events may have no position.
+    pub screen_position: Option<Point<Pixels>>,
+}
+
+/// A native drag event, including external files and retained application-local values.
 #[derive(Debug, Clone)]
 pub enum FileDropEvent {
+    /// An application-local native drag entered a GPUI window. The value stays
+    /// retained in the App and is never reconstructed from pasteboard contents.
+    InternalEntered {
+        /// The position relative to the destination window.
+        position: Point<Pixels>,
+    },
+    /// A native source session completed with release/cancellation evidence.
+    Completed(DragCompletion),
     /// The files have entered the window.
     Entered {
         /// The position of the mouse relative to the window.

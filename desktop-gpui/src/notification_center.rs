@@ -1,4 +1,5 @@
 //! Native inbox routing. The backend validates every approval decision.
+use crate::workspace_windows::DesktopContextExt as _;
 use crate::{Desktop, approval_prompt, field, rows, notifications::{NotificationBell, NotificationEvent}};
 use gpui_kit::{prelude::*, *};
 use serde_json::{Value, json};
@@ -22,6 +23,13 @@ fn approval_command(request: &Value, decision: &str, native_mcp: bool) -> Result
     } else { Ok(("resolve_approval", json!({"approvalId":id,"decision":decision}))) }
 }
 impl Desktop {
+    fn retained_notification_bells(&self) -> impl Iterator<Item = &Entity<NotificationBell>> {
+        self.window.notification_bell.iter().chain(
+            self.parked_window_views.values().chain(self.workspace_view_cache.values())
+                .filter_map(|view| view.notification_bell.as_ref())
+        )
+    }
+
     pub(super) fn sync_notification_bell(&mut self, cx: &mut Context<Self>) {
         if let Some(service) = self.service.clone() {
             for (task_id, message_id) in self.notification_model.take_summary_requests() {
@@ -46,28 +54,28 @@ impl Desktop {
                 }).detach();
             }
         }
-        if let Some(bell) = &self.notification_bell {
-            let entries = self.notification_model.entries(&self.snapshot);
-            bell.update(cx, |bell, cx| bell.set_entries(entries, cx));
+        let entries = self.notification_model.entries(&self.snapshot);
+        for bell in self.retained_notification_bells() {
+            bell.update(cx, |bell, cx| bell.set_entries(entries.clone(), cx));
         }
         self.sync_workspace_notification_entries(cx);
     }
     pub(super) fn ensure_notification_bell(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<NotificationBell> {
-        if let Some(bell) = &self.notification_bell { return bell.clone(); }
+        if let Some(bell) = &self.window.notification_bell { return bell.clone(); }
         let bell = cx.new(NotificationBell::new);
         let subscription = self.subscribe_notification_feed(&bell, None, window, cx);
-        self.notification_subscription = Some(subscription);
-        self.notification_bell = Some(bell.clone());
+        self.window.notification_subscription = Some(subscription);
+        self.window.notification_bell = Some(bell.clone());
         self.sync_notification_bell(cx);
         bell
     }
     fn subscribe_notification_feed(&self, bell: &Entity<NotificationBell>, workspace: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Subscription {
-        cx.subscribe_in(bell, window, move |view, _, event, window, cx| {
+        cx.subscribe_workspace(bell, window, move |view, _, event, window, cx| {
             match event {
                 NotificationEvent::Dismiss { id } => view.notification_model.dismiss(id),
                 NotificationEvent::ReviewChannel { channel_id } => {
                     view.palette_channels(window, cx);
-                    if let Some(pane) = &view.channels {
+                    if let Some(pane) = &view.window.channels {
                         pane.update(cx, |pane, cx| pane.select(Some(channel_id.clone()), window, cx));
                     }
                     view.notification_model.mark_channel_read(channel_id);
@@ -140,7 +148,7 @@ impl Desktop {
         pills
     }
     fn set_notification_request_state(&mut self, id: &str, busy: bool, error: Option<String>, cx: &mut Context<Self>) {
-        if let Some(bell) = &self.notification_bell {
+        for bell in self.retained_notification_bells() {
             bell.update(cx, |bell, cx| bell.set_request_state(id, busy, error.clone(), cx));
         }
         for feed in self.workspace_notifications.values() {

@@ -475,6 +475,10 @@ pub struct InputBaseState<M: InputModeKind> {
     pub(super) emit_events: bool,
 
     _subscriptions: Vec<Subscription>,
+    // Only these observers are tied to a particular native window. Keep them
+    // separate so moving a retained input does not replace editing observers.
+    host_window_id: gpui::WindowId,
+    host_subscriptions: Vec<Subscription>,
 
     pub(super) auto_scroll: AutoScroll,
 }
@@ -682,21 +686,9 @@ impl<M: InputModeKind> InputBaseState<M> {
             }),
             // Observe the blink cursor to repaint the view when it changes.
             cx.observe(&blink_cursor, |_, _, cx| cx.notify()),
-            // Blink the cursor when the window is active, pause when it's not.
-            cx.observe_window_activation(window, |input, window, cx| {
-                if window.is_window_active() {
-                    let focus_handle = input.focus_handle.clone();
-                    if focus_handle.is_focused(window) {
-                        input.blink_cursor.update(cx, |blink_cursor, cx| {
-                            blink_cursor.start(cx);
-                        });
-                    }
-                }
-            }),
-            cx.on_focus(&focus_handle, window, Self::on_focus),
-            cx.on_blur(&focus_handle, window, Self::on_blur),
         ];
 
+        let host_subscriptions = Self::host_subscriptions(&focus_handle, window, cx);
         let text_style = window.text_style();
 
         Self {
@@ -767,10 +759,77 @@ impl<M: InputModeKind> InputBaseState<M> {
             silent_replace_text: false,
             emit_events: true,
             _subscriptions,
+            host_window_id: window.window_handle().window_id(),
+            host_subscriptions,
             _pending_update: false,
             cursor_line_end_affinity: false,
             auto_scroll: AutoScroll::default(),
         }
+    }
+
+    fn host_subscriptions(
+        focus_handle: &FocusHandle,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<Subscription> {
+        let host_window_id = window.window_handle().window_id();
+        vec![
+            // These listeners are registered on the native host itself rather
+            // than routed through the entity's current-window association.
+            cx.observe_window_activation(window, move |input, window, cx| {
+                if input.host_window_id == host_window_id
+                    && window.is_window_active()
+                    && input.focus_handle.is_focused(window)
+                {
+                    input.blink_cursor.update(cx, |cursor, cx| cursor.start(cx));
+                }
+            }),
+            cx.on_focus(focus_handle, window, move |input, window, cx| {
+                if input.host_window_id == host_window_id {
+                    input.on_focus(window, cx);
+                }
+            }),
+            cx.on_blur(focus_handle, window, move |input, window, cx| {
+                if input.host_window_id == host_window_id {
+                    input.on_blur(window, cx);
+                }
+            }),
+        ]
+    }
+
+    /// Move this retained input's native focus/activation observers to a new
+    /// host without rebuilding its text, selection, IME composition, or undo
+    /// history. The caller must stop mounting the input in its previous host.
+    /// Repeated calls for the same host preserve its existing listeners.
+    pub fn rehost_to_window(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let entity_id = cx.entity_id();
+        cx.rehost_entity_window(entity_id, window)
+            .map_err(|error| error.to_string())?;
+        cx.rehost_entity_window(self.blink_cursor.entity_id(), window)
+            .map_err(|error| error.to_string())?;
+        let host_id = window.window_handle().window_id();
+        if self.host_window_id == host_id {
+            return Ok(());
+        }
+        // Drop the old host's listeners before installing destination ones.
+        // Calling on_blur here would clamp values, alter undo coalescing and
+        // dismiss editing state despite there being no user blur gesture.
+        self.host_subscriptions.clear();
+        self.host_subscriptions = Self::host_subscriptions(&self.focus_handle, window, cx);
+        self.host_window_id = host_id;
+        let focused = window.is_window_active() && self.focus_handle.is_focused(window);
+        self.blink_cursor.update(cx, |cursor, cx| {
+            cursor.stop(cx);
+            if focused {
+                cursor.start(cx);
+            }
+        });
+        cx.notify();
+        Ok(())
     }
 
     /// Sets whether the context menu that shows on right-click is enabled.
@@ -4401,6 +4460,14 @@ impl<M: InputModeKind> Focusable for InputBaseState<M> {
 
 impl<M: InputModeKind> Render for InputBaseState<M> {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Route panes can own private inputs that were not part of an explicit
+        // transfer helper. Repair their host on the first destination render,
+        // before focus handlers and the native input handler are installed.
+        if self.host_window_id != window.window_handle().window_id() {
+            if let Err(error) = self.rehost_to_window(window, cx) {
+                eprintln!("Could not rehost retained input: {error}");
+            }
+        }
         // Before anything reads it: the element resolves this style during
         // layout and paint, and both happen after this call in the same frame.
         self.editor_style = self
@@ -4911,6 +4978,158 @@ mod tests {
                 f(crate::input::InputState::new(window, cx))
             })
         }
+    }
+
+    #[gpui::test]
+    fn retained_input_rehosts_focus_observers_without_resetting_edit_state(
+        cx: &mut TestAppContext,
+    ) {
+        struct MoveRoot(Option<Entity<InputBaseState<InputMode>>>);
+        impl Render for MoveRoot {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().children(self.0.clone())
+            }
+        }
+        let events = Rc::new(std::cell::RefCell::new(Vec::<&'static str>::new()));
+        let mut retained = None;
+        let source = cx.update(|cx| {
+            cx.set_global(Theme::default());
+            super::super::init(cx);
+            cx.open_window(Default::default(), |window, cx| {
+                let input = cx.new(|cx| crate::input::InputState::new(window, cx));
+                retained = Some(input.clone());
+                let capture = events.clone();
+                cx.subscribe(&input, move |_, event, _| match event {
+                    InputEvent::Focus => capture.borrow_mut().push("focus"),
+                    InputEvent::Blur => capture.borrow_mut().push("blur"),
+                    _ => {}
+                })
+                .detach();
+                cx.new(|_| MoveRoot(Some(input)))
+            })
+            .unwrap()
+        });
+        let input = retained.unwrap();
+        // Test windows start inactive. Focus observers run during a draw, so
+        // exercise real active-window focus before testing the host transfer.
+        source
+            .update(cx, |_, window, _| window.activate_window())
+            .unwrap();
+        cx.executor().run_until_parked();
+        let mut before = None;
+        source
+            .update(cx, |_, window, cx| {
+                input.update(cx, |state, cx| {
+                    state.focus(window, cx);
+                    state.replace_text_in_range(None, "draft ", window, cx);
+                    state.replace_and_mark_text_in_range(None, "ni", Some(2..2), window, cx);
+                    before = Some((
+                        state.value(),
+                        state.ime_marked_range,
+                        state.selections.iter().copied().collect::<Vec<_>>(),
+                        state.undo_manager.undo_count(),
+                    ));
+                });
+            })
+            .unwrap();
+        cx.update_window(source.into(), |_, window, cx| window.draw(cx).clear(cx))
+            .unwrap();
+        assert_eq!(&*events.borrow(), &["focus"]);
+        source
+            .update(cx, |root, _, cx| {
+                root.0 = None;
+                cx.notify();
+            })
+            .unwrap();
+        events.borrow_mut().clear();
+        let destination = cx.update(|cx| {
+            cx.open_window(Default::default(), |window, cx| {
+                input.update(cx, |state, cx| {
+                    state.rehost_to_window(window, cx).unwrap();
+                    // Rehosting twice must not duplicate focus listeners.
+                    state.rehost_to_window(window, cx).unwrap();
+                    let saved = before.as_ref().unwrap();
+                    assert_eq!(state.value(), saved.0);
+                    assert_eq!(state.ime_marked_range, saved.1);
+                    assert_eq!(
+                        state.selections.iter().copied().collect::<Vec<_>>(),
+                        saved.2
+                    );
+                    assert_eq!(state.undo_manager.undo_count(), saved.3);
+                    assert_eq!(state._subscriptions.len(), 2);
+                    assert_eq!(state.host_subscriptions.len(), 3);
+                });
+                cx.new(|_| MoveRoot(Some(input.clone())))
+            })
+            .unwrap()
+        });
+        assert!(
+            events.borrow().is_empty(),
+            "a move must not synthesize a user blur/focus"
+        );
+        source.update(cx, |_, window, cx| window.blur(cx)).unwrap();
+        cx.update_window(source.into(), |_, window, cx| window.draw(cx).clear(cx))
+            .unwrap();
+        assert!(
+            events.borrow().is_empty(),
+            "the source host must no longer notify this input"
+        );
+        destination
+            .update(cx, |_, window, _| window.activate_window())
+            .unwrap();
+        cx.executor().run_until_parked();
+        destination
+            .update(cx, |_, window, cx| {
+                input.update(cx, |state, cx| state.focus(window, cx))
+            })
+            .unwrap();
+        cx.update_window(destination.into(), |_, window, cx| window.draw(cx).clear(cx))
+            .unwrap();
+        assert_eq!(&*events.borrow(), &["focus"]);
+        destination
+            .update(cx, |_, window, cx| window.blur(cx))
+            .unwrap();
+        cx.update_window(destination.into(), |_, window, cx| window.draw(cx).clear(cx))
+            .unwrap();
+        assert_eq!(&*events.borrow(), &["focus", "blur"]);
+        destination
+            .update(cx, |_, window, cx| {
+                input.update(cx, |state, cx| {
+                    state.unmark_text(window, cx);
+                    assert!(state.undo_manager.has_undos());
+                    let current = state.value();
+                    state.undo(&Undo, window, cx);
+                    assert_ne!(state.value(), current);
+                })
+            })
+            .unwrap();
+        // Mounting a private route input without an explicit owner helper
+        // repairs its native observers on its first destination render.
+        destination
+            .update(cx, |root, _, cx| {
+                root.0 = None;
+                cx.notify();
+            })
+            .unwrap();
+        source
+            .update(cx, |root, _, cx| {
+                root.0 = Some(input.clone());
+                cx.notify();
+            })
+            .unwrap();
+        source
+            .update(cx, |_, window, _| window.activate_window())
+            .unwrap();
+        cx.executor().run_until_parked();
+        let mut visual = VisualTestContext::from_window(source.into(), cx);
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        input.read_with(&visual, |state, _| {
+            assert_eq!(state.host_window_id, source.window_id());
+            assert_eq!(state.host_subscriptions.len(), 3);
+        });
+        visual.update(|window, cx| input.update(cx, |state, cx| state.focus(window, cx)));
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(&*events.borrow(), &["focus", "blur", "focus"]);
     }
 
     /// The frame is laid out by the application, which should not have to

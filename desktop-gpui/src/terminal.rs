@@ -666,6 +666,18 @@ fn initial_operations(mode: &PaneMode) -> VecDeque<Operation> {
     }
 }
 impl TerminalPane {
+    /// Move this retained GUI surface without reopening or resizing its PTY.
+    /// The shared exit monitor and the FIFO poll task have no native host;
+    /// render installs the grid input handler in the destination window.
+    pub(crate) fn rehost_to_window(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Result<(), String> {
+        let id = cx.entity_id();
+        cx.rehost_entity_window(id, window).map_err(|error| error.to_string())?;
+        self.grid_bounds = None;
+        self.last_mouse_cell = None;
+        cx.notify();
+        Ok(())
+    }
+
     pub(super) fn palette_sessions(&self) -> &[Value] { &self.sessions }
     /// Search the retained terminal screen and scrollback without moving its viewport.
     pub(super) fn palette_search_text(&self, session_id: &str) -> String {
@@ -2314,6 +2326,79 @@ impl Render for TerminalPane {
 mod native_terminal_tests {
     use super::*;
     use ::core::prelude::v1::test;
+
+    #[cfg(feature = "visual-export")]
+    struct TerminalRehostRoot;
+    #[cfg(feature = "visual-export")]
+    impl Render for TerminalRehostRoot {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement { div() }
+    }
+
+    #[cfg(feature = "visual-export")]
+    #[gpui_kit::test]
+    fn terminal_rehosting_retains_screen_scrollback_input_and_fifo_without_backend_io(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let mut retained = None;
+        let (_, visual) = cx.add_window_view(|window, cx| {
+            let pane = cx.new(|cx| {
+                // Hidden manager: no initial pump, exit monitor or live PTY.
+                let mut pane = TerminalPane::new_inner(
+                    DesktopService::disconnected_for_ui_fixture(), &json!({}), window,
+                    PaneMode::Manager, false, false, cx,
+                );
+                let mut model = TerminalModel::new(3, 20);
+                model.parser.process(b"first\r\nsecond\r\nthird\r\nfourth\r\nfifth\r\nlast");
+                model.parser.screen_mut().set_scrollback(2);
+                model.seq = 41;
+                pane.models.insert("offline-terminal".into(), model);
+                pane.selected = Some("offline-terminal".into());
+                pane.queue = VecDeque::from([write("offline-terminal", b"queued input")]);
+                pane.busy = true;
+                pane.marked = "composing".into();
+                pane.marked_selection = 2..4;
+                pane.selection = Some(Selection { anchor: CellPoint { row: 0, col: 1 }, end: CellPoint { row: 1, col: 2 }, text: "selected text".into() });
+                pane.grid_bounds = Some(Bounds::new(point(px(100.), px(200.)), size(px(200.), px(100.))));
+                pane.last_mouse_cell = Some(CellPoint { row: 1, col: 2 });
+                pane
+            });
+            retained = Some(pane);
+            let root = cx.new(|_| TerminalRehostRoot);
+            gpui_kit::component::Root::new(root, window, cx)
+        });
+        let pane = retained.unwrap();
+        let original_id = visual.update(|window, _| window.window_handle().window_id());
+        let before = pane.read_with(visual, |pane, _| {
+            let screen = pane.models["offline-terminal"].parser.screen();
+            (screen.contents(), screen.scrollback(), screen.size())
+        });
+        let moved = pane.clone();
+        let destination = visual.add_window(move |window, cx| {
+            moved.update(cx, |pane, cx| pane.rehost_to_window(window, cx)).unwrap();
+            TerminalRehostRoot
+        });
+        visual.update(|window, cx| {
+            assert_eq!(cx.with_window(pane.entity_id(), |window, _| window.window_handle().window_id()), Some(destination.window_id()));
+            pane.update(cx, |pane, cx| pane.rehost_to_window(window, cx)).unwrap();
+        });
+        destination.update(visual, |_, _, cx| {
+            assert_eq!(cx.with_window(pane.entity_id(), |window, _| window.window_handle().window_id()), Some(original_id));
+            pane.update(cx, |pane, _| {
+                let model = &pane.models["offline-terminal"];
+                let screen = model.parser.screen();
+                assert_eq!((screen.contents(), screen.scrollback(), screen.size()), before);
+                assert_eq!(model.seq, 41);
+                assert_eq!(pane.selected.as_deref(), Some("offline-terminal"));
+                assert_eq!(pane.marked, "composing");
+                assert_eq!(pane.marked_selection, 2..4);
+                assert_eq!(pane.selection.as_ref().unwrap().text, "selected text");
+                assert!(pane.busy && !pane.visible && pane.exit_monitor.is_none());
+                assert!(pane.grid_bounds.is_none() && pane.last_mouse_cell.is_none());
+                assert_eq!(pane.queue.len(), 1);
+                assert_write(pane.queue.pop_front(), "offline-terminal", b"queued input");
+            });
+        }).unwrap();
+        destination.update(visual, |_, window, _| window.remove_window()).unwrap();
+    }
 
     #[::core::prelude::v1::test]
     fn terminal_context_excludes_transcripts_and_detects_host_and_style_changes() {

@@ -363,6 +363,56 @@ impl<'a, T: 'static> Context<'a, T> {
         )
     }
 
+    /// Subscribe using the emitting entity's current native host. This is useful
+    /// for an application controller that coordinates views in several windows.
+    /// Unlike `subscribe_in`, moving the emitter also moves the callback target.
+    pub fn subscribe_in_emitter_window<Emitter, Evt>(
+        &mut self,
+        emitter: &Entity<Emitter>,
+        window: &Window,
+        mut on_event: impl FnMut(&mut T, &Entity<Emitter>, &Evt, &mut Window, &mut Context<T>) + 'static,
+    ) -> Subscription
+    where
+        Emitter: EventEmitter<Evt>,
+        Evt: 'static,
+    {
+        let emitter = emitter.downgrade();
+        let subscriber = self.weak_entity();
+        self.ensure_window(emitter.entity_id(), window.handle.id);
+        self.new_subscription(
+            emitter.entity_id(),
+            (
+                TypeId::of::<Evt>(),
+                Box::new(move |event, cx| {
+                    let Some((subscriber, emitter)) = subscriber.upgrade().zip(emitter.upgrade()) else {
+                        return false;
+                    };
+                    let event = event.downcast_ref().expect("invalid event type");
+                    cx.with_window(emitter.entity_id(), |window, cx| {
+                        subscriber.update(cx, |subscriber, cx| {
+                            on_event(subscriber, &emitter, event, window, cx);
+                        });
+                    });
+                    true
+                }),
+            ),
+        )
+    }
+
+    /// Visit another native host while retaining the current controller context.
+    /// The entity is already leased by the caller; this does not update or
+    /// borrow that entity a second time.
+    pub fn update_window_context<R>(
+        &mut self,
+        handle: AnyWindowHandle,
+        update: impl FnOnce(&mut Window, &mut Context<T>) -> R,
+    ) -> Result<R> {
+        let entity = self.weak_entity();
+        self.app.update_window(handle, |_, window, app| {
+            update(window, &mut Context::new_context(app, entity))
+        })
+    }
+
     /// Register a callback to be invoked when the view is released.
     ///
     /// The callback receives a handle to the view's window. This handle may be

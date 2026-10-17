@@ -321,6 +321,10 @@ impl PlatformWindow for TestWindow {
         self.0.lock().bounds
     }
 
+    fn global_bounds(&self) -> Option<Bounds<Pixels>> {
+        Some(self.bounds())
+    }
+
     fn window_bounds(&self) -> WindowBounds {
         WindowBounds::Windowed(self.bounds())
     }
@@ -575,10 +579,8 @@ impl PlatformWindow for TestWindow {
 
     fn start_external_drag(&self, payload: &crate::ExternalDragPayload) -> bool {
         let mut state = self.0.lock();
-        match payload {
-            crate::ExternalDragPayload::Files(paths) => {
-                state.external_drag_files.extend_from_slice(paths.entries());
-            }
+        if let crate::ExternalDragPayload::Files(paths) = payload {
+            state.external_drag_files.extend_from_slice(paths.entries());
         }
         state.start_external_drag_result
     }

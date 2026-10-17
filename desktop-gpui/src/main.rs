@@ -53,6 +53,9 @@ mod git;
 mod git_workspace;
 mod native_clock;
 mod window_state;
+mod workspace_window_state;
+mod workspace_windows;
+use workspace_windows::DesktopContextExt as _;
 mod drawer_preferences;
 mod wallpaper_accent;
 mod wallpaper_backdrop;
@@ -154,6 +157,8 @@ mod performance_metrics;
 mod performance_scenario;
 #[cfg(feature = "performance-profiling")]
 mod surface_preview;
+#[cfg(feature = "performance-profiling")]
+mod workspace_window_preview;
 mod workspace;
 use transcript::TranscriptState;
 use workspace::WorkspacePane;
@@ -298,42 +303,20 @@ impl Render for PaneFocusFrame {
 }
 
 struct Desktop {
-    dock: Entity<docking::DockWorkspace>,
-    palette: Option<Entity<command_palette::CommandPalette>>,
-    palette_subscription: Option<Subscription>,
-    palette_terminal_sessions: Vec<Value>,
-    palette_terminals_loading: bool,
-    _layout_subscription: Subscription,
-    _activation_subscription: Subscription,
-    sidebar_resize: Entity<ResizableState>,
-    _sidebar_resize_subscription: Subscription,
-    sidebar_width_touched: bool,
-    sidebar_collapsed: bool,
-    sidebar_hidden: bool,
-    sidebar_expanded_width: f32,
-    sidebar_motion: layout_motion::WidthMotion,
-    sidebar_motion_frame_pending: bool,
-    sidebar_motion_compact: bool,
-    sidebar_focus: FocusHandle,
-    sidebar_toggle_focus: FocusHandle,
-    preferences_open: bool,
-    preferences_focus: FocusHandle,
-    preferences_previous_focus: Option<FocusHandle>,
-    sidebar_scale: u16,
-    sidebar_view: SidebarView,
-    sidebar_tabs_motion: RefCell<crate::sidebar_tabs_motion::SidebarTabsMotion>,
+    window: workspace_windows::DesktopWindowView,
+    window_hosts: HashMap<workspace_window_state::WindowId, workspace_windows::WorkspaceHost>,
+    parked_window_views: HashMap<workspace_window_state::WindowId, workspace_windows::DesktopWindowView>,
+    workspace_view_cache: HashMap<String, workspace_windows::DesktopWindowView>,
+    current_workspace_window: workspace_window_state::WindowId,
+    workspace_window_assignments: workspace_window_state::WorkspaceWindowState,
+    workspace_window_restore_pending: bool,
+    workspace_window_transfer: bool,
+
     preferences: Option<NativePreferences>,
     named_workspaces: Option<monitter_lib::experimental_desktop::NativeWorkspaceSet>,
     workspaces_dirty: bool,
     workspace_store_revision: i64,
     pending_auto_size_panes: Option<bool>,
-    workspace_switch: Option<String>,
-    pending_sidebar_task: Option<String>,
-    pending_notification_read: Option<String>,
-    sidebar_task_navigation_scheduled: bool,
-    pending_workspace_removal: Option<String>,
-    workspace_editor: Option<workspace_tabs::WorkspaceEditor>,
-    workspace_number_hints: bool,
     native_drafts: BTreeMap<String, String>,
     dirty_draft_ids: HashSet<String>,
     native_attachment_drafts: BTreeMap<String, NativeAttachmentDraft>,
@@ -344,14 +327,7 @@ struct Desktop {
     browser_subscription: Option<Subscription>,
     native_chat_panes: BTreeMap<String, NativeChatPanePreferences>,
     dirty_chat_pane_ids: HashSet<String>,
-    route_touched: bool,
-    preferences_restore: bool,
-    preferences_restore_suppressed: bool,
-    preferences_restoring: bool,
     preferences_generation: u64,
-    preferences_restore_generation: u64,
-    sidebar_resize_suppressed: bool,
-    sidebar_resize_generation: u64,
     preferences_blocked: bool,
     preferences_dirty: bool,
     preferences_busy: bool,
@@ -360,7 +336,6 @@ struct Desktop {
     close_pending: bool,
     chat_panes: Rc<RefCell<HashMap<String, Entity<chat::ChatPane>>>>,
     chat_subscriptions: HashMap<String, Subscription>,
-    dock_current: Option<String>,
     service: Option<DesktopService>,
     snapshot: Rc<Value>,
     revision: Option<String>,
@@ -380,21 +355,11 @@ struct Desktop {
     startup_live_frame_pending: bool,
     startup_cache_timer: Option<Task<()>>,
     wallpaper_accent: Entity<wallpaper_accent::WallpaperAccent>,
-    wallpaper_backdrop: Entity<wallpaper_backdrop::WallpaperBackdrop>,
     session_lock: Entity<session_lock::SessionLock>,
-    lock_previous_focus: Option<FocusHandle>,
     lock_close_saving: bool,
     lock_close_confirmed: bool,
     hidden_task_ids: HashSet<String>,
     removed_dock_ids: Vec<String>,
-    selected: Option<String>,
-    sidebar: Sidebar,
-    filter: Option<String>,
-    error: Option<String>,
-    busy: bool,
-    empty_terminal_pending: bool,
-    pending_empty_session: Option<(String, String)>,
-    pending_draft_chats: BTreeMap<String, String>,
     browser_requests_pending: bool,
     browser_requests_busy: bool,
     browser_requests_seen: HashSet<String>,
@@ -403,59 +368,13 @@ struct Desktop {
     _changes: Option<Task<()>>,
     browser: Option<Entity<BrowserPane>>,
     closing: bool,
-    native_settings: Option<settings::NativeSettings>,
     draft_panes: Rc<RefCell<HashMap<String, Entity<draft_creation::DraftCreationPane>>>>,
     draft_subscriptions: HashMap<String, Subscription>,
-    draft_creation: Option<Entity<draft_creation::DraftCreationPane>>,
-    draft_creation_open: bool,
-    applied_style: Option<String>,
     report_theme_publisher: report_theme::Publisher,
-    applied_window_surface: Option<String>,
     appearance_reference_pending: bool,
-    workspace: Option<Entity<WorkspacePane>>,
-    archives: Option<Entity<archives::ArchivedChatsPane>>,
-    archives_subscription: Option<Subscription>,
-    archives_revision: Option<String>,
-    mail: Option<Entity<MailPane>>,
-    mail_context_task: Option<String>,
-    collapsed_agents: HashSet<String>,
     native_theme_preset: String,
-    channels: Option<Entity<ChannelPane>>,
-    channels_revision: Option<String>,
-    channel_subscription: Option<Subscription>,
-    channel_cursors: HashMap<String, Option<String>>,
-    terminal: Option<Entity<terminal::TerminalPane>>,
-    terminal_context: Option<(Option<String>, Option<String>)>,
-    terminal_panes: HashMap<String, Entity<terminal::TerminalPane>>,
-    neovim_sessions: HashMap<String, Entity<neovim::NeovimSession>>,
-    neovim_panes: HashMap<String, Entity<neovim::NeovimPane>>,
-    neovim_layouts: HashMap<String, Value>,
-    neovim_origins: HashMap<String, String>,
-    neovim_focus_windows: HashMap<String, i64>,
-    neovim_pending: bool,
-    usage: Option<Entity<usage::UsagePane>>,
-    usage_revision: Option<String>,
-    app_resources: Option<Entity<usage::AppResourcePane>>,
-    sidebar_usage: Option<Entity<sidebar_usage::SidebarUsageWidget>>,
-    workspace_usage_rings: Option<Entity<sidebar_usage::WorkspaceUsageRings>>,
-    notification_bell: Option<Entity<notifications::NotificationBell>>,
     notification_model: notification_model::NotificationModel,
-    notification_subscription: Option<Subscription>,
     workspace_notifications: HashMap<String, notification_center::WorkspaceNotificationFeed>,
-    admin_activity: Option<Entity<admin_activity::AdminActivity>>,
-    admin_activity_subscription: Option<Subscription>,
-    sidebar_usage_snapshot: Option<Rc<Value>>,
-    sidebar_usage_revision: Option<String>,
-    schedules: Option<Entity<schedules::SchedulePane>>,
-    schedules_revision: Option<String>,
-    agent_editor: Option<Entity<agents::AgentHostPane>>,
-    agent_editor_revision: Option<String>,
-    subagents: Option<Entity<collaboration::SubagentPane>>,
-    subagents_context: Option<(Option<String>, Option<String>)>,
-    git: Option<Entity<git::GitPane>>,
-    git_panes: HashMap<String, Entity<git::GitPane>>,
-    git_panes_revision: Option<String>,
-    git_context: Option<(Option<String>, Option<String>)>,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SidebarView {
@@ -465,30 +384,38 @@ enum SidebarView {
 }
 impl Desktop {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        #[cfg(feature = "performance-profiling")]
+        let disconnected_preview = workspace_window_preview::enabled();
+        #[cfg(not(feature = "performance-profiling"))]
+        let disconnected_preview = false;
         // A small bounded local read is the only data dependency of the first
         // workspace frame. It never seeds NativeState or a journal cursor.
         #[cfg(not(test))]
-        let cached = monitter_gpui_desktop::startup_cache::load();
+        let cached = if disconnected_preview { None } else { monitter_gpui_desktop::startup_cache::load() };
         #[cfg(test)]
         let cached: Option<monitter_gpui_desktop::startup_cache::Presentation> = None;
         cx.observe_global::<streaming_display::Selection>(|_, cx| cx.notify()).detach();
-        let session_lock = cx.new(|cx| session_lock::SessionLock::new(window,cx));
+        let session_lock = cx.new(|cx| {
+            #[cfg(feature = "performance-profiling")]
+            if disconnected_preview { return session_lock::SessionLock::new_for_ui_fixture(window, cx); }
+            session_lock::SessionLock::new(window,cx)
+        });
         cx.observe(&session_lock, |_,_,cx|cx.notify()).detach();
-        cx.subscribe_in(&session_lock,window,|view,_,event:&session_lock::LockEvent,window,cx| {
+        cx.subscribe_workspace(&session_lock,window,|view,_,event:&session_lock::LockEvent,window,cx| {
             match event {
                 session_lock::LockEvent::Locked => {
                     view.lock_close_confirmed=false;
-                    view.lock_previous_focus=if view.preferences_open {view.preferences_previous_focus.clone()}else{window.focused(cx)};
+                    view.window.lock_previous_focus=if view.window.preferences_open {view.window.preferences_previous_focus.clone()}else{window.focused(cx)};
                     native_pane_highlight::clear(window);
-                    if view.preferences_open {view.close_preferences(window,cx);}
+                    if view.window.preferences_open {view.close_preferences(window,cx);}
                     cx.stop_active_drag(window);
                     window.close_dialog(cx);
-                    view.dock.update(cx,|dock,cx|dock.set_shown(false,window,cx));
+                    view.window.dock.update(cx,|dock,cx|dock.set_shown(false,window,cx));
                     if let Some(browser)=&view.browser {browser.update(cx,|browser,cx|browser.hide(cx));}
                 }
                 session_lock::LockEvent::Unlocked => {
-                    view.dock.update(cx,|dock,cx|dock.set_shown(true,window,cx));
-                    if let Some(focus)=view.lock_previous_focus.take() {window.focus(&focus,cx);}
+                    view.window.dock.update(cx,|dock,cx|dock.set_shown(true,window,cx));
+                    if let Some(focus)=view.window.lock_previous_focus.take() {window.focus(&focus,cx);}
                 }
             }
             cx.notify();
@@ -497,147 +424,8 @@ impl Desktop {
             HashMap::<String, Entity<chat::ChatPane>>::new(),
         ));
         let draft_panes = Rc::new(RefCell::new(HashMap::<String, Entity<draft_creation::DraftCreationPane>>::new()));
-        let retained_drafts = draft_panes.clone();
-        let retained = chat_panes.clone();
-        let factory: docking::PaneFactory = Rc::new(move |id, _, cx| {
-            if id.starts_with("draft:") {
-                let pane = retained_drafts.borrow().get(id)?.clone();
-                return Some(docking::PaneSpec { id: id.into(), title: "New Chat".into(), content: pane.clone().into(), focus: pane.focus_handle(cx), lifecycle: None, closable: true });
-            }
-            let task_id = id.strip_prefix("chat:")?;
-            let pane = retained.borrow().get(task_id)?.clone();
-            Some(docking::PaneSpec {
-                id: id.into(),
-                title: "Chat".into(),
-                content: pane.clone().into(),
-                focus: pane.focus_handle(cx),
-                lifecycle: None,
-                closable: true,
-            })
-        });
-        let dock =
-            cx.new(|cx| docking::DockWorkspace::new("monitter-workspace", factory, window, cx));
-        let layout_subscription = cx.subscribe_in(&dock, window, |view, _, event, window, cx| {
-            if let docking::WorkspaceEvent::VisibilityChanged { id, visible } = event {
-                if let Some(task_id) = id.strip_prefix("chat:") {
-                    let pane = view.chat_panes.borrow().get(task_id).cloned();
-                    if let Some(pane) = pane {
-                        pane.update(cx, |pane, cx| {
-                            pane.set_dock_visible(*visible, cx);
-                            if *visible { pane.ensure_latest_history(cx); }
-                        });
-                    }
-                    if !visible { view.compact_inactive_task(task_id, cx); }
-                }
-            }
-            if let docking::WorkspaceEvent::Removed { id } = event {
-                view.git_panes.remove(id);
-                view.release_removed_neovim_pane(id, cx);
-                if browser_workspace::parse_browser_pane_id(id).is_some() {
-                    let removed = HashSet::from([id.clone()]);
-                    if let Some(set) = &mut view.named_workspaces {
-                        for workspace in &mut set.items {
-                            if let Some(layout) = &mut workspace.layout {
-                                match workspace_visibility::prune_native_pane_ids(layout, &removed) {
-                                    Ok(cleaned) if cleaned != *layout => {
-                                        *layout = cleaned;
-                                        view.workspaces_dirty = true;
-                                    }
-                                    Err(error) => view.preferences_error = Some(error),
-                                    _ => {}
-                                }
-                            }
-                        }
-                    }
-                    if view.workspaces_dirty { view.queue_preferences_save(cx); }
-                }
-                if id.starts_with("draft:") {
-                    view.draft_panes.borrow_mut().remove(id);
-                    view.draft_subscriptions.remove(id);
-                    if view.dock_current.as_deref() == Some(id.as_str()) { view.draft_creation = None; view.dock_current = None; }
-                }
-                if let Some(task_id) = id.strip_prefix("chat:") {
-                    // Persisted draft/sidebar state lives separately. Release the
-                    // closed pane's transcript, row entities, and animation state.
-                    view.chat_panes.borrow_mut().remove(task_id);
-                    view.chat_subscriptions.remove(task_id);
-                    if view.selected.as_deref() == Some(task_id) && view.dock_current.as_deref() == Some(id.as_str()) {
-                        view.selected = None;
-                        view.dock_current = None;
-                    }
-                    view.queue_native_publication(PublicationChanges {
-                        trim_tasks: HashSet::from([task_id.to_owned()]),
-                        ..Default::default()
-                    }, cx);
-                }
-            }
-            if let docking::WorkspaceEvent::EmptyClose { pane_id } = event {
-                if view.dock.update(cx, |dock, cx| dock.close_empty(pane_id, window, cx)) {
-                    view.queue_preferences_save(cx);
-                }
-                return;
-            }
-            if let docking::WorkspaceEvent::EmptyAction { pane_id, action } = event {
-                if let Err(error) = view.empty_pane_action(pane_id, *action, window, cx) {
-                    view.error = Some(error);
-                    cx.notify();
-                }
-                return;
-            }
-            if let docking::WorkspaceEvent::EmptyWorkspaceAction(action) = event {
-                if view.closing || view.busy || view.empty_terminal_pending
-                    || view.service.is_none() || view.preferences.is_none()
-                    || view.preferences_restore || view.preferences_restoring {
-                    return;
-                }
-                let result = view.dock.update(cx, |dock, cx| dock.add_focused_empty_tab(window, cx))
-                    .and_then(|id| view.empty_pane_action(&id, *action, window, cx));
-                if let Err(error) = result {
-                    view.error = Some(error);
-                    cx.notify();
-                }
-                return;
-            }
-            if let docking::WorkspaceEvent::EmptySession { pane_id, task_id } = event {
-                let valid = rows(&view.snapshot, "tasks").iter().any(|task| field(task, "id") == *task_id && task["archived"] != true);
-                if valid && !view.closing && !view.busy && view.service.is_some()
-                    && view.dock.read(cx).panel_key(pane_id).is_some() {
-                    view.pending_empty_session = Some((pane_id.clone(), task_id.clone()));
-                    view.selected = Some(task_id.clone());
-                    view.sidebar = Sidebar::Chats;
-                    view.draft_creation_open = false;
-                    view.dock_current = None;
-                    cx.notify();
-                }
-                return;
-            }
-            if matches!(event, docking::WorkspaceEvent::LayoutChanged)
-                && !view.closing
-                && view.preferences.is_some()
-                && !view.preferences_restore
-                && !view.preferences_restore_suppressed
-            {
-                view.workspaces_dirty = true;
-                view.queue_preferences_save(cx);
-            }
-            if let docking::WorkspaceEvent::AutoSizePanesChanged(_) = event {
-                cx.notify();
-                if !view.closing && view.preferences.is_some() && !view.preferences_restore_suppressed {
-                    view.workspaces_dirty = true;
-                    view.queue_preferences_save(cx);
-                }
-            }
-        });
-        let vim_command_bar = vim_command::VimCommandBar::new(window, cx);
-        cx.subscribe_in(&vim_command_bar, window, |desktop, _, event, window, cx| {
-            if let vim_command::VimCommandBarEvent::Run(command) = event {
-                desktop.run_vim_command(command.clone(), window, cx);
-            }
-        }).detach();
-        let wallpaper_backdrop = cx.new(|_| wallpaper_backdrop::WallpaperBackdrop::default());
-        cx.observe(&wallpaper_backdrop, |_, _, cx| cx.notify()).detach();
         let wallpaper_accent = cx.new(|_| wallpaper_accent::WallpaperAccent::new());
-        cx.observe(&wallpaper_accent, |view, _, cx| { view.applied_style = None; view.invalidate_surface_blends(cx); }).detach();
+        cx.observe(&wallpaper_accent, |view, _, cx| { view.window.applied_style = None; view.invalidate_surface_blends(cx); }).detach();
         if wallpaper_theme::mode() != wallpaper_theme::Mode::Manual {
             wallpaper_accent.update(cx, |sampler, cx| sampler.refresh(window, cx));
         }
@@ -648,47 +436,9 @@ impl Desktop {
             }
         }).detach();
         cx.observe_window_bounds(window, |view, window, cx| { window_state::save(window, cx); view.refresh_wallpaper(window, cx); }).detach();
-        let activation_subscription = cx.observe_window_activation(window, |view, window, cx| {
-            if window.is_window_active() { view.refresh_wallpaper(window, cx); }
-            if !window.is_window_active() {
-                view.set_workspace_number_hints(false, cx);
-                cx.stop_active_drag(window);
-            }
-        });
-        let sidebar_resize = cx.new(|_| ResizableState::default());
-        let sidebar_resize_subscription =
-            cx.subscribe(&sidebar_resize, |view, state, event, cx| {
-                if matches!(event, ResizablePanelEvent::Resized) {
-                    if let Some(width) = state.read(cx).sizes().first() {
-                        let width = *width / design::ui_px(1., view.sidebar_scale);
-                        if width.is_finite()
-                            && !view.sidebar_resize_suppressed
-                            && !view.sidebar_is_hidden()
-                            && !view.preferences_restore_suppressed
-                        {
-                            view.sidebar_width_touched = true;
-                            let collapse = sidebar_should_collapse(
-                                width,
-                                view.sidebar_collapsed,
-                                view.sidebar_scale,
-                            );
-                            if collapse != view.sidebar_collapsed {
-                                if collapse { view.sidebar_expanded_width = expanded_sidebar_width_for_scale(view.sidebar_expanded_width,view.sidebar_scale); }
-                                view.sidebar_collapsed = collapse;
-                            }
-                            // Drag takeover can clear a Hidden target without
-                            // changing the collapse flag. Commit the resolved
-                            // visible mode on release even when that flag agrees.
-                            preferences_modal::save_sidebar_collapse(collapse);
-                            if !collapse { view.sidebar_expanded_width = expanded_sidebar_width_for_scale(width,view.sidebar_scale); }
-                            view.queue_preferences_save(cx);
-                        }
-                    }
-                }
-            });
         // Headless UI fixtures must not connect to the user's live backend.
         #[cfg(not(test))]
-        {
+        if !disconnected_preview {
         let open = cx
             .background_executor()
             .spawn(async {
@@ -712,16 +462,16 @@ impl Desktop {
                                     }
                                 }));
                             }
-                            Err(error) => view.error = Some(error),
+                            Err(error) => view.window.error = Some(error),
                         }
-                        if let Some(activity) = &view.admin_activity {
+                        if let Some(activity) = &view.window.admin_activity {
                             activity.update(cx, |activity, cx| activity.connect(service.clone(), cx));
                         }
                         view.service = Some(service);
                         view.load_preferences(cx);
                         view.refresh(cx);
                     }
-                    Err(error) => view.error = Some(error),
+                    Err(error) => view.window.error = Some(error),
                 }
                 cx.notify();
             });
@@ -733,42 +483,19 @@ impl Desktop {
             .and_then(|route| Self::palette_routes().into_iter().find(|(id, _, _)| id == route).map(|(_, _, route)| route))
             .unwrap_or(Sidebar::Chats);
         Self {
-            dock,
-            sidebar_resize,
-            _sidebar_resize_subscription: sidebar_resize_subscription,
-            sidebar_width_touched: false,
-            sidebar_collapsed: preferences_modal::load_sidebar_collapse(),
-            sidebar_hidden: preferences_modal::load_sidebar_hidden(),
-            sidebar_expanded_width: 252.,
-            sidebar_motion: Default::default(),
-            sidebar_motion_frame_pending: false,
-            sidebar_motion_compact: false,
-            sidebar_focus: cx.focus_handle(),
-            sidebar_toggle_focus: cx.focus_handle(),
-            preferences_open: false,
-            preferences_focus: cx.focus_handle(),
-            preferences_previous_focus: None,
-            sidebar_scale: design::INTERFACE_SCALE_DEFAULT,
-            sidebar_view: SidebarView::Activity,
-            sidebar_tabs_motion: Default::default(),
-            palette: None,
-            palette_subscription: None,
-            palette_terminal_sessions: vec![],
-            palette_terminals_loading: false,
-            _layout_subscription: layout_subscription,
-            _activation_subscription: activation_subscription,
+            window: Self::create_workspace_view(chat_panes.clone(), draft_panes.clone(), cached_route, window, cx),
+            window_hosts: HashMap::new(),
+            parked_window_views: HashMap::new(),
+            workspace_view_cache: HashMap::new(),
+            current_workspace_window: workspace_window_state::WindowId::main(),
+            workspace_window_assignments: Default::default(),
+            workspace_window_restore_pending: true,
+            workspace_window_transfer: false,
             preferences: cached.as_ref().map(|cache| cache.preferences.clone()),
             named_workspaces: cached.as_ref().and_then(|cache| cache.workspaces.clone()),
-            workspace_number_hints: false,
             workspaces_dirty: false,
             workspace_store_revision: 0,
             pending_auto_size_panes: None,
-            workspace_switch: None,
-            pending_sidebar_task: None,
-            pending_notification_read: None,
-            sidebar_task_navigation_scheduled: false,
-            pending_workspace_removal: None,
-            workspace_editor: None,
             native_drafts: BTreeMap::new(),
             dirty_draft_ids: HashSet::new(),
             native_attachment_drafts: BTreeMap::new(),
@@ -779,23 +506,15 @@ impl Desktop {
             browser_subscription: None,
             native_chat_panes: BTreeMap::new(),
             dirty_chat_pane_ids: HashSet::new(),
-            route_touched: false,
-            preferences_restore: false,
-            preferences_restore_suppressed: false,
-            preferences_restoring: false,
             preferences_generation: 0,
-            preferences_restore_generation: 0,
-            sidebar_resize_suppressed: false,
-            sidebar_resize_generation: 0,
             preferences_blocked: cached.is_some(),
             preferences_dirty: false,
             preferences_busy: false,
             preferences_error: None,
             preferences_save_timer: None,
             close_pending: false,
-            chat_panes,
+            chat_panes: chat_panes,
             chat_subscriptions: HashMap::new(),
-            dock_current: None,
             service: None,
             snapshot: Rc::new(cached.as_ref().map(|cache| cache.snapshot.clone()).unwrap_or_else(|| json!({}))),
             revision: None,
@@ -814,22 +533,12 @@ impl Desktop {
             startup_first_frame: cfg!(not(test)),
             startup_live_frame_pending: false,
             startup_cache_timer: None,
-            wallpaper_accent,
-            wallpaper_backdrop,
-            session_lock,
-            lock_previous_focus: None,
+            wallpaper_accent: wallpaper_accent,
+            session_lock: session_lock,
             lock_close_saving: false,
             lock_close_confirmed: false,
             hidden_task_ids: HashSet::new(),
             removed_dock_ids: Vec::new(),
-            selected: None,
-            sidebar: cached_route,
-            filter: None,
-            error: None,
-            busy: false,
-            empty_terminal_pending: false,
-            pending_empty_session: None,
-            pending_draft_chats: BTreeMap::new(),
             browser_requests_pending: true,
             browser_requests_busy: false,
             browser_requests_seen: HashSet::new(),
@@ -838,74 +547,30 @@ impl Desktop {
             _changes: None,
             browser: None,
             closing: false,
-            native_settings: None,
-            draft_panes,
+            draft_panes: draft_panes,
             draft_subscriptions: HashMap::new(),
-            draft_creation: None,
-            draft_creation_open: false,
-            applied_style: None,
             report_theme_publisher: report_theme::Publisher::default(),
-            applied_window_surface: None,
             appearance_reference_pending: std::env::var_os("MONITTER_GPUI_APPEARANCE_REFERENCE")
                 .is_some(),
-            workspace: None,
-            archives: None,
-            archives_subscription: None,
-            archives_revision: None,
-            mail: None,
-            mail_context_task: None,
-            collapsed_agents: HashSet::new(),
             native_theme_preset: cached_theme.into(),
-            channels: None,
-            channels_revision: None,
-            channel_subscription: None,
-            channel_cursors: HashMap::new(),
-            terminal: None,
-            terminal_context: None,
-            terminal_panes: HashMap::new(),
-            neovim_sessions: HashMap::new(),
-            neovim_panes: HashMap::new(),
-            neovim_layouts: HashMap::new(),
-            neovim_origins: HashMap::new(),
-            neovim_focus_windows: HashMap::new(),
-            neovim_pending: false,
-            usage: None,
-            usage_revision: None,
-            app_resources: None,
-            sidebar_usage: None,
-            workspace_usage_rings: None,
-            notification_bell: None,
             notification_model: Default::default(),
-            notification_subscription: None,
             workspace_notifications: HashMap::new(),
-            admin_activity: None,
-            admin_activity_subscription: None,
-            sidebar_usage_snapshot: None,
-            sidebar_usage_revision: None,
-            schedules: None,
-            schedules_revision: None,
-            agent_editor: None,
-            agent_editor_revision: None,
-            subagents: None,
-            subagents_context: None,
-            git: None,
-            git_panes: HashMap::new(),
-            git_panes_revision: None,
-            git_context: None,
         }
     }
     fn schedule_startup_cache(&mut self, cx: &mut Context<Self>) {
+        #[cfg(feature = "performance-profiling")]
+        if workspace_window_preview::enabled() { return; }
         if self.startup_pending || self.startup_cache_timer.is_some() || self.closing { return; }
         self.startup_cache_timer = Some(cx.spawn(async move |view, cx| {
             cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
             let cache = view.update(cx, |view, cx| {
                 view.startup_cache_timer = None;
-                if view.preferences_busy || view.preferences_restore || view.preferences_restoring || view.closing { return None; }
+                if view.preferences_busy || view.window.preferences_restore || view.window.preferences_restoring || view.closing { return None; }
                 let mut preferences = view.preferences.clone()?;
                 preferences.data.chat_panes = view.native_chat_panes.clone();
                 preferences.data.appearance.sidebar_width = Some(view.current_sidebar_width(cx));
-                let mut layout = view.dock.read(cx).serialize(cx).ok()?;
-                workspace_visibility::remember_focus(&mut layout, view.dock_current.as_deref());
+                let mut layout = view.window.dock.read(cx).serialize(cx).ok()?;
+                workspace_visibility::remember_focus(&mut layout, view.window.dock_current.as_deref());
                 let ids = docking::DockWorkspace::saved_ids(&layout).ok()?;
                 Some(monitter_gpui_desktop::startup_cache::Presentation::capture(&view.snapshot, &preferences, view.named_workspaces.clone(), layout, &ids))
             }).ok().flatten();
@@ -930,7 +595,7 @@ impl Desktop {
         self.schedule_startup_cache(cx);
     }
     fn deactivate_mail(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(mail) = &self.mail {
+        if let Some(mail) = &self.window.mail {
             mail.update(cx, |mail, cx| mail.deactivate(window, cx));
         }
     }
@@ -938,7 +603,7 @@ impl Desktop {
         if session_lock::locked(cx) {return;}
         if surface == Sidebar::Settings { self.show_preferences(window, cx); return; }
         if surface == Sidebar::Subagents {
-            let focused = self.dock.read(cx).focused_pane_id(window, cx);
+            let focused = self.window.dock.read(cx).focused_pane_id(window, cx);
             let pane = focused
                 .as_deref()
                 .and_then(|id| id.strip_prefix("chat:"))
@@ -946,42 +611,42 @@ impl Desktop {
             if let Some(pane) = pane {
                 pane.update(cx, |pane, cx| pane.toggle_companion(cx));
             } else {
-                self.error = Some("Focus a chat pane to toggle its secondary sidebar.".into());
+                self.window.error = Some("Focus a chat pane to toggle its secondary sidebar.".into());
                 cx.notify();
             }
             return;
         }
-        self.route_touched = true;
-        self.draft_creation_open = false;
-        if surface == Sidebar::Archived && self.sidebar != Sidebar::Archived {
+        self.window.route_touched = true;
+        self.window.draft_creation_open = false;
+        if surface == Sidebar::Archived && self.window.sidebar != Sidebar::Archived {
             self.ensure_archives(window, cx);
-            if let Some(pane) = &self.archives {
+            if let Some(pane) = &self.window.archives {
                 pane.update(cx, |pane, cx| pane.activate(window, cx));
             }
         }
-        if self.sidebar == Sidebar::Mail && surface != Sidebar::Mail {
+        if self.window.sidebar == Sidebar::Mail && surface != Sidebar::Mail {
             self.deactivate_mail(window, cx);
         }
         if surface == Sidebar::Browser {
             self.ensure_browser(window, cx);
-            self.sidebar = surface;
+            self.window.sidebar = surface;
             if self.preferences.is_some()
-                && !self.preferences_restore
-                && !self.preferences_restoring
+                && !self.window.preferences_restore
+                && !self.window.preferences_restoring
             {
                 if let Err(error) = self.open_selected_browser(window, cx) {
-                    self.error = Some(error);
+                    self.window.error = Some(error);
                 }
             }
             cx.notify();
             return;
         }
-        self.dock_current = None;
-        self.dock.update(cx, |dock, cx| {
+        self.window.dock_current = None;
+        self.window.dock.update(cx, |dock, cx| {
             dock.set_shown(surface != Sidebar::Settings, window, cx)
         });
-        self.sidebar = surface;
-        self.filter = None;
+        self.window.sidebar = surface;
+        self.window.filter = None;
         cx.notify();
     }
     // A retained browser owns native views; preferences contain only bounded
@@ -996,7 +661,9 @@ impl Desktop {
             self.browser_restore_revision = Some(browser.read(cx).metadata_revision());
             self.browser_subscription =
                 Some(
-                    cx.subscribe_in(&browser, window, |view, _, event, window, cx| match event {
+                    // The manager is shared by every native host. Resolve UI
+                    // commands from their source pane instead of its birth window.
+                    cx.subscribe(&browser, |view, _, event, cx| match event {
                         browser::BrowserPaneEvent::MetadataChanged(metadata) => {
                             for tab in &metadata.tabs {
                                 let id = browser_workspace::browser_pane_id(tab.id);
@@ -1005,9 +672,14 @@ impl Desktop {
                                 } else {
                                     &tab.title
                                 };
-                                view.dock.update(cx, |dock, cx| {
-                                    dock.set_title(&id, title.to_owned().into(), cx)
-                                });
+                                for retained in std::iter::once(&view.window)
+                                    .chain(view.parked_window_views.values())
+                                    .chain(view.workspace_view_cache.values())
+                                {
+                                    retained.dock.update(cx, |dock, cx| {
+                                        dock.set_title(&id, title.to_owned().into(), cx)
+                                    });
+                                }
                             }
                             if view.native_browser_metadata.as_ref() != Some(metadata) {
                                 view.native_browser_metadata = Some(metadata.clone());
@@ -1020,21 +692,39 @@ impl Desktop {
                                 return;
                             }
                             let origin = browser_workspace::browser_pane_id(*source_id);
-                            if let Err(error) = view.open_browser_target(url, None, Some(&origin), window, cx) {
-                                view.error = Some(error);
-                                cx.notify();
-                            }
+                            let url = url.clone();
+                            let weak = cx.weak_entity();
+                            cx.defer(move |cx| {
+                                let _ = weak.update(cx, |view, cx| {
+                                    if view.closing { return; }
+                                    let _ = view.with_workspace_for_pane(&origin, cx, |view, window, cx| {
+                                        if let Err(error) = view.open_browser_target(&url, None, Some(&origin), window, cx) {
+                                            view.window.error = Some(error);
+                                            cx.notify();
+                                        }
+                                    });
+                                });
+                            });
                         }
                         browser::BrowserPaneEvent::WorkspaceAction { source_id, action } => {
                             if view.closing {
                                 return;
                             }
-                            if let Err(error) =
-                                view.browser_workspace_action(*source_id, *action, window, cx)
-                            {
-                                view.error = Some(error);
-                                cx.notify();
-                            }
+                            let source_id = *source_id;
+                            let action = *action;
+                            let weak = cx.weak_entity();
+                            cx.defer(move |cx| {
+                                let _ = weak.update(cx, |view, cx| {
+                                    if view.closing { return; }
+                                    let origin = browser_workspace::browser_pane_id(source_id);
+                                    let _ = view.with_workspace_for_pane(&origin, cx, |view, window, cx| {
+                                        if let Err(error) = view.browser_workspace_action(source_id, action, window, cx) {
+                                            view.window.error = Some(error);
+                                            cx.notify();
+                                        }
+                                    });
+                                });
+                            });
                         }
                     }),
                 );
@@ -1082,7 +772,8 @@ impl Desktop {
         let weak = cx.weak_entity();
         let native = tab.clone();
         let active_key = key.clone();
-        let lifecycle: docking::LifecycleHook = Rc::new(move |event, _, cx| {
+        let source_workspace = self.window.active_workspace_id.clone();
+        let lifecycle: docking::LifecycleHook = Rc::new(move |event, window, cx| {
             match event {
                 docking::PaneLifecycle::Visible(true) => native.update(cx, |tab, cx| tab.show(cx)),
                 docking::PaneLifecycle::Visible(false) => native.update(cx, |tab, cx| tab.hide(cx)),
@@ -1094,17 +785,14 @@ impl Desktop {
                             if view.closing {
                                 return;
                             }
-                            if let Some(manager) = &view.browser {
-                                if manager.read(cx).tab_entity(id).is_none() {
-                                    return;
-                                }
+                            let _ = view.with_workspace_for_pane(&key, cx, |view, _, cx| {
+                                let Some(manager) = &view.browser else { return; };
+                                if manager.read(cx).tab_entity(id).is_none() { return; }
                                 manager.update(cx, |manager, cx| manager.select_docked(id, cx));
-                            } else {
-                                return;
-                            }
-                            view.sidebar = Sidebar::Browser;
-                            view.dock_current = Some(key);
-                            cx.notify();
+                                view.window.sidebar = Sidebar::Browser;
+                                view.window.dock_current = Some(key.clone());
+                                cx.notify();
+                            });
                         });
                     });
                 }
@@ -1112,21 +800,45 @@ impl Desktop {
                     // Hide happened above. Finish release outside the dock's
                     // mutation, while the window and prior frame are still alive.
                     let weak = weak.clone();
+                    let key = active_key.clone();
+                    let source_workspace = source_workspace.clone();
+                    let handle = window.window_handle();
                     cx.defer(move |cx| {
-                        let _ = weak.update(cx, |view, cx| {
-                            if view.closing {
-                                return;
-                            }
-                            if let Some(manager) = &view.browser {
-                                manager.update(cx, |manager, cx| manager.remove_docked(id, cx));
-                                if manager.read(cx).selected_tab_id().is_none()
-                                    && view.sidebar == Sidebar::Browser
-                                {
-                                    view.sidebar = Sidebar::Chats;
-                                    view.dock_current = None;
+                        let _ = handle.update(cx, |_, window, cx| {
+                            let _ = weak.update(cx, |view, cx| {
+                                if view.closing { return; }
+                                // Multiple saved workspaces in one native host
+                                // may reference the same retained page. Only its
+                                // final actual-layout removal releases it.
+                                let retained = view.pane_workspace_owner(&key, cx).is_some();
+                                if let Some(manager) = &view.browser {
+                                    if retained {
+                                        let visible = std::iter::once(&view.window)
+                                            .chain(view.parked_window_views.values())
+                                            .chain(view.workspace_view_cache.values())
+                                            .any(|retained| retained.dock.read(cx).is_pane_visible(&key));
+                                        if visible {
+                                            if let Some(tab) = manager.read(cx).tab_entity(id) {
+                                                tab.update(cx, |tab, cx| tab.show(cx));
+                                            }
+                                        }
+                                    } else {
+                                        manager.update(cx, |manager, cx| manager.remove_docked(id, cx));
+                                    }
                                 }
-                            }
-                            cx.notify();
+                                view.with_workspace_window(window, cx, |view, window, cx| {
+                                    let _ = view.with_retained_workspace(source_workspace.as_deref(), window, cx, |view, _, cx| {
+                                        let has_browser = view.window.dock.read(cx).serialize(cx).ok()
+                                            .and_then(|layout| docking::DockWorkspace::saved_ids(&layout).ok())
+                                            .is_some_and(|ids| ids.iter().any(|id| browser_workspace::parse_browser_pane_id(id).is_some()));
+                                        if !has_browser && view.window.sidebar == Sidebar::Browser {
+                                            view.window.sidebar = Sidebar::Chats;
+                                            view.window.dock_current = None;
+                                        }
+                                        cx.notify();
+                                    });
+                                });
+                            });
                         });
                     });
                 }
@@ -1150,21 +862,28 @@ impl Desktop {
     ) -> Result<(), String> {
         // Hydrate saved browser entities before any dock spec captures them.
         // Otherwise a late startup restore can replace a still-hosted blank tab.
-        if self.preferences.is_none() || self.preferences_restore || self.preferences_restoring {
+        if self.preferences.is_none() || self.window.preferences_restore || self.window.preferences_restoring {
             return Err("Browser workspace preferences are still loading.".into());
         }
         let key = browser_workspace::browser_pane_id(id);
-        if !self
-            .dock
+        // A native page may have several cached layouts in one host, but must
+        // never be mounted in two native windows at the same time.
+        if self.focus_pane_owner(&key, cx) { return Ok(()); }
+        let manager = self.browser.clone().ok_or("Browser is unavailable.")?;
+        let tab = manager.read(cx).tab_entity(id).ok_or("Browser tab is unavailable.")?;
+        if !tab.read(cx).is_hosted_in(window) {
+            manager.update(cx, |manager, cx| manager.transfer_tabs_to_window(&[id], window, cx))?;
+        }
+        if !self.window.dock
             .update(cx, |dock, cx| dock.focus(&key, window, cx))
         {
-            let layout = self.dock.read(cx).serialize(cx)?;
+            let layout = self.window.dock.read(cx).serialize(cx)?;
             if docking::DockWorkspace::saved_ids(&layout)?.len() >= 64 {
                 return Err("Native workspace supports at most 64 panes.".into());
             }
-            let group = self.dock.read(cx).focused_group_node(window, cx);
+            let group = self.window.dock.read(cx).focused_group_node(window, cx);
             let spec = self.browser_spec(id, cx)?;
-            self.dock.update(cx, |dock, cx| {
+            self.window.dock.update(cx, |dock, cx| {
                 dock.add(
                     spec,
                     gpui_kit::component::dock::DockPlacement::Center,
@@ -1173,7 +892,7 @@ impl Desktop {
                     cx,
                 )
             })?;
-            self.dock.update(cx, |dock, cx| {
+            self.window.dock.update(cx, |dock, cx| {
                 if let Some(group) = group {
                     dock.move_pane(
                         &key,
@@ -1189,9 +908,9 @@ impl Desktop {
                 dock.focus(&key, window, cx);
             });
         }
-        self.sidebar = Sidebar::Browser;
-        self.dock_current = Some(key);
-        self.dock
+        self.window.sidebar = Sidebar::Browser;
+        self.window.dock_current = Some(key);
+        self.window.dock
             .update(cx, |dock, cx| dock.set_shown(true, window, cx));
         Ok(())
     }
@@ -1213,10 +932,10 @@ impl Desktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<u64, String> {
-        if self.preferences.is_none() || self.preferences_restore || self.preferences_restoring {
+        if self.preferences.is_none() || self.window.preferences_restore || self.window.preferences_restoring {
             return Err("Browser workspace preferences are still loading.".into());
         }
-        let layout = self.dock.read(cx).serialize(cx)?;
+        let layout = self.window.dock.read(cx).serialize(cx)?;
         if docking::DockWorkspace::saved_ids(&layout)?.len() >= 64 {
             return Err("Native workspace supports at most 64 panes.".into());
         }
@@ -1228,7 +947,7 @@ impl Desktop {
     fn process_browser_requests(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.startup_pending { return; }
         if !self.browser_requests_pending || self.browser_requests_busy || self.closing
-            || self.preferences.is_none() || self.preferences_restore || self.preferences_restoring
+            || self.preferences.is_none() || self.window.preferences_restore || self.window.preferences_restoring
             || self.session_lock.read(cx).is_locked() {
             return;
         }
@@ -1237,13 +956,13 @@ impl Desktop {
         self.browser_requests_busy = true;
         let reader = service.clone();
         let worker = cx.background_executor().spawn(async move { reader.read_browser_open_requests() });
-        cx.spawn_in(window, async move |view, cx| {
+        self.spawn_workspace(window, cx, async move |view, cx| {
             let requests = worker.await;
             let mut acknowledged = Vec::new();
             let _ = view.update_in(cx, |view, window, cx| {
                 view.browser_requests_busy = false;
                 if view.closing || view.session_lock.read(cx).is_locked()
-                    || view.preferences.is_none() || view.preferences_restore || view.preferences_restoring {
+                    || view.preferences.is_none() || view.window.preferences_restore || view.window.preferences_restoring {
                     view.browser_requests_pending = true;
                     return;
                 }
@@ -1253,7 +972,7 @@ impl Desktop {
                         for request in requests {
                             if !view.browser_requests_seen.contains(&request.id) {
                                 if let Err(error) = view.open_browser_target(&request.url, request.title.as_deref(), Some(&format!("chat:{}", request.task_id)), window, cx) {
-                                    view.error = Some(format!("Could not open agent browser link: {error}"));
+                                    view.window.error = Some(format!("Could not open agent browser link: {error}"));
                                 }
                                 // Retain receipt locally until the broker stops returning it.
                                 // Lost acknowledgements must not create duplicate visible tabs.
@@ -1265,7 +984,7 @@ impl Desktop {
                     Err(error) => {
                         // Older installed backends do not implement this private method.
                         if !error.contains("Unknown") && !error.contains("not supported") && !error.contains("not available") {
-                            view.error = Some(error);
+                            view.window.error = Some(error);
                         }
                     }
                 }
@@ -1278,7 +997,7 @@ impl Desktop {
                 });
                 if let Err(error) = ack.await {
                     let _ = view.update_in(cx, |view, _, cx| {
-                        view.error = Some(error);
+                        view.window.error = Some(error);
                         cx.notify();
                     });
                 }
@@ -1301,26 +1020,35 @@ impl Desktop {
 
     fn open_browser_target(&mut self, target: &str, title: Option<&str>, origin: Option<&str>, window: &mut Window, cx: &mut Context<Self>) -> Result<(), String> {
         let url = monitter_lib::browser_links::normalize_target(target)?;
+        if let Some(origin) = origin {
+            if self.window.dock.read(cx).group_for_pane(origin, cx).is_none()
+                && self.pane_workspace_owner(origin, cx).is_some()
+            {
+                return self.with_workspace_for_pane_in(origin, window, cx, |view, window, cx| {
+                    view.open_browser_target(&url, title, Some(origin), window, cx)
+                }).unwrap_or_else(|| Err("The browser source workspace is unavailable.".into()));
+            }
+        }
         // Capture the source group before creating/focusing a native browser.
-        let group = origin.and_then(|id| self.dock.read(cx).group_for_pane(id, cx))
-            .or_else(|| self.dock.read(cx).focused_group_node(window, cx));
+        let group = origin.and_then(|id| self.window.dock.read(cx).group_for_pane(id, cx))
+            .or_else(|| self.window.dock.read(cx).focused_group_node(window, cx));
         self.ensure_browser(window, cx);
         let id = self.create_browser_tab(window, cx)?;
         let manager = self.browser.clone().ok_or("Browser is unavailable.")?;
         let key = browser_workspace::browser_pane_id(id);
         let result = self.browser_spec(id, cx).and_then(|spec| {
-            self.dock.update(cx, |dock, cx| dock.add_browser_beside(spec, group, window, cx))
+            self.window.dock.update(cx, |dock, cx| dock.add_browser_beside(spec, group, window, cx))
         }).and_then(|()| {
             manager.read(cx).tab_entity(id).ok_or("Browser tab is unavailable.")?
                 .update(cx, |tab, cx| tab.open_url(&url, title, cx))
         });
         if result.is_err() {
-            self.dock.update(cx, |dock, cx| dock.remove(&key, window, cx));
+            self.window.dock.update(cx, |dock, cx| dock.remove(&key, window, cx));
             manager.update(cx, |manager, cx| manager.remove_docked(id, cx));
         } else {
-            self.sidebar = Sidebar::Browser;
-            self.dock_current = Some(key);
-            self.dock.update(cx, |dock, cx| dock.set_shown(true, window, cx));
+            self.window.sidebar = Sidebar::Browser;
+            self.window.dock_current = Some(key);
+            self.window.dock.update(cx, |dock, cx| dock.set_shown(true, window, cx));
         }
         result
     }
@@ -1332,6 +1060,12 @@ impl Desktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
+        let key = browser_workspace::browser_pane_id(source_id);
+        if self.window.dock.read(cx).group_for_pane(&key, cx).is_none() {
+            return self.with_workspace_for_pane_in(&key, window, cx, |view, window, cx| {
+                view.browser_workspace_action(source_id, action, window, cx)
+            }).unwrap_or(Ok(()));
+        }
         let manager = self.browser.clone().ok_or("Browser is unavailable.")?;
         if manager.read(cx).tab_entity(source_id).is_none() {
             return Ok(());
@@ -1340,7 +1074,7 @@ impl Desktop {
             browser::BrowserWorkspaceAction::NewTab => {
                 if design::tile_theme() == monitter_lib::experimental_desktop::NativeTileTheme::Tern {
                     let key = browser_workspace::browser_pane_id(source_id);
-                    self.dock.update(cx, |dock, cx| dock.focus(&key, window, cx));
+                    self.window.dock.update(cx, |dock, cx| dock.focus(&key, window, cx));
                     return self.open_focused_empty_tab(window, cx);
                 }
                 let id = self.create_browser_tab(window, cx)?;
@@ -1351,16 +1085,16 @@ impl Desktop {
             }
             browser::BrowserWorkspaceAction::CloseTab => {
                 let key = browser_workspace::browser_pane_id(source_id);
-                self.dock.update(cx, |dock, cx| {
+                self.window.dock.update(cx, |dock, cx| {
                     dock.remove(&key, window, cx);
                 });
             }
             browser::BrowserWorkspaceAction::ToggleZoom => {
                 let key = browser_workspace::browser_pane_id(source_id);
-                let Some(group) = self.dock.read(cx).group_for_pane(&key, cx) else {
+                let Some(group) = self.window.dock.read(cx).group_for_pane(&key, cx) else {
                     return Ok(());
                 };
-                let area = self.dock.read(cx).area();
+                let area = self.window.dock.read(cx).area();
                 if area.read(cx).zoomed_group() == Some(group) {
                     area.update(cx, |area, cx| area.set_zoomed_out(window, cx));
                 } else {
@@ -1370,7 +1104,8 @@ impl Desktop {
             browser::BrowserWorkspaceAction::NextTab
             | browser::BrowserWorkspaceAction::PreviousTab => {
                 let forward = matches!(action, browser::BrowserWorkspaceAction::NextTab);
-                self.dock
+                self.window.dock.update(cx, |dock, cx| dock.focus(&key, window, cx));
+                self.window.dock
                     .update(cx, |dock, cx| dock.cycle_focused_tab(forward, window, cx))?;
             }
         }
@@ -1386,22 +1121,22 @@ impl Desktop {
         if self.closing || !pane_id.starts_with("empty:") {
             return Ok(());
         }
-        let Some(expected_panel) = self.dock.read(cx).panel_key(pane_id) else {
+        let Some(expected_panel) = self.window.dock.read(cx).panel_key(pane_id) else {
             return Ok(());
         };
         let service = self
             .service
             .clone()
             .ok_or("The native backend is not ready.")?;
-        if self.preferences.is_none() || self.preferences_restore || self.preferences_restoring {
+        if self.preferences.is_none() || self.window.preferences_restore || self.window.preferences_restoring {
             return Err("Native workspace preferences are still loading.".into());
         }
         if action != empty_pane::EmptyPaneAction::Browser
-            && (self.busy || self.empty_terminal_pending)
+            && (self.window.busy || self.window.empty_terminal_pending)
         {
             return Ok(());
         }
-        self.dock.update(cx, |dock, cx| {
+        self.window.dock.update(cx, |dock, cx| {
             dock.focus(pane_id, window, cx);
         });
         match action {
@@ -1414,8 +1149,8 @@ impl Desktop {
                     return Ok(());
                 }
                 self.open_chat_draft(None, window, cx);
-                if self.draft_creation_open {
-                    self.dock.update(cx, |dock, cx| {
+                if self.window.draft_creation_open {
+                    self.window.dock.update(cx, |dock, cx| {
                         dock.remove(pane_id, window, cx);
                     });
                 }
@@ -1429,7 +1164,7 @@ impl Desktop {
                     }
                     return Err(error);
                 }
-                self.dock.update(cx, |dock, cx| {
+                self.window.dock.update(cx, |dock, cx| {
                     dock.remove(pane_id, window, cx);
                 });
             }
@@ -1454,27 +1189,27 @@ impl Desktop {
                         let _ = sender.send(result);
                     })
                     .map_err(|error| error.to_string())?;
-                self.empty_terminal_pending = true;
-                cx.spawn_in(window, async move |view, cx| {
+                self.window.empty_terminal_pending = true;
+                self.spawn_workspace(window, cx, async move |view, cx| {
                     let result = receiver.await.map_err(|error| error.to_string())
                         .and_then(|result| result);
                     let _ = view.update_in(cx, |view, window, cx| {
-                        view.empty_terminal_pending = false;
+                        view.window.empty_terminal_pending = false;
                         if view.closing { return; }
                         // An intervening close/recreate/restore must not consume
                         // another empty pane that happens to reuse the same ID.
                         let pane_still_live = {
-                            let dock = view.dock.read(cx);
+                            let dock = view.window.dock.read(cx);
                             dock.panel_key(&pane_id) == Some(expected_panel)
                                 && dock.area().read(cx).panel(expected_panel).is_some()
                         };
                         if !pane_still_live {
                             match result {
-                                Err(error) => view.error = Some(error),
+                                Err(error) => view.window.error = Some(error),
                                 Ok(session) => {
                                     let id = field(&session, "id");
                                     if id.is_empty() {
-                                        view.error = Some("Terminal open response omitted its ID after its pane closed.".into());
+                                        view.window.error = Some("Terminal open response omitted its ID after its pane closed.".into());
                                     } else {
                                         // Cancel only this new, never-adopted local
                                         // session after its originating pane closed.
@@ -1486,10 +1221,10 @@ impl Desktop {
                             return;
                         }
                         match result {
-                            Err(error) => view.error = Some(error),
+                            Err(error) => view.window.error = Some(error),
                             Ok(session) => {
                                 let adopted = view.open_terminal_pane(session, Some(&pane_id), window, cx);
-                                if let Err(error) = adopted { view.error = Some(error); }
+                                if let Err(error) = adopted { view.window.error = Some(error); }
 
                             }
                         }
@@ -1504,7 +1239,7 @@ impl Desktop {
     fn close_ended_terminal_pane(&mut self, session_id: &str, window: &mut Window, cx: &mut Context<Self>) {
         // Normal removal releases the retained view without killing an
         // already-exited server-owned PTY or any manager session.
-        terminal::remove_exited_terminal_pane(&self.dock,session_id,window,cx);
+        terminal::remove_exited_terminal_pane(&self.window.dock,session_id,window,cx);
         if let Ok(key)=terminal_workspace::terminal_pane_id(session_id) {
             let removed=HashSet::from([key.clone()]);
             if let Some(workspaces)=&mut self.named_workspaces {
@@ -1512,25 +1247,25 @@ impl Desktop {
                     if let Some(layout)=&mut workspace.layout {
                         match workspace_visibility::prune_native_pane_ids(layout,&removed) {
                             Ok(pruned)=>*layout=pruned,
-                            Err(error)=>self.error=Some(error),
+                            Err(error)=>self.window.error=Some(error),
                         }
                     }
                 }
             }
-            if !self.dock.read(cx).contains(&key) {
-                self.terminal_panes.remove(session_id);
-                if self.dock_current.as_ref()==Some(&key) {self.dock_current=None;self.sidebar=Sidebar::Chats;}
+            if !self.window.dock.read(cx).contains(&key) {
+                self.window.terminal_panes.remove(session_id);
+                if self.window.dock_current.as_ref()==Some(&key) {self.window.dock_current=None;self.window.sidebar=Sidebar::Chats;}
             }
         }
-        self.palette_terminal_sessions.retain(|session|field(session,"id")!=session_id);
+        self.window.palette_terminal_sessions.retain(|session|field(session,"id")!=session_id);
         self.queue_preferences_save(cx);
         cx.notify();
     }
     fn new_terminal_manager(&mut self, service: DesktopService, window: &mut Window, cx: &mut Context<Self>) -> Entity<terminal::TerminalPane> {
         let pane=cx.new(|cx|terminal::TerminalPane::new(service,&self.snapshot,window,cx));
-        cx.subscribe_in(&pane,window,|view,source,event:&terminal::TerminalEvent,window,cx| {
+        cx.subscribe_workspace(&pane,window,|view,source,event:&terminal::TerminalEvent,window,cx| {
             let terminal::TerminalEvent::SessionClosed {session_id}=event else {return;};
-            if view.closing || !view.terminal.as_ref().is_some_and(|manager|manager.entity_id()==source.entity_id()) {return;}
+            if view.closing || !view.window.terminal.as_ref().is_some_and(|manager|manager.entity_id()==source.entity_id()) {return;}
             view.close_ended_terminal_pane(session_id,window,cx);
         }).detach();
         pane
@@ -1544,7 +1279,7 @@ impl Desktop {
         let session_id = field(&session, "id");
         let key = terminal_workspace::terminal_pane_id(&session_id)?;
         let validated = terminal::PinnedSession::try_from(session)?;
-        let pane = if let Some(pane) = self.terminal_panes.get(&session_id) {
+        let pane = if let Some(pane) = self.window.terminal_panes.get(&session_id) {
             pane.clone()
         } else {
             let service = self
@@ -1555,12 +1290,12 @@ impl Desktop {
                 terminal::TerminalPane::new_pinned(service, &self.snapshot, validated, window, cx)
             });
             let expected_id=session_id.clone();
-            cx.subscribe_in(&pane,window,move |view,source,event:&terminal::TerminalEvent,window,cx| {
+            cx.subscribe_workspace(&pane,window,move |view,source,event:&terminal::TerminalEvent,window,cx| {
                 let terminal::TerminalEvent::Exited {session_id} = event else {return;};
-                if view.closing || session_id != &expected_id || !view.terminal_panes.get(session_id).is_some_and(|current|current.entity_id()==source.entity_id()) {return;}
+                if view.closing || session_id != &expected_id || !view.window.terminal_panes.get(session_id).is_some_and(|current|current.entity_id()==source.entity_id()) {return;}
                 view.close_ended_terminal_pane(session_id,window,cx);
             }).detach();
-            self.terminal_panes.insert(session_id.clone(), pane.clone());
+            self.window.terminal_panes.insert(session_id.clone(), pane.clone());
             pane
         };
         let native = pane.downgrade();
@@ -1588,16 +1323,16 @@ impl Desktop {
                         if matches!(event, docking::PaneLifecycle::Removed) {
                             // Removing a view never terminates its server-owned PTY.
                             // Keep a replacement with the same identity if one exists.
-                            if !view.dock.read(cx).contains(&key) {
-                                view.terminal_panes.remove(&session_id);
-                                if view.dock_current.as_ref() == Some(&key) {
-                                    view.dock_current = None;
-                                    view.sidebar = Sidebar::Chats;
+                            if !view.window.dock.read(cx).contains(&key) {
+                                view.window.terminal_panes.remove(&session_id);
+                                if view.window.dock_current.as_ref() == Some(&key) {
+                                    view.window.dock_current = None;
+                                    view.window.sidebar = Sidebar::Chats;
                                 }
                             }
-                        } else if view.dock.read(cx).contains(&key) {
-                            view.sidebar = Sidebar::Terminal;
-                            view.dock_current = Some(key);
+                        } else if view.window.dock.read(cx).contains(&key) {
+                            view.window.sidebar = Sidebar::Terminal;
+                            view.window.dock_current = Some(key);
                         }
                         cx.notify();
                     });
@@ -1621,14 +1356,14 @@ impl Desktop {
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
         if let Some(origin) = replace_empty {
-            self.dock.update(cx, |dock, cx| {
+            self.window.dock.update(cx, |dock, cx| {
                 dock.focus(origin, window, cx);
             });
         }
-        let group = self.dock.read(cx).focused_group_node(window, cx);
+        let group = self.window.dock.read(cx).focused_group_node(window, cx);
         let spec = self.terminal_spec(session, window, cx)?;
         let key = spec.id.clone();
-        self.dock.update(cx, |dock, cx| -> Result<(), String> {
+        self.window.dock.update(cx, |dock, cx| -> Result<(), String> {
             if !dock.contains(&key) {
                 dock.add(spec, gpui_kit::component::dock::DockPlacement::Center, None, window, cx)?;
                 if let Some(group) = group {
@@ -1646,14 +1381,14 @@ impl Desktop {
             if let Some(origin) = replace_empty { dock.remove(origin, window, cx); }
             Ok(())
         })?;
-        self.sidebar = Sidebar::Terminal;
-        self.dock_current = Some(key);
+        self.window.sidebar = Sidebar::Terminal;
+        self.window.dock_current = Some(key);
         cx.notify();
         Ok(())
     }
     fn close_unclaimed_terminal(&mut self, id: String, cx: &mut Context<Self>) {
         let Some(service) = self.service.clone() else {
-            self.error = Some(
+            self.window.error = Some(
                 "A terminal opened after its pane closed; reconnect and close it from Terminal."
                     .into(),
             );
@@ -1667,7 +1402,7 @@ impl Desktop {
                 let _ = sender.send(service.invoke("close_terminal", json!({"id": id})));
             });
         if let Err(error) = spawned {
-            self.error = Some(format!(
+            self.window.error = Some(format!(
                 "Terminal cleanup could not start: {error}. Close it from Terminal."
             ));
             return;
@@ -1679,7 +1414,7 @@ impl Desktop {
                 .and_then(|result| result);
             if let Err(error) = result {
                 let _ = view.update(cx, |view, cx| {
-                    view.error = Some(format!(
+                    view.window.error = Some(format!(
                         "Unclaimed terminal cleanup failed: {error}. Close it from Terminal."
                     ));
                     cx.notify();
@@ -1689,6 +1424,18 @@ impl Desktop {
         .detach();
     }
     fn prepare_close(&mut self, cx: &mut Context<Self>) -> Option<DesktopService> {
+        if !self.closing {
+            self.capture_native_drafts(cx);
+            let previous = self.named_workspaces.clone();
+            match self.capture_window_layouts(cx) {
+                Ok(()) if self.named_workspaces != previous => {
+                    self.workspaces_dirty = true;
+                    self.preferences_dirty = true;
+                }
+                Ok(()) => {}
+                Err(error) => self.preferences_error = Some(error),
+            }
+        }
         self.closing = true;
         if let Some(browser) = &self.browser {
             browser.update(cx, |browser, cx| browser.close(cx));
@@ -1698,29 +1445,69 @@ impl Desktop {
     }
     fn request_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.session_lock.read(cx).is_locked() && !self.lock_close_confirmed {
-            if self.lock_close_saving { return; }
+            if self.lock_close_saving {
+                return;
+            }
             if self.session_lock.read(cx).is_busy() {
-                // Retain Quit while the initial lock write finishes. Its
-                // notification redraws the desktop and resumes pending close.
                 self.close_pending = true;
                 return;
             }
             self.close_pending = false;
-            self.lock_close_saving=true;
-            let worker=cx.background_executor().spawn(async {session_lock_store::set_locked(true)});
-            cx.spawn_in(window,async move|view,cx| {let result=worker.await;let _=view.update_in(cx,|view,window,cx| {
-                view.lock_close_saving=false;
-                match result {Ok(())=>{view.lock_close_confirmed=true;view.request_close(window,cx);},Err(error)=>view.session_lock.update(cx,|lock,cx|lock.show_error(error,cx))}
-            });}).detach();
+            self.lock_close_saving = true;
+            let worker = cx
+                .background_executor()
+                .spawn(async { session_lock_store::set_locked(true) });
+            cx.spawn_in(window, async move |view, cx| {
+                let result = worker.await;
+                let _ = view.update_in(cx, |view, window, cx| {
+                    view.lock_close_saving = false;
+                    match result {
+                        Ok(()) => {
+                            view.lock_close_confirmed = true;
+                            view.with_workspace_window(window, cx, |view, window, cx| {
+                                view.request_close(window, cx)
+                            });
+                        }
+                        Err(error) => view
+                            .session_lock
+                            .update(cx, |lock, cx| lock.show_error(error, cx)),
+                    }
+                });
+            })
+            .detach();
             return;
         }
         if self.closing {
             return;
         }
-        // The startup presentation is inert and has no unsaved input. Quit
-        // must not wait for backend connection or try to save cached state.
+        // Startup is inert. Loaded workspaces must all finish restoring before
+        // the one preference writer captures a final cross-window snapshot.
         if !self.startup_pending {
+            let (restoring, suppressed) = self.retained_workspace_restore_state();
+            if suppressed || self.preferences_blocked {
+                self.close_pending = false;
+                self.preferences_error.get_or_insert_with(|| {
+                    "A workspace could not be restored. Resolve its error before quitting.".into()
+                });
+                cx.notify();
+                return;
+            }
+            if restoring {
+                self.close_pending = true;
+                return;
+            }
             self.capture_native_drafts(cx);
+            let previous = self.named_workspaces.clone();
+            if let Err(error) = self.capture_window_layouts(cx) {
+                self.preferences_error = Some(error);
+                self.close_pending = false;
+                cx.notify();
+                return;
+            }
+            if self.named_workspaces != previous {
+                self.workspaces_dirty = true;
+                self.preferences_dirty = true;
+            }
             self.preferences_save_timer = None;
             if self.preferences_busy {
                 self.close_pending = true;
@@ -1728,32 +1515,44 @@ impl Desktop {
                 return;
             }
             if self.preferences_dirty && self.preferences.is_some() {
-                if self.preferences_blocked {
-                    self.close_pending = false;
-                    cx.notify();
-                    return;
-                }
                 self.save_preferences(cx, self.preferences_generation);
                 if self.preferences_busy {
                     self.close_pending = true;
                     cx.notify();
                     return;
                 }
+                if self.preferences_dirty {
+                    self.close_pending = false;
+                    cx.notify();
+                    return;
+                }
             }
         }
+        if let Err(error) = self.capture_all_workspace_window_placements(Some(window), cx) {
+            self.preferences_error = Some(error);
+            self.close_pending = false;
+            cx.notify();
+            return;
+        }
         self.close_pending = false;
-        self.deactivate_mail(window, cx);
-        self.dock.update(cx, |dock, cx| dock.close_all(window, cx));
         self.prepare_close(cx);
-        // Callback is deferred until the current entity update has ended.
-        // Explicitly draw/clear the empty closing surface so no native WebView
-        // frame Rc survives into GPUI's window destruction.
-        window.on_next_frame(|window, cx| {
+        self.close_all_workspace_native_views(Some(window), cx);
+        let handles = self.workspace_window_handles();
+        let current = window.window_handle();
+        // First leave this native window and Desktop lease. Then flush every
+        // host's closing frame before GPUI destroys any native WebView frames.
+        window.on_next_frame(move |window, cx| {
             window.refresh();
             window.draw(cx).clear(cx);
-            // Release the current Window borrow before platform quit observers
-            // access it for their final synchronous cleanup.
-            cx.defer(|cx| cx.quit());
+            cx.defer(move |cx| {
+                for handle in handles.into_iter().filter(|handle| *handle != current) {
+                    let _ = handle.update(cx, |_, window, cx| {
+                        window.refresh();
+                        window.draw(cx).clear(cx);
+                    });
+                }
+                cx.quit();
+            });
         });
     }
     fn refresh(&mut self, cx: &mut Context<Self>) {
@@ -1794,10 +1593,10 @@ impl Desktop {
                     view.full_reset_requested |= force_reset;
                     view.refresh_requested = true;
                 } else {
-                    if result.is_ok() && view.error.as_deref().is_some_and(|error|
+                    if result.is_ok() && view.window.error.as_deref().is_some_and(|error|
                         chat::connection_recovery::transient(error)
                             || error == "Could not reconnect to Monitter. Your agents may still be running; try again shortly.") {
-                        view.error = None;
+                        view.window.error = None;
                         cx.notify();
                     }
                     match result {
@@ -1805,26 +1604,26 @@ impl Desktop {
                             ApplyResult::Unchanged => {
                                 if view.publication.resume_failed() { view.start_native_publication(cx); }
                                 if force_reset {
-                                    view.error = Some("Backend did not provide the requested native state reset.".into());
+                                    view.window.error = Some("Backend did not provide the requested native state reset.".into());
                                     cx.notify();
                                 }
                             }
                             ApplyResult::Gap => {
                                 if force_reset {
-                                    view.error = Some("Backend did not provide the requested native state reset.".into());
+                                    view.window.error = Some("Backend did not provide the requested native state reset.".into());
                                     cx.notify();
                                 } else {
                                     view.request_full_reset(cx);
                                 }
                             }
                             ApplyResult::FullReset(changes) => {
-                                if let Some(pane) = &view.subagents { pane.update(cx, |pane, cx| pane.suppress_completion_motion(cx)); }
+                                if let Some(pane) = &view.window.subagents { pane.update(cx, |pane, cx| pane.suppress_completion_motion(cx)); }
                                 view.native_state = state;
                                 view.queue_native_publication(PublicationChanges::from_changes(true, changes), cx);
                             }
                             ApplyResult::Delta(changes) => {
                                 if force_reset {
-                                    view.error = Some("Backend did not provide the requested native state reset.".into());
+                                    view.window.error = Some("Backend did not provide the requested native state reset.".into());
                                     cx.notify();
                                 } else {
                                     view.native_state = state;
@@ -1833,7 +1632,7 @@ impl Desktop {
                             }
                         },
                         Err(error) => {
-                            if !chat::connection_recovery::transient(&error) { view.error = Some(error); }
+                            if !chat::connection_recovery::transient(&error) { view.window.error = Some(error); }
                             cx.notify();
                         }
                     }
@@ -1861,7 +1660,7 @@ impl Desktop {
         let visible: HashSet<_> = self.chat_panes.borrow().iter()
             .filter(|(_, pane)| pane.read(cx).wants_history_publication()).map(|(id, _)| id.clone()).collect();
         let mut panes: HashSet<_> = self.chat_panes.borrow().keys().cloned().collect();
-        if let Some(selected) = &self.selected { panes.insert(selected.clone()); }
+        if let Some(selected) = &self.window.selected { panes.insert(selected.clone()); }
         let previous_records = self.collaboration_records.clone();
         let previous_transcripts = self.collaboration_transcripts.clone();
         let previous = self.publication_index.clone();
@@ -1904,7 +1703,7 @@ impl Desktop {
                 if view.publication.finish(generation, changes.clone()) {
                     match prepared {
                         Ok((state, prepared, evicted, notifications, sessions)) => {
-                            if view.publication_error.is_some() && view.error.as_ref() == view.publication_error.as_ref() { view.error = None; cx.notify(); }
+                            if view.publication_error.is_some() && view.window.error.as_ref() == view.publication_error.as_ref() { view.window.error = None; cx.notify(); }
                             view.publication_error = None;
                             view.native_state = state;
                             let mut changes = changes;
@@ -1921,7 +1720,7 @@ impl Desktop {
                         Err(error) => {
                             view.publication.fail(changes);
                             view.publication_error = Some(error.clone());
-                            view.error = Some(error);
+                            view.window.error = Some(error);
                             cx.notify();
                             // Retain pending refresh intent, but do not turn a
                             // serialization failure into a self-retrying loop.
@@ -1963,7 +1762,7 @@ impl Desktop {
         self.notification_projection = Some(notifications.projection);
         if let Some(sessions) = sessions { self.empty_sessions = sessions; }
         self.sync_notification_bell(cx);
-        for pane in self.terminal_panes.values() {
+        for pane in self.window.terminal_panes.values() {
             pane.update(cx, |pane, cx| pane.set_context(&self.snapshot, None, cx));
         }
         for draft in self.draft_panes.borrow().values() {
@@ -1974,9 +1773,9 @@ impl Desktop {
         let close_buttons = self.snapshot["settings"]["showTabCloseButtons"]
             .as_bool()
             .unwrap_or(true);
-        self.dock.update(cx, |dock, cx| {
+        self.window.dock.update(cx, |dock, cx| {
             dock.set_close_buttons_visible(close_buttons, cx);
-            dock.set_tab_appearance(&self.snapshot["settings"], self.sidebar_scale, cx);
+            dock.set_tab_appearance(&self.snapshot["settings"], self.window.sidebar_scale, cx);
         });
         // Explicit preview-only import. Preserve all non-appearance configuration
         // and let the existing native command validate and persist the settings.
@@ -2020,12 +1819,12 @@ impl Desktop {
                     }
                     self.command("save_settings", json!({"settings": settings}), cx);
                 }
-                Err(error) => self.error = Some(format!("Appearance reference: {error}")),
+                Err(error) => self.window.error = Some(format!("Appearance reference: {error}")),
             }
         }
 
         channels::reconcile_cursors(
-            &mut self.channel_cursors,
+            &mut self.window.channel_cursors,
             &self.snapshot,
             reset,
             &reset_channels,
@@ -2034,10 +1833,10 @@ impl Desktop {
         // boundary. Earlier pages and later backend resets remain invalidated.
         for id in changes.channel_page_boundaries.keys() {
             if let Some(boundary) = changes.channel_boundary(id, self.revision.as_deref(), &self.snapshot) {
-                self.channel_cursors.insert(id.clone(), boundary.next_before_id.clone());
+                self.window.channel_cursors.insert(id.clone(), boundary.next_before_id.clone());
             }
         }
-        if let Some(channels) = &self.channels {
+        if let Some(channels) = &self.window.channels {
             let mut changed_channels = changes.changed_channels.clone();
             changed_channels.extend(changes.channel_page_boundaries.keys().cloned());
             channels.update(cx, |channels, cx| {
@@ -2046,14 +1845,14 @@ impl Desktop {
                     self.revision.as_deref().unwrap_or_default(),
                     reset,
                     &reset_channels,
-                    &self.channel_cursors,
+                    &self.window.channel_cursors,
                     &changed_channels,
                     cx,
                 )
             });
-            self.channels_revision = self.revision.clone();
+            self.window.channels_revision = self.revision.clone();
         }
-        if let Some(palette) = &self.palette {
+        if let Some(palette) = &self.window.palette {
             if palette.read(cx).is_open() && (["tasks", "agents", "projects", "settings"].iter()
                 .any(|key| retired_snapshot[*key] != self.snapshot[*key])
                 || retired_snapshot["channels"].as_array().into_iter().flatten().map(|channel| (&channel["id"], &channel["name"], &channel["description"]))
@@ -2061,7 +1860,7 @@ impl Desktop {
                 let entries = self.palette_entries(palette.read(cx).mode(), cx);
                 let result = palette.update(cx, |palette, cx| palette.set_entries(entries, cx));
                 if let Err(error) = result {
-                    self.error = Some(error);
+                    self.window.error = Some(error);
                 }
             }
         }
@@ -2090,9 +1889,9 @@ impl Desktop {
             self.chat_panes.borrow_mut().remove(&id);
             self.chat_subscriptions.remove(&id);
             self.removed_dock_ids.push(format!("chat:{id}"));
-            if self.selected.as_ref() == Some(&id) {
-                self.selected = None;
-                self.dock_current = None;
+            if self.window.selected.as_ref() == Some(&id) {
+                self.window.selected = None;
+                self.window.dock_current = None;
             }
         }
         {
@@ -2112,7 +1911,7 @@ impl Desktop {
                 });
             }
         }
-        self.dock.update(cx, |dock, cx| {
+        self.window.dock.update(cx, |dock, cx| {
             let previous: HashMap<_, _> = retired_snapshot["tasks"].as_array().into_iter().flatten()
                 .filter_map(|task| Some((task["id"].as_str()?, task["title"].as_str()?))).collect();
             for task in self.snapshot["tasks"].as_array().into_iter().flatten() {
@@ -2123,13 +1922,13 @@ impl Desktop {
                 }
             }
         });
-        if let Some(workspace) = &self.workspace {
+        if let Some(workspace) = &self.window.workspace {
             workspace.update(cx, |workspace, cx| {
                 workspace.sync(self.snapshot.clone(), cx)
             });
         }
-        if let Some(mail) = &self.mail {
-            let selected = self.selected.clone();
+        if let Some(mail) = &self.window.mail {
+            let selected = self.window.selected.clone();
             mail.update(cx, |mail, cx| {
                 mail.set_context(&self.snapshot, selected, cx)
             });
@@ -2216,9 +2015,14 @@ impl Desktop {
         self.accept_channel_page_attempt(channel.to_owned(), before.map(str::to_owned), Arc::new(page), 0, cx);
     }
     fn accept_channel_page_attempt(
-        &mut self, channel: String, before: Option<String>,
-        page: Arc<Result<ChannelMessagesPage, String>>, attempt: u8, cx: &mut Context<Self>,
+        &mut self,
+        channel: String,
+        before: Option<String>,
+        page: Arc<Result<ChannelMessagesPage, String>>,
+        attempt: u8,
+        cx: &mut Context<Self>,
     ) {
+        let source = self.workspace_weak_desktop(cx);
         let mut state = self.native_state.clone();
         let generation = self.publication.generation;
         let worker_channel = channel.clone();
@@ -2227,7 +2031,10 @@ impl Desktop {
         let worker = cx.background_executor().spawn(async move {
             worker_page.as_ref().clone().and_then(|page| {
                 if page.next_before_id.is_some() && page.next_before_id == worker_before {
-                    return Err("Channel history returned a non-advancing cursor; refresh before retrying.".into());
+                    return Err(
+                        "Channel history returned a non-advancing cursor; refresh before retrying."
+                            .into(),
+                    );
                 }
                 let next = page.next_before_id.clone();
                 let value = serde_json::to_value(&page).map_err(|error| error.to_string())?;
@@ -2235,65 +2042,83 @@ impl Desktop {
                 Ok((state, value, changes, next))
             })
         });
-        cx.spawn(async move |view, cx| {
+        cx.spawn(async move |_, cx| {
             let result = worker.await;
-            let _ = view.update(cx, |view, cx| {
-                if result.is_ok() && native_publication::rebase_history_once(
-                    generation, view.publication.generation,
-                    page.as_ref().as_ref().ok().map(|page| page.revision.as_str()),
-                    view.native_state.revision(), attempt,
-                ) {
+            let _ = source.update(cx, |view, _, cx| {
+                if result.is_ok()
+                    && native_publication::rebase_history_once(
+                        generation,
+                        view.publication.generation,
+                        page.as_ref()
+                            .as_ref()
+                            .ok()
+                            .map(|page| page.revision.as_str()),
+                        view.native_state.revision(),
+                        attempt,
+                    )
+                {
                     view.accept_channel_page_attempt(channel, before, page, attempt + 1, cx);
                     return;
                 }
                 let result = result.and_then(|(state, value, changes, next)| {
                     if generation != view.publication.generation {
-                        return Err("Channel history page is stale; retry at the current revision.".into());
+                        return Err(
+                            "Channel history page is stale; retry at the current revision.".into(),
+                        );
                     }
                     view.native_state = state;
-                    view.channel_cursors.insert(channel.clone(), next.clone());
+                    view.window
+                        .channel_cursors
+                        .insert(channel.clone(), next.clone());
                     let mut changes = PublicationChanges::from_changes(false, changes);
                     let accepted_page = page.as_ref().as_ref().unwrap();
-                    changes.channel_page_boundaries.insert(channel.clone(), native_publication::PageBoundary::new(accepted_page.revision.clone(), next));
+                    changes.channel_page_boundaries.insert(
+                        channel.clone(),
+                        native_publication::PageBoundary::new(accepted_page.revision.clone(), next),
+                    );
                     view.queue_native_publication(changes, cx);
                     Ok(value)
                 });
-                if let Some(channels) = &view.channels {
-                    channels.update(cx, |channels, cx| channels.accept_history_page(&channel, result, cx));
+                if let Some(channels) = &view.window.channels {
+                    channels.update(cx, |channels, cx| {
+                        channels.accept_history_page(&channel, result, cx)
+                    });
                 }
             });
-        }).detach();
+        })
+        .detach();
     }
     fn command(&mut self, command: &'static str, args: Value, cx: &mut Context<Self>) {
-        if self.startup_pending || self.busy {
+        if self.startup_pending || self.window.busy {
             return;
         }
         let Some(service) = self.service.clone() else {
             return;
         };
-        self.busy = true;
-        self.error = None;
+        let source = self.workspace_weak_desktop(cx);
+        self.window.busy = true;
+        self.window.error = None;
         let task = cx
             .background_executor()
             .spawn(async move { service.invoke(command, args) });
-        cx.spawn(async move |view, cx| {
+        cx.spawn(async move |_, cx| {
             let result = task.await;
-            let _ = view.update(cx, |view, cx| {
-                view.busy = false;
+            let _ = source.update(cx, |view, _, cx| {
+                view.window.busy = false;
                 match result {
                     Ok(result) => {
                         // Clear a command failure after the command has
                         // completed successfully. Workspace preference
                         // failures have their own state and remain visible.
-                        view.error = None;
+                        view.window.error = None;
                         if command == "create_task" {
-                            view.selected = Some(field(&result, "id"));
-                            view.sidebar = Sidebar::Chats;
-                            view.dock_current = None;
+                            view.window.selected = Some(field(&result, "id"));
+                            view.window.sidebar = Sidebar::Chats;
+                            view.window.dock_current = None;
                         }
                         view.refresh(cx);
                     }
-                    Err(error) => view.error = Some(error),
+                    Err(error) => view.window.error = Some(error),
                 }
                 cx.notify();
             });
@@ -2330,13 +2155,13 @@ impl Desktop {
         if self.closing {
             return;
         }
-        if self.palette.is_none() {
+        if self.window.palette.is_none() {
             let pane = cx.new(|cx| command_palette::CommandPalette::new(window, cx));
-            self.palette_subscription =
+            self.window.palette_subscription =
                 Some(
-                    cx.subscribe_in(&pane, window, |view, _, event, window, cx| {
-                        view.dock.update(cx, |dock, cx| {
-                            dock.set_shown(view.sidebar != Sidebar::Settings, window, cx)
+                    cx.subscribe_workspace(&pane, window, |view, _, event, window, cx| {
+                        view.window.dock.update(cx, |dock, cx| {
+                            dock.set_shown(view.window.sidebar != Sidebar::Settings, window, cx)
                         });
                         if let command_palette::PaletteEvent::Selected(entry) = event {
                             view.execute_palette(entry, window, cx);
@@ -2344,23 +2169,23 @@ impl Desktop {
                         cx.notify();
                     }),
                 );
-            self.palette = Some(pane);
+            self.window.palette = Some(pane);
         }
-        if !self.palette_terminals_loading {
+        if !self.window.palette_terminals_loading {
             if let Some(service)=self.service.clone() {
-                self.palette_terminals_loading=true;
+                self.window.palette_terminals_loading=true;
                 let lookup=cx.background_executor().spawn(async move {service.invoke("list_terminals",json!({}))});
                 cx.spawn(async move |view,cx| {
                     let result=lookup.await;
                     let _=view.update(cx,|view,cx| {
-                        view.palette_terminals_loading=false;
+                        view.window.palette_terminals_loading=false;
                         match result {
-                            Ok(value)=>view.palette_terminal_sessions=value.as_array().cloned().unwrap_or_default(),
-                            Err(error)=>{view.error=Some(format!("Terminal palette lookup: {error}"));}
+                            Ok(value)=>view.window.palette_terminal_sessions=value.as_array().cloned().unwrap_or_default(),
+                            Err(error)=>{view.window.error=Some(format!("Terminal palette lookup: {error}"));}
                         }
-                        if let Some(palette)=view.palette.clone() {
+                        if let Some(palette)=view.window.palette.clone() {
                             let entries=view.palette_entries(palette.read(cx).mode(),cx);
-                            if let Err(error)=palette.update(cx,|palette,cx|palette.set_entries(entries,cx)){view.error=Some(error);}
+                            if let Err(error)=palette.update(cx,|palette,cx|palette.set_entries(entries,cx)){view.window.error=Some(error);}
                         }
                         cx.notify();
                     });
@@ -2369,23 +2194,22 @@ impl Desktop {
         }
         let entries = self.palette_entries(mode, cx);
         let search_pane_ids = entries.iter().filter(|entry| entry.open_priority < 2).map(|entry| entry.id.clone()).collect();
-        let result = self
-            .palette
+        let result = self.window.palette
             .as_ref()
             .unwrap()
             .update(cx, |palette, cx| palette.open(mode, entries, window, cx));
         if let Err(error) = result {
-            self.error = Some(error);
+            self.window.error = Some(error);
         } else {
             self.refresh_palette_browser_text(search_pane_ids, cx);
-            self.dock
+            self.window.dock
                 .update(cx, |dock, cx| dock.set_shown(false, window, cx));
         }
         cx.notify();
     }
     fn refresh_palette_browser_text(&self, pane_ids: Vec<String>, cx: &mut Context<Self>) {
         use futures::StreamExt as _;
-        let (Some(browser), Some(palette)) = (&self.browser, &self.palette) else { return; };
+        let (Some(browser), Some(palette)) = (&self.browser, &self.window.palette) else { return; };
         let generation = palette.read(cx).generation();
         let revision = browser.read(cx).metadata_revision();
         let (sender, mut receiver) = futures::channel::mpsc::unbounded();
@@ -2400,7 +2224,7 @@ impl Desktop {
                 if text.is_empty() { continue; }
                 let _ = view.update(cx, |view, cx| {
                     if view.browser.as_ref().is_none_or(|b| b.read(cx).metadata_revision() != revision) { return; }
-                    if let Some(palette) = &view.palette {
+                    if let Some(palette) = &view.window.palette {
                         let suffix = format!(":browser:{id}");
                         let ids: Vec<_> = pane_ids.iter().filter(|id| id.ends_with(&suffix)).cloned().collect();
                         palette.update(cx, |palette, cx| {
@@ -2417,8 +2241,7 @@ impl Desktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let mode = self
-            .palette
+        let mode = self.window.palette
             .as_ref()
             .map(|pane| pane.read(cx).mode())
             .unwrap_or(command_palette::PaletteMode::Switch);
@@ -2427,7 +2250,7 @@ impl Desktop {
             .into_iter()
             .find(|current| current.id == entry.id && !current.disabled);
         let Some(entry) = current.as_ref() else {
-            self.error = Some(
+            self.window.error = Some(
                 "The selected workspace item changed or is unavailable. Open the palette again."
                     .into(),
             );
@@ -2444,7 +2267,7 @@ impl Desktop {
             return;
         }
         if let Some(task) = entry.id.strip_prefix("task:") {
-            self.selected = Some(task.into());
+            self.window.selected = Some(task.into());
             self.switch_surface(Sidebar::Chats, window, cx);
             if entry.kind == command_palette::EntryKind::ArchivedTask {
                 self.command(
@@ -2462,7 +2285,7 @@ impl Desktop {
         } else if let Some(preset) = entry.id.strip_prefix("native-palette:") {
             self.native_theme_preset = preset.into();
             self.queue_preferences_save(cx);
-        } else if let Some(task) = self.selected.clone() {
+        } else if let Some(task) = self.window.selected.clone() {
             match entry.id.as_str() {
                 "current:stop" => self.command("cancel_task", json!({"taskId":task}), cx),
                 "current:archive" => self.command(
@@ -2475,7 +2298,7 @@ impl Desktop {
         }
     }
     fn ensure_archives(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.archives.is_some() {
+        if self.window.archives.is_some() {
             return;
         }
         let Some(service) = self.service.clone() else {
@@ -2483,10 +2306,10 @@ impl Desktop {
         };
         let pane =
             cx.new(|cx| archives::ArchivedChatsPane::new(service, &self.snapshot, window, cx));
-        self.archives_subscription = Some(cx.subscribe(&pane, |view, _, event, cx| match event {
+        self.window.archives_subscription = Some(cx.subscribe(&pane, |view, _, event, cx| match event {
             archives::ArchiveEvent::Refresh => view.refresh(cx),
         }));
-        self.archives = Some(pane);
+        self.window.archives = Some(pane);
     }
     fn capture_native_drafts(&mut self, cx: &mut Context<Self>) {
         let drafts: Vec<_> = self
@@ -2592,8 +2415,8 @@ impl Desktop {
             cx.notify();
             return;
         }
-        if self.workspaces_dirty && !self.preferences_restoring && !self.preferences_restore {
-            if let Ok(layout) = self.dock.read(cx).serialize(cx) { self.capture_workspace_layout(layout); }
+        if self.workspaces_dirty && !self.window.preferences_restoring && !self.window.preferences_restore {
+            if let Ok(layout) = self.window.dock.read(cx).serialize(cx) { self.capture_workspace_layout(layout); }
         }
         let Some(service) = self.service.clone() else {
             self.preferences_error = Some("Workspace preferences service is unavailable.".into());
@@ -2602,9 +2425,9 @@ impl Desktop {
         };
         self.preferences_generation = self.preferences_generation.wrapping_add(1);
         self.preferences_save_timer = None;
-        self.preferences_restore_generation = self.preferences_restore_generation.wrapping_add(1);
-        self.preferences_restoring = false;
-        self.preferences_restore_suppressed = false;
+        self.window.preferences_restore_generation = self.window.preferences_restore_generation.wrapping_add(1);
+        self.window.preferences_restoring = false;
+        self.window.preferences_restore_suppressed = false;
         let generation = self.preferences_generation;
         eprintln!("[native-preferences] operation=load generation={generation} result=started");
         self.preferences_busy = true;
@@ -2643,19 +2466,19 @@ impl Desktop {
                             view.native_browser_metadata = preferences.data.browser_metadata.clone();
                         }
                         view.native_chat_panes = merge_native_reload(&preferences.data.chat_panes, &view.native_chat_panes, &view.dirty_chat_pane_ids);
-                        if !view.route_touched {
+                        if !view.window.route_touched {
                             if let Some(route) = &preferences.data.appearance.last_route {
                                 if let Some((_, _, surface)) = Self::palette_routes()
                                     .into_iter()
                                     .find(|(id, _, _)| *id == route)
                                 {
-                                    view.sidebar = surface;
-                                    view.dock_current = None;
+                                    view.window.sidebar = surface;
+                                    view.window.dock_current = None;
                                 }
                             }
                         }
                         if view.workspaces_dirty {
-                            if let Ok(layout) = view.dock.read(cx).serialize(cx) { view.capture_workspace_layout(layout); }
+                            if let Ok(layout) = view.window.dock.read(cx).serialize(cx) { view.capture_workspace_layout(layout); }
                         }
                         let missing_local_workspaces = stored_workspaces.is_none();
                         view.workspace_store_revision = workspace_revision;
@@ -2664,15 +2487,16 @@ impl Desktop {
                             let mut source = preferences.data.clone();
                             source.workspaces = stored_workspaces.or(source.workspaces);
                             view.named_workspaces = Some(workspace_tabs::loaded_workspaces(&source));
-                            view.selected = None;
-                            view.dock_current = None;
+                            view.window.selected = None;
+                            view.window.dock_current = None;
                         }
                         view.workspaces_dirty |= missing_local_workspaces;
                         view.preferences = Some(preferences);
-                        view.preferences_restore = true;
+                        view.window.preferences_restore = true;
+                        view.initialize_workspace_window_ownership();
                         view.preferences_blocked = false;
                         view.preferences_dirty = !view.dirty_draft_ids.is_empty();
-                        view.preferences_dirty |= view.workspaces_dirty || view.native_browser_dirty || view.sidebar_width_touched || !view.dirty_chat_pane_ids.is_empty() || !view.dirty_attachment_draft_ids.is_empty();
+                        view.preferences_dirty |= view.workspaces_dirty || view.native_browser_dirty || view.window.sidebar_width_touched || !view.dirty_chat_pane_ids.is_empty() || !view.dirty_attachment_draft_ids.is_empty();
                         view.preferences_error = None;
                     }
                     Err(error) => {
@@ -2693,6 +2517,8 @@ impl Desktop {
     }
     fn schedule_preferences_save(&mut self, cx: &mut Context<Self>) {
         self.preferences_dirty = true;
+        #[cfg(feature = "performance-profiling")]
+        if workspace_window_preview::enabled() { return; }
         self.preferences_generation = self.preferences_generation.wrapping_add(1);
         let generation = self.preferences_generation;
         self.preferences_save_timer = Some(cx.spawn(async move |view, cx| {
@@ -2708,11 +2534,13 @@ impl Desktop {
     }
     fn save_preferences(&mut self, cx: &mut Context<Self>, generation: u64) {
         self.capture_native_drafts(cx);
+        if let Err(error)=self.capture_window_layouts(cx) {self.preferences_error=Some(error);self.preferences_blocked=true;return;}
         if self.startup_pending || self.preferences_busy
             || self.preferences_blocked
-            || self.preferences_restore
-            || self.preferences_restore_suppressed
-            || self.preferences_restoring
+            || self.window.preferences_restore
+            || self.window.preferences_restore_suppressed
+            || self.window.preferences_restoring
+            || self.parked_window_views.values().chain(self.workspace_view_cache.values()).any(|view|view.preferences_restore||view.preferences_restoring||view.preferences_restore_suppressed)
             || self.closing
         {
             return;
@@ -2721,7 +2549,7 @@ impl Desktop {
         else {
             return;
         };
-        let layout = match self.dock.read(cx).serialize(cx) {
+        let layout = match self.window.dock.read(cx).serialize(cx) {
             Ok(layout) => layout,
             Err(error) => {
                 self.preferences_error = Some(error);
@@ -2731,14 +2559,13 @@ impl Desktop {
         };
         let layout_structure = Self::native_layout_structure(&layout);
         let mut data = preferences.data;
-        self.capture_workspace_layout(layout.clone());
         let saved_workspaces = self.named_workspaces.clone();
         let workspace_revision = self.workspace_store_revision;
         let save_workspaces = self.workspaces_dirty;
         // Client-local layouts must not require a running-backend schema upgrade.
         data.workspaces = None;
         let saved_tile_theme = data.appearance.tile_theme;
-        let saved_auto_size_panes = self.dock.read(cx).auto_size_panes();
+        let saved_auto_size_panes = self.window.dock.read(cx).auto_size_panes();
         data.appearance.tile_theme = monitter_lib::experimental_desktop::NativeTileTheme::Monitter;
         data.layout = Some(layout);
         data.appearance.sidebar_width = Some(self.current_sidebar_width(cx));
@@ -2749,7 +2576,7 @@ impl Desktop {
         data.chat_panes = self.native_chat_panes.clone();
         data.appearance.last_route = Self::palette_routes()
             .into_iter()
-            .find(|(_, _, surface)| *surface == self.sidebar)
+            .find(|(_, _, surface)| *surface == self.window.sidebar)
             .map(|(id, _, _)| id.to_owned());
         eprintln!("[native-preferences] operation=save generation={generation} result=started");
         self.preferences_busy = true;
@@ -2784,7 +2611,7 @@ impl Desktop {
                     view.workspace_store_revision = revision;
                     view.workspaces_dirty = view.named_workspaces != acknowledged_workspaces
                         || view.preferences.as_ref().is_some_and(|current| current.data.appearance.tile_theme != saved_tile_theme)
-                        || view.dock.read(cx).auto_size_panes() != saved_auto_size_panes;
+                        || view.window.dock.read(cx).auto_size_panes() != saved_auto_size_panes;
                 }
                 match result {
                     Ok(mut preferences) => {
@@ -2867,25 +2694,25 @@ impl Desktop {
         entries
     }
     fn current_sidebar_width(&self, cx: &App) -> f32 {
-        if self.sidebar_motion.active() || self.sidebar_is_hidden() { return expanded_sidebar_width_for_scale(self.sidebar_expanded_width,self.sidebar_scale); }
-        if self.sidebar_collapsed { return expanded_sidebar_width_for_scale(self.sidebar_expanded_width,self.sidebar_scale); }
-        self.sidebar_resize
+        if self.window.sidebar_motion.active() || self.sidebar_is_hidden() { return expanded_sidebar_width_for_scale(self.window.sidebar_expanded_width,self.window.sidebar_scale); }
+        if self.window.sidebar_collapsed { return expanded_sidebar_width_for_scale(self.window.sidebar_expanded_width,self.window.sidebar_scale); }
+        self.window.sidebar_resize
             .read(cx)
             .sizes()
             .first()
-            .map(|width| *width / design::ui_px(1., self.sidebar_scale))
-            .filter(|width| width.is_finite() && !sidebar_should_collapse(*width,false,self.sidebar_scale))
+            .map(|width| *width / design::ui_px(1., self.window.sidebar_scale))
+            .filter(|width| width.is_finite() && !sidebar_should_collapse(*width,false,self.window.sidebar_scale))
             .or_else(|| {
                 self.preferences
                     .as_ref()
                     .and_then(|preferences| preferences.data.appearance.sidebar_width)
             })
-            .map(|width|expanded_sidebar_width_for_scale(width,self.sidebar_scale))
+            .map(|width|expanded_sidebar_width_for_scale(width,self.window.sidebar_scale))
             .unwrap_or(252.0)
     }
     fn workspace_route_background(&self, palette: design::Palette, cx: &App) -> gpui::Background {
-        let has_dock = self.dock.read(cx).has_panes()
-            && self.sidebar != Sidebar::Settings && !self.close_pending;
+        let has_dock = self.window.dock.read(cx).has_panes()
+            && self.window.sidebar != Sidebar::Settings && !self.close_pending;
         if design::workspace_route_needs_fill(design::tile_theme(), has_dock) {
             crate::surface_blend::background(crate::surface_blend::Area::Workspace, palette.paper)
         } else {
@@ -2894,65 +2721,65 @@ impl Desktop {
         }
     }
     fn sidebar_is_hidden(&self) -> bool {
-        self.sidebar_hidden
+        self.window.sidebar_hidden
     }
     fn displayed_sidebar_width(&self, cx: &App) -> f32 {
-        self.sidebar_resize.read(cx).sizes().first()
-            .map(|width| *width / design::ui_px(1., self.sidebar_scale))
+        self.window.sidebar_resize.read(cx).sizes().first()
+            .map(|width| *width / design::ui_px(1., self.window.sidebar_scale))
             .filter(|width| width.is_finite())
-            .unwrap_or_else(|| if self.sidebar_is_hidden() { 0. } else if self.sidebar_collapsed { design::compact_sidebar_width_design(self.sidebar_scale) } else { self.sidebar_expanded_width })
+            .unwrap_or_else(|| if self.sidebar_is_hidden() { 0. } else if self.window.sidebar_collapsed { design::compact_sidebar_width_design(self.window.sidebar_scale) } else { self.window.sidebar_expanded_width })
     }
     fn start_sidebar_motion(&mut self, from: f32, target: f32, window: &mut Window, cx: &mut Context<Self>) {
-        self.sidebar_width_touched = true;
-        self.sidebar_resize_generation = self.sidebar_resize_generation.wrapping_add(1);
-        self.sidebar_motion.start(from, target, std::time::Instant::now(), native_motion::motion_allowed());
-        self.sidebar_resize_suppressed = true;
-        if self.sidebar_motion.active() {
+        self.window.sidebar_width_touched = true;
+        self.window.sidebar_resize_generation = self.window.sidebar_resize_generation.wrapping_add(1);
+        self.window.sidebar_motion.start(from, target, std::time::Instant::now(), native_motion::motion_allowed());
+        self.window.sidebar_resize_suppressed = true;
+        if self.window.sidebar_motion.active() {
             self.schedule_sidebar_motion_frame(window, cx);
         } else {
             self.set_sidebar_displayed_width(target, window, cx);
-            self.sidebar_resize_suppressed = false;
+            self.window.sidebar_resize_suppressed = false;
             self.queue_preferences_save(cx);
         }
     }
     fn set_sidebar_displayed_width(&mut self, width: f32, window: &mut Window, cx: &mut Context<Self>) {
         if (self.displayed_sidebar_width(cx) - width).abs() > 0.01 {
-            self.sidebar_resize.update(cx, |state, cx| state.resize_panel_for_layout(0, design::ui_px(width, self.sidebar_scale), window, cx));
+            self.window.sidebar_resize.update(cx, |state, cx| state.resize_panel_for_layout(0, design::ui_px(width, self.window.sidebar_scale), window, cx));
         }
     }
     fn finish_sidebar_motion(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(target) = self.sidebar_motion.target() {
-            self.sidebar_motion.cancel();
+        if let Some(target) = self.window.sidebar_motion.target() {
+            self.window.sidebar_motion.cancel();
             self.set_sidebar_displayed_width(target, window, cx);
-            self.sidebar_resize_suppressed = false;
+            self.window.sidebar_resize_suppressed = false;
             self.queue_preferences_save(cx);
         }
     }
     fn settle_sidebar_presentation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.sidebar_motion.cancel();
-        self.sidebar_resize_generation = self.sidebar_resize_generation.wrapping_add(1);
-        self.sidebar_resize_suppressed = false;
-        self.sidebar_motion_compact = self.sidebar_collapsed;
-        self.sidebar_tabs_motion.borrow_mut().settle(match self.sidebar_view {
+        self.window.sidebar_motion.cancel();
+        self.window.sidebar_resize_generation = self.window.sidebar_resize_generation.wrapping_add(1);
+        self.window.sidebar_resize_suppressed = false;
+        self.window.sidebar_motion_compact = self.window.sidebar_collapsed;
+        self.window.sidebar_tabs_motion.borrow_mut().settle(match self.window.sidebar_view {
             SidebarView::Agents => 0, SidebarView::Projects => 1, SidebarView::Activity => 2,
         });
-        let width = if self.sidebar_is_hidden() { 0. } else if self.sidebar_collapsed {
-            design::compact_sidebar_width_design(self.sidebar_scale)
-        } else { expanded_sidebar_width_for_scale(self.sidebar_expanded_width, self.sidebar_scale) };
+        let width = if self.sidebar_is_hidden() { 0. } else if self.window.sidebar_collapsed {
+            design::compact_sidebar_width_design(self.window.sidebar_scale)
+        } else { expanded_sidebar_width_for_scale(self.window.sidebar_expanded_width, self.window.sidebar_scale) };
         self.set_sidebar_displayed_width(width, window, cx);
     }
     fn schedule_sidebar_motion_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.sidebar_motion_frame_pending || !self.sidebar_motion.active() { return; }
-        self.sidebar_motion_frame_pending = true;
+        if self.window.sidebar_motion_frame_pending || !self.window.sidebar_motion.active() { return; }
+        self.window.sidebar_motion_frame_pending = true;
         let weak = cx.weak_entity();
         window.on_next_frame(move |window, cx| {
             let _ = weak.update(cx, |view, cx| {
-                view.sidebar_motion_frame_pending = false;
-                if !view.sidebar_motion.active() { return; }
-                if view.sidebar_resize.read(cx).is_resizing() {
-                    view.sidebar_motion.cancel();
-                    view.sidebar_resize_suppressed = false;
-                    view.sidebar_hidden = false;
+                view.window.sidebar_motion_frame_pending = false;
+                if !view.window.sidebar_motion.active() { return; }
+                if view.window.sidebar_resize.read(cx).is_resizing() {
+                    view.window.sidebar_motion.cancel();
+                    view.window.sidebar_resize_suppressed = false;
+                    view.window.sidebar_hidden = false;
                     return;
                 }
                 if !native_motion::motion_allowed() || view.closing || view.close_pending || crate::session_lock::locked(cx) {
@@ -2960,13 +2787,13 @@ impl Desktop {
                     cx.notify();
                     return;
                 }
-                if let Some(width) = view.sidebar_motion.sample(std::time::Instant::now()) {
+                if let Some(width) = view.window.sidebar_motion.sample(std::time::Instant::now()) {
                     view.set_sidebar_displayed_width(width, window, cx);
                 }
-                if view.sidebar_motion.active() {
+                if view.window.sidebar_motion.active() {
                     view.schedule_sidebar_motion_frame(window, cx);
                 } else {
-                    view.sidebar_resize_suppressed = false;
+                    view.window.sidebar_resize_suppressed = false;
                     view.queue_preferences_save(cx);
                 }
                 cx.notify();
@@ -2974,14 +2801,14 @@ impl Desktop {
         });
     }
     fn sidebar_split(&mut self, sidebar: AnyElement, content: AnyElement, palette: design::Palette, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let width = if self.sidebar_motion.active() { self.displayed_sidebar_width(cx) } else if self.sidebar_is_hidden() { 0. } else if self.sidebar_collapsed { design::compact_sidebar_width_design(design::interface_scale()) } else if self.sidebar_resize_suppressed { expanded_sidebar_width_for_scale(self.sidebar_expanded_width,self.sidebar_scale) } else if self.sidebar_width_touched {
+        let width = if self.window.sidebar_motion.active() { self.displayed_sidebar_width(cx) } else if self.sidebar_is_hidden() { 0. } else if self.window.sidebar_collapsed { design::compact_sidebar_width_design(design::interface_scale()) } else if self.window.sidebar_resize_suppressed { expanded_sidebar_width_for_scale(self.window.sidebar_expanded_width,self.window.sidebar_scale) } else if self.window.sidebar_width_touched {
             self.current_sidebar_width(cx)
-        } else { self.preferences.as_ref().and_then(|preferences| preferences.data.appearance.sidebar_width).map(|width|expanded_sidebar_width_for_scale(width,self.sidebar_scale)).unwrap_or(252.0) };
+        } else { self.preferences.as_ref().and_then(|preferences| preferences.data.appearance.sidebar_width).map(|width|expanded_sidebar_width_for_scale(width,self.window.sidebar_scale)).unwrap_or(252.0) };
         if design::tile_theme() == monitter_lib::experimental_desktop::NativeTileTheme::Tern {
             let spacing = design::tern_spacing(&self.snapshot["settings"]);
             // Keep the newer flush sidebar edge while it slides out; restore
             // the hidden workspace gutter continuously near zero width.
-            let edge = (width / design::compact_sidebar_width_design(self.sidebar_scale)).clamp(0., 1.);
+            let edge = (width / design::compact_sidebar_width_design(self.window.sidebar_scale)).clamp(0., 1.);
             let tabs = self.render_workspace_tabs(palette, window, cx);
             let column = div().size_full().flex().flex_col().min_w_0()
                 .child(tabs)
@@ -2997,41 +2824,41 @@ impl Desktop {
                         // only at the sidebar divider. Other pane gaps stay intact.
                         .ml(-design::ui_scaled_px(spacing.gutter * edge))
                         .child(content)));
-            return sidebar_split_with_visibility(&self.sidebar_resize, width, self.sidebar_scale, sidebar, column.into_any_element(), self.sidebar_is_hidden() && !self.sidebar_motion.active(), self.sidebar_motion.active());
+            return sidebar_split_with_visibility(&self.window.sidebar_resize, width, self.window.sidebar_scale, sidebar, column.into_any_element(), self.sidebar_is_hidden() && !self.window.sidebar_motion.active(), self.window.sidebar_motion.active());
         }
-        sidebar_split_with_visibility(&self.sidebar_resize, width, self.sidebar_scale, sidebar, content, self.sidebar_is_hidden() && !self.sidebar_motion.active(), self.sidebar_motion.active())
+        sidebar_split_with_visibility(&self.window.sidebar_resize, width, self.window.sidebar_scale, sidebar, content, self.sidebar_is_hidden() && !self.window.sidebar_motion.active(), self.window.sidebar_motion.active())
     }
     fn apply_saved_sidebar_width(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.sidebar_width_touched && !self.sidebar_motion.active() {
+        if !self.window.sidebar_width_touched && !self.window.sidebar_motion.active() {
             if let Some(width) = self.preferences.as_ref().and_then(|preferences| preferences.data.appearance.sidebar_width) {
-                self.sidebar_expanded_width = expanded_sidebar_width_for_scale(width,self.sidebar_scale);
+                self.window.sidebar_expanded_width = expanded_sidebar_width_for_scale(width,self.window.sidebar_scale);
             }
         }
-        if self.sidebar_motion.active() || self.sidebar_is_hidden() { return; }
-        let has_panels = self.sidebar_resize.read(cx).sizes().len() == 2;
+        if self.window.sidebar_motion.active() || self.sidebar_is_hidden() { return; }
+        let has_panels = self.window.sidebar_resize.read(cx).sizes().len() == 2;
         if !has_panels {
             return;
         }
         // resize_panel commits the programmatic change and clears the active
         // gesture. Never replay the saved width over a pointer-owned resize.
         let Some(width) = saved_sidebar_width_target(
-            self.preferences.as_ref().and_then(|preferences| preferences.data.appearance.sidebar_width).map(|width|expanded_sidebar_width_for_scale(width,self.sidebar_scale)),
-            self.current_sidebar_width(cx), self.sidebar_width_touched,
-            self.sidebar_collapsed, self.sidebar_resize.read(cx).is_resizing(), self.sidebar_scale,
+            self.preferences.as_ref().and_then(|preferences| preferences.data.appearance.sidebar_width).map(|width|expanded_sidebar_width_for_scale(width,self.window.sidebar_scale)),
+            self.current_sidebar_width(cx), self.window.sidebar_width_touched,
+            self.window.sidebar_collapsed, self.window.sidebar_resize.read(cx).is_resizing(), self.window.sidebar_scale,
         ) else { return; };
-        self.sidebar_resize_suppressed = true;
-        self.sidebar_resize_generation = self.sidebar_resize_generation.wrapping_add(1);
-        let generation = self.sidebar_resize_generation;
-        self.sidebar_resize.update(cx, |state, cx| {
-            state.resize_panel_for_layout(0, design::ui_px(width,self.sidebar_scale), window, cx);
+        self.window.sidebar_resize_suppressed = true;
+        self.window.sidebar_resize_generation = self.window.sidebar_resize_generation.wrapping_add(1);
+        let generation = self.window.sidebar_resize_generation;
+        self.window.sidebar_resize.update(cx, |state, cx| {
+            state.resize_panel_for_layout(0, design::ui_px(width,self.window.sidebar_scale), window, cx);
         });
-        cx.spawn(async move |view, cx| {
+        self.spawn_workspace(window,cx,async move |view,cx| {
             cx.background_executor()
                 .timer(std::time::Duration::from_millis(250))
                 .await;
-            let _ = view.update(cx, |view, cx| {
-                if view.sidebar_resize_generation == generation {
-                    view.sidebar_resize_suppressed = false;
+            let _ = view.update_in(cx, |view, _window, cx| {
+                if view.window.sidebar_resize_generation == generation {
+                    view.window.sidebar_resize_suppressed = false;
                     cx.notify();
                 }
             });
@@ -3039,8 +2866,8 @@ impl Desktop {
         .detach();
     }
     fn restore_preferences(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.preferences_restore
-            || self.preferences_restoring
+        if !self.window.preferences_restore
+            || self.window.preferences_restoring
             || self.native_state.snapshot().is_none()
             // The raw backend state arrives before its background UI
             // projection. Pane preparation uses the published snapshot;
@@ -3051,11 +2878,11 @@ impl Desktop {
         {
             return;
         }
-        self.preferences_restore = false;
-        self.preferences_restoring = true;
-        self.preferences_restore_suppressed = true;
-        self.preferences_restore_generation = self.preferences_restore_generation.wrapping_add(1);
-        let restore_generation = self.preferences_restore_generation;
+        self.window.preferences_restore = false;
+        self.window.preferences_restoring = true;
+        self.window.preferences_restore_suppressed = true;
+        self.window.preferences_restore_generation = self.window.preferences_restore_generation.wrapping_add(1);
+        let restore_generation = self.window.preferences_restore_generation;
         eprintln!(
             "[native-preferences] operation=restore generation={restore_generation} result=started"
         );
@@ -3088,28 +2915,13 @@ impl Desktop {
             self.preferences_dirty = true;
         }
         self.restore_browser_metadata(window, cx);
-        for (id, pane) in self.chat_panes.borrow().iter() {
-            if let Some(state) = self.native_attachment_drafts.get(id) {
-                pane.update(cx, |pane, cx| pane.restore_attachment_draft(id, state, cx));
-            }
-            if let Some(state) = self.native_chat_panes.get(id) {
-                pane.update(cx, |pane, cx| {
-                    pane.restore_secondary_sidebar(state, window, cx)
-                });
-            }
-            if let Some(text) = self.native_drafts.get(id) {
-                pane.update(cx, |pane, cx| {
-                    pane.restore_draft(text, window, cx);
-                });
-            }
-        }
         let layout = self.named_workspaces.as_ref().and_then(|set| {
-            let id = self.workspace_switch.as_ref().unwrap_or(&set.active_id);
+            let id = self.window.workspace_switch.as_ref().unwrap_or(&set.active_id);
             set.items.iter().find(|item| &item.id == id).map(|item| item.layout.clone().unwrap_or_else(workspace_tabs::empty_layout))
         }).or_else(|| self.preferences.as_ref().and_then(|preferences| preferences.data.layout.clone()));
         let Some(mut layout) = layout else {
-            self.preferences_restore_suppressed = false;
-            self.preferences_restoring = false;
+            self.window.preferences_restore_suppressed = false;
+            self.window.preferences_restoring = false;
             self.finish_startup(window, cx);
             if self.preferences_dirty {
                 self.queue_preferences_save(cx);
@@ -3120,7 +2932,7 @@ impl Desktop {
             .filter(|id| id.starts_with("neovim-files:") || (id.starts_with("draft:") && !self.draft_panes.borrow().contains_key(id))).collect();
         match workspace_visibility::prune_native_pane_ids(&layout, &obsolete) {
             Ok(cleaned) => { if cleaned != layout { layout = cleaned; self.preferences_dirty = true; } },
-            Err(error) => { self.fail_workspace_restore(error, cx); return; }
+            Err(error) => { self.fail_workspace_restore(error, window, cx); return; }
         }
         match workspace_visibility::prune_layout(&layout, &self.hidden_task_ids) {
             Ok(pruned) => {
@@ -3132,6 +2944,7 @@ impl Desktop {
             Err(error) => {
                 self.fail_workspace_restore(
                     format!("Saved workspace visibility cleanup failed: {error}"),
+                    window,
                     cx,
                 );
                 return;
@@ -3156,7 +2969,7 @@ impl Desktop {
                         layout = migrated;
                     }
                     Err(error) => {
-                        self.fail_workspace_restore(error, cx);
+                        self.fail_workspace_restore(error, window, cx);
                         return;
                     }
                 }
@@ -3177,7 +2990,7 @@ impl Desktop {
             return;
         }
         let Some(service) = self.service.clone() else {
-            self.fail_workspace_restore("Native service has not loaded.".into(), cx);
+            self.fail_workspace_restore("Native service has not loaded.".into(), window, cx);
             return;
         };
         let (sender, receiver) = futures::channel::oneshot::channel();
@@ -3216,13 +3029,13 @@ impl Desktop {
                 let _ = sender.send(result);
             })
         {
-            self.fail_workspace_restore(error.to_string(), cx);
+            self.fail_workspace_restore(error.to_string(), window, cx);
             return;
         }
-        cx.spawn_in(window, async move |view, cx| {
+        self.spawn_workspace(window, cx, async move |view, cx| {
             let result = receiver.await.map_err(|error| error.to_string()).and_then(|result| result);
             let _ = view.update_in(cx, |view, window, cx| {
-                if view.closing || view.preferences_restore_generation != restore_generation {
+                if view.closing || view.window.preferences_restore_generation != restore_generation {
                     return;
                 }
                 match result {
@@ -3236,6 +3049,7 @@ impl Desktop {
                     ),
                     Err(error) => view.fail_workspace_restore(
                         format!("Workspace session restore failed: {error}"),
+                        window,
                         cx,
                     ),
                 }
@@ -3243,18 +3057,71 @@ impl Desktop {
         })
         .detach();
     }
-    fn fail_workspace_restore(&mut self, error: String, cx: &mut Context<Self>) {
-        self.pending_sidebar_task = None;
-        self.pending_notification_read = None;
-        let switching_workspace = self.workspace_switch.take().is_some();
-        self.pending_workspace_removal = None;
-        self.preferences_restore_suppressed = false;
-        self.preferences_restoring = false;
+    fn fail_workspace_restore(
+        &mut self,
+        error: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let failed_target = self.window.workspace_switch.take();
+        // Ownership only commits after a successful restore. Its active ID
+        // therefore identifies the exact outgoing view parked by an uncached
+        // switch, even when an async callback has temporarily scoped set.active_id.
+        let source = failed_target.as_deref().and_then(|target| {
+            self.workspace_window_assignments
+                .window(&self.current_workspace_window)
+                .and_then(|host| host.active_workspace_id())
+                .filter(|source| *source != target)
+                .map(str::to_owned)
+        });
+        let outgoing = source
+            .as_ref()
+            .and_then(|id| self.workspace_view_cache.remove(id));
+        self.window.pending_sidebar_task = None;
+        self.window.pending_notification_read = None;
+        self.window.pending_pane_focus = None;
+        self.window.pending_workspace_removal = None;
+        self.window.pending_detach_workspace = None;
+        self.window.sidebar_task_navigation_scheduled = false;
+        if let Some(outgoing) = outgoing {
+            self.window
+                .dock
+                .update(cx, |dock, cx| dock.set_shown(false, window, cx));
+            // Release only the transient failed UI. Do not invoke Removed or
+            // close hooks, serialize it into saved layouts, or cache it as a
+            // successful target that a later retry could accidentally select.
+            let failed = std::mem::replace(&mut self.window, outgoing);
+            self.window.workspace_switch = None;
+            self.window.pending_sidebar_task = None;
+            self.window.pending_notification_read = None;
+            self.window.pending_pane_focus = None;
+            self.window.pending_workspace_removal = None;
+            self.window.pending_detach_workspace = None;
+            self.window.sidebar_task_navigation_scheduled = false;
+            self.window.preferences_restore = false;
+            self.window.preferences_restore_suppressed = false;
+            self.window.preferences_restoring = false;
+            if let Some(set) = &mut self.named_workspaces {
+                set.active_id = self.window.active_workspace_id.clone().unwrap_or_default();
+            }
+            self.preferences_blocked = false;
+            self.window.dock.update(cx, |dock, cx| {
+                dock.set_shown(!session_lock::locked(cx), window, cx)
+            });
+            if let Ok(layout) = self.window.dock.read(cx).serialize(cx) {
+                self.restore_named_workspace_focus(&layout, window, cx);
+            }
+            drop(failed);
+        } else {
+            // Initial/empty-host failures have no prior retained view to show.
+            // Keep capture_window_layouts from treating partial panes as valid,
+            // and avoid an automatic retry loop on the next render.
+            self.window.preferences_restore = false;
+            self.window.preferences_restore_suppressed = true;
+            self.window.preferences_restoring = true;
+            self.preferences_blocked = true;
+        }
         self.preferences_error = Some(error);
-        // A rejected destination leaves the outgoing workspace intact. Keep
-        // other workspace tabs usable; initial-load failures still protect
-        // the saved preferences from being overwritten.
-        self.preferences_blocked = !switching_workspace;
         cx.notify();
     }
     fn finish_workspace_restore(
@@ -3275,7 +3142,7 @@ impl Desktop {
             &neovim_sessions,
         ) {
             Ok(layout) => layout,
-            Err(error) => { self.fail_workspace_restore(error, cx); return; }
+            Err(error) => { self.fail_workspace_restore(error, window, cx); return; }
         };
         if layout != original_layout {
             self.preferences_dirty = true;
@@ -3285,31 +3152,33 @@ impl Desktop {
         let result = self
             .prepare_saved_panes(&layout, &sessions, window, cx)
             .and_then(|()| {
-                self.dock
+                self.window.dock
                     .update(cx, |dock, cx| dock.restore_retaining(layout, window, cx))
             });
         match result {
             Ok(()) => {
-                if let Some(id) = self.workspace_switch.take() {
-                    if let Some(set) = &mut self.named_workspaces { set.active_id = id; }
+                if let Some(id) = self.window.workspace_switch.take() {
+                    self.window.active_workspace_id=Some(id.clone());
+                    if let Some(set) = &mut self.named_workspaces { set.active_id = id.clone(); }
+                    let _=self.workspace_window_assignments.set_active_workspace(&self.current_workspace_window,&id);
                     self.workspaces_dirty = true;
                     self.preferences_dirty = true;
                 }
-                if let Some(id) = self.pending_workspace_removal.take() {
+                if let Some(id) = self.window.pending_workspace_removal.take() {
                     if let Some(set) = &mut self.named_workspaces {
                         monitter_gpui_desktop::workspace_order::remove(set, &id);
                     }
                     self.workspaces_dirty = true;
                     self.preferences_dirty = true;
                 }
-                self.preferences_error = None;
+                if let Err(error)=self.persist_workspace_window_assignments(false) {self.preferences_error=Some(error);} else {self.preferences_error=None;}
                 self.preferences_blocked = false;
                 self.restore_named_workspace_focus(&restored_layout, window, cx);
-                self.dock_current = self.dock.read(cx).focused_pane_id(window, cx);
+                self.window.dock_current = self.window.dock.read(cx).focused_pane_id(window, cx);
                 // The new layout is usable now. Only persistence needs the
                 // settling delay; keeping the UI in its loading state makes
                 // pane controls dim and brighten on every workspace switch.
-                self.preferences_restoring = false;
+                self.window.preferences_restoring = false;
                 self.finish_startup(window, cx);
                 let neovim_session_ids = docking::DockWorkspace::saved_ids(&restored_layout)
                     .unwrap_or_default()
@@ -3321,18 +3190,18 @@ impl Desktop {
                     .collect::<HashSet<_>>();
                 for session_id in neovim_session_ids {
                     if let Err(error) = self.reconcile_neovim(&session_id, window, cx) {
-                        self.error = Some(error);
+                        self.window.error = Some(error);
                     }
                 }
                 let generation = restore_generation;
-                cx.spawn(async move |view, cx| {
+                self.spawn_workspace(window,cx,async move |view,cx| {
                     cx.background_executor()
                         .timer(std::time::Duration::from_millis(250))
                         .await;
-                    let _ = view.update(cx, |view, cx| {
-                        if view.preferences_restore_generation == generation {
-                            view.preferences_restore_suppressed = false;
-                            view.preferences_restoring = false;
+                    let _ = view.update_in(cx, |view, _window, cx| {
+                        if view.window.preferences_restore_generation == generation {
+                            view.window.preferences_restore_suppressed = false;
+                            view.window.preferences_restoring = false;
                             view.preferences_dirty |= view.native_browser_dirty || !view.dirty_draft_ids.is_empty() || !view.dirty_chat_pane_ids.is_empty() || !view.dirty_attachment_draft_ids.is_empty();
                             if view.preferences_dirty {
                                 view.queue_preferences_save(cx);
@@ -3345,17 +3214,10 @@ impl Desktop {
                 .detach();
             }
             Err(error) => {
-                self.pending_sidebar_task = None;
-                self.pending_notification_read = None;
-                let switching_workspace = self.workspace_switch.take().is_some();
-                self.pending_workspace_removal = None;
-                self.preferences_restore_suppressed = false;
-                self.preferences_restoring = false;
                 eprintln!(
                     "[native-preferences] operation=restore generation={restore_generation} result=error: {error}"
                 );
-                self.preferences_error = Some(error);
-                self.preferences_blocked = !switching_workspace;
+                self.fail_workspace_restore(error, window, cx);
             }
         }
     }
@@ -3367,6 +3229,9 @@ impl Desktop {
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
         let ids = docking::DockWorkspace::saved_ids(layout)?;
+        for id in &ids {
+            if self.pane_is_owned_by_another_window(id,cx) {return Err("A saved chat or browser pane is already open in another window. Remove the duplicate from one workspace.".into());}
+        }
         let task_ids: HashSet<String> = rows(&self.snapshot, "tasks")
             .iter()
             .map(|task| field(task, "id"))
@@ -3439,7 +3304,7 @@ impl Desktop {
             if id.starts_with("empty:") || id.starts_with("draft:") {
                 continue;
             }
-            if self.dock.read(cx).contains(&id) {
+            if self.window.dock.read(cx).contains(&id) {
                 continue;
             }
             let spec = if git_workspace::task_id(&id).is_some() {
@@ -3466,7 +3331,7 @@ impl Desktop {
                 let weak = cx.weak_entity();
                 let task = task.to_owned();
                 let voice_pane = pane.downgrade();
-                let hook: docking::LifecycleHook = Rc::new(move |event, _, cx| {
+                let hook: docking::LifecycleHook = Rc::new(move |event, window, cx| {
                     if matches!(
                         event,
                         docking::PaneLifecycle::Visible(false) | docking::PaneLifecycle::Removed
@@ -3474,11 +3339,19 @@ impl Desktop {
                         let _ = voice_pane.update(cx, |pane, cx| pane.deactivate_voice(cx));
                     }
                     if matches!(event, docking::PaneLifecycle::Active(true)) {
-                        let _ = weak.update(cx, |view, cx| {
-                            view.selected = Some(task.clone());
-                            view.sidebar = Sidebar::Chats;
-                            view.dock_current = Some(format!("chat:{task}"));
-                            cx.notify();
+                        let weak = weak.clone();
+                        let task = task.clone();
+                        let handle = window.window_handle();
+                        cx.defer(move |cx| {
+                            let _ = handle.update(cx, |_, window, cx| weak.update(cx, |view, cx| {
+                                let key = format!("chat:{task}");
+                                let _ = view.with_workspace_for_pane_in(&key, window, cx, |view, _, cx| {
+                                    view.window.selected = Some(task);
+                                    view.window.sidebar = Sidebar::Chats;
+                                    view.window.dock_current = Some(key.clone());
+                                    cx.notify();
+                                });
+                            }));
                         });
                     }
                 });
@@ -3497,24 +3370,24 @@ impl Desktop {
                         (
                             Sidebar::Archived,
                             "Archives",
-                            self.archives.as_ref().unwrap().clone().into(),
+                            self.window.archives.as_ref().unwrap().clone().into(),
                         )
                     }
                     "route:repository" => {
-                        if self.git.is_none() {
-                            self.git = Some(cx.new(|cx| {
+                        if self.window.git.is_none() {
+                            self.window.git = Some(cx.new(|cx| {
                                 git::GitPane::new(service.clone(), &self.snapshot, window, cx)
                             }));
                         }
                         (
                             Sidebar::Git,
                             "Repository",
-                            self.git.as_ref().unwrap().clone().into(),
+                            self.window.git.as_ref().unwrap().clone().into(),
                         )
                     }
                     "route:subagents" => {
-                        if self.subagents.is_none() {
-                            self.subagents = Some(cx.new(|cx| {
+                        if self.window.subagents.is_none() {
+                            self.window.subagents = Some(cx.new(|cx| {
                                 collaboration::SubagentPane::new(
                                     service.clone(),
                                     self.snapshot.clone(),
@@ -3526,12 +3399,12 @@ impl Desktop {
                         (
                             Sidebar::Subagents,
                             "Subagents",
-                            self.subagents.as_ref().unwrap().clone().into(),
+                            self.window.subagents.as_ref().unwrap().clone().into(),
                         )
                     }
                     "route:agents" => {
-                        if self.agent_editor.is_none() {
-                            self.agent_editor = Some(cx.new(|cx| {
+                        if self.window.agent_editor.is_none() {
+                            self.window.agent_editor = Some(cx.new(|cx| {
                                 agents::AgentHostPane::new(
                                     service.clone(),
                                     (*self.snapshot).clone(),
@@ -3543,12 +3416,12 @@ impl Desktop {
                         (
                             Sidebar::Agents,
                             "Agents",
-                            self.agent_editor.as_ref().unwrap().clone().into(),
+                            self.window.agent_editor.as_ref().unwrap().clone().into(),
                         )
                     }
                     "route:schedules" => {
-                        if self.schedules.is_none() {
-                            self.schedules = Some(cx.new(|cx| {
+                        if self.window.schedules.is_none() {
+                            self.window.schedules = Some(cx.new(|cx| {
                                 schedules::SchedulePane::new(
                                     service.clone(),
                                     &self.snapshot,
@@ -3560,50 +3433,50 @@ impl Desktop {
                         (
                             Sidebar::Schedules,
                             "Schedules",
-                            self.schedules.as_ref().unwrap().clone().into(),
+                            self.window.schedules.as_ref().unwrap().clone().into(),
                         )
                     }
                     "route:app-resource-usage" => {
                         let spec = self.resource_spec(window, cx)?;
-                        self.dock.update(cx, |dock, cx| dock.register(spec, cx))?;
+                        self.window.dock.update(cx, |dock, cx| dock.register(spec, cx))?;
                         continue;
                     }
                     "route:usage" => {
-                        if self.usage.is_none() {
-                            self.usage = Some(cx.new(|cx| {
+                        if self.window.usage.is_none() {
+                            self.window.usage = Some(cx.new(|cx| {
                                 usage::UsagePane::new(service.clone(), &self.snapshot, window, cx)
                             }));
                         }
                         (
                             Sidebar::Usage,
                             "Usage",
-                            self.usage.as_ref().unwrap().clone().into(),
+                            self.window.usage.as_ref().unwrap().clone().into(),
                         )
                     }
                     "route:terminal" => {
-                        if self.terminal.is_none() {
-                            self.terminal = Some(self.new_terminal_manager(service.clone(),window,cx));
+                        if self.window.terminal.is_none() {
+                            self.window.terminal = Some(self.new_terminal_manager(service.clone(),window,cx));
                         }
                         (
                             Sidebar::Terminal,
                             "Terminal",
-                            self.terminal.as_ref().unwrap().clone().into(),
+                            self.window.terminal.as_ref().unwrap().clone().into(),
                         )
                     }
                     "route:mail" => {
-                        if self.mail.is_none() {
-                            self.mail =
+                        if self.window.mail.is_none() {
+                            self.window.mail =
                                 Some(cx.new(|cx| MailPane::new(service.clone(), window, cx)));
                         }
                         (
                             Sidebar::Mail,
                             "Mail",
-                            self.mail.as_ref().unwrap().clone().into(),
+                            self.window.mail.as_ref().unwrap().clone().into(),
                         )
                     }
                     "route:projects" => {
-                        if self.workspace.is_none() {
-                            self.workspace = Some(cx.new(|cx| {
+                        if self.window.workspace.is_none() {
+                            self.window.workspace = Some(cx.new(|cx| {
                                 WorkspacePane::new(
                                     service.clone(),
                                     self.snapshot.clone(),
@@ -3615,15 +3488,15 @@ impl Desktop {
                         (
                             Sidebar::Projects,
                             "Projects",
-                            self.workspace.as_ref().unwrap().clone().into(),
+                            self.window.workspace.as_ref().unwrap().clone().into(),
                         )
                     }
                     "route:channels" => {
-                        if self.channels.is_none() {
+                        if self.window.channels.is_none() {
                             let channels =
                                 cx.new(|cx| ChannelPane::new(service.clone(), window, cx));
-                            self.channel_subscription =
-                                Some(cx.subscribe(&channels, |view, _, event, cx| match event {
+                            self.window.channel_subscription =
+                                Some(cx.subscribe_workspace(&channels, window, |view, _, event, _, cx| match event {
                                     channels::ChannelEvent::Refresh => view.refresh(cx),
                                     channels::ChannelEvent::HistoryPage {
                                         channel,
@@ -3642,38 +3515,38 @@ impl Desktop {
                                     self.revision.as_deref().unwrap_or_default(),
                                     false,
                                     &[],
-                                    &self.channel_cursors,
+                                    &self.window.channel_cursors,
                                     cx,
                                 )
                             });
-                            self.channels = Some(channels);
+                            self.window.channels = Some(channels);
                         }
                         (
                             Sidebar::Channels,
                             "Channels",
-                            self.channels.as_ref().unwrap().clone().into(),
+                            self.window.channels.as_ref().unwrap().clone().into(),
                         )
                     }
                     _ => unreachable!("identities checked before construction"),
                 };
                 self.auxiliary_spec(surface, title, content, cx)
             };
-            self.dock.update(cx, |dock, cx| dock.register(spec, cx))?;
+            self.window.dock.update(cx, |dock, cx| dock.register(spec, cx))?;
         }
         Ok(())
     }
     fn ensure_sidebar_usage(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.sidebar_usage.is_some() { return; }
+        if self.window.sidebar_usage.is_some() { return; }
         let Some(service) = self.service.clone() else { return; };
         let snapshot = self.snapshot.clone();
         let revision = self.revision.clone();
         let widget = cx.new(|cx| sidebar_usage::SidebarUsageWidget::new(
             service, snapshot.clone(), revision.as_deref(), window, cx,
         ));
-        cx.subscribe_in(&widget, window, |desktop, _, _: &sidebar_usage::ResourceUsageEvent, window, cx| {
+        cx.subscribe_workspace(&widget, window, |desktop, _, _: &sidebar_usage::ResourceUsageEvent, window, cx| {
             match desktop.resource_spec(window, cx) {
                 Ok(spec) => {
-                    desktop.dock.update(cx, |dock, cx| {
+                    desktop.window.dock.update(cx, |dock, cx| {
                         if !dock.focus("route:app-resource-usage", window, cx) {
                             if let Err(error) = dock.add(spec, gpui_kit::component::dock::DockPlacement::Center, None, window, cx) {
                                 eprintln!("Could not open resource tab: {error}");
@@ -3683,27 +3556,27 @@ impl Desktop {
                         }
                         dock.set_shown(true, window, cx);
                     });
-                    desktop.sidebar = Sidebar::Chats;
-                    desktop.dock_current = Some("route:app-resource-usage".into());
+                    desktop.window.sidebar = Sidebar::Chats;
+                    desktop.window.dock_current = Some("route:app-resource-usage".into());
                     cx.notify();
                 }
-                Err(error) => { desktop.error = Some(error); cx.notify(); }
+                Err(error) => { desktop.window.error = Some(error); cx.notify(); }
             }
         }).detach();
-        self.workspace_usage_rings = Some(cx.new(|cx| sidebar_usage::WorkspaceUsageRings::new(widget.clone(), cx)));
-        self.sidebar_usage = Some(widget);
-        self.sidebar_usage_snapshot = Some(snapshot);
-        self.sidebar_usage_revision = revision;
+        self.window.workspace_usage_rings = Some(cx.new(|cx| sidebar_usage::WorkspaceUsageRings::new(widget.clone(), cx)));
+        self.window.sidebar_usage = Some(widget);
+        self.window.sidebar_usage_snapshot = Some(snapshot);
+        self.window.sidebar_usage_revision = revision;
     }
 
     fn resource_spec(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Result<docking::PaneSpec, String> {
         self.ensure_sidebar_usage(window, cx);
-        let widget = self.sidebar_usage.clone().ok_or("Native service has not loaded.")?;
-        if self.app_resources.is_none() {
-            self.app_resources = Some(cx.new(|cx| usage::AppResourcePane::new(widget, cx)));
+        let widget = self.window.sidebar_usage.clone().ok_or("Native service has not loaded.")?;
+        if self.window.app_resources.is_none() {
+            self.window.app_resources = Some(cx.new(|cx| usage::AppResourcePane::new(widget, cx)));
         }
         let focus = cx.focus_handle();
-        let content = self.app_resources.as_ref().unwrap().clone().into();
+        let content = self.window.app_resources.as_ref().unwrap().clone().into();
         let frame = cx.new(|_| PaneFocusFrame { content, focus: focus.clone() });
         let owner = cx.weak_entity();
         Ok(docking::PaneSpec {
@@ -3713,8 +3586,8 @@ impl Desktop {
             lifecycle: Some(Rc::new(move |event, _, cx| {
                 if matches!(event, docking::PaneLifecycle::Active(true)) {
                     let _ = owner.update(cx, |desktop, cx| {
-                        desktop.sidebar = Sidebar::Chats;
-                        desktop.dock_current = Some("route:app-resource-usage".into());
+                        desktop.window.sidebar = Sidebar::Chats;
+                        desktop.window.dock_current = Some("route:app-resource-usage".into());
                         cx.notify();
                     });
                 }
@@ -3725,11 +3598,11 @@ impl Desktop {
 
     fn task_git_spec(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) -> Result<docking::PaneSpec, String> {
         let task_id = git_workspace::task_id(id).ok_or("Invalid task Git pane identity.")?.to_owned();
-        let pane = if let Some(pane) = self.git_panes.get(id) { pane.clone() } else {
+        let pane = if let Some(pane) = self.window.git_panes.get(id) { pane.clone() } else {
             let service = self.service.clone().ok_or("Native service has not loaded.")?;
             let pane = cx.new(|cx| git::GitPane::new(service, &self.snapshot, window, cx));
             pane.update(cx, |pane, cx| pane.set_context(&self.snapshot, &task_id, cx));
-            self.git_panes.insert(id.to_owned(), pane.clone());
+            self.window.git_panes.insert(id.to_owned(), pane.clone());
             pane
         };
         let weak = cx.weak_entity();
@@ -3737,9 +3610,9 @@ impl Desktop {
         let lifecycle: docking::LifecycleHook = Rc::new(move |event, _, cx| {
             if matches!(event, docking::PaneLifecycle::Active(true)) {
                 let _ = weak.update(cx, |desktop, cx| {
-                    desktop.sidebar = Sidebar::Chats;
-                    desktop.selected = Some(task_id.clone());
-                    desktop.dock_current = Some(key.clone());
+                    desktop.window.sidebar = Sidebar::Chats;
+                    desktop.window.selected = Some(task_id.clone());
+                    desktop.window.dock_current = Some(key.clone());
                     cx.notify();
                 });
             }
@@ -3751,13 +3624,13 @@ impl Desktop {
 
     fn open_task_git_below(&mut self, task_id: &str, window: &mut Window, cx: &mut Context<Self>) -> Result<(), String> {
         let origin = format!("chat:{task_id}");
-        let id = git_workspace::next_id(task_id, |id| self.dock.read(cx).contains(id));
+        let id = git_workspace::next_id(task_id, |id| self.window.dock.read(cx).contains(id));
         let spec = self.task_git_spec(&id, window, cx)?;
-        let result = self.dock.update(cx, |dock, cx| dock.add_below(spec, &origin, window, cx));
-        if let Err(error) = result { self.git_panes.remove(&id); return Err(error); }
-        self.selected = Some(task_id.to_owned());
-        self.sidebar = Sidebar::Chats;
-        self.dock_current = Some(id);
+        let result = self.window.dock.update(cx, |dock, cx| dock.add_below(spec, &origin, window, cx));
+        if let Err(error) = result { self.window.git_panes.remove(&id); return Err(error); }
+        self.window.selected = Some(task_id.to_owned());
+        self.window.sidebar = Sidebar::Chats;
+        self.window.dock_current = Some(id);
         cx.notify();
         Ok(())
     }
@@ -3772,17 +3645,13 @@ impl Desktop {
         let stable_id = format!("route:{}", title.to_ascii_lowercase());
         let weak = cx.weak_entity();
         let key = stable_id.clone();
-        let browser = if surface == Sidebar::Browser {
-            self.browser.clone()
-        } else {
-            None
-        };
+        let source_workspace = self.window.active_workspace_id.clone();
         let mail = if surface == Sidebar::Mail {
-            self.mail.clone()
+            self.window.mail.clone()
         } else {
             None
         };
-        let subagents = if surface == Sidebar::Subagents { self.subagents.clone() } else { None };
+        let subagents = if surface == Sidebar::Subagents { self.window.subagents.clone() } else { None };
         let lifecycle: docking::LifecycleHook = Rc::new(move |event, window, cx| {
             if let Some(pane) = &subagents {
                 match event {
@@ -3791,14 +3660,8 @@ impl Desktop {
                     _ => {}
                 }
             }
-            if let Some(browser) = &browser {
-                browser.update(cx, |browser, cx| match event {
-                    docking::PaneLifecycle::Visible(true) => browser.show(cx),
-                    docking::PaneLifecycle::Visible(false) => browser.hide(cx),
-                    docking::PaneLifecycle::Removed => browser.close(cx),
-                    _ => {}
-                });
-            }
+            // Browser pages use per-tab PaneSpecs. A legacy route panel has
+            // no authority over the shared manager or another host's pages.
             if let Some(mail) = &mail {
                 if matches!(
                     event,
@@ -3808,25 +3671,26 @@ impl Desktop {
                 }
             }
             if matches!(event, docking::PaneLifecycle::Active(true)) {
-                let _ = weak.update(cx, |desktop, cx| {
-                    if surface == Sidebar::Archived && desktop.sidebar != surface {
-                        if let Some(pane) = &desktop.archives {
-                            pane.update(cx, |pane, cx| pane.activate(window, cx));
-                        }
-                    }
-                    desktop.sidebar = surface;
-                    desktop.dock_current = Some(key.clone());
-                    cx.notify();
-                });
-            }
-            if surface == Sidebar::Browser && matches!(event, docking::PaneLifecycle::Removed) {
                 let weak = weak.clone();
+                let key = key.clone();
+                let workspace = source_workspace.clone();
+                let handle = window.window_handle();
                 cx.defer(move |cx| {
-                    let _ = weak.update(cx, |desktop, _| {
-                        desktop.browser = None;
-                        desktop.browser_subscription = None;
-                        desktop.browser_restore_revision = None;
-                    });
+                    let _ = handle.update(cx, |_, window, cx| weak.update(cx, |desktop, cx| {
+                        desktop.with_workspace_window(window, cx, |desktop, window, cx| {
+                            let _ = desktop.with_retained_workspace(workspace.as_deref(), window, cx, |desktop, window, cx| {
+                                if desktop.window.dock.read(cx).group_for_pane(&key, cx).is_none() { return; }
+                                if surface == Sidebar::Archived && desktop.window.sidebar != surface {
+                                    if let Some(pane) = &desktop.window.archives {
+                                        pane.update(cx, |pane, cx| pane.activate(window, cx));
+                                    }
+                                }
+                                desktop.window.sidebar = surface;
+                                desktop.window.dock_current = Some(key);
+                                cx.notify();
+                            });
+                        });
+                    }));
                 });
             }
         });
@@ -3855,9 +3719,9 @@ impl Desktop {
         cx: &mut Context<Self>,
     ) -> Entity<docking::DockWorkspace> {
         let stable_id = format!("route:{}", title.to_ascii_lowercase());
-        if self.dock_current.as_ref() != Some(&stable_id) {
+        if self.window.dock_current.as_ref() != Some(&stable_id) {
             let spec = self.auxiliary_spec(surface, title, content, cx);
-            self.dock.update(cx, |dock, cx| {
+            self.window.dock.update(cx, |dock, cx| {
                 if !dock.focus(&stable_id, window, cx) {
                     let _ = dock.add(
                         spec,
@@ -3870,9 +3734,9 @@ impl Desktop {
                 }
                 dock.set_shown(true, window, cx);
             });
-            self.dock_current = Some(stable_id);
+            self.window.dock_current = Some(stable_id);
         }
-        self.dock.clone()
+        self.window.dock.clone()
     }
     fn ensure_chat_pane(
         &mut self,
@@ -3918,7 +3782,7 @@ impl Desktop {
                     .filter(|message| field(message, "taskId") == task_id).collect());
             pane.update(cx, |pane, cx| pane.reconcile_history(known, true, cx));
             let subscription =
-                cx.subscribe_in(&pane, window, |view, _, event, window, cx| match event {
+                cx.subscribe_workspace(&pane, window, |view, _, event, window, cx| match event {
                     chat::ChatEvent::SecondarySidebarChanged { task_id, state } => {
                         if view.native_chat_panes.get(task_id) != Some(state) {
                             view.native_chat_panes
@@ -3927,13 +3791,13 @@ impl Desktop {
                             view.queue_preferences_save(cx);
                         }
                     }
-                    chat::ChatEvent::OpenBrowser { url, task_id } => { if let Err(error) = view.open_chat_browser_link(task_id, url, window, cx) { view.error = Some(error); cx.notify(); } },
+                    chat::ChatEvent::OpenBrowser { url, task_id } => { if let Err(error) = view.open_chat_browser_link(task_id, url, window, cx) { view.window.error = Some(error); cx.notify(); } },
                     chat::ChatEvent::Refresh => view.refresh(cx),
                     chat::ChatEvent::Archived(task_id) => {
                         view.removed_dock_ids.push(format!("chat:{task_id}"));
-                        if view.selected.as_ref() == Some(task_id) {
-                            view.selected = None;
-                            view.dock_current = None;
+                        if view.window.selected.as_ref() == Some(task_id) {
+                            view.window.selected = None;
+                            view.window.dock_current = None;
                         }
                         view.refresh(cx);
                         cx.notify();
@@ -3954,33 +3818,33 @@ impl Desktop {
                         view.accept_history_page(task_id, page.clone(), cx)
                     }
                     chat::ChatEvent::Focused(id) => {
-                        view.selected = Some(id.clone());
-                        view.sidebar = Sidebar::Chats;
+                        view.window.selected = Some(id.clone());
+                        view.window.sidebar = Sidebar::Chats;
                         cx.notify();
                     }
                     chat::ChatEvent::Git(id) => {
                         if let Err(error) = view.open_task_git_below(id, window, cx) {
-                            view.error = Some(error);
+                            view.window.error = Some(error);
                             cx.notify();
                         }
                     }
                     chat::ChatEvent::Terminal { task_id, command } => {
                         if let Some(service) = view.service.clone() {
-                            if view.terminal.is_none() {
-                                view.terminal = Some(view.new_terminal_manager(service,window,cx));
+                            if view.window.terminal.is_none() {
+                                view.window.terminal = Some(view.new_terminal_manager(service,window,cx));
                             }
-                            if let Some(terminal) = &view.terminal {
+                            if let Some(terminal) = &view.window.terminal {
                                 terminal.update(cx, |terminal, cx| {
                                     terminal.set_context(&view.snapshot, Some(task_id.clone()), cx);
                                     terminal.open_command(task_id, command.as_deref(), cx);
                                 });
                             }
-                            view.selected = Some(task_id.clone());
-                            view.sidebar = Sidebar::Terminal;
-                            view.dock_current = None;
+                            view.window.selected = Some(task_id.clone());
+                            view.window.sidebar = Sidebar::Terminal;
+                            view.window.dock_current = None;
                             cx.notify();
                         } else {
-                            view.error = Some("The experimental backend is not connected.".into());
+                            view.window.error = Some("The experimental backend is not connected.".into());
                             cx.notify();
                         }
                     }
@@ -3990,16 +3854,16 @@ impl Desktop {
                                 .iter()
                                 .any(|task| field(task, "id") == *id)
                         {
-                            view.selected = Some(id.clone());
-                            view.sidebar = Sidebar::Chats;
-                            view.draft_creation_open = false;
-                            view.dock_current = None;
+                            view.window.selected = Some(id.clone());
+                            view.window.sidebar = Sidebar::Chats;
+                            view.window.draft_creation_open = false;
+                            view.window.dock_current = None;
                             cx.notify();
                         }
                     }
                     chat::ChatEvent::DelegateTask(id) => {
                         view.open_chat_draft(None, window, cx);
-                        if let Some(draft) = view.draft_creation.clone() {
+                        if let Some(draft) = view.window.draft_creation.clone() {
                             let result =
                                 draft.update(cx, |draft, cx| draft.set_parent_task(id, window, cx));
                             if let Err(error) = result {
@@ -4008,9 +3872,9 @@ impl Desktop {
                         }
                     }
                     chat::ChatEvent::Settings(id) => {
-                        view.selected = Some(id.clone());
-                        view.sidebar = Sidebar::Settings;
-                        view.dock_current = None;
+                        view.window.selected = Some(id.clone());
+                        view.window.sidebar = Sidebar::Settings;
+                        view.window.dock_current = None;
                         cx.notify();
                     }
                 });
@@ -4036,32 +3900,32 @@ impl Desktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Div {
-        let live_ids = if self.pending_draft_chats.is_empty() { Vec::new() } else { self.dock.read(cx).serialize(cx).ok().and_then(|layout| docking::DockWorkspace::saved_ids(&layout).ok()).unwrap_or_default() };
-        if let Some((task_id, _)) = self.pending_draft_chats.iter().find(|(task_id, origin)| live_ids.contains(origin) && rows(&self.snapshot, "tasks").iter().any(|task| field(task, "id") == **task_id)) {
-            self.selected = Some(task_id.clone());
-            self.dock_current = None;
+        let live_ids = if self.window.pending_draft_chats.is_empty() { Vec::new() } else { self.window.dock.read(cx).serialize(cx).ok().and_then(|layout| docking::DockWorkspace::saved_ids(&layout).ok()).unwrap_or_default() };
+        if let Some((task_id, _)) = self.window.pending_draft_chats.iter().find(|(task_id, origin)| live_ids.contains(origin) && rows(&self.snapshot, "tasks").iter().any(|task| field(task, "id") == **task_id)) {
+            self.window.selected = Some(task_id.clone());
+            self.window.dock_current = None;
         }
-        let hidden_selection = self
-            .selected
+        let hidden_selection = self.window.selected
             .as_ref()
             .filter(|task_id| self.hidden_task_ids.contains(*task_id))
             .cloned();
         if let Some(hidden_selection) = hidden_selection {
-            self.selected = None;
+            self.window.selected = None;
             let hidden_chat_id = format!("chat:{hidden_selection}");
-            if self.dock_current.as_deref() == Some(hidden_chat_id.as_str()) {
-                self.dock_current = None;
+            if self.window.dock_current.as_deref() == Some(hidden_chat_id.as_str()) {
+                self.window.dock_current = None;
             }
         }
-        if let (Some(task_id), Some(service)) = (self.selected.clone(), self.service.clone()) {
+        if let Some(task)=self.window.selected.clone() {if self.focus_pane_owner(&format!("chat:{task}"),cx) {self.window.selected=None;self.window.dock_current=None;}}
+        if let (Some(task_id), Some(service)) = (self.window.selected.clone(), self.service.clone()) {
             let pane = self.ensure_chat_pane(&task_id, service, window, cx);
             let stable_id = format!("chat:{task_id}");
-            if self.dock_current.as_ref() != Some(&stable_id)
-                && !self.dock_current.as_deref().is_some_and(|id| git_workspace::task_id(id).is_some() || neovim_workspace::parse_id(id).is_some() || neovim_workspace::parse_files_id(id).is_some()) {
+            if self.window.dock_current.as_ref() != Some(&stable_id)
+                && !self.window.dock_current.as_deref().is_some_and(|id| git_workspace::task_id(id).is_some() || neovim_workspace::parse_id(id).is_some() || neovim_workspace::parse_files_id(id).is_some()) {
                 let weak = cx.weak_entity();
                 let selected_id = task_id.clone();
                 let voice_pane = pane.downgrade();
-                let lifecycle: docking::LifecycleHook = Rc::new(move |event, _, cx| {
+                let lifecycle: docking::LifecycleHook = Rc::new(move |event, window, cx| {
                     if let docking::PaneLifecycle::Visible(visible) = event {
                         activity_effects::set_pane_visible(&selected_id, visible, cx);
                     }
@@ -4072,11 +3936,19 @@ impl Desktop {
                         let _ = voice_pane.update(cx, |pane, cx| pane.deactivate_voice(cx));
                     }
                     if matches!(event, docking::PaneLifecycle::Active(true)) {
-                        let _ = weak.update(cx, |desktop, cx| {
-                            desktop.sidebar = Sidebar::Chats;
-                            desktop.selected = Some(selected_id.clone());
-                            desktop.dock_current = Some(format!("chat:{selected_id}"));
-                            cx.notify();
+                        let weak = weak.clone();
+                        let selected_id = selected_id.clone();
+                        let handle = window.window_handle();
+                        cx.defer(move |cx| {
+                            let _ = handle.update(cx, |_, window, cx| weak.update(cx, |desktop, cx| {
+                                let key = format!("chat:{selected_id}");
+                                let _ = desktop.with_workspace_for_pane_in(&key, window, cx, |desktop, _, cx| {
+                                    desktop.window.sidebar = Sidebar::Chats;
+                                    desktop.window.selected = Some(selected_id);
+                                    desktop.window.dock_current = Some(key.clone());
+                                    cx.notify();
+                                });
+                            }));
                         });
                     }
                 });
@@ -4086,7 +3958,7 @@ impl Desktop {
                     .map(|task| field(task, "title"))
                     .unwrap_or_else(|| "Chat".into());
                 let focus = pane.focus_handle(cx);
-                self.dock.update(cx, |dock, cx| {
+                self.window.dock.update(cx, |dock, cx| {
                     if !dock.focus(&stable_id, window, cx) {
                         let _ = dock.add(
                             docking::PaneSpec {
@@ -4106,28 +3978,28 @@ impl Desktop {
                     }
                     dock.set_shown(true, window, cx);
                 });
-                if let Some(origin) = self.pending_draft_chats.remove(&task_id) {
-                    self.pending_empty_session = Some((origin, task_id.clone()));
+                if let Some(origin) = self.window.pending_draft_chats.remove(&task_id) {
+                    self.window.pending_empty_session = Some((origin, task_id.clone()));
                 }
-                if self.pending_empty_session.as_ref().is_some_and(|(_, requested)| requested == &task_id) {
-                    if let Some((origin, _)) = self.pending_empty_session.take() {
-                        if self.dock.update(cx, |dock, cx| dock.replace_pane(&origin, &stable_id, window, cx)) {
+                if self.window.pending_empty_session.as_ref().is_some_and(|(_, requested)| requested == &task_id) {
+                    if let Some((origin, _)) = self.window.pending_empty_session.take() {
+                        if self.window.dock.update(cx, |dock, cx| dock.replace_pane(&origin, &stable_id, window, cx)) {
                             self.draft_panes.borrow_mut().remove(&origin);
                             self.draft_subscriptions.remove(&origin);
-                        } else { self.error = Some("Could not place this chat in the selected pane. The chat remains open.".into()); }
+                        } else { self.window.error = Some("Could not place this chat in the selected pane. The chat remains open.".into()); }
                     }
                 }
-                self.dock_current = Some(stable_id);
+                self.window.dock_current = Some(stable_id);
             }
         }
         for pane in self.chat_panes.borrow().values() {
             pane.update(cx, |pane, cx| pane.set_composed_palette(palette, cx));
         }
         let mut content = div().flex_1().h_full().min_w_0();
-        if !self.dock.read(cx).has_panes() {
-            content = content.bg(self.workspace_route_background(palette, cx)).child(self.dock.clone());
+        if !self.window.dock.read(cx).has_panes() {
+            content = content.bg(self.workspace_route_background(palette, cx)).child(self.window.dock.clone());
         } else {
-            content = content.child(self.dock.clone());
+            content = content.child(self.window.dock.clone());
         }
         let workspace = self.sidebar_split(sidebar, content.into_any_element(), palette, window, cx);
         // Each non-overlapping pane and the sidebar own their single surface
@@ -4149,7 +4021,7 @@ impl Desktop {
 impl Desktop {
     fn refresh_wallpaper(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let enabled = matches!(self.snapshot["settings"]["windowSurface"].as_str(), Some("glass" | "translucent"));
-        self.wallpaper_backdrop.update(cx, |backdrop, cx| backdrop.refresh(window, enabled, cx));
+        self.window.wallpaper_backdrop.update(cx, |backdrop, cx| backdrop.refresh(window, enabled, cx));
         if wallpaper_theme::mode() != wallpaper_theme::Mode::Manual {
             self.wallpaper_accent.update(cx, |sampler, cx| sampler.refresh(window, cx));
         }
@@ -4157,10 +4029,10 @@ impl Desktop {
     fn invalidate_surface_blends(&mut self, cx: &mut Context<Self>) {
         gpui_kit::component::resizable::set_separator_blend_mode(crate::surface_blend::separator_mode());
         for pane in self.chat_panes.borrow().values() { pane.update(cx, |_, cx| cx.notify()); }
-        for pane in self.terminal_panes.values() { pane.update(cx, |_, cx| cx.notify()); }
-        if let Some(pane) = &self.terminal { pane.update(cx, |_, cx| cx.notify()); }
+        for pane in self.window.terminal_panes.values() { pane.update(cx, |_, cx| cx.notify()); }
+        if let Some(pane) = &self.window.terminal { pane.update(cx, |_, cx| cx.notify()); }
         if let Some(pane) = &self.browser { pane.update(cx, |_, cx| cx.notify()); }
-        self.dock.update(cx, |dock, cx| {
+        self.window.dock.update(cx, |dock, cx| {
             dock.refresh_activity(cx);
             cx.notify();
         });
@@ -4168,8 +4040,8 @@ impl Desktop {
     }
 
     fn render_surface(&mut self, palette: design::Palette, window: &mut Window, cx: &mut Context<Self>) -> Div {
-        for id in std::mem::take(&mut self.removed_dock_ids) {
-            self.dock.update(cx, |dock, cx| {
+        for id in std::mem::take(&mut self.window.removed_pane_ids) {
+            self.window.dock.update(cx, |dock, cx| {
                 dock.remove(&id, window, cx);
             });
         }
@@ -4185,7 +4057,7 @@ impl Desktop {
                     || preferences.data.appearance.last_route.as_deref()
                         != Self::palette_routes()
                             .into_iter()
-                            .find(|(_, _, surface)| *surface == self.sidebar)
+                            .find(|(_, _, surface)| *surface == self.window.sidebar)
                             .map(|(id, _, _)| id)
                     || preferences
                         .data
@@ -4205,19 +4077,19 @@ impl Desktop {
             / 14.;
         let ready = self.service.is_some()
             && self.preferences.is_some()
-            && !self.preferences_restore
-            && !self.preferences_restoring
+            && !self.window.preferences_restore
+            && !self.window.preferences_restoring
             && !self.closing;
-        self.dock.update(cx, |dock, cx| {
+        self.window.dock.update(cx, |dock, cx| {
             dock.set_empty_presentation(
                 palette,
                 font_ratio,
-                self.busy || self.empty_terminal_pending || !ready,
+                self.window.busy || self.window.empty_terminal_pending || !ready,
                 ready,
                 cx,
             )
         });
-        self.dock.update(cx, |dock, cx| dock.set_empty_sessions(&self.empty_sessions, cx));
+        self.window.dock.update(cx, |dock, cx| dock.set_empty_sessions(&self.empty_sessions, cx));
         if self.closing {
             return div()
                 .size_full()
@@ -4234,91 +4106,90 @@ impl Desktop {
                 browser.set_appearance(palette, font_ratio, cx);
             });
         }
-        if self.mail.is_some() && self.mail_context_task != self.selected {
-            let selected = self.selected.clone();
-            self.mail.as_ref().unwrap().update(cx, |mail, cx| {
+        if self.window.mail.is_some() && self.window.mail_context_task != self.window.selected {
+            let selected = self.window.selected.clone();
+            self.window.mail.as_ref().unwrap().update(cx, |mail, cx| {
                 mail.set_context(&self.snapshot, selected.clone(), cx)
             });
-            self.mail_context_task = selected;
+            self.window.mail_context_task = selected;
         }
         // Retained split panes keep receiving state even when another route is active.
-        if self.git_panes_revision != self.revision {
-            for (id, pane) in &self.git_panes {
+        if self.window.git_panes_revision != self.revision {
+            for (id, pane) in &self.window.git_panes {
                 if let Some(task) = git_workspace::task_id(id) {
                     pane.update(cx, |pane, cx| pane.set_context(&self.snapshot, task, cx));
                 }
             }
-            self.git_panes_revision = self.revision.clone();
+            self.window.git_panes_revision = self.revision.clone();
         }
-        let context = (self.revision.clone(), self.selected.clone());
-        if let Some(pane) = &self.git {
-            if self.git_context.as_ref() != Some(&context) {
+        let context = (self.revision.clone(), self.window.selected.clone());
+        if let Some(pane) = &self.window.git {
+            if self.window.git_context.as_ref() != Some(&context) {
                 pane.update(cx, |pane, cx| {
                     pane.set_context(
                         &self.snapshot,
-                        self.selected.as_deref().unwrap_or_default(),
+                        self.window.selected.as_deref().unwrap_or_default(),
                         cx,
                     )
                 });
-                self.git_context = Some(context.clone());
+                self.window.git_context = Some(context.clone());
             }
         }
-        if let Some(pane) = &self.subagents {
-            if self.subagents_context.as_ref() != Some(&context) {
-                let task = self.selected.as_deref().unwrap_or_default();
+        if let Some(pane) = &self.window.subagents {
+            if self.window.subagents_context.as_ref() != Some(&context) {
+                let task = self.window.selected.as_deref().unwrap_or_default();
                 pane.update(cx, |pane, cx| {
                     if let Some(items) = self.collaboration_records.get(task) {
                         pane.set_prepared_context(self.snapshot.clone(), task, items.clone(), self.collaboration_transcripts[task].clone(), cx);
                     } else { pane.set_context(self.snapshot.clone(), task, cx); }
                 });
-                self.subagents_context = Some(context.clone());
+                self.window.subagents_context = Some(context.clone());
             }
         }
-        if let Some(pane) = &self.terminal {
-            if self.terminal_context.as_ref() != Some(&context) {
+        if let Some(pane) = &self.window.terminal {
+            if self.window.terminal_context.as_ref() != Some(&context) {
                 pane.update(cx, |pane, cx| {
-                    pane.set_context(&self.snapshot, self.selected.clone(), cx)
+                    pane.set_context(&self.snapshot, self.window.selected.clone(), cx)
                 });
-                self.terminal_context = Some(context);
+                self.window.terminal_context = Some(context);
             }
         }
-        if let Some(pane) = &self.archives {
-            if self.archives_revision != self.revision {
+        if let Some(pane) = &self.window.archives {
+            if self.window.archives_revision != self.revision {
                 pane.update(cx, |pane, cx| pane.set_snapshot(&self.snapshot, cx));
-                self.archives_revision = self.revision.clone();
+                self.window.archives_revision = self.revision.clone();
             }
         }
-        if let Some(pane) = &self.agent_editor {
-            if self.agent_editor_revision != self.revision {
+        if let Some(pane) = &self.window.agent_editor {
+            if self.window.agent_editor_revision != self.revision {
                 pane.update(cx, |pane, cx| pane.set_snapshot(&self.snapshot, window, cx));
-                self.agent_editor_revision = self.revision.clone();
+                self.window.agent_editor_revision = self.revision.clone();
             }
         }
-        if let Some(pane) = &self.schedules {
-            if self.schedules_revision != self.revision {
+        if let Some(pane) = &self.window.schedules {
+            if self.window.schedules_revision != self.revision {
                 pane.update(cx, |pane, cx| pane.set_snapshot(&self.snapshot, cx));
-                self.schedules_revision = self.revision.clone();
+                self.window.schedules_revision = self.revision.clone();
             }
         }
-        if let Some(pane) = &self.usage {
-            if self.usage_revision != self.revision {
+        if let Some(pane) = &self.window.usage {
+            if self.window.usage_revision != self.revision {
                 pane.update(cx, |pane, cx| pane.set_snapshot(&self.snapshot, cx));
-                self.usage_revision = self.revision.clone();
+                self.window.usage_revision = self.revision.clone();
             }
         }
         self.ensure_sidebar_usage(window, cx);
-        let sidebar_snapshot_changed = self
-            .sidebar_usage_snapshot
+        let sidebar_snapshot_changed = self.window.sidebar_usage_snapshot
             .as_ref()
             .is_none_or(|snapshot| !Rc::ptr_eq(snapshot, &self.snapshot))
-            || self.sidebar_usage_revision != self.revision;
+            || self.window.sidebar_usage_revision != self.revision;
         if sidebar_snapshot_changed {
-            if let Some(widget) = &self.sidebar_usage {
+            if let Some(widget) = &self.window.sidebar_usage {
                 widget.update(cx, |widget, cx| {
                     widget.set_snapshot_shared(self.snapshot.clone(), self.revision.as_deref(), cx)
                 });
-                let retired_snapshot = self.sidebar_usage_snapshot.replace(self.snapshot.clone());
-                self.sidebar_usage_revision = self.revision.clone();
+                let retired_snapshot = self.window.sidebar_usage_snapshot.replace(self.snapshot.clone());
+                self.window.sidebar_usage_revision = self.revision.clone();
                 if let Some(snapshot) = retired_snapshot {
                     retire_snapshot(snapshot, cx);
                 }
@@ -4333,15 +4204,15 @@ impl Desktop {
             .filter(|t| t["archived"] != true)
             .collect();
         shell::set_task_markers_visible(
-            (!self.sidebar_is_hidden() || self.sidebar_motion.active())
-                && !self.sidebar_collapsed && !(self.sidebar_is_hidden() && self.sidebar_motion_compact)
-                && !self.preferences_open && !session_lock::locked(cx) && !self.closing, self.sidebar_view, cx);
-        let sidebar = if self.sidebar_is_hidden() && !self.sidebar_motion.active() { div().into_any_element() } else if self.sidebar_collapsed || (self.sidebar_is_hidden() && self.sidebar_motion_compact) {
+            (!self.sidebar_is_hidden() || self.window.sidebar_motion.active())
+                && !self.window.sidebar_collapsed && !(self.sidebar_is_hidden() && self.window.sidebar_motion_compact)
+                && !self.window.preferences_open && !session_lock::locked(cx) && !self.closing, self.window.sidebar_view, cx);
+        let sidebar = if self.sidebar_is_hidden() && !self.window.sidebar_motion.active() { div().into_any_element() } else if self.window.sidebar_collapsed || (self.sidebar_is_hidden() && self.window.sidebar_motion_compact) {
             self.render_compact_sidebar(&agents, &tasks, palette, window, cx)
         } else { self.render_sidebar(&agents, &tasks, palette, window, cx) };
         let sidebar = div()
             .id("native-preferences-sidebar")
-            .track_focus(&self.sidebar_focus)
+            .track_focus(&self.window.sidebar_focus)
             .w_full()
             .min_w_0()
             .flex()
@@ -4363,18 +4234,18 @@ impl Desktop {
             }
             let content = div().flex_1().h_full().min_w_0().relative()
                 .when_some(self.startup_preview.clone(), |content, preview| content.child(preview))
-                .when_some(self.error.as_deref().and_then(chat::connection_recovery::visible_error).map(str::to_owned), |content, error| content.child(div().absolute().bottom_4().left_4().p_3().text_sm().child(error)));
+                .when_some(self.window.error.as_deref().and_then(chat::connection_recovery::visible_error).map(str::to_owned), |content, error| content.child(div().absolute().bottom_4().left_4().p_3().text_sm().child(error)));
             let workspace = self.sidebar_split(sidebar, content.into_any_element(), palette, window, cx);
             return div().size_full().bg(self.workspace_route_background(palette, cx))
                 .child(inert_workspace::InertWorkspace::new(workspace));
         }
-        if self.sidebar == Sidebar::Archived {
+        if self.window.sidebar == Sidebar::Archived {
             self.ensure_archives(window, cx);
             let mut content = div().flex_1().h_full().min_w_0();
-            if let Some(pane) = self.archives.clone() {
-                if self.archives_revision != self.revision {
+            if let Some(pane) = self.window.archives.clone() {
+                if self.window.archives_revision != self.revision {
                     pane.update(cx, |pane, cx| pane.set_snapshot(&self.snapshot, cx));
-                    self.archives_revision = self.revision.clone();
+                    self.window.archives_revision = self.revision.clone();
                 }
                 content = content.child(self.auxiliary_dock(
                     Sidebar::Archived,
@@ -4399,25 +4270,25 @@ impl Desktop {
                 ))
                 .child(self.sidebar_split(sidebar, content.into_any_element(), palette, window, cx));
         }
-        if self.sidebar == Sidebar::Git {
-            if self.git.is_none() {
+        if self.window.sidebar == Sidebar::Git {
+            if self.window.git.is_none() {
                 if let Some(service) = self.service.clone() {
-                    self.git =
+                    self.window.git =
                         Some(cx.new(|cx| git::GitPane::new(service, &self.snapshot, window, cx)));
                 }
             }
             let mut content = div().flex_1().h_full().min_w_0();
-            if let Some(pane) = &self.git {
-                let context = (self.revision.clone(), self.selected.clone());
-                if self.git_context.as_ref() != Some(&context) {
+            if let Some(pane) = &self.window.git {
+                let context = (self.revision.clone(), self.window.selected.clone());
+                if self.window.git_context.as_ref() != Some(&context) {
                     pane.update(cx, |pane, cx| {
                         pane.set_context(
                             &self.snapshot,
-                            self.selected.as_deref().unwrap_or_default(),
+                            self.window.selected.as_deref().unwrap_or_default(),
                             cx,
                         )
                     });
-                    self.git_context = Some(context);
+                    self.window.git_context = Some(context);
                 }
                 content = content.child(self.auxiliary_dock(
                     Sidebar::Git,
@@ -4442,25 +4313,25 @@ impl Desktop {
                 ))
                 .child(self.sidebar_split(sidebar, content.into_any_element(), palette, window, cx));
         }
-        if self.sidebar == Sidebar::Subagents {
-            if self.subagents.is_none() {
+        if self.window.sidebar == Sidebar::Subagents {
+            if self.window.subagents.is_none() {
                 if let Some(service) = self.service.clone() {
-                    self.subagents = Some(cx.new(|cx| {
+                    self.window.subagents = Some(cx.new(|cx| {
                         collaboration::SubagentPane::new(service, self.snapshot.clone(), window, cx)
                     }));
                 }
             }
             let mut content = div().flex_1().h_full().min_w_0();
-            if let Some(pane) = &self.subagents {
-                let context = (self.revision.clone(), self.selected.clone());
-                if self.subagents_context.as_ref() != Some(&context) {
+            if let Some(pane) = &self.window.subagents {
+                let context = (self.revision.clone(), self.window.selected.clone());
+                if self.window.subagents_context.as_ref() != Some(&context) {
                     pane.update(cx, |pane, cx| {
-                        let task = self.selected.as_deref().unwrap_or_default();
+                        let task = self.window.selected.as_deref().unwrap_or_default();
                         if let Some(items) = self.collaboration_records.get(task) {
                             pane.set_prepared_context(self.snapshot.clone(), task, items.clone(), self.collaboration_transcripts[task].clone(), cx);
                         } else { pane.set_context(self.snapshot.clone(), task, cx); }
                     });
-                    self.subagents_context = Some(context);
+                    self.window.subagents_context = Some(context);
                 }
                 content = content.child(self.auxiliary_dock(
                     Sidebar::Subagents,
@@ -4485,10 +4356,10 @@ impl Desktop {
                 ))
                 .child(self.sidebar_split(sidebar, content.into_any_element(), palette, window, cx));
         }
-        if self.sidebar == Sidebar::Agents {
-            if self.agent_editor.is_none() {
+        if self.window.sidebar == Sidebar::Agents {
+            if self.window.agent_editor.is_none() {
                 if let Some(service) = self.service.clone() {
-                    self.agent_editor = Some(cx.new(|cx| {
+                    self.window.agent_editor = Some(cx.new(|cx| {
                         agents::AgentHostPane::new(
                             service,
                             self.snapshot.as_ref().clone(),
@@ -4499,12 +4370,12 @@ impl Desktop {
                 }
             }
             let mut content = div().flex_1().h_full().min_w_0();
-            if let Some(editor) = &self.agent_editor {
-                if self.agent_editor_revision != self.revision {
+            if let Some(editor) = &self.window.agent_editor {
+                if self.window.agent_editor_revision != self.revision {
                     editor.update(cx, |editor, cx| {
                         editor.set_snapshot(&self.snapshot, window, cx)
                     });
-                    self.agent_editor_revision = self.revision.clone();
+                    self.window.agent_editor_revision = self.revision.clone();
                 }
                 content = content.child(self.auxiliary_dock(
                     Sidebar::Agents,
@@ -4529,19 +4400,19 @@ impl Desktop {
                 ))
                 .child(self.sidebar_split(sidebar, content.into_any_element(), palette, window, cx));
         }
-        if self.sidebar == Sidebar::Schedules {
-            if self.schedules.is_none() {
+        if self.window.sidebar == Sidebar::Schedules {
+            if self.window.schedules.is_none() {
                 if let Some(service) = self.service.clone() {
-                    self.schedules = Some(cx.new(|cx| {
+                    self.window.schedules = Some(cx.new(|cx| {
                         schedules::SchedulePane::new(service, &self.snapshot, window, cx)
                     }));
                 }
             }
             let mut content = div().flex_1().h_full().min_w_0();
-            if let Some(usage) = &self.schedules {
-                if self.schedules_revision != self.revision {
+            if let Some(usage) = &self.window.schedules {
+                if self.window.schedules_revision != self.revision {
                     usage.update(cx, |usage, cx| usage.set_snapshot(&self.snapshot, cx));
-                    self.schedules_revision = self.revision.clone();
+                    self.window.schedules_revision = self.revision.clone();
                 }
                 content = content.child(self.auxiliary_dock(
                     Sidebar::Schedules,
@@ -4566,19 +4437,19 @@ impl Desktop {
                 ))
                 .child(self.sidebar_split(sidebar, content.into_any_element(), palette, window, cx));
         }
-        if self.sidebar == Sidebar::Usage {
-            if self.usage.is_none() {
+        if self.window.sidebar == Sidebar::Usage {
+            if self.window.usage.is_none() {
                 if let Some(service) = self.service.clone() {
-                    self.usage = Some(
+                    self.window.usage = Some(
                         cx.new(|cx| usage::UsagePane::new(service, &self.snapshot, window, cx)),
                     );
                 }
             }
             let mut content = div().flex_1().h_full().min_w_0();
-            if let Some(usage) = &self.usage {
-                if self.usage_revision != self.revision {
+            if let Some(usage) = &self.window.usage {
+                if self.window.usage_revision != self.revision {
                     usage.update(cx, |usage, cx| usage.set_snapshot(&self.snapshot, cx));
-                    self.usage_revision = self.revision.clone();
+                    self.window.usage_revision = self.revision.clone();
                 }
                 content = content.child(self.auxiliary_dock(
                     Sidebar::Usage,
@@ -4603,9 +4474,8 @@ impl Desktop {
                 ))
                 .child(self.sidebar_split(sidebar, content.into_any_element(), palette, window, cx));
         }
-        if self.sidebar == Sidebar::Terminal {
-            if self
-                .dock_current
+        if self.window.sidebar == Sidebar::Terminal {
+            if self.window.dock_current
                 .as_deref()
                 .is_some_and(|key| key.starts_with("terminal:"))
             {
@@ -4613,7 +4483,7 @@ impl Desktop {
                     .flex_1()
                     .h_full()
                     .min_w_0()
-                    .child(self.dock.clone())
+                    .child(self.window.dock.clone())
                     .into_any_element();
                 return div()
                     .size_full()
@@ -4622,19 +4492,19 @@ impl Desktop {
                     .text_color(rgb(palette.ink))
                     .child(self.sidebar_split(sidebar, content, palette, window, cx));
             }
-            if self.terminal.is_none() {
+            if self.window.terminal.is_none() {
                 if let Some(service) = self.service.clone() {
-                    self.terminal = Some(self.new_terminal_manager(service,window,cx));
+                    self.window.terminal = Some(self.new_terminal_manager(service,window,cx));
                 }
             }
             let mut content = div().flex_1().h_full().min_w_0();
-            if let Some(terminal) = &self.terminal {
-                let context = (self.revision.clone(), self.selected.clone());
-                if self.terminal_context.as_ref() != Some(&context) {
+            if let Some(terminal) = &self.window.terminal {
+                let context = (self.revision.clone(), self.window.selected.clone());
+                if self.window.terminal_context.as_ref() != Some(&context) {
                     terminal.update(cx, |terminal, cx| {
-                        terminal.set_context(&self.snapshot, self.selected.clone(), cx)
+                        terminal.set_context(&self.snapshot, self.window.selected.clone(), cx)
                     });
-                    self.terminal_context = Some(context);
+                    self.window.terminal_context = Some(context);
                 }
                 content = content.child(self.auxiliary_dock(
                     Sidebar::Terminal,
@@ -4659,12 +4529,12 @@ impl Desktop {
                 ))
                 .child(self.sidebar_split(sidebar, content.into_any_element(), palette, window, cx));
         }
-        if self.sidebar == Sidebar::Channels {
-            if self.channels.is_none() {
+        if self.window.sidebar == Sidebar::Channels {
+            if self.window.channels.is_none() {
                 if let Some(service) = self.service.clone() {
                     let channels = cx.new(|cx| ChannelPane::new(service, window, cx));
-                    self.channel_subscription =
-                        Some(cx.subscribe(&channels, |view, _, event, cx| match event {
+                    self.window.channel_subscription =
+                        Some(cx.subscribe_workspace(&channels, window, |view, _, event, _, cx| match event {
                             channels::ChannelEvent::Refresh => view.refresh(cx),
                             channels::ChannelEvent::HistoryPage {
                                 channel,
@@ -4677,23 +4547,23 @@ impl Desktop {
                                 cx,
                             ),
                         }));
-                    self.channels = Some(channels);
+                    self.window.channels = Some(channels);
                 }
             }
             let mut content = div().flex_1().h_full().min_w_0();
-            if let Some(channels) = &self.channels {
-                if self.channels_revision != self.revision {
+            if let Some(channels) = &self.window.channels {
+                if self.window.channels_revision != self.revision {
                     channels.update(cx, |channels, cx| {
                         channels.sync(
                             self.snapshot.clone(),
                             self.revision.as_deref().unwrap_or_default(),
                             false,
                             &[],
-                            &self.channel_cursors,
+                            &self.window.channel_cursors,
                             cx,
                         )
                     });
-                    self.channels_revision = self.revision.clone();
+                    self.window.channels_revision = self.revision.clone();
                 }
                 content = content.child(self.auxiliary_dock(
                     Sidebar::Channels,
@@ -4718,19 +4588,19 @@ impl Desktop {
                 ))
                 .child(self.sidebar_split(sidebar, content.into_any_element(), palette, window, cx));
         }
-        if self.sidebar == Sidebar::Mail {
-            if self.mail.is_none() {
+        if self.window.sidebar == Sidebar::Mail {
+            if self.window.mail.is_none() {
                 if let Some(service) = self.service.clone() {
                     let mail = cx.new(|cx| MailPane::new(service, window, cx));
                     mail.update(cx, |mail, cx| {
-                        mail.set_context(&self.snapshot, self.selected.clone(), cx)
+                        mail.set_context(&self.snapshot, self.window.selected.clone(), cx)
                     });
-                    self.mail_context_task = self.selected.clone();
-                    self.mail = Some(mail);
+                    self.window.mail_context_task = self.window.selected.clone();
+                    self.window.mail = Some(mail);
                 }
             }
             let mut content = div().flex_1().h_full().min_w_0();
-            if let Some(mail) = &self.mail {
+            if let Some(mail) = &self.window.mail {
                 content = content.child(self.auxiliary_dock(
                     Sidebar::Mail,
                     "Mail",
@@ -4754,16 +4624,16 @@ impl Desktop {
                 ))
                 .child(self.sidebar_split(sidebar, content.into_any_element(), palette, window, cx));
         }
-        if self.sidebar == Sidebar::Projects {
-            if self.workspace.is_none() {
+        if self.window.sidebar == Sidebar::Projects {
+            if self.window.workspace.is_none() {
                 if let Some(service) = self.service.clone() {
-                    self.workspace = Some(cx.new(|cx| {
+                    self.window.workspace = Some(cx.new(|cx| {
                         WorkspacePane::new(service, self.snapshot.clone(), window, cx)
                     }));
                 }
             }
             let mut content = div().flex_1().h_full().min_w_0();
-            if let Some(workspace) = &self.workspace {
+            if let Some(workspace) = &self.window.workspace {
                 content = content.child(self.auxiliary_dock(
                     Sidebar::Projects,
                     "Projects",
@@ -4787,8 +4657,8 @@ impl Desktop {
                 ))
                 .child(self.sidebar_split(sidebar, content.into_any_element(), palette, window, cx));
         }
-        if self.sidebar == Sidebar::Settings {
-            self.dock
+        if self.window.sidebar == Sidebar::Settings {
+            self.window.dock
                 .update(cx, |dock, cx| dock.set_shown(false, window, cx));
             let settings_content = div()
                 .flex_1()
@@ -4809,23 +4679,22 @@ impl Desktop {
                 ))
                 .child(self.sidebar_split(sidebar, settings_content, palette, window, cx));
         }
-        if self.sidebar == Sidebar::Browser {
+        if self.window.sidebar == Sidebar::Browser {
             if self.browser.is_none() {
                 self.ensure_browser(window, cx);
             }
             if self.preferences.is_some()
-                && !self.preferences_restore
-                && !self.preferences_restoring
-                && !self
-                    .dock_current
+                && !self.window.preferences_restore
+                && !self.window.preferences_restoring
+                && !self.window.dock_current
                     .as_deref()
                     .is_some_and(|id| id.starts_with("browser:"))
             {
                 if let Err(error) = self.open_selected_browser(window, cx) {
-                    self.error = Some(error);
+                    self.window.error = Some(error);
                 }
             }
-            let content = div().flex_1().h_full().min_w_0().child(self.dock.clone());
+            let content = div().flex_1().h_full().min_w_0().child(self.window.dock.clone());
             return div()
                 .size_full()
                 .flex()
@@ -4844,9 +4713,18 @@ impl Desktop {
 }
 impl Render for Desktop {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.ensure_workspace_window_registry(window, cx);
+        self.restore_workspace_window_hosts(window,cx);
+        self.process_workspace_window_intent(window,cx);
+        if !self.removed_dock_ids.is_empty() {
+            let ids=std::mem::take(&mut self.removed_dock_ids);
+            self.window.removed_pane_ids.extend(ids.iter().cloned());
+            for view in self.parked_window_views.values_mut().chain(self.workspace_view_cache.values_mut()) {view.removed_pane_ids.extend(ids.iter().cloned());}
+        }
+        self.sync_workspace_projection(cx);
         self.process_browser_requests(window, cx);
         if let Some(enabled) = self.pending_auto_size_panes.take() {
-            self.dock.update(cx, |dock, cx| dock.set_auto_size_panes(enabled, window, cx));
+            self.window.dock.update(cx, |dock, cx| dock.set_auto_size_panes(enabled, window, cx));
         }
         // Begin before any child renders: NativePanel records highlight
         // candidates during render, before deferred paint callbacks run.
@@ -4855,76 +4733,82 @@ impl Render for Desktop {
             native_pane_highlight::clear(window);
             native_popup_occlusion::clear(window);
             let palette=self.apply_native_theme(window,cx);
+            if self.current_workspace_window!=workspace_window_state::WindowId::main() {
+                self.window.dock.update(cx,|dock,cx|dock.set_shown(false,window,cx));
+                window.close_dialog(cx);native_popup_occlusion::clear(window);
+                return div().size_full().flex().items_center().justify_center().bg(rgb(palette.paper)).child(
+                    div().flex().flex_col().gap_3().child("Monitter is locked").child(
+                        div().id("unlock-main-window").cursor_pointer().child("Unlock in main window").on_click(cx.workspace_listener(|desktop,_,_,cx|desktop.focus_primary_workspace_window(cx)))));
+            }
             self.session_lock.update(cx,|lock,_|lock.set_palette(palette));
-            self.dock.update(cx,|dock,cx|dock.set_shown(false,window,cx));
+            self.window.dock.update(cx,|dock,cx|dock.set_shown(false,window,cx));
             let workspace = self.render_surface(palette, window, cx);
             return div().size_full().relative()
                 .child(inert_workspace::InertWorkspace::new(workspace.into_any_element()))
                 .child(div().absolute().inset_0().child(self.session_lock.clone()));
         }
         let palette = self.apply_native_theme(window, cx);
-        for session in self.neovim_sessions.values() {
+        for session in self.window.neovim_sessions.values() {
             session.update(cx, |session, cx| session.set_theme(palette, &self.snapshot["settings"], cx));
         }
         // Synchronize only when the surface setting changes. No wallpaper I/O per frame.
         let wallpaper_enabled = matches!(self.snapshot["settings"]["windowSurface"].as_str(), Some("glass" | "translucent"));
-        if self.wallpaper_backdrop.read(cx).enabled() != wallpaper_enabled {
-            self.wallpaper_backdrop.update(cx, |backdrop, cx| backdrop.refresh(window, wallpaper_enabled, cx));
+        if self.window.wallpaper_backdrop.read(cx).enabled() != wallpaper_enabled {
+            self.window.wallpaper_backdrop.update(cx, |backdrop, cx| backdrop.refresh(window, wallpaper_enabled, cx));
         }
         window.set_rem_size(design::ui_scaled_px(16.));
         let new_scale = design::interface_scale();
-        if self.sidebar_motion.active() && self.sidebar_resize.read(cx).is_resizing() {
-            self.sidebar_motion.cancel();
-            self.sidebar_resize_suppressed = false;
-            self.sidebar_hidden = false;
+        if self.window.sidebar_motion.active() && self.window.sidebar_resize.read(cx).is_resizing() {
+            self.window.sidebar_motion.cancel();
+            self.window.sidebar_resize_suppressed = false;
+            self.window.sidebar_hidden = false;
         }
         let resize_target = {
-            let state = self.sidebar_resize.read(cx);
-            if state.sizes().len() == 2 && !self.sidebar_resize_suppressed && !self.sidebar_is_hidden() {
-                let actual = state.sizes()[0] / design::ui_px(1., self.sidebar_scale);
+            let state = self.window.sidebar_resize.read(cx);
+            if state.sizes().len() == 2 && !self.window.sidebar_resize_suppressed && !self.sidebar_is_hidden() {
+                let actual = state.sizes()[0] / design::ui_px(1., self.window.sidebar_scale);
                 sidebar_resize_target(
                     actual,
-                    self.sidebar_collapsed,
+                    self.window.sidebar_collapsed,
                     state.is_resizing(),
-                    self.sidebar_scale,
+                    self.window.sidebar_scale,
                 )
             } else {
                 None
             }
         };
         if let Some(desired) = resize_target {
-            self.sidebar_resize_suppressed = true;
-            self.sidebar_resize.update(cx, |state, cx| {
-                state.resize_panel_for_layout(0, design::ui_px(desired, self.sidebar_scale), window, cx)
+            self.window.sidebar_resize_suppressed = true;
+            self.window.sidebar_resize.update(cx, |state, cx| {
+                state.resize_panel_for_layout(0, design::ui_px(desired, self.window.sidebar_scale), window, cx)
             });
-            self.sidebar_resize_suppressed = false;
+            self.window.sidebar_resize_suppressed = false;
         }
-        if self.sidebar_scale != new_scale {
+        if self.window.sidebar_scale != new_scale {
             self.finish_sidebar_motion(window, cx);
-            self.dock.update(cx, |dock, cx| {
+            self.window.dock.update(cx, |dock, cx| {
                 dock.set_tab_appearance(&self.snapshot["settings"], new_scale, cx)
             });
             // Persist the splitter in design units, while measuring/hit testing
             // in the same scaled GPUI pixels as the rest of the native tree.
-            if !self.sidebar_resize.read(cx).is_resizing() {
-                let width = if self.sidebar_is_hidden() {0.} else if self.sidebar_collapsed { design::compact_sidebar_width_design(new_scale) } else { expanded_sidebar_width_for_scale(self.current_sidebar_width(cx),new_scale) };
-                self.sidebar_scale = new_scale;
-                if self.sidebar_resize.read(cx).sizes().len() == 2 {
-                    self.sidebar_resize_suppressed = true;
-                    self.sidebar_resize.update(cx, |state, cx| {
+            if !self.window.sidebar_resize.read(cx).is_resizing() {
+                let width = if self.sidebar_is_hidden() {0.} else if self.window.sidebar_collapsed { design::compact_sidebar_width_design(new_scale) } else { expanded_sidebar_width_for_scale(self.current_sidebar_width(cx),new_scale) };
+                self.window.sidebar_scale = new_scale;
+                if self.window.sidebar_resize.read(cx).sizes().len() == 2 {
+                    self.window.sidebar_resize_suppressed = true;
+                    self.window.sidebar_resize.update(cx, |state, cx| {
                         state.resize_panel_for_layout(0, design::ui_px(width, new_scale), window, cx);
                     });
-                    self.sidebar_resize_suppressed = false;
+                    self.window.sidebar_resize_suppressed = false;
                 }
             }
         }
         let open = !self.closing
             && !self.close_pending
-            && self
-                .palette
+            && self.window.palette
                 .as_ref()
                 .is_some_and(|pane| pane.read(cx).is_open());
-        if self.preferences_open || open {
+        if self.window.preferences_open || open {
             native_pane_highlight::clear(window);
         }
         // Hidden native children must not enter the frame arena behind a modal.
@@ -4932,7 +4816,7 @@ impl Render for Desktop {
         let mut root = div()
             .size_full()
             .relative()
-            .on_modifiers_changed(cx.listener(|view, event: &ModifiersChangedEvent, window, cx| {
+            .on_modifiers_changed(cx.workspace_listener(|view, event: &ModifiersChangedEvent, window, cx| {
                 view.set_workspace_number_hints(event.modifiers.platform && window.is_window_active(), cx);
                 window.refresh();
             }))
@@ -4944,7 +4828,7 @@ impl Render for Desktop {
                 }
             });
         if wallpaper_backdrop::needed(window.is_fullscreen(), self.snapshot["settings"]["windowSurface"].as_str().unwrap_or("opaque")) {
-            if let Some(image) = self.wallpaper_backdrop.read(cx).image() {
+            if let Some(image) = self.window.wallpaper_backdrop.read(cx).image() {
                 // This image is painted above AppKit's backdrop. Restore the
                 // configured window tint above it across the entire window,
                 // including workspace chrome and the spaces between panes.
@@ -4957,7 +4841,7 @@ impl Render for Desktop {
         }
         if open {
             root = root.bg(design::surface_color(palette.paper));
-            let palette = self.palette.as_ref().unwrap().clone();
+            let palette = self.window.palette.as_ref().unwrap().clone();
             root = root.child(
                 div()
                     .id("native-palette-overlay")
@@ -4986,7 +4870,7 @@ impl Render for Desktop {
         if self.startup_pending {
             root = div().size_full().relative().child(inert_workspace::InertWorkspace::new(root.into_any_element()));
         }
-        if !self.preferences_open {
+        if !self.window.preferences_open {
             if let Some(error) = self.preferences_error.clone() {
                 root = root.child(div().id("workspace-layout-error").absolute().top(px(70.)).right(px(16.))
                     .w(px(420.)).max_w_full().p_3().rounded_lg().occlude()
@@ -4995,24 +4879,24 @@ impl Render for Desktop {
                     .child(div().flex().flex_wrap().gap_2()
                         .child(Button::new("reload-native-layout").compact().label("Reload saved workspace")
                             .disabled(self.preferences_busy)
-                            .on_click(cx.listener(|view, _, _, cx| view.load_preferences(cx))))
+                            .on_click(cx.workspace_listener(|view, _, _, cx| view.load_preferences(cx))))
                         .child(Button::new("save-current-native-layout").compact().label("Retry save")
                             .disabled(self.preferences_busy)
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.preferences_restore = false;
+                            .on_click(cx.workspace_listener(|view, _, _, cx| {
+                                view.window.preferences_restore = false;
                                 view.preferences_blocked = false;
                                 view.queue_preferences_save(cx);
                             })))
                         .child(Button::new("dismiss-native-layout-error").compact().label("Dismiss")
-                            .on_click(cx.listener(|view, _, _, cx| { view.preferences_error = None; cx.notify(); })))))
+                            .on_click(cx.workspace_listener(|view, _, _, cx| { view.preferences_error = None; cx.notify(); })))))
             }
         }
-        if self.preferences_open {
+        if self.window.preferences_open {
             // Dock corner masks and focus contours are deferred at priorities 2/3.
             // Paint the modal afterward so tile chrome cannot cross its card.
             root = root.child(gpui_kit::deferred(self.render_preferences_modal(window, cx)).with_priority(4));
         }
-        if !self.closing && !self.preferences_open {
+        if !self.closing && !self.window.preferences_open {
             if let Some(command_bar) = vim_command::bar(cx) {
                 if let Some(element) = command_bar.update(cx, |bar, cx| {
                     bar.set_palette(palette, cx);
@@ -5029,6 +4913,17 @@ impl Render for Desktop {
         if std::mem::take(&mut self.startup_live_frame_pending) {
             root = root.child(canvas(|_, _, _| (), |_, _, _, _| startup_workspace::mark("live-workspace-frame")).absolute().inset_0());
         }
+        // A shared lock hides every host, while its unlock event is delivered
+        // to the primary host. Restore each visible host from its own route on
+        // the next frame, including a satellite whose selection never changed.
+        // Apply this after route construction, which may open a native pane.
+        let native_surfaces_shown = !self.closing
+            && !self.window.preferences_open
+            && !open
+            && self.window.sidebar != Sidebar::Settings;
+        self.window.dock.update(cx, |dock, cx| {
+            dock.set_shown(native_surfaces_shown, window, cx)
+        });
         root
             // Pane highlights are deferred (priorities 1 and 3). Finalize
             // native overlay visibility after those candidates have painted.
@@ -5096,8 +4991,7 @@ impl Desktop {
         if self.closing {
             return Err("Desktop is closing.".into());
         }
-        if design::tile_theme() != monitter_lib::experimental_desktop::NativeTileTheme::Tern && self
-            .dock
+        if design::tile_theme() != monitter_lib::experimental_desktop::NativeTileTheme::Tern && self.window.dock
             .read(cx)
             .focused_pane_id(window, cx)
             .is_some_and(|id| browser_workspace::parse_browser_pane_id(&id).is_some())
@@ -5105,7 +4999,7 @@ impl Desktop {
             let id = self.create_browser_tab(window, cx)?;
             return self.open_browser_tab(id, window, cx);
         }
-        self.dock.update(cx, |dock, cx| {
+        self.window.dock.update(cx, |dock, cx| {
             dock.add_focused_empty_tab(window, cx).map(|_| ())
         })
     }
@@ -5118,7 +5012,7 @@ impl Desktop {
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
         if self.closing { return Err("Desktop is closing.".into()); }
-        self.dock.update(cx, |dock, cx| {
+        self.window.dock.update(cx, |dock, cx| {
             dock.add_focused_empty_split(vertical, window, cx).map(|_| ())
         })
     }
@@ -5133,7 +5027,7 @@ impl Desktop {
             return Err("Desktop is closing.".into());
         }
         if self.neovim_close_focused(window, cx) { return Ok(()); }
-        self.dock
+        self.window.dock
             .update(cx, |dock, cx| dock.close_focused_tab(window, cx))
     }
 
@@ -5147,7 +5041,7 @@ impl Desktop {
         if self.closing {
             return Err("Desktop is closing.".into());
         }
-        self.dock
+        self.window.dock
             .update(cx, |dock, cx| dock.select_focused_tab_at(index, window, cx))
     }
 }
@@ -5263,45 +5157,53 @@ impl Desktop {
         cx: &mut Context<Self>,
     ) {
         let Some(service) = self.service.clone() else {
-            self.error = Some("The native backend is not ready.".into());
+            self.window.error = Some("The native backend is not ready.".into());
             cx.notify();
             return;
         };
-        let origin = self.dock.read(cx).focused_pane_id(window, cx).filter(|id| id.starts_with("empty:"));
-        let destination = self.dock.read(cx).focused_group_node(window, cx);
+        let origin = self.window.dock.read(cx).focused_pane_id(window, cx).filter(|id| id.starts_with("empty:"));
+        let destination = self.window.dock.read(cx).focused_group_node(window, cx);
         let pane = cx.new(|cx| draft_creation::DraftCreationPane::new(service, self.snapshot.as_ref().clone(), window, cx));
         let id = format!("draft:{}", pane.entity_id());
         if let Some(agent) = agent_id { pane.update(cx, |draft, cx| draft.select_agent(agent, window, cx)); }
         let source = id.clone();
-        let subscription = cx.subscribe_in(&pane, window, move |view, pane, event: &draft_creation::DraftCreationEvent, window, cx| {
+        let subscription = cx.subscribe_workspace(&pane, window, move |view, pane, event: &draft_creation::DraftCreationEvent, window, cx| {
             match event {
                 draft_creation::DraftCreationEvent::Changed => {},
                 draft_creation::DraftCreationEvent::Send(submission) => view.submit_chat_draft(source.clone(), pane.clone(), submission.clone(), cx),
-                draft_creation::DraftCreationEvent::Close => { view.dock.update(cx, |dock, cx| dock.remove(&source, window, cx)); },
+                draft_creation::DraftCreationEvent::Close => { view.window.dock.update(cx, |dock, cx| dock.remove(&source, window, cx)); },
             }
         });
         self.draft_panes.borrow_mut().insert(id.clone(), pane.clone());
         self.draft_subscriptions.insert(id.clone(), subscription);
-        self.draft_creation = Some(pane.clone());
+        self.window.draft_creation = Some(pane.clone());
         self.deactivate_mail(window, cx);
-        self.sidebar = Sidebar::Chats;
-        self.selected = None;
+        self.window.sidebar = Sidebar::Chats;
+        self.window.selected = None;
         let focus = pane.focus_handle(cx);
         let weak = cx.entity().downgrade();
         let active_pane = pane.clone();
         let active_id = id.clone();
-        let lifecycle: docking::LifecycleHook = Rc::new(move |event, _, cx| {
+        let lifecycle: docking::LifecycleHook = Rc::new(move |event, window, cx| {
             if matches!(event, docking::PaneLifecycle::Active(true)) {
-                let _ = weak.update(cx, |view, cx| {
-                    view.selected = None;
-                    view.sidebar = Sidebar::Chats;
-                    view.dock_current = Some(active_id.clone());
-                    view.draft_creation = Some(active_pane.clone());
-                    cx.notify();
+                let weak = weak.clone();
+                let active_id = active_id.clone();
+                let active_pane = active_pane.clone();
+                let handle = window.window_handle();
+                cx.defer(move |cx| {
+                    let _ = handle.update(cx, |_, window, cx| weak.update(cx, |view, cx| {
+                        let _ = view.with_workspace_for_pane_in(&active_id, window, cx, |view, _, cx| {
+                            view.window.selected = None;
+                            view.window.sidebar = Sidebar::Chats;
+                            view.window.dock_current = Some(active_id.clone());
+                            view.window.draft_creation = Some(active_pane);
+                            cx.notify();
+                        });
+                    }));
                 });
             }
         });
-        let result = self.dock.update(cx, |dock, cx| {
+        let result = self.window.dock.update(cx, |dock, cx| {
             dock.add(docking::PaneSpec { id: id.clone(), title: "New Chat".into(), content: pane.into(), focus, lifecycle: Some(lifecycle), closable: true }, gpui_kit::component::dock::DockPlacement::Center, None, window, cx)?;
             if let Some(origin) = &origin { dock.replace_pane(origin, &id, window, cx); }
             else if let Some(node) = destination { dock.move_pane(&id, gpui_kit::component::dock::InsertTarget::Tabs { node, ix: None, activate: true }, window, cx); }
@@ -5309,9 +5211,9 @@ impl Desktop {
             dock.focus(&id, window, cx);
             Ok::<_, String>(())
         });
-        if let Err(error) = result { self.error = Some(error); }
-        self.dock_current = Some(id);
-        self.draft_creation_open = false;
+        if let Err(error) = result { self.window.error = Some(error); }
+        self.window.dock_current = Some(id);
+        self.window.draft_creation_open = false;
         cx.notify();
     }
     fn submit_chat_draft(
@@ -5359,9 +5261,10 @@ impl Desktop {
             });
             return;
         }
-        cx.spawn(async move |view, cx| {
+        let owner=self.workspace_weak_desktop(cx);
+        cx.spawn(async move |_, cx| {
             let outcome = receiver.await;
-            let _ = view.update(cx, |view, cx| {
+            let _ = owner.update(cx, |view, _, cx| {
                 match outcome {
                     Ok((task_id, result)) => {
                         pane.update(cx, |draft, cx| {
@@ -5370,9 +5273,9 @@ impl Desktop {
                             draft.set_error(result.as_ref().err().cloned(), cx);
                         });
                         if result.is_ok() {
-                            if let Some(id) = &task_id { if view.draft_panes.borrow().contains_key(&draft_id) { view.pending_draft_chats.insert(id.clone(), draft_id.clone()); } }
-                            view.sidebar = Sidebar::Chats;
-                            view.draft_creation_open = false;
+                            if let Some(id) = &task_id { if view.draft_panes.borrow().contains_key(&draft_id) { view.window.pending_draft_chats.insert(id.clone(), draft_id.clone()); } }
+                            view.window.sidebar = Sidebar::Chats;
+                            view.window.draft_creation_open = false;
 
                             view.refresh(cx);
                         }
@@ -5395,6 +5298,8 @@ fn main() {
         .with_assets(native_icons::DesktopIcons)
         .run(|cx| {
             gpui_kit::init(cx);
+            #[cfg(feature = "performance-profiling")]
+            if workspace_window_preview::open_if_requested(cx) { return; }
             #[cfg(feature = "visual-export")]
             if git::open_preview_if_requested(cx) { return; }
             #[cfg(feature = "visual-export")]
@@ -5467,27 +5372,65 @@ fn main() {
             );
             shortcut_desktop::install(window_handle, shortcut_desktop::DesktopShortcuts::new(desktop.downgrade()), cx);
             let weak = desktop.downgrade();
-            cx.on_action(move |_: &native_menu::LockSession,cx| {
-                let weak=weak.clone(); cx.defer(move|cx| {let _=window_handle.update(cx,|_,window,cx| {let _=weak.update(cx,|desktop,cx| {
-                    if session_lock::locked(cx) {return;}
-                    if desktop.session_lock.read(cx).configured() {desktop.session_lock.update(cx,|lock,cx|lock.lock(window,cx));}
-                    else {
-                        desktop.show_preferences(window,cx);
-                        if desktop.native_settings.is_none() {
-                            desktop.native_settings = Some(settings::NativeSettings::new(&desktop.snapshot["settings"], window, cx));
-                        }
-                        if let Some(settings)=&mut desktop.native_settings {settings.select_security();}
-                        cx.notify();
-                    }
-                });});});
+            cx.on_action(move |_: &native_menu::LockSession, cx| {
+                let weak = weak.clone();
+                cx.defer(move |cx| {
+                    let handle = weak
+                        .read_with(cx, |desktop, cx| {
+                            // The one lock entity keeps its focus authority in main.
+                            if desktop.session_lock.read(cx).configured() {
+                                None
+                            } else {
+                                desktop.active_workspace_window(cx)
+                            }
+                        })
+                        .ok()
+                        .flatten()
+                        .unwrap_or_else(|| window_handle.into());
+                    let _ = handle.update(cx, |_, window, cx| {
+                        let _ = weak.update(cx, |desktop, cx| {
+                            if session_lock::locked(cx) {
+                                return;
+                            }
+                            if desktop.session_lock.read(cx).configured() {
+                                desktop
+                                    .session_lock
+                                    .update(cx, |lock, cx| lock.lock(window, cx));
+                            } else {
+                                desktop.with_workspace_window(window, cx, |desktop, window, cx| {
+                                    desktop.show_preferences(window, cx);
+                                    if desktop.window.native_settings.is_none() {
+                                        desktop.window.native_settings =
+                                            Some(settings::NativeSettings::new(
+                                                &desktop.snapshot["settings"],
+                                                window,
+                                                cx,
+                                            ));
+                                    }
+                                    if let Some(settings) = &mut desktop.window.native_settings {
+                                        settings.select_security();
+                                    }
+                                    cx.notify();
+                                });
+                            }
+                        });
+                    });
+                });
             });
             let weak = desktop.downgrade();
             cx.on_action(move |_: &native_menu::OpenSettings, cx| {
                 let weak = weak.clone();
                 cx.defer(move |cx| {
-                    let _ = window_handle.update(cx, |_, window, cx| {
+                    let handle = weak
+                        .read_with(cx, |desktop, cx| desktop.active_workspace_window(cx))
+                        .ok()
+                        .flatten()
+                        .unwrap_or_else(|| window_handle.into());
+                    let _ = handle.update(cx, |_, window, cx| {
                         let _ = weak.update(cx, |desktop, cx| {
-                            desktop.switch_surface(Sidebar::Settings, window, cx);
+                            desktop.with_workspace_window(window, cx, |desktop, window, cx| {
+                                desktop.switch_surface(Sidebar::Settings, window, cx);
+                            });
                         });
                     });
                 });
@@ -5496,35 +5439,85 @@ fn main() {
             cx.on_action(move |_: &Quit, cx| {
                 let weak = weak.clone();
                 cx.defer(move |cx| {
-                    let _ = window_handle.update(cx, |_, window, cx| {
-                        let _ = weak.update(cx, |desktop, cx| desktop.request_close(window, cx));
+                    let handle = weak
+                        .read_with(cx, |desktop, cx| desktop.active_workspace_window(cx))
+                        .ok()
+                        .flatten()
+                        .unwrap_or_else(|| window_handle.into());
+                    let _ = handle.update(cx, |_, window, cx| {
+                        let _ = weak.update(cx, |desktop, cx| {
+                            desktop.with_workspace_window(window, cx, |desktop, window, cx| {
+                                desktop.request_close(window, cx)
+                            })
+                        });
                     });
                 });
             });
             let weak = desktop.downgrade();
             cx.on_app_quit(move |cx| {
-                let locked=session_lock::locked(cx);
-                let service = weak
-                    .update(cx, |desktop, cx| desktop.prepare_close(cx))
-                    .ok()
-                    .flatten();
-                let _ = window_handle.update(cx, |_, window, cx| window_state::save_native(window, cx));
-                // Platform-initiated app quit bypasses our deferred action handler.
-                // GPUI destroys windows immediately after observers return, so flush
-                // the closing frame here, outside the Desktop entity borrow.
-                let _ = window_handle.update(cx, |_, window, cx| {
-                    let _ = weak.update(cx, |desktop, cx| {
-                        desktop.deactivate_mail(window, cx);
-                        desktop
-                            .dock
-                            .update(cx, |dock, cx| dock.close_all(window, cx));
+                let locked = session_lock::locked(cx);
+                // Platform quit cannot be cancelled here. Capture before clearing
+                // docks, and release every native child while hosts still exist.
+                let (service, mut handles) = weak
+                    .update(cx, |desktop, cx| {
+                        if let Err(error) =
+                            desktop.capture_all_workspace_window_placements(None, cx)
+                        {
+                            eprintln!(
+                                "[workspace-window] operation=quit-save result=error error={error}"
+                            );
+                        }
+                        let service = desktop.prepare_close(cx);
+                        desktop.close_all_workspace_native_views(None, cx);
+                        (service, desktop.workspace_window_handles())
+                    })
+                    .unwrap_or_default();
+                if handles.is_empty() {
+                    handles.push(window_handle.into());
+                    let _ = window_handle
+                        .update(cx, |_, window, cx| window_state::save_native(window, cx));
+                }
+                // The Desktop lease has ended. Rendering here drops old frame
+                // clones before GPUI destroys the complete native window set.
+                for handle in handles {
+                    let _ = handle.update(cx, |_, window, cx| {
+                        window.refresh();
+                        window.draw(cx).clear(cx);
                     });
-                    window.refresh();
-                    window.draw(cx).clear(cx);
-                });
+                }
+                // Keep an already-running preference writer alive and wait for
+                // its real completion notification before service shutdown. A
+                // forced platform quit has a bounded GPUI grace period.
+                let writer_owner = weak.upgrade();
+                let mut writer_done = None;
+                let mut writer_observer = None;
+                if let Some(owner) = writer_owner
+                    .as_ref()
+                    .filter(|owner| owner.read(cx).preferences_busy)
+                {
+                    let (sender, receiver) = futures::channel::oneshot::channel();
+                    let mut sender = Some(sender);
+                    writer_observer = Some(cx.observe(owner, move |owner, cx| {
+                        if !owner.read(cx).preferences_busy {
+                            if let Some(sender) = sender.take() {
+                                let _ = sender.send(());
+                            }
+                        }
+                    }));
+                    writer_done = Some(receiver);
+                }
                 let executor = cx.background_executor().clone();
                 async move {
-                    if locked {let _=executor.spawn(async {session_lock_store::set_locked(true)}).await;}
+                    let _writer_owner = writer_owner;
+                    let _writer_observer = writer_observer;
+                    if let Some(done) = writer_done {
+                        let _ = done.await;
+                    }
+                    if locked {
+                        let _ = executor
+                            .spawn(async { session_lock_store::set_locked(true) })
+                            .await;
+                    }
                     if let Some(service) = service {
                         executor
                             .spawn(async move {
