@@ -140,6 +140,12 @@ impl WebView {
         self.bounds
     }
 
+    /// Reapply native geometry after the existing child moves to another
+    /// native window, even when its logical bounds are unchanged.
+    pub fn invalidate_native_bounds(&mut self) {
+        self.applied_native_bounds = None;
+    }
+
     /// Go back in the webview history.
     pub fn back(&mut self) -> anyhow::Result<()> {
         Ok(self.webview.evaluate_script("history.back();")?)

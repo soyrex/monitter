@@ -393,6 +393,21 @@
       ],
       "status": "implemented_unverified",
       "evidence": "Existing Rust Service runs in an independent macOS accessory/menu-bar server. GUI connects via private same-user Unix IPC, disconnect does not shut down backend, and packaging leaves running immutable server untouched. Both binaries compile/sign, 18 focused IPC tests pass, and a real PTY heartbeat advances across GUI SIGKILL/absence/reopen (artifacts/gpui/server-continuity.json); terminal closed explicitly afterward. Current server PID73266 survived two subsequent GUI restarts. Menu click behavior and real provider model-turn continuity remain unverified."
+    },
+    {
+      "id": "detachable_workspace_windows",
+      "sourcePaths": [
+        "desktop-gpui/src/workspace_windows.rs",
+        "desktop-gpui/src/workspace_window_state.rs",
+        "desktop-gpui/src/workspace_tabs.rs",
+        "desktop-gpui/src/window_state.rs",
+        "desktop-gpui/src/browser.rs",
+        "desktop-gpui/vendor/gpui-pre/src/window.rs",
+        "desktop-gpui/vendor/gpui-pre-macos/src/window.rs",
+        "docs/GPUI-WORKSPACE-WINDOWS.md"
+      ],
+      "status": "implemented_unverified",
+      "evidence": "Retained workspace hosts share one Desktop controller, backend subscription and preference writer. Workspace menus move to a new native window and return to main; closing a detached window returns its active and cached workspaces. Device-local ownership and placement are bounded and persisted. The macOS adapter supplies native internal drag completion and global window coordinates; Windows/Linux use menu actions until native drag adapters are implemented. Native browser reparenting currently supports macOS; unsupported transfers fail visibly while preserving the source. 54 focused desktop native tests and 88 vendor lifecycle/accessibility tests pass on the final source; an earlier full desktop snapshot passed 808 tests. An isolated macOS preview records native drag completion and successful transfer, but visual return/close acceptance remains pending. No cross-platform runtime acceptance is claimed."
     }
   ],
   "latestVerification": {

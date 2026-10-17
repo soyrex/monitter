@@ -10,5 +10,6 @@ pub mod neovim_model;
 pub mod neovim_keys;
 
 pub mod workspace_store;
+pub mod workspace_window_state;
 pub mod workspace_order;
 pub mod startup_cache;

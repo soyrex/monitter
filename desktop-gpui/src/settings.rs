@@ -1,4 +1,5 @@
 //! Native preferences and real task-scoped harness model catalogs.
+use crate::workspace_windows::DesktopContextExt as _;
 use super::*;
 #[path = "lan_settings.rs"]
 mod lan_settings;
@@ -205,6 +206,36 @@ pub(super) struct NativeSettings {
     errors: HashMap<String, String>,
 }
 impl NativeSettings {
+    /// Carry retained form controls with their workspace. Composite widgets
+    /// repair private input hosts when rendered; explicitly pin their roots
+    /// now so emitted settings events resolve the owning workspace beforehand.
+    pub(super) fn rehost_to_window(&mut self, window: &mut Window, cx: &mut App) -> Result<(), String> {
+        let mut ids = vec![
+            self.chat_line_height.entity_id(), self.terminal_line_height.entity_id(),
+            self.window_transparency.entity_id(), self.wallpaper_strength.entity_id(),
+            self.interface_density.entity_id(), self.inactive_pane_opacity.entity_id(),
+        ];
+        for font in &self.fonts { ids.extend([font.family.entity_id(), font.weight.entity_id()]); }
+        ids.extend(self.lan.iter().map(Entity::entity_id));
+        ids.extend(self.services.iter().map(Entity::entity_id));
+        if let Some(appearance) = &self.appearance {
+            ids.extend([
+                appearance.light.entity_id(), appearance.dark.entity_id(), appearance.accent_picker.entity_id(),
+                appearance.contrast.entity_id(), appearance.tint.entity_id(),
+                appearance.border_opacity.entity_id(), appearance.interface_scale.entity_id(),
+            ]);
+        }
+        for id in ids { cx.rehost_entity_window(id, window).map_err(|error| error.to_string())?; }
+        for input in [&self.search, &self.user_name, &self.accent].into_iter().chain(self.fonts.iter().map(|font| &font.size)) {
+            input.update(cx, |input, cx| input.rehost_to_window(window, cx))?;
+        }
+        self.board_guidance.update(cx, |input, cx| input.rehost_to_window(window, cx))?;
+        if let Some(appearance) = &self.appearance {
+            appearance.accent.update(cx, |input, cx| input.rehost_to_window(window, cx))?;
+        }
+        Ok(())
+    }
+
     pub(super) fn select_category(&mut self, category: &str) { self.category = settings_navigation::category(category).id.into(); self.page_scroll.set_offset(gpui_kit::point(gpui_kit::px(0.), gpui_kit::px(0.))); }
     // The native Lock Session action calls this when no PIN is configured.
     pub(super) fn select_security(&mut self) { self.select_category("security"); }
@@ -325,7 +356,7 @@ impl NativeSettings {
             loading: HashSet::new(),
             errors: HashMap::new(),
         };
-        state._slider_subscriptions.push(cx.subscribe_in(&state.search, window, |view, input, event: &InputEvent, window, cx| {
+        state._slider_subscriptions.push(cx.subscribe_workspace(&state.search, window, |view, input, event: &InputEvent, window, cx| {
             match event {
                 InputEvent::Change => {
                     if let Some(state) = &mut view.native_settings {
@@ -352,7 +383,7 @@ impl NativeSettings {
                 .push(cx.observe(slider, |_, _, cx| cx.notify()));
         }
         state._slider_subscriptions.push(cx.observe(&state.board_guidance, |_, _, cx| cx.notify()));
-        state._slider_subscriptions.push(cx.subscribe(&state.user_name, |view, input, event: &InputEvent, cx| {
+        state._slider_subscriptions.push(cx.subscribe_workspace(&state.user_name, window, |view, input, event: &InputEvent, _, cx| {
             if !matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) { return; }
             let name=input.read(cx).value().trim().to_owned();
             if name.chars().any(char::is_control) || name.chars().count()>80 {
@@ -361,29 +392,29 @@ impl NativeSettings {
             if field(&view.snapshot["settings"],"userName") != name { view.patch_settings(json!({"userName":name}),cx); }
         }));
         for row in &state.fonts {
-            state._slider_subscriptions.push(cx.subscribe(&row.family, |view, _, _: &SelectEvent<Vec<settings_appearance::FontChoice>>, cx| view.save_typography(cx)));
-            state._slider_subscriptions.push(cx.subscribe(&row.weight, |view, _, event: &SliderEvent, cx| {
+            state._slider_subscriptions.push(cx.subscribe_workspace(&row.family, window, |view, _, _: &SelectEvent<Vec<settings_appearance::FontChoice>>, _, cx| view.save_typography(cx)));
+            state._slider_subscriptions.push(cx.subscribe_workspace(&row.weight, window, |view, _, event: &SliderEvent, _, cx| {
                 if matches!(event, SliderEvent::Release(_)) { view.save_typography(cx); } else { cx.notify(); }
             }));
-            state._slider_subscriptions.push(cx.subscribe(&row.size, |view, _, event: &gpui_kit::component::input::InputEvent, cx| {
+            state._slider_subscriptions.push(cx.subscribe_workspace(&row.size, window, |view, _, event: &gpui_kit::component::input::InputEvent, _, cx| {
                 if matches!(event, gpui_kit::component::input::InputEvent::Blur | gpui_kit::component::input::InputEvent::PressEnter { .. }) { view.save_typography(cx); }
             }));
         }
         for slider in [&state.chat_line_height, &state.terminal_line_height] {
-            state._slider_subscriptions.push(cx.subscribe(slider, |view, _, event: &SliderEvent, cx| {
+            state._slider_subscriptions.push(cx.subscribe_workspace(slider, window, |view, _, event: &SliderEvent, _, cx| {
                 if matches!(event, SliderEvent::Release(_)) { view.save_typography(cx); } else { cx.notify(); }
             }));
         }
-        state._slider_subscriptions.push(cx.subscribe(&state.wallpaper_strength, |view, _, event: &SliderEvent, cx| {
+        state._slider_subscriptions.push(cx.subscribe_workspace(&state.wallpaper_strength, window, |view, _, event: &SliderEvent, _, cx| {
             if let SliderEvent::Release(value) = event {
                 if let Err(error) = wallpaper_theme::set_strength(value.end().round() as u16) { view.error = Some(error); }
                 view.applied_style = None;
                 view.invalidate_surface_blends(cx);
             } else { cx.notify(); }
         }));
-        state._slider_subscriptions.push(cx.subscribe(
-            &state.window_transparency,
-            |view, _, event: &SliderEvent, cx| {
+        state._slider_subscriptions.push(cx.subscribe_workspace(
+            &state.window_transparency, window,
+            |view, _, event: &SliderEvent, _, cx| {
                 if let SliderEvent::Release(value) = event {
                     view.patch_settings(
                         json!({"windowTransparency": value.end().round() as u16}),
@@ -394,9 +425,9 @@ impl NativeSettings {
                 }
             },
         ));
-        state._slider_subscriptions.push(cx.subscribe(
-            &state.interface_density,
-            |view, _, event: &SliderEvent, cx| {
+        state._slider_subscriptions.push(cx.subscribe_workspace(
+            &state.interface_density, window,
+            |view, _, event: &SliderEvent, _, cx| {
                 if let SliderEvent::Release(value) = event {
                     let density =
                         ["tight", "normal", "spacious"][value.end().round().clamp(0., 2.) as usize];
@@ -406,9 +437,9 @@ impl NativeSettings {
                 }
             },
         ));
-        state._slider_subscriptions.push(cx.subscribe(
-            &state.inactive_pane_opacity,
-            |view, _, event: &SliderEvent, cx| {
+        state._slider_subscriptions.push(cx.subscribe_workspace(
+            &state.inactive_pane_opacity, window,
+            |view, _, event: &SliderEvent, _, cx| {
                 if let SliderEvent::Release(value) = event {
                     view.patch_settings(
                         json!({"inactivePaneOpacity": value.end().round() as f64 / 100.}),
@@ -448,9 +479,9 @@ impl Desktop {
         let settings = &self.snapshot["settings"];
         design::set_surface(settings);
         let surface = settings["windowSurface"].as_str().unwrap_or("opaque");
-        if self.applied_window_surface.as_deref() != Some(surface) {
+        if self.window.applied_window_surface.as_deref() != Some(surface) {
             if crate::window_surface::apply(window, surface) {
-                self.applied_window_surface = Some(surface.to_owned());
+                self.window.applied_window_surface = Some(surface.to_owned());
             }
         }
         let stored_appearance = self
@@ -515,7 +546,7 @@ impl Desktop {
             settings["windowTransparency"],
             stored_appearance.tile_theme,
         );
-        if self.applied_style.as_ref() != Some(&signature) {
+        if self.window.applied_style.as_ref() != Some(&signature) {
             Theme::change(
                 if palette.dark {
                     ThemeMode::Dark
@@ -636,16 +667,16 @@ impl Desktop {
                     }
                 }
             });
-            self.dock.update(cx, |dock, cx| {
+            self.window.dock.update(cx, |dock, cx| {
                 dock.set_tab_appearance(settings, interface_scale, cx);
             });
-            self.applied_style = Some(signature);
+            self.window.applied_style = Some(signature);
         }
-        self.dock.update(cx, |dock, cx| {
+        self.window.dock.update(cx, |dock, cx| {
             dock.set_pane_appearance(settings, palette, cx)
         });
         if crate::activity_effects::sync_cached(&self.snapshot, palette, cx) {
-            self.dock.update(cx, |dock, cx| dock.refresh_activity(cx));
+            self.window.dock.update(cx, |dock, cx| dock.refresh_activity(cx));
         }
         self.publish_report_theme(palette, cx);
         palette
@@ -657,7 +688,7 @@ impl Desktop {
             .filter(|v| v.is_object())
             .cloned()
         else {
-            self.error = Some("Settings have not loaded yet.".into());
+            self.window.error = Some("Settings have not loaded yet.".into());
             cx.notify();
             return;
         };
@@ -667,7 +698,7 @@ impl Desktop {
         self.command("save_settings", json!({"settings":settings}), cx);
     }
     fn save_typography(&mut self, cx: &mut Context<Self>) {
-        let Some(state) = &self.native_settings else {
+        let Some(state) = &self.window.native_settings else {
             return;
         };
         let result = (|| {
@@ -711,7 +742,7 @@ impl Desktop {
         match result {
             Ok(patch) => self.patch_settings(patch, cx),
             Err(error) => {
-                self.error = Some(error);
+                self.window.error = Some(error);
                 cx.notify();
             }
         }
@@ -729,7 +760,7 @@ impl Desktop {
         preferences.data.appearance.tile_theme = theme;
         self.workspaces_dirty = true;
         design::set_tile_theme(theme);
-        self.applied_style = None;
+        self.window.applied_style = None;
         self.preferences_error = None;
         self.queue_preferences_save(cx);
         cx.notify();
@@ -739,8 +770,7 @@ impl Desktop {
             return;
         }
         let result: Result<(String, String, Option<String>, u16, u16, u16, u16), String> = (|| {
-            let controls = self
-                .native_settings
+            let controls = self.window.native_settings
                 .as_ref()
                 .and_then(|settings| settings.appearance.as_ref())
                 .ok_or("Native appearance preferences are still loading.")?;
@@ -799,19 +829,19 @@ impl Desktop {
         preferences.data.appearance.border_opacity = border_opacity;
         preferences.data.appearance.interface_scale = interface_scale;
         preferences.data.appearance.warm_paper = self.native_theme_preset == "reference";
-        self.applied_style = None;
+        self.window.applied_style = None;
         self.preferences_error = None;
         self.queue_preferences_save(cx);
         cx.notify();
     }
-    fn load_model_catalog(&mut self, cx: &mut Context<Self>) {
-        let Some(id) = self.selected.clone() else {
+    fn load_model_catalog(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let Some(id) = self.window.selected.clone() else {
             return;
         };
         let Some(service) = self.service.clone() else {
             return;
         };
-        let Some(settings) = &mut self.native_settings else {
+        let Some(settings) = &mut self.window.native_settings else {
             return;
         };
         if !settings.loading.insert(id.clone()) {
@@ -825,10 +855,10 @@ impl Desktop {
                 json!({"target":{"taskId":target,"refresh":true}}),
             )
         });
-        cx.spawn(async move |view, cx| {
+        self.spawn_workspace(window, cx, async move |view, cx| {
             let result = task.await;
-            let _ = view.update(cx, |view, cx| {
-                if let Some(settings) = &mut view.native_settings {
+            let _ = view.update_in(cx, |view, _, cx| {
+                if let Some(settings) = &mut view.window.native_settings {
                     settings.loading.remove(&id);
                     match result {
                         Ok(catalog) => {
@@ -853,12 +883,12 @@ impl Desktop {
         palette: Palette,
         cx: &mut Context<Desktop>,
     ) -> AnyElement {
-        let Some(id) = self.selected.clone() else {
+        let Some(id) = self.window.selected.clone() else {
             return div()
                 .child("Select a chat to read its actual provider model catalog.")
                 .into_any_element();
         };
-        let state = self.native_settings.as_ref().unwrap();
+        let state = self.window.native_settings.as_ref().unwrap();
         let loading = state.loading.contains(&id);
         let mut panel = div()
             .w_full()
@@ -885,10 +915,9 @@ impl Desktop {
                         "Read actual harness model catalog"
                     })
                     .disabled(loading)
-                    .on_click(cx.listener(|view, _, _, cx| view.load_model_catalog(cx))),
+                    .on_click(cx.workspace_listener(|view, _, window, cx| view.load_model_catalog(window, cx))),
             );
-        if let Some(error) = self
-            .native_settings
+        if let Some(error) = self.window.native_settings
             .as_ref()
             .and_then(|state| state.errors.get(&id))
         {
@@ -898,8 +927,7 @@ impl Desktop {
                     .child(format!("Catalog error: {error}")),
             );
         }
-        if let Some(catalog) = self
-            .native_settings
+        if let Some(catalog) = self.window.native_settings
             .as_ref()
             .and_then(|state| state.catalogs.get(&id).cloned())
         {
@@ -908,8 +936,7 @@ impl Desktop {
                 field(&catalog, "source"),
                 field(&catalog, "warning")
             ));
-            let choice = self
-                .native_settings
+            let choice = self.window.native_settings
                 .as_ref()
                 .and_then(|state| state.choices.get(&id).cloned())
                 .unwrap_or_else(|| catalog["current"].clone());
@@ -924,8 +951,8 @@ impl Desktop {
                 let selected = field(&choice, "model") == model_id;
                 panel = panel.child(Button::new(SharedString::from(format!("model-{model_id}")))
                     .label(format!("{}{} · {}", if selected { "✓ " } else { "" }, field(model, "name"), field(model, "description")))
-                    .on_click(cx.listener(move |view, _, _, cx| {
-                        if let Some(state) = &mut view.native_settings {
+                    .on_click(cx.workspace_listener(move |view, _, _, cx| {
+                        if let Some(state) = &mut view.window.native_settings {
                             state.choices.insert(target.clone(), json!({"model":model_id,"reasoningEffort":effort,"fastMode":null}));
                         }
                         cx.notify();
@@ -947,9 +974,8 @@ impl Desktop {
                                 effort_id,
                                 field(&effort, "description")
                             ))
-                            .on_click(cx.listener(move |view, _, _, cx| {
-                                if let Some(choice) = view
-                                    .native_settings
+                            .on_click(cx.workspace_listener(move |view, _, _, cx| {
+                                if let Some(choice) = view.window.native_settings
                                     .as_mut()
                                     .and_then(|state| state.choices.get_mut(&target))
                                 {
@@ -970,9 +996,8 @@ impl Desktop {
                                     if selected { "✓ " } else { "" },
                                     if fast { "on" } else { "off" }
                                 ))
-                                .on_click(cx.listener(move |view, _, _, cx| {
-                                    if let Some(choice) = view
-                                        .native_settings
+                                .on_click(cx.workspace_listener(move |view, _, _, cx| {
+                                    if let Some(choice) = view.window.native_settings
                                         .as_mut()
                                         .and_then(|state| state.choices.get_mut(&target))
                                     {
@@ -988,8 +1013,8 @@ impl Desktop {
                 Button::new("apply-task-model")
                     .primary()
                     .label("Apply to selected chat · next turn")
-                    .disabled(self.busy || models.is_empty())
-                    .on_click(cx.listener(move |view, _, _, cx| {
+                    .disabled(self.window.busy || models.is_empty())
+                    .on_click(cx.workspace_listener(move |view, _, _, cx| {
                         view.command(
                             "set_task_model_settings",
                             json!({"taskId":id,"settings":choice}),
@@ -1006,22 +1031,20 @@ impl Desktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        if self.native_settings.is_none() {
-            self.native_settings =
+        if self.window.native_settings.is_none() {
+            self.window.native_settings =
                 Some(NativeSettings::new(&self.snapshot["settings"], window, cx));
         }
-        if self
-            .native_settings
+        if self.window.native_settings
             .as_ref()
             .is_some_and(|state| state.lan.is_none())
         {
             if let Some(service) = self.service.clone() {
                 let lan = cx.new(|cx| lan_settings::LanSettingsPane::new(service, window, cx));
-                self.native_settings.as_mut().unwrap().lan = Some(lan);
+                self.window.native_settings.as_mut().unwrap().lan = Some(lan);
             }
         }
-        if self
-            .native_settings
+        if self.window.native_settings
             .as_ref()
             .is_some_and(|state| state.services.is_none())
         {
@@ -1030,11 +1053,10 @@ impl Desktop {
                 let services = cx.new(|cx| {
                     settings_services::ServicePreferencesPane::new(service, &snapshot, window, cx)
                 });
-                self.native_settings.as_mut().unwrap().services = Some(services);
+                self.window.native_settings.as_mut().unwrap().services = Some(services);
             }
         }
-        if self
-            .native_settings
+        if self.window.native_settings
             .as_ref()
             .is_some_and(|state| state.appearance.is_none())
         {
@@ -1044,7 +1066,7 @@ impl Desktop {
                 .map(|preferences| preferences.data.appearance.clone())
             {
                 let controls = NativeAppearanceControls::new(&appearance, window, cx);
-                let state = self.native_settings.as_mut().unwrap();
+                let state = self.window.native_settings.as_mut().unwrap();
                 for slider in [
                     &controls.contrast,
                     &controls.tint,
@@ -1056,26 +1078,26 @@ impl Desktop {
                         .push(cx.observe(slider, |_, _, cx| cx.notify()));
                 }
                 for select in [&controls.light, &controls.dark] {
-                    state._slider_subscriptions.push(cx.subscribe(select, |view, _, _: &SelectEvent<Vec<settings_appearance::PaletteChoice>>, cx| view.save_native_appearance(cx)));
+                    state._slider_subscriptions.push(cx.subscribe_workspace(select, window, |view, _, _: &SelectEvent<Vec<settings_appearance::PaletteChoice>>, _, cx| view.save_native_appearance(cx)));
                 }
                 for slider in [&controls.contrast, &controls.tint, &controls.border_opacity, &controls.interface_scale] {
-                    state._slider_subscriptions.push(cx.subscribe(slider, |view, _, event: &SliderEvent, cx| {
+                    state._slider_subscriptions.push(cx.subscribe_workspace(slider, window, |view, _, event: &SliderEvent, _, cx| {
                         if matches!(event, SliderEvent::Release(_)) { view.save_native_appearance(cx); } else { cx.notify(); }
                     }));
                 }
-                state._slider_subscriptions.push(cx.subscribe_in(&controls.accent_picker, window, |view, _, event: &ColorPickerEvent, window, cx| {
+                state._slider_subscriptions.push(cx.subscribe_workspace(&controls.accent_picker, window, |view, _, event: &ColorPickerEvent, window, cx| {
                     let ColorPickerEvent::Change(Some(color)) = event else { return };
                     let rgba: gpui_kit::Rgba = (*color).into();
                     let hex = format!("#{:06X}", u32::from(rgba) >> 8);
-                    if let Some(native) = view.native_settings.as_ref().and_then(|s| s.appearance.as_ref()) {
+                    if let Some(native) = view.window.native_settings.as_ref().and_then(|s| s.appearance.as_ref()) {
                         native.accent.update(cx, |input, cx| input.set_value(hex, window, cx));
                     }
                     view.save_native_appearance(cx);
                 }));
-                state._slider_subscriptions.push(cx.subscribe_in(&controls.accent, window, |view, input, event: &gpui_kit::component::input::InputEvent, window, cx| {
+                state._slider_subscriptions.push(cx.subscribe_workspace(&controls.accent, window, |view, input, event: &gpui_kit::component::input::InputEvent, window, cx| {
                     let text=input.read(cx).value().to_string();
                     if let Some(color)=native_appearance::parse_accent(&text) {
-                        if let Some(native)=view.native_settings.as_ref().and_then(|s|s.appearance.as_ref()) {
+                        if let Some(native)=view.window.native_settings.as_ref().and_then(|s|s.appearance.as_ref()) {
                             native.accent_picker.update(cx, |picker,cx| picker.set_value(rgb(color),window,cx));
                         }
                     }
@@ -1086,25 +1108,23 @@ impl Desktop {
         }
         let snapshot = self.snapshot.as_ref().clone();
         let revision = self.revision.clone();
-        let service_pane = self
-            .native_settings
+        let service_pane = self.window.native_settings
             .as_ref()
             .and_then(|state| state.services.clone());
-        let update_service_snapshot = self
-            .native_settings
+        let update_service_snapshot = self.window.native_settings
             .as_ref()
             .is_some_and(|state| state.service_revision != revision);
         if update_service_snapshot {
             if let Some(service_pane) = &service_pane {
                 service_pane.update(cx, |pane, cx| pane.set_snapshot(&snapshot, cx));
             }
-            if let Some(state) = &mut self.native_settings {
+            if let Some(state) = &mut self.window.native_settings {
                 state.service_revision = revision;
             }
         }
         let palette = self.apply_native_theme(window, cx);
         SETTINGS_FONT_BITS.store(f32::from(cx.theme().font_size).to_bits(), std::sync::atomic::Ordering::Relaxed);
-        let category = self.native_settings.as_ref().unwrap().category.clone();
+        let category = self.window.native_settings.as_ref().unwrap().category.clone();
         let destination = settings_navigation::category(&category);
         let title = destination.label;
         let mut body = match category.as_str() {
@@ -1116,9 +1136,9 @@ impl Desktop {
                 settings_appearance::render(self, window, cx, palette, &category)
             }
             "agents" => {
-                if self.agent_editor.is_none() {
+                if self.window.agent_editor.is_none() {
                     if let Some(service) = self.service.clone() {
-                        self.agent_editor = Some(cx.new(|cx| {
+                        self.window.agent_editor = Some(cx.new(|cx| {
                             agents::AgentHostPane::new(
                                 service,
                                 self.snapshot.as_ref().clone(),
@@ -1128,12 +1148,12 @@ impl Desktop {
                         }));
                     }
                 }
-                if let Some(editor) = &self.agent_editor {
-                    if self.agent_editor_revision != self.revision {
+                if let Some(editor) = &self.window.agent_editor {
+                    if self.window.agent_editor_revision != self.revision {
                         editor.update(cx, |editor, cx| {
                             editor.set_snapshot(&self.snapshot, window, cx)
                         });
-                        self.agent_editor_revision = self.revision.clone();
+                        self.window.agent_editor_revision = self.revision.clone();
                     }
                     div()
                         .h_full()
@@ -1144,8 +1164,7 @@ impl Desktop {
                     div().child("Opening agent settings…").into_any_element()
                 }
             }
-            "lan" => self
-                .native_settings
+            "lan" => self.window.native_settings
                 .as_ref()
                 .and_then(|state| state.lan.clone())
                 .map(|pane| pane.into_any_element())
@@ -1190,13 +1209,13 @@ impl Desktop {
                 .child(div().flex().items_center().justify_between().flex_wrap().gap(design::ui_scaled_px(8.))
                     .child(settings_hint("Configure these choices for each agent.", palette))
                     .child(Button::new("preferences-open-agents").compact().label("Configure agents")
-                        .on_click(cx.listener(|view, _, _, cx| {
-                            if let Some(state) = &mut view.native_settings { state.select_category("agents"); }
+                        .on_click(cx.workspace_listener(|view, _, _, cx| {
+                            if let Some(state) = &mut view.window.native_settings { state.select_category("agents"); }
                             cx.notify();
                         }))))
                 .child(body).into_any_element();
         }
-        let state = self.native_settings.as_ref().unwrap();
+        let state = self.window.native_settings.as_ref().unwrap();
         let search = state.search.clone();
         let query = search.read(cx).value().to_string();
         let searching = !query.trim().is_empty();
@@ -1216,8 +1235,8 @@ impl Desktop {
                     .child(div().debug_selector(move || format!("preferences-search-result-{index}")).min_w_0().flex().flex_col().gap(design::ui_scaled_px(3.))
                         .child(div().font_weight(FontWeight::SEMIBOLD).child(entry.label))
                         .child(settings_hint(format!("{} · {}", settings_navigation::category(entry.category).label, entry.description), palette)))
-                    .on_click(cx.listener(move |view, _, window, cx| {
-                        if let Some(state) = &mut view.native_settings { state.search_selected = index; }
+                    .on_click(cx.workspace_listener(move |view, _, window, cx| {
+                        if let Some(state) = &mut view.window.native_settings { state.search_selected = index; }
                         view.open_preferences_search_result(window, cx);
                     })));
             }
@@ -1251,10 +1270,10 @@ impl Desktop {
                     .when(!compact, |this| this.child(div().flex_1().min_w_0().whitespace_normal()
                         .text_size(settings_text_size(0.86)).font_weight(if selected { FontWeight::SEMIBOLD } else { FontWeight::MEDIUM })
                         .child(item.label))))
-                .on_click(cx.listener(move |view, _, window, cx| {
+                .on_click(cx.workspace_listener(move |view, _, window, cx| {
                     view.clear_preferences_search(window, cx);
-                    if let Some(state) = &mut view.native_settings { state.select_category(id); state.search_target = None; }
-                    view.error = None;
+                    if let Some(state) = &mut view.window.native_settings { state.select_category(id); state.search_target = None; }
+                    view.window.error = None;
                     cx.notify();
                 })).into_any_element());
         }
@@ -1265,7 +1284,7 @@ impl Desktop {
             .children(rows);
         let status = if self.preferences_busy {
             "Saving private preferences…"
-        } else if self.busy {
+        } else if self.window.busy {
             "Saving settings…"
         } else {
             ""
@@ -1275,8 +1294,8 @@ impl Desktop {
             .size_full()
             .flex()
             .flex_col()
-            .capture_key_down(cx.listener(|view, event: &KeyDownEvent, window, cx| {
-                let Some(state) = &mut view.native_settings else { return; };
+            .capture_key_down(cx.workspace_listener(|view, event: &KeyDownEvent, window, cx| {
+                let Some(state) = &mut view.window.native_settings else { return; };
                 if !state.search.read(cx).focus_handle(cx).contains_focused(window, cx) { return; }
                 if state.search.update(cx, |input, cx| input.marked_text_range(window, cx).is_some()) { return; }
                 let count = state.search_results.len();
@@ -1309,7 +1328,7 @@ impl Desktop {
                         .child(settings_hint(if searching { "Select a setting to open its category." } else { destination.description }, palette))
                         .when(!searching, |this| this.when_some(search_target, |this, target| this.child(settings_hint(format!("Selected setting: {target}"), palette)))))
                     .child(div().w_full().min_w_0().flex_shrink_0().max_w(design::ui_scaled_px(760.)).mx_auto().child(body))
-                    .when_some(self.error.clone(), |this, error| {
+                    .when_some(self.window.error.clone(), |this, error| {
                         this.child(
                             div()
                                 .flex()
@@ -1320,8 +1339,8 @@ impl Desktop {
                                     Button::new("dismiss-settings-error")
                                         .compact()
                                         .label("Dismiss")
-                                        .on_click(cx.listener(|view, _, _, cx| {
-                                            view.error = None;
+                                        .on_click(cx.workspace_listener(|view, _, _, cx| {
+                                            view.window.error = None;
                                             cx.notify();
                                         })),
                                 ),
@@ -1349,7 +1368,7 @@ impl Desktop {
                                         Button::new("dismiss-layout-settings-error")
                                             .compact()
                                             .label("Dismiss")
-                                            .on_click(cx.listener(|view, _, _, cx| {
+                                            .on_click(cx.workspace_listener(|view, _, _, cx| {
                                                 view.preferences_error = None;
                                                 cx.notify();
                                             })),
@@ -1363,10 +1382,10 @@ impl Desktop {
     }
 
     pub(super) fn preferences_search_composing(&self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        self.native_settings.as_ref().is_some_and(|state| state.search.update(cx, |input, cx| input.marked_text_range(window, cx).is_some()))
+        self.window.native_settings.as_ref().is_some_and(|state| state.search.update(cx, |input, cx| input.marked_text_range(window, cx).is_some()))
     }
     pub(super) fn clear_preferences_search(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let Some(state) = &mut self.native_settings else { return false; };
+        let Some(state) = &mut self.window.native_settings else { return false; };
         if state.search.read(cx).value().is_empty() { return false; }
         state.search.update(cx, |input, cx| input.set_value("", window, cx));
         state.search_selected = 0;
@@ -1376,7 +1395,7 @@ impl Desktop {
     }
     fn open_preferences_search_result(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.preferences_search_composing(window, cx) { return; }
-        let Some(state) = &mut self.native_settings else { return; };
+        let Some(state) = &mut self.window.native_settings else { return; };
         if state.search.read(cx).value().trim().is_empty() { return; }
         let Some(entry) = state.search_results.get(state.search_selected).copied() else { return; };
         state.search_results.clear();
@@ -1389,7 +1408,7 @@ impl Desktop {
         if entry.label != "Agent delegation" && matches!(entry.category, "profile" | "appearance" | "interface" | "typography" | "behaviour" | "conversation" | "collaboration") {
             window.on_next_frame(move |window, cx| anchor.scroll_to(window, cx));
         }
-        window.focus(&self.preferences_focus, cx);
+        window.focus(&self.window.preferences_focus, cx);
         cx.notify();
     }
     pub(super) fn render_settings(

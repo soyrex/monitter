@@ -884,6 +884,13 @@ pub enum TextInputStateChange {
 #[expect(missing_docs)]
 pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn bounds(&self) -> Bounds<Pixels>;
+    /// Actual outer-window bounds in global logical screen coordinates, sharing
+    /// the coordinate space of native drag completion positions. Platforms must
+    /// opt in: placement/client bounds can omit chrome or use another origin.
+    /// Wayland cannot expose a global window origin.
+    fn global_bounds(&self) -> Option<Bounds<Pixels>> {
+        None
+    }
     fn is_maximized(&self) -> bool;
     fn window_bounds(&self) -> WindowBounds;
     fn content_size(&self) -> Size<Pixels>;

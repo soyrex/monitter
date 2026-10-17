@@ -25,6 +25,7 @@ pub enum LockEvent {
     Unlocked,
 }
 pub struct SessionLock {
+    disconnected_fixture: bool,
     focus: FocusHandle,
     locked: bool,
     configured: Option<bool>,
@@ -44,7 +45,15 @@ pub struct SessionLock {
 impl EventEmitter<LockEvent> for SessionLock {}
 impl SessionLock {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let result = store::read_snapshot();
+        Self::new_with_storage(!cfg!(test), window, cx)
+    }
+    /// Native workspace previews must not open the independent PIN database.
+    #[cfg(feature = "performance-profiling")]
+    pub(crate) fn new_for_ui_fixture(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::new_with_storage(false, window, cx)
+    }
+    fn new_with_storage(storage: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let result = if storage { store::read_snapshot() } else { Ok(store::LockSnapshot::default()) };
         let locked = result.as_ref().map(|s| s.locked).unwrap_or(true);
         let attempts = result.as_ref().map(|s| s.attempts).unwrap_or(0);
         let retry_after = result.as_ref().ok().and_then(|s| {
@@ -85,7 +94,7 @@ impl SessionLock {
         .detach();
         let worker = cx
             .background_executor()
-            .spawn(async { store::configured() });
+            .spawn(async move { if storage { store::configured() } else { Ok(false) } });
         cx.spawn(async move |view, cx| {
             let result = worker.await;
             let _ = view.update(cx, |view, cx| {
@@ -98,6 +107,7 @@ impl SessionLock {
         })
         .detach();
         Self {
+            disconnected_fixture: !storage,
             focus: cx.focus_handle(),
             locked,
             configured: None,
@@ -144,6 +154,7 @@ impl SessionLock {
         }
     }
     pub fn lock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.disconnected_fixture { return; }
         if self.locked || !self.configured() || self.busy {
             return;
         }
@@ -175,6 +186,7 @@ impl SessionLock {
         cx.notify();
     }
     fn retry_storage(&mut self, cx: &mut Context<Self>) {
+        if self.disconnected_fixture { return; }
         if self.busy {
             return;
         }
@@ -198,6 +210,11 @@ impl SessionLock {
         cx.notify();
     }
     fn save_pin(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.disconnected_fixture {
+            self.error = Some("Session PIN changes are disabled in the disconnected preview.".into());
+            cx.notify();
+            return;
+        }
         if self.locked
             || self.busy
             || self.configured.is_none()
@@ -253,6 +270,7 @@ impl SessionLock {
         cx.notify();
     }
     fn unlock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.disconnected_fixture { return; }
         if !self.locked || self.busy || self.retry_after.is_some_and(|t| Instant::now() < t) {
             return;
         }

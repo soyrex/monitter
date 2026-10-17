@@ -525,6 +525,7 @@ pub struct DockWorkspace {
     restore_generation: u64,
     live_group_count: usize,
     live_panel_count: usize,
+    host_generation: u64,
 }
 impl EventEmitter<WorkspaceEvent> for DockWorkspace {}
 impl DockWorkspace {
@@ -606,6 +607,7 @@ impl DockWorkspace {
             restore_generation: 0,
             live_group_count: 0,
             live_panel_count: 0,
+            host_generation: 0,
         }
     }
     pub fn auto_size_panes(&self) -> bool { self.auto_size_panes }
@@ -654,6 +656,112 @@ impl DockWorkspace {
         self.auto_size_generation = self.auto_size_generation.wrapping_add(1);
         self.equalize_motion = None;
     }
+    /// Keep every tab in the current saved layout while releasing cache-only
+    /// panes from previously selected named layouts. Content/session owners
+    /// retain those views independently; this never invokes removal lifecycle.
+    pub fn retain_displayed_panels(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
+        let saved = self.serialize(cx)?;
+        let ids: HashSet<String> = Self::saved_ids(&saved)?.into_iter().collect();
+        // Preflight before dropping anything: every saved ID must still point
+        // at the exact retained panel registered with this live DockArea.
+        {
+            let panels = self.panels.borrow();
+            let area = self.area.read(cx);
+            for id in &ids {
+                let panel = panels
+                    .get(id)
+                    .ok_or_else(|| format!("Layout pane {id} is not retained."))?;
+                let key = PanelId::from(panel.entity_id());
+                if panel.read(cx).removed || area.panel(key).is_none() {
+                    return Err(format!("Layout pane {id} is unavailable."));
+                }
+            }
+        }
+        self.panels.borrow_mut().retain(|id, _| ids.contains(id));
+        self.empty_panes.retain(|id, _| ids.contains(id));
+        self.empty_subscriptions.retain(|id, _| ids.contains(id));
+        let mut paint = self.paint.borrow_mut();
+        paint.painted.retain(|id| ids.contains(id));
+        paint.visible.retain(|id| ids.contains(id));
+        // A prior layout's queued cleanup must not destroy its content after
+        // this dock has been moved and a different host owns that workspace.
+        paint.removed.retain(|(id, _)| ids.contains(id));
+        Ok(())
+    }
+
+    /// Stable retained contents, including inactive panes that are absent from
+    /// the currently displayed layout. Content owners can rehost their private
+    /// children without rebuilding this dock or replacing a native session.
+    pub fn retained_content_views(&self, cx: &App) -> Vec<(String, AnyView)> {
+        let mut contents: Vec<_> = self
+            .panels
+            .borrow()
+            .iter()
+            .map(|(id, panel)| (id.clone(), panel.read(cx).spec.content.clone()))
+            .collect();
+        contents.sort_by(|a, b| a.0.cmp(&b.0));
+        contents
+    }
+    pub(crate) fn is_pane_visible(&self,id:&str)->bool {self.paint.borrow().visible.contains(id)}
+    pub fn retained_browser_ids(&self) -> Vec<u64> {
+        let mut ids: Vec<_> = self
+            .panels
+            .borrow()
+            .keys()
+            .filter_map(|id| crate::browser_workspace::parse_browser_pane_id(id))
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+    /// The dock's retained children, excluding this DockWorkspace entity itself.
+    /// Private children of arbitrary content views remain their owner's concern.
+    pub fn retained_entity_ids(&self, cx: &App) -> Vec<EntityId> {
+        let mut ids = self.area.read(cx).retained_entity_ids();
+        for panel in self.panels.borrow().values() {
+            ids.push(panel.entity_id());
+            let panel = panel.read(cx);
+            ids.push(panel.spec.content.entity_id());
+            if let Some(background) = &panel.background {
+                ids.push(background.entity_id());
+            }
+        }
+        for pane in self.empty_panes.values() {
+            ids.push(pane.entity_id());
+            ids.extend(pane.read(cx).child_entity_ids());
+        }
+        ids.sort_by_key(|id| id.as_u64());
+        ids.dedup();
+        ids
+    }
+    /// Move the intact retained dock to a new native host. The caller must stop
+    /// mounting it in its previous host first. No panel/group/lifecycle is reset.
+    pub fn rehost_to_window(
+        &mut self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let mut ids = self.retained_entity_ids(cx);
+        ids.push(cx.entity_id());
+        for id in ids {
+            cx.rehost_entity_window(id, window)
+                .map_err(|error| format!("Cannot rehost dock entity {}: {error}", id.as_u64()))?;
+        }
+        // on_next_frame closures belong to the old native window, independent
+        // of entity callback routing. Invalidate those probes/animations; the
+        // first destination render schedules a fresh visibility probe.
+        self.host_generation = self.host_generation.wrapping_add(1);
+        self.cancel_layout_motion();
+        self.equalize_frame_pending = false;
+        let mut paint = self.paint.borrow_mut();
+        paint.frame_callback_pending = false;
+        paint.painted.clear();
+        drop(paint);
+        self.area.update(cx, |_, cx| cx.notify());
+        cx.notify();
+        Ok(())
+    }
+
     pub fn area(&self) -> Entity<DockArea> {
         self.area.clone()
     }
@@ -1609,8 +1717,10 @@ impl DockWorkspace {
         if self.equalize_frame_pending || self.equalize_motion.is_none() { return; }
         self.equalize_frame_pending = true;
         let weak = cx.weak_entity();
+        let host_generation = self.host_generation;
         window.on_next_frame(move |window, cx| {
             let _ = weak.update(cx, |workspace, cx| {
+                if workspace.host_generation != host_generation { return; }
                 workspace.equalize_frame_pending = false;
                 let Some((started, snapshots)) = workspace.equalize_motion.as_ref() else { return; };
                 let progress = if !crate::native_motion::motion_allowed() || !workspace.paint.borrow().shown || crate::session_lock::locked(cx) || !workspace.area.read(cx).has_visible_split_geometry(snapshots, cx) {
@@ -2156,8 +2266,10 @@ impl Render for DockWorkspace {
         };
         if schedule_callback {
             let weak = cx.weak_entity();
+            let host_generation = self.host_generation;
             window.on_next_frame(move |window, cx| {
                 let _ = weak.update(cx, |workspace, cx| {
+                    if workspace.host_generation != host_generation { return; }
                     let next = {
                         let mut paint = workspace.paint.borrow_mut();
                         paint.frame_callback_pending = false;
@@ -2885,5 +2997,162 @@ mod tests {
         let mut invalid = layout;
         invalid["version"] = json!(2);
         assert!(DockWorkspace::saved_ids(&invalid).is_err());
+    }
+}
+
+#[cfg(all(test, feature = "visual-export"))]
+mod workspace_rehost_tests {
+    use super::*;
+    use ::core::prelude::v1::test;
+    use gpui_kit::{TestAppContext, WindowId};
+
+    struct Content;
+    impl EventEmitter<()> for Content {}
+    impl Render for Content {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full()
+        }
+    }
+    struct Host(Rc<RefCell<Option<Entity<DockWorkspace>>>>);
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().children(self.0.borrow().clone())
+        }
+    }
+
+    #[gpui_kit::test]
+    fn intact_dock_move_preserves_layout_inactive_contents_and_callback_host(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let events = Rc::new(RefCell::new(Vec::<PaneLifecycle>::new()));
+        let callbacks = Rc::new(RefCell::new(Vec::<WindowId>::new()));
+        let source_mount = Rc::new(RefCell::new(None));
+        let destination_mount = Rc::new(RefCell::new(None));
+        let mut retained_dock = None;
+        let mut retained_content = None;
+        let mut retained_source_host = None;
+        let (_, source) = cx.add_window_view(|window, cx| {
+            let dock =
+                cx.new(|cx| DockWorkspace::new("rehost", Rc::new(|_, _, _| None), window, cx));
+            let content = cx.new(|_| Content);
+            let inactive = cx.new(|_| Content);
+            let capture = events.clone();
+            let lifecycle: LifecycleHook =
+                Rc::new(move |event, _, _| capture.borrow_mut().push(event));
+            dock.update(cx, |dock, cx| {
+                dock.set_auto_size_panes(false, window, cx);
+                let callback_windows = callbacks.clone();
+                cx.subscribe_in(&content, window, move |_, _, _, window, _| {
+                    callback_windows
+                        .borrow_mut()
+                        .push(window.window_handle().window_id());
+                })
+                .detach();
+                let active = PaneSpec {
+                    id: "retained:active".into(),
+                    title: "active".into(),
+                    content: content.clone().into(),
+                    focus: cx.focus_handle(),
+                    lifecycle: Some(lifecycle.clone()),
+                    closable: true,
+                };
+                dock.add(active, DockPlacement::Center, None, window, cx)
+                    .unwrap();
+                let inactive = PaneSpec {
+                    id: "retained:inactive".into(),
+                    title: "inactive".into(),
+                    content: inactive.clone().into(),
+                    focus: cx.focus_handle(),
+                    lifecycle: Some(lifecycle),
+                    closable: true,
+                };
+                dock.add(inactive, DockPlacement::Center, None, window, cx)
+                    .unwrap();
+                assert!(dock.focus("retained:inactive", window, cx));
+                assert_eq!(dock.focused_pane_id(window, cx).as_deref(), Some("retained:inactive"));
+                dock.add_focused_empty_tab(window, cx).unwrap();
+                let stale = PaneSpec {
+                    id: "retained:stale".into(),
+                    title: "stale".into(),
+                    content: cx.new(|_| Content).into(),
+                    focus: cx.focus_handle(),
+                    lifecycle: None,
+                    closable: true,
+                };
+                dock.register(stale, cx).unwrap();
+                let stale_empty = dock.empty_spec("empty:stale", window, cx).unwrap();
+                dock.register(stale_empty, cx).unwrap();
+            });
+            *source_mount.borrow_mut() = Some(dock.clone());
+            retained_dock = Some(dock);
+            retained_content = Some(content);
+            let host = cx.new(|_| Host(source_mount.clone()));
+            retained_source_host = Some(host.clone());
+            gpui_kit::component::Root::new(host, window, cx)
+        });
+        let dock = retained_dock.unwrap();
+        let content = retained_content.unwrap();
+        let source_host = retained_source_host.unwrap();
+        let mut original = None;
+        let mut ids = vec![];
+        let mut panel_keys = vec![];
+        source.update(|_, cx| {
+            dock.update(cx, |workspace, cx| {
+                let before = workspace.serialize(cx).unwrap();
+                workspace.retain_displayed_panels(cx).unwrap();
+                assert_eq!(workspace.serialize(cx).unwrap(), before);
+                assert!(!workspace.contains("retained:stale"));
+                assert!(!workspace.contains("empty:stale"));
+                assert!(!workspace.empty_panes.contains_key("empty:stale"));
+                assert!(!workspace.empty_subscriptions.contains_key("empty:stale"));
+                assert!(workspace.contains("retained:inactive"));
+            });
+            let workspace = dock.read(cx);
+            original = Some(workspace.serialize(cx).unwrap());
+            ids = workspace.retained_entity_ids(cx);
+            ids.push(dock.entity_id());
+            assert_eq!(workspace.retained_content_views(cx).len(), 3);
+            panel_keys = workspace
+                .panels
+                .borrow()
+                .iter()
+                .map(|(id, panel)| (id.clone(), panel.entity_id()))
+                .collect();
+            *source_mount.borrow_mut() = None;
+            source_host.update(cx, |_, cx| cx.notify());
+        });
+        events.borrow_mut().clear();
+        let mut destination_id = None;
+        let (_, destination) = cx.add_window_view(|window, cx| {
+            destination_id = Some(window.window_handle().window_id());
+            dock.update(cx, |workspace, cx| {
+                workspace.rehost_to_window(window, cx).unwrap();
+                assert_eq!(workspace.serialize(cx).unwrap(), original.clone().unwrap());
+                for (id, key) in &panel_keys {
+                    assert_eq!(workspace.panels.borrow()[id].entity_id(), *key);
+                }
+            });
+            *destination_mount.borrow_mut() = Some(dock.clone());
+            let host = cx.new(|_| Host(destination_mount.clone()));
+            gpui_kit::component::Root::new(host, window, cx)
+        });
+        destination.update(|_, cx| content.update(cx, |_, cx| cx.emit(())));
+        destination.run_until_parked();
+        assert_eq!(&*callbacks.borrow(), &[destination_id.unwrap()]);
+        assert!(
+            !events
+                .borrow()
+                .iter()
+                .any(|event| matches!(event, PaneLifecycle::Removed))
+        );
+        cx.update(|cx| {
+            for id in ids {
+                assert_eq!(
+                    cx.with_window(id, |window, _| window.window_handle().window_id()),
+                    destination_id
+                );
+            }
+        });
     }
 }

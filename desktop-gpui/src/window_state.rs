@@ -1,8 +1,17 @@
 //! Device-local native window placement. Never changes the shared workspace profile.
+use crate::workspace_window_state::{MAX_WINDOWS, WindowId, WorkspaceWindowState};
 use gpui_kit::*;
 use serde_json::{Value, json};
 const FILE: &str = "window-state.json";
+const MAX_FILE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_NATIVE_BYTES: usize = 16 * 1024;
 fn path() -> Option<std::path::PathBuf> {
+    #[cfg(feature = "performance-profiling")]
+    if crate::workspace_window_preview::enabled() { return None; }
+    // Native fixtures must never read or overwrite the user's window placement.
+    #[cfg(test)]
+    return None;
+    #[cfg(not(test))]
     monitter_lib::experimental_desktop::profile_dir()
         .ok()
         .map(|p| p.join(FILE))
@@ -10,25 +19,52 @@ fn path() -> Option<std::path::PathBuf> {
 fn cached() -> &'static std::sync::Mutex<Option<Value>> {
     static STATE: std::sync::OnceLock<std::sync::Mutex<Option<Value>>> = std::sync::OnceLock::new();
     STATE.get_or_init(|| {
-        std::sync::Mutex::new(
-            path()
-                .and_then(|p| std::fs::read(p).ok())
-                .and_then(|b| serde_json::from_slice(&b).ok()),
-        )
+        use std::io::Read;
+        let loaded = path()
+            .and_then(|p| std::fs::File::open(p).ok())
+            .and_then(|file| {
+                let mut bytes = Vec::new();
+                file.take((MAX_FILE_BYTES + 1) as u64)
+                    .read_to_end(&mut bytes)
+                    .ok()?;
+                if bytes.len() > MAX_FILE_BYTES {
+                    return None;
+                }
+                let value: Value = serde_json::from_slice(&bytes).ok()?;
+                valid_root(&value).then_some(value)
+            });
+        std::sync::Mutex::new(loaded)
     })
+}
+fn valid_root(value: &Value) -> bool {
+    value.is_object()
+        && value.get("windows").is_none_or(|windows| {
+            windows.as_object().is_some_and(|windows| {
+                windows.len() < MAX_WINDOWS
+                    && windows.iter().all(|(key, placement)| {
+                        WindowId::try_from(key.clone()).is_ok_and(|id| id != WindowId::main())
+                            && placement.is_object()
+                    })
+            })
+        })
 }
 fn read() -> Option<Value> {
     cached().lock().ok()?.clone()
 }
+/// One bounded writer queue. Enqueue while holding the cache lock so snapshots
+/// cannot reach disk in reverse order when native windows save concurrently.
 fn enqueue(value: Value, flush: bool) {
     type Write = (Value, Option<std::sync::mpsc::Sender<()>>);
-    static WRITER: std::sync::OnceLock<std::sync::mpsc::Sender<Write>> = std::sync::OnceLock::new();
+    static WRITER: std::sync::OnceLock<std::sync::mpsc::SyncSender<Write>> =
+        std::sync::OnceLock::new();
     let sender = WRITER.get_or_init(|| {
-        let (tx, rx) = std::sync::mpsc::channel::<Write>();
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Write>(1);
         std::thread::spawn(move || {
             while let Ok((mut value, ack)) = rx.recv() {
                 let mut acknowledgements = ack.into_iter().collect::<Vec<_>>();
-                for (newer, ack) in rx.try_iter() {
+                // Only one queued snapshot can exist. Newer snapshots contain
+                // all placement and ownership updates from the same cache.
+                if let Ok((newer, ack)) = rx.try_recv() {
                     value = newer;
                     acknowledgements.extend(ack);
                 }
@@ -36,8 +72,10 @@ fn enqueue(value: Value, flush: bool) {
                     if let Some(parent) = path.parent() {
                         if std::fs::create_dir_all(parent).is_ok() {
                             let temporary = path.with_extension("json.tmp");
-                            if let Ok(bytes) = serde_json::to_vec_pretty(&value) {
-                                if std::fs::write(&temporary, bytes).is_ok() {
+                            if let Ok(bytes) = serde_json::to_vec(&value) {
+                                if bytes.len() <= MAX_FILE_BYTES
+                                    && std::fs::write(&temporary, bytes).is_ok()
+                                {
                                     let _ = std::fs::rename(temporary, path);
                                 }
                             }
@@ -57,8 +95,91 @@ fn enqueue(value: Value, flush: bool) {
         let _ = rx.recv_timeout(std::time::Duration::from_secs(1));
     }
 }
+fn update(mutator: impl FnOnce(&mut Value), flush: bool) -> Result<(), String> {
+    let mut cache = cached()
+        .lock()
+        .map_err(|_| "Window state cache is unavailable")?;
+    let mut value = cache.clone().unwrap_or_else(|| json!({"version":1}));
+    mutator(&mut value);
+    if !valid_root(&value) {
+        return Err("Invalid or excessive window placements".into());
+    }
+    let bytes = serde_json::to_vec(&value).map_err(|e| e.to_string())?;
+    if bytes.len() > MAX_FILE_BYTES {
+        return Err("Window state exceeds size limit".into());
+    }
+    if cache.as_ref() != Some(&value) || flush {
+        *cache = Some(value.clone());
+        enqueue(value, flush);
+    }
+    Ok(())
+}
+fn placement<'a>(root: &'a Value, id: &WindowId) -> Option<&'a Value> {
+    if id == &WindowId::main() {
+        Some(root)
+    } else {
+        root.get("windows")?.get(id.as_str())
+    }
+}
+fn set_placement(root: &mut Value, id: &WindowId, value: Value) {
+    if id == &WindowId::main() {
+        // Keep the version-1 root placement layout readable by older releases.
+        if let Some(fields) = value.as_object() {
+            for (key, value) in fields {
+                root[key] = value.clone();
+            }
+        }
+    } else {
+        if !root.get("windows").is_some_and(Value::is_object) {
+            root["windows"] = json!({});
+        }
+        root["windows"][id.as_str()] = value;
+    }
+}
+pub fn load_workspace_windows() -> Option<WorkspaceWindowState> {
+    let root = read()?;
+    let bytes = serde_json::to_vec(root.get("workspaceWindows")?).ok()?;
+    WorkspaceWindowState::decode(&bytes).ok()
+}
+pub fn save_workspace_windows(state: &WorkspaceWindowState, flush: bool) -> Result<(), String> {
+    let value: Value = serde_json::from_slice(&state.encode()?).map_err(|e| e.to_string())?;
+    update(
+        |root| {
+            root["workspaceWindows"] = value;
+            // Closing/reconciling windows also drops their stale native placements.
+            if let Some(placements) = root.get_mut("windows").and_then(Value::as_object_mut) {
+                placements.retain(|key, _| {
+                    state
+                        .windows()
+                        .iter()
+                        .any(|w| w.window_id().as_str() == key)
+                });
+            }
+        },
+        flush,
+    )
+}
+pub fn remove_placement_for(id: &WindowId) -> Result<(), String> {
+    if id == &WindowId::main() {
+        return Err("Primary placement cannot be removed".into());
+    }
+    update(
+        |root| {
+            if let Some(windows) = root.get_mut("windows").and_then(Value::as_object_mut) {
+                windows.remove(id.as_str());
+            }
+        },
+        false,
+    )
+}
 pub fn restore_native(window: &Window, cx: &App) {
-    let Some(saved) = read() else {
+    restore_native_for(&WindowId::main(), window, cx);
+}
+pub fn restore_native_for(id: &WindowId, window: &Window, cx: &App) {
+    let Some(root) = read() else {
+        return;
+    };
+    let Some(saved) = placement(&root, id) else {
         return;
     };
     if saved["state"] == "fullscreen"
@@ -68,28 +189,34 @@ pub fn restore_native(window: &Window, cx: &App) {
     {
         return;
     }
-    if let Some(bytes) = saved["nativeState"].as_array().and_then(|a| {
-        a.iter()
-            .map(|n| n.as_u64().filter(|n| *n <= 255).map(|n| n as u8))
-            .collect::<Option<Vec<_>>>()
-    }) {
+    // Native restoration can bypass GPUI placement; reject offscreen geometry.
+    let Some(bounds) = decode(&saved["bounds"]) else {
+        return;
+    };
+    if !cx
+        .displays()
+        .iter()
+        .any(|d| contains(d.visible_bounds(), bounds))
+    {
+        return;
+    }
+    if let Some(bytes) = saved["nativeState"]
+        .as_array()
+        .filter(|a| a.len() <= MAX_NATIVE_BYTES)
+        .and_then(|a| {
+            a.iter()
+                .map(|n| n.as_u64().filter(|n| *n <= 255).map(|n| n as u8))
+                .collect::<Option<Vec<_>>>()
+        })
+    {
         window.restore_native_window_state(&bytes);
     }
 }
 pub fn save_native(window: &Window, cx: &App) {
-    save(window, cx);
-    if let Some(bytes) = window.native_window_state() {
-        if let Ok(mut saved) = cached().lock() {
-            if let Some(v) = saved.as_mut() {
-                v["nativeState"] = json!(bytes);
-                v["nativeStateBounds"] = v["bounds"].clone();
-                v["nativeStateWindowMode"] = v["state"].clone();
-            }
-        }
-    }
-    if let Some(saved) = read() {
-        enqueue(saved, true);
-    }
+    save_native_for(&WindowId::main(), window, cx);
+}
+pub fn save_native_for(id: &WindowId, window: &Window, cx: &App) {
+    save_inner(id, window, cx, true);
 }
 fn encode(b: Bounds<Pixels>) -> Value {
     json!([
@@ -126,34 +253,60 @@ fn displays(cx: &App) -> Value {
     rows.sort_by_key(|v| v["uuid"].to_string());
     Value::Array(rows)
 }
+fn contains(visible: Bounds<Pixels>, bounds: Bounds<Pixels>) -> bool {
+    bounds.origin.x >= visible.origin.x
+        && bounds.origin.y >= visible.origin.y
+        && bounds.right() <= visible.right()
+        && bounds.bottom() <= visible.bottom()
+}
+fn clamp(mut bounds: Bounds<Pixels>, visible: Bounds<Pixels>) -> Bounds<Pixels> {
+    bounds.size.width = bounds.size.width.min(visible.size.width);
+    bounds.size.height = bounds.size.height.min(visible.size.height);
+    bounds.origin.x = bounds
+        .origin
+        .x
+        .max(visible.origin.x)
+        .min(visible.right() - bounds.size.width);
+    bounds.origin.y = bounds
+        .origin
+        .y
+        .max(visible.origin.y)
+        .min(visible.bottom() - bounds.size.height);
+    bounds
+}
 pub fn display_id(cx: &App) -> Option<DisplayId> {
-    let saved = read()?;
+    display_id_for(&WindowId::main(), cx)
+}
+pub fn display_id_for(id: &WindowId, cx: &App) -> Option<DisplayId> {
+    let root = read()?;
+    let saved = placement(&root, id)?;
+    let uuid = saved["displayUuid"].as_str()?;
     cx.displays()
         .iter()
-        .find(|d| {
-            d.uuid().ok().map(|u| u.to_string()) == saved["displayUuid"].as_str().map(str::to_owned)
-        })
+        .find(|d| d.uuid().ok().map(|u| u.to_string()).as_deref() == Some(uuid))
         .map(|d| d.id())
 }
 pub fn initial(cx: &App) -> Option<WindowBounds> {
-    let saved = read()?;
+    initial_for(&WindowId::main(), cx)
+}
+pub fn initial_for(id: &WindowId, cx: &App) -> Option<WindowBounds> {
+    let root = read()?;
+    let saved = placement(&root, id)?;
     let mut b = decode(&saved["restoreBounds"]).or_else(|| decode(&saved["bounds"]))?;
-    if saved["displays"] != displays(cx) {
-        let ds = cx.displays();
-        let target = ds
-            .iter()
-            .find(|d| {
-                d.uuid().ok().map(|u| u.to_string())
-                    == saved["displayUuid"].as_str().map(str::to_owned)
-            })
-            .cloned()
-            .or_else(|| cx.primary_display())?;
-        let v = target.visible_bounds();
-        b.size.width = b.size.width.min(v.size.width);
-        b.size.height = b.size.height.min(v.size.height);
-        b.origin.x = b.origin.x.max(v.origin.x).min(v.right() - b.size.width);
-        b.origin.y = b.origin.y.max(v.origin.y).min(v.bottom() - b.size.height);
-    }
+    let ds = cx.displays();
+    let target = ds
+        .iter()
+        .find(|d| {
+            saved["displayUuid"]
+                .as_str()
+                .is_some_and(|uuid| d.uuid().ok().map(|u| u.to_string()).as_deref() == Some(uuid))
+        })
+        .cloned()
+        .or_else(|| ds.iter().find(|d| contains(d.visible_bounds(), b)).cloned())
+        .or_else(|| cx.primary_display())?;
+    // Also clamp when display IDs are unchanged: a corrupt/offscreen frame is
+    // never allowed to hide a restored native workspace window.
+    b = clamp(b, target.visible_bounds());
     Some(match saved["state"].as_str() {
         Some("fullscreen") => WindowBounds::Fullscreen(b),
         Some("maximized") => WindowBounds::Maximized(b),
@@ -161,7 +314,12 @@ pub fn initial(cx: &App) -> Option<WindowBounds> {
     })
 }
 pub fn save(window: &Window, cx: &App) {
-    let old = read();
+    save_for(&WindowId::main(), window, cx);
+}
+pub fn save_for(id: &WindowId, window: &Window, cx: &App) {
+    save_inner(id, window, cx, false);
+}
+fn save_inner(id: &WindowId, window: &Window, cx: &App, native: bool) {
     let state = if window.is_fullscreen() {
         "fullscreen"
     } else if window.is_maximized() {
@@ -170,41 +328,105 @@ pub fn save(window: &Window, cx: &App) {
         "windowed"
     };
     let bounds = window.bounds();
-    let restore = match window.window_bounds() {
-        WindowBounds::Fullscreen(b) => b,
-        _ if state == "maximized" => old
-            .as_ref()
-            .and_then(|s| decode(&s["restoreBounds"]))
-            .unwrap_or(bounds),
-        _ => bounds,
-    };
-    let mut value = json!({"version":1,"state":state,"bounds":encode(bounds),"restoreBounds":encode(restore),
-        "displayUuid":window.display(cx).and_then(|d|d.uuid().ok()).map(|u|u.to_string()),"displays":displays(cx)});
-    if old.as_ref() == Some(&value) {
-        return;
-    }
-    if let Some(old) = old.as_ref() {
-        if old["bounds"] == value["bounds"]
-            && old["state"] == value["state"]
-            && old["displays"] == value["displays"]
-        {
-            for key in ["nativeState", "nativeStateBounds", "nativeStateWindowMode"] {
-                if let Some(v) = old.get(key) {
-                    value[key] = v.clone();
+    let native_bytes = native
+        .then(|| window.native_window_state())
+        .flatten()
+        .filter(|b| b.len() <= MAX_NATIVE_BYTES);
+    let result = update(
+        |root| {
+            let old = placement(root, id).cloned();
+            let restore = match window.window_bounds() {
+                WindowBounds::Fullscreen(b) => b,
+                _ if state == "maximized" => old
+                    .as_ref()
+                    .and_then(|s| decode(&s["restoreBounds"]))
+                    .unwrap_or(bounds),
+                _ => bounds,
+            };
+            let mut value = json!({"version":1,"state":state,"bounds":encode(bounds),"restoreBounds":encode(restore),
+            "displayUuid":window.display(cx).and_then(|d|d.uuid().ok()).map(|u|u.to_string()),"displays":displays(cx)});
+            if let Some(bytes) = native_bytes {
+                value["nativeState"] = json!(bytes);
+                value["nativeStateBounds"] = value["bounds"].clone();
+                value["nativeStateWindowMode"] = value["state"].clone();
+            } else if let Some(old) = old.as_ref() {
+                if old["bounds"] == value["bounds"]
+                    && old["state"] == value["state"]
+                    && old["displays"] == value["displays"]
+                {
+                    for key in ["nativeState", "nativeStateBounds", "nativeStateWindowMode"] {
+                        if let Some(v) = old.get(key) {
+                            value[key] = v.clone();
+                        }
+                    }
                 }
             }
-        }
+            // Root placement replacement must remove obsolete native fields while
+            // retaining ownership and secondary placements.
+            if id == &WindowId::main() {
+                if let Some(fields) = root.as_object_mut() {
+                    for key in ["nativeState", "nativeStateBounds", "nativeStateWindowMode"] {
+                        fields.remove(key);
+                    }
+                }
+            }
+            set_placement(root, id, value);
+        },
+        native,
+    );
+    if let Err(error) = result {
+        eprintln!("Could not save native window placement: {error}");
     }
-    if let Ok(mut state) = cached().lock() {
-        *state = Some(value.clone());
+}
+
+#[cfg(test)]
+mod tests {
+    use ::core::prelude::v1::test;
+    use super::*;
+    fn b(x: f32, y: f32, w: f32, h: f32) -> Bounds<Pixels> {
+        Bounds::new(point(px(x), px(y)), size(px(w), px(h)))
     }
-    enqueue(value, false);
+    #[test]
+    fn offscreen_and_oversized_frames_are_clamped_for_monitor_migration() {
+        let visible = b(-1920., 30., 1920., 1050.);
+        let frame = clamp(b(9000., -2000., 2500., 1600.), visible);
+        assert_eq!(frame, visible);
+        let smaller = clamp(b(2000., 2000., 800., 600.), visible);
+        assert!(contains(visible, smaller));
+        assert_eq!(smaller.origin.x, px(-800.));
+        assert_eq!(smaller.origin.y, px(480.));
+    }
+    #[test]
+    fn main_placement_stays_legacy_compatible_and_secondary_is_independent() {
+        let id = WindowId::try_from("workspace-window-1".to_owned()).unwrap();
+        let mut root = json!({"version":1,"bounds":[0,0,800,600],"workspaceWindows":{"test":true}});
+        set_placement(&mut root, &id, json!({"bounds":[20,30,900,700]}));
+        set_placement(
+            &mut root,
+            &WindowId::main(),
+            json!({"bounds":[10,10,600,400]}),
+        );
+        assert_eq!(root["bounds"], json!([10, 10, 600, 400]));
+        assert_eq!(
+            placement(&root, &id).unwrap()["bounds"],
+            json!([20, 30, 900, 700])
+        );
+        assert_eq!(root["workspaceWindows"]["test"], true);
+        assert!(valid_root(&root));
+        root["windows"]["../../evil"] = json!({});
+        assert!(!valid_root(&root));
+    }
 }
 
 /// Resize the outer window on its current screen, using AppKit coordinates
 /// throughout so secondary screens and the menu bar/Dock need no conversion.
 #[cfg(target_os = "macos")]
-pub fn center_at_percent(window: &mut Window, width_percent: u8, height_percent: u8, cx: &mut App) -> Result<(), String> {
+pub fn center_at_percent(
+    window: &mut Window,
+    width_percent: u8,
+    height_percent: u8,
+    cx: &mut App,
+) -> Result<(), String> {
     use objc2::{msg_send, rc::Retained, runtime::AnyObject};
     use objc2_foundation::{NSPoint, NSRect, NSSize};
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -220,28 +442,41 @@ pub fn center_at_percent(window: &mut Window, width_percent: u8, height_percent:
     unsafe {
         let view = handle.ns_view.as_ptr().cast::<AnyObject>();
         let native: *mut AnyObject = msg_send![view, window];
-        if native.is_null() { return Err("The native window is unavailable.".into()); }
+        if native.is_null() {
+            return Err("The native window is unavailable.".into());
+        }
         let screen: *mut AnyObject = msg_send![native, screen];
-        if screen.is_null() { return Err("The current screen is unavailable.".into()); }
+        if screen.is_null() {
+            return Err("The current screen is unavailable.".into());
+        }
         let usable: NSRect = msg_send![screen, visibleFrame];
         let minimum: NSSize = msg_send![native, minSize];
-        let width = (usable.size.width * f64::from(width_percent) / 100.).max(minimum.width).min(usable.size.width);
-        let height = (usable.size.height * f64::from(height_percent) / 100.).max(minimum.height).min(usable.size.height);
-        let frame = NSRect::new(NSPoint::new(
-            usable.origin.x + (usable.size.width - width) / 2.,
-            usable.origin.y + (usable.size.height - height) / 2.,
-        ), NSSize::new(width, height));
+        let width = (usable.size.width * f64::from(width_percent) / 100.)
+            .max(minimum.width)
+            .min(usable.size.width);
+        let height = (usable.size.height * f64::from(height_percent) / 100.)
+            .max(minimum.height)
+            .min(usable.size.height);
+        let frame = NSRect::new(
+            NSPoint::new(
+                usable.origin.x + (usable.size.width - width) / 2.,
+                usable.origin.y + (usable.size.height - height) / 2.,
+            ),
+            NSSize::new(width, height),
+        );
         let native = Retained::retain(native).ok_or("The native window is unavailable.")?;
-        cx.foreground_executor().spawn(async move {
-            // Retaining prevents use-after-free if the user closes the window
-            // before this turn. Do not resize a closed or hidden native window.
-            let visible: bool = msg_send![&*native, isVisible];
-            if visible {
-                let _: () = msg_send![&*native, setFrame: frame, display: true, animate: false];
-            }
-            // AppKit now delivers its normal GPUI resize/move callbacks with no
-            // active command borrow. Those update the viewport and pane layout.
-        }).detach();
+        cx.foreground_executor()
+            .spawn(async move {
+                // Retaining prevents use-after-free if the user closes the window
+                // before this turn. Do not resize a closed or hidden native window.
+                let visible: bool = msg_send![&*native, isVisible];
+                if visible {
+                    let _: () = msg_send![&*native, setFrame: frame, display: true, animate: false];
+                }
+                // AppKit now delivers its normal GPUI resize/move callbacks with no
+                // active command borrow. Those update the viewport and pane layout.
+            })
+            .detach();
     }
     Ok(())
 }

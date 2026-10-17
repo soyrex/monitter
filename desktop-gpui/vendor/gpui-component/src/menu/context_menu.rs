@@ -178,13 +178,7 @@ struct DeferredMenu {
 }
 
 impl DeferredMenu {
-    fn build_menu(&self, window: &mut Window, cx: &mut App) -> AnyElement {
-        // Focus the menu, so that can be handle the action.
-        let focus_handle = self.menu_view.focus_handle(cx);
-        if !focus_handle.contains_focused(window, cx) {
-            focus_handle.focus(window, cx);
-        }
-
+    fn build_menu(&self, window: &mut Window) -> AnyElement {
         deferred(
             anchored().child(
                 div()
@@ -255,7 +249,7 @@ impl Element for DeferredMenu {
         if !self.draws.get() {
             return;
         }
-        let mut menu = self.build_menu(window, cx);
+        let mut menu = self.build_menu(window);
         menu.prepaint_as_root(bounds.origin, window.viewport_size().into(), window, cx);
         self.menu = Some(menu);
     }
@@ -473,6 +467,11 @@ impl<E: ParentElement + Styled + IntoElement + 'static> Element for ContextMenu<
                                     menu.set_trigger_focus(trigger_focus_handle, cx);
                                     menu.set_previous_focus(previous_focus_handle, cx);
                                 });
+                                // Focus before publishing the menu for drawing.
+                                // Changing focus during prepaint would leave an
+                                // earlier node's accessibility focus claim alive
+                                // alongside the menu's claim in the same frame.
+                                menu.focus_handle(cx).focus(window, cx);
 
                                 // Set up the subscription for dismiss handling.
                                 // Hold a Weak here, not a strong clone: the closure

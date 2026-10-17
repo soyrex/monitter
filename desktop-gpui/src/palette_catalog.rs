@@ -1,5 +1,6 @@
 //! One native catalog shared by both keyboard aliases. Enumeration is local;
 //! execution revalidates the fresh catalog in Desktop::execute_palette.
+use crate::workspace_windows::DesktopContextExt as _;
 use super::*;
 use command_palette::{EntryKind as K, PaletteEntry as E};
 fn entry(
@@ -639,25 +640,25 @@ impl Desktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.native_settings.is_none() {
-            self.native_settings = Some(settings::NativeSettings::new(
+        if self.window.native_settings.is_none() {
+            self.window.native_settings = Some(settings::NativeSettings::new(
                 &self.snapshot["settings"],
                 window,
                 cx,
             ));
         }
-        if let Some(state) = &mut self.native_settings {
+        if let Some(state) = &mut self.window.native_settings {
             state.select_category(category);
         }
         self.show_preferences(window, cx);
     }
     pub(super) fn palette_channels(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.switch_surface(Sidebar::Channels, window, cx);
-        if self.channels.is_none() {
+        if self.window.channels.is_none() {
             if let Some(service) = self.service.clone() {
                 let channels = cx.new(|cx| channels::ChannelPane::new(service, window, cx));
-                self.channel_subscription =
-                    Some(cx.subscribe(&channels, |view, _, event, cx| match event {
+                self.window.channel_subscription =
+                    Some(cx.subscribe_workspace(&channels, window, |view, _, event, _, cx| match event {
                         channels::ChannelEvent::Refresh => view.refresh(cx),
                         channels::ChannelEvent::HistoryPage {
                             channel,
@@ -665,17 +666,17 @@ impl Desktop {
                             page,
                         } => view.accept_channel_page(channel, before.as_deref(), page.clone(), cx),
                     }));
-                self.channels = Some(channels);
+                self.window.channels = Some(channels);
             }
         }
-        if let Some(pane) = &self.channels {
+        if let Some(pane) = &self.window.channels {
             pane.update(cx, |pane, cx| {
                 pane.sync(
                     self.snapshot.clone(),
                     self.revision.as_deref().unwrap_or_default(),
                     false,
                     &[],
-                    &self.channel_cursors,
+                    &self.window.channel_cursors,
                     cx,
                 )
             });
@@ -683,9 +684,9 @@ impl Desktop {
     }
     fn palette_projects(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.switch_surface(Sidebar::Projects, window, cx);
-        if self.workspace.is_none() {
+        if self.window.workspace.is_none() {
             if let Some(service) = self.service.clone() {
-                self.workspace = Some(cx.new(|cx| {
+                self.window.workspace = Some(cx.new(|cx| {
                     workspace::WorkspacePane::new(service, self.snapshot.clone(), window, cx)
                 }));
             }
@@ -708,27 +709,26 @@ impl Desktop {
             return true;
         }
         if let Some(pane) = id.strip_prefix("pane:") {
-            self.dock.update(cx, |dock, cx| {
+            self.window.dock.update(cx, |dock, cx| {
                 dock.set_shown(true, window, cx);
                 dock.reveal_and_focus(pane, window, cx)
             });
             return true;
         }
         if let Some(session_id) = id.strip_prefix("terminal:") {
-            let session = self
-                .palette_terminal_sessions
+            let session = self.window.palette_terminal_sessions
                 .iter()
                 .cloned()
                 .chain(
-                    self.terminal
+                    self.window.terminal
                         .iter()
-                        .chain(self.terminal_panes.values())
+                        .chain(self.window.terminal_panes.values())
                         .flat_map(|pane| pane.read(cx).palette_sessions().to_vec()),
                 )
                 .find(|session| field(session, "id") == session_id);
             if let Some(session) = session {
                 if let Err(error) = self.open_terminal_pane(session, None, window, cx) {
-                    self.error = Some(error);
+                    self.window.error = Some(error);
                 }
             }
             return true;
@@ -759,23 +759,23 @@ impl Desktop {
                 .into_iter()
                 .find(|p| field(p, "id") == project);
             self.palette_projects(window, cx);
-            if let (Some(pane), Some(value)) = (&self.workspace, value) {
+            if let (Some(pane), Some(value)) = (&self.window.workspace, value) {
                 pane.update(cx, |pane, cx| pane.select(value, window, cx));
             }
             return true;
         }
         if let Some(channel) = id.strip_prefix("channel:") {
             self.palette_channels(window, cx);
-            if let Some(pane) = &self.channels {
+            if let Some(pane) = &self.window.channels {
                 pane.update(cx, |pane, cx| pane.select(Some(channel.into()), window, cx));
             }
             return true;
         }
         if let Some(agent) = id.strip_prefix("agent:") {
             self.palette_settings_category("agents", window, cx);
-            if self.agent_editor.is_none() {
+            if self.window.agent_editor.is_none() {
                 if let Some(service) = self.service.clone() {
-                    self.agent_editor = Some(cx.new(|cx| {
+                    self.window.agent_editor = Some(cx.new(|cx| {
                         agents::AgentHostPane::new(
                             service,
                             self.snapshot.as_ref().clone(),
@@ -785,7 +785,7 @@ impl Desktop {
                     }));
                 }
             }
-            if let Some(pane) = &self.agent_editor {
+            if let Some(pane) = &self.window.agent_editor {
                 pane.update(cx, |pane, cx| pane.select_agent(agent, window, cx));
             }
             return true;
@@ -793,7 +793,7 @@ impl Desktop {
         #[cfg(target_os = "macos")]
         if let Some((_, width, height)) = WINDOW_CENTER_PRESETS.iter().find(|(key, _, _)| *key == id) {
             if let Err(error) = window_state::center_at_percent(window, *width, *height, cx) {
-                self.error = Some(error);
+                self.window.error = Some(error);
                 cx.notify();
             }
             return true;
@@ -801,9 +801,9 @@ impl Desktop {
         if let Some((_, _, category)) = SETTINGS.iter().find(|(key, _, _)| *key == id) {
             self.palette_settings_category(category, window, cx);
             if id == "hosts" || id == "agents-directory" {
-                if self.agent_editor.is_none() {
+                if self.window.agent_editor.is_none() {
                     if let Some(service) = self.service.clone() {
-                        self.agent_editor = Some(cx.new(|cx| {
+                        self.window.agent_editor = Some(cx.new(|cx| {
                             agents::AgentHostPane::new(
                                 service,
                                 self.snapshot.as_ref().clone(),
@@ -813,7 +813,7 @@ impl Desktop {
                         }));
                     }
                 }
-                if let Some(pane) = &self.agent_editor {
+                if let Some(pane) = &self.window.agent_editor {
                     pane.update(cx, |pane, cx| {
                         if id == "hosts" {
                             pane.show_hosts(cx)
@@ -830,7 +830,7 @@ impl Desktop {
             return true;
         }
         if let Some(view) = id.strip_prefix("sidebar:") {
-            self.sidebar_view = match view {
+            self.window.sidebar_view = match view {
                 "projects" => SidebarView::Projects,
                 "activity" => SidebarView::Activity,
                 _ => SidebarView::Agents,
@@ -850,11 +850,10 @@ impl Desktop {
             }
         }
         if let Some(preset) = id.strip_prefix("layout:") {
-            if let Err(error) = self
-                .dock
+            if let Err(error) = self.window.dock
                 .update(cx, |dock, cx| dock.apply_layout_preset(preset, window, cx))
             {
-                self.error = Some(error);
+                self.window.error = Some(error);
             } else {
                 self.queue_preferences_save(cx);
             }
@@ -876,7 +875,7 @@ impl Desktop {
                     preferences.data.appearance.warm_paper = false;
                 }
                 self.native_theme_preset = "monitter".into();
-                self.native_settings = None;
+                self.window.native_settings = None;
                 self.queue_preferences_save(cx);
                 return true;
             }
@@ -922,14 +921,14 @@ impl Desktop {
                     design::set_interface_scale(preferences.data.appearance.interface_scale);
                 }
             }
-            self.native_settings = None;
+            self.window.native_settings = None;
             self.queue_preferences_save(cx);
             cx.notify();
             return true;
         }
         match id {
             "detail" => {
-                if let Some(task) = &self.selected {
+                if let Some(task) = &self.window.selected {
                     if let Some(pane) = self.chat_panes.borrow().get(task).cloned() {
                         pane.update(cx, |pane, cx| pane.toggle_companion(cx));
                     }
@@ -937,15 +936,15 @@ impl Desktop {
             }
             "new-task" => self.open_chat_draft(None, window, cx),
             "neovim-files" => {
-                if let Err(error) = self.show_neovim_files(window, cx) { self.error = Some(error); }
+                if let Err(error) = self.show_neovim_files(window, cx) { self.window.error = Some(error); }
             }
             "new-neovim" => {
                 if let Err(error) = self.open_neovim_pane(None, window, cx) {
-                    self.error = Some(error);
+                    self.window.error = Some(error);
                 }
             }
             "new-terminal" => {
-                let pane = self.dock.update(cx, |dock, cx| dock.add_focused_empty_tab(window, cx));
+                let pane = self.window.dock.update(cx, |dock, cx| dock.add_focused_empty_tab(window, cx));
                 match pane {
                     Ok(pane) => {
                         if let Err(error) = self.empty_pane_action(
@@ -954,10 +953,10 @@ impl Desktop {
                             window,
                             cx,
                         ) {
-                            self.error = Some(error);
+                            self.window.error = Some(error);
                         }
                     }
-                    Err(error) => self.error = Some(error),
+                    Err(error) => self.window.error = Some(error),
                 }
             }
             "new-browser" => {
@@ -967,14 +966,14 @@ impl Desktop {
                     .and_then(|id| self.open_browser_tab(id, window, cx))
                 {
                     Ok(()) => {}
-                    Err(error) => self.error = Some(error),
+                    Err(error) => self.window.error = Some(error),
                 }
             }
             "new-agent" => {
                 self.palette_settings_category("agents", window, cx);
-                if self.agent_editor.is_none() {
+                if self.window.agent_editor.is_none() {
                     if let Some(service) = self.service.clone() {
-                        self.agent_editor = Some(cx.new(|cx| {
+                        self.window.agent_editor = Some(cx.new(|cx| {
                             agents::AgentHostPane::new(
                                 service,
                                 self.snapshot.as_ref().clone(),
@@ -984,24 +983,24 @@ impl Desktop {
                         }));
                     }
                 }
-                if let Some(pane) = &self.agent_editor {
+                if let Some(pane) = &self.window.agent_editor {
                     pane.update(cx, |pane, cx| pane.select_agent("", window, cx));
                 }
             }
             "new-project" => {
                 self.palette_projects(window, cx);
-                if let Some(pane) = &self.workspace {
+                if let Some(pane) = &self.window.workspace {
                     pane.update(cx, |pane, cx| pane.select(json!({}), window, cx));
                 }
             }
             "new-channel" => {
                 self.palette_channels(window, cx);
-                if let Some(pane) = &self.channels {
+                if let Some(pane) = &self.window.channels {
                     pane.update(cx, |pane, cx| pane.create(window, cx));
                 }
             }
             "balance-panes" => {
-                self.dock
+                self.window.dock
                     .update(cx, |dock, cx| dock.equalize_workspace(window, cx));
                 self.queue_preferences_save(cx);
             }
@@ -1028,7 +1027,7 @@ impl Desktop {
                 }
             }
             "stop" | "archive" | "autoname" => {
-                if let Some(task) = self.selected.clone() {
+                if let Some(task) = self.window.selected.clone() {
                     match id {
                         "stop" => self.command("cancel_task", json!({"taskId":task}), cx),
                         "archive" => self.command(

@@ -110,19 +110,31 @@ pub(super) fn pane_and_workspace_bindings() -> Vec<KeyBinding> {
     for direction in ["left", "right", "up", "down"] {
         bindings.push(KeyBinding::new(
             &format!("cmd-ctrl-{direction}"),
-            MoveFocusedTab { direction: direction.into() },
+            MoveFocusedTab {
+                direction: direction.into(),
+            },
             None,
         ));
     }
     for (key, direction) in [
-        ("cmd-shift-left", -1), ("cmd-shift-up", -1), ("cmd-[", -1),
-        ("cmd-shift-right", 1), ("cmd-shift-down", 1), ("cmd-]", 1),
+        ("cmd-shift-left", -1),
+        ("cmd-shift-up", -1),
+        ("cmd-[", -1),
+        ("cmd-shift-right", 1),
+        ("cmd-shift-down", 1),
+        ("cmd-]", 1),
     ] {
-        bindings.push(KeyBinding::new(key, SwitchNamedWorkspace { direction }, None));
+        bindings.push(KeyBinding::new(
+            key,
+            SwitchNamedWorkspace { direction },
+            None,
+        ));
     }
     for index in 1..=9 {
         bindings.push(KeyBinding::new(
-            &format!("cmd-{index}"), SelectNamedWorkspace { index }, None,
+            &format!("cmd-{index}"),
+            SelectNamedWorkspace { index },
+            None,
         ));
     }
     bindings.extend([
@@ -177,31 +189,41 @@ impl DesktopShortcuts {
         action: impl FnOnce(&mut crate::Desktop, &mut Window, &mut Context<crate::Desktop>) + 'static,
     ) {
         let weak = self.weak.clone();
-        let handle = window_handle.clone();
+        let handle = self
+            .weak
+            .read_with(cx, |desktop, cx| desktop.active_workspace_window(cx))
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| window_handle.clone());
         cx.defer(move |cx| {
             let _ = handle.update(cx, |_root, window, cx| {
                 let _ = weak.update(cx, |desktop, cx| {
-                    // Global actions can dispatch without an interactive root.
-                    // Wait for authoritative workspace reconciliation first.
-                    if desktop.startup_pending { return; }
-                    // A sheet/preferences dialog owns its keyboard. In particular,
-                    // don't let workspace shortcuts mutate the hidden dock below it.
-                    if workspace_shortcuts_blocked(
-                        window.has_active_dialog(cx),
-                        desktop.preferences_open || crate::session_lock::locked(cx),
-                        desktop
-                            .palette
-                            .as_ref()
-                            .is_some_and(|palette| palette.read(cx).is_open()),
-                        desktop.closing,
-                        crate::vim_command::bar(cx).is_some_and(|bar| bar.read(cx).is_open()),
-                        desktop.draft_creation_open,
-                        desktop.focused_composer_is_composing(window, cx),
-                    ) {
-                        return;
-                    }
-                    action(desktop, window, cx);
-                    cx.notify();
+                    desktop.with_workspace_window(window, cx, |desktop, window, cx| {
+                        // Global actions can dispatch without an interactive root.
+                        // Wait for authoritative workspace reconciliation first.
+                        if desktop.startup_pending {
+                            return;
+                        }
+                        // A sheet/preferences dialog owns its keyboard. In particular,
+                        // don't let workspace shortcuts mutate the hidden dock below it.
+                        if workspace_shortcuts_blocked(
+                            window.has_active_dialog(cx),
+                            desktop.preferences_open || crate::session_lock::locked(cx),
+                            desktop
+                                .palette
+                                .as_ref()
+                                .is_some_and(|palette| palette.read(cx).is_open()),
+                            desktop.closing,
+                            crate::vim_command::bar_for(window, cx)
+                                .is_some_and(|bar| bar.read(cx).is_open()),
+                            desktop.draft_creation_open,
+                            desktop.focused_composer_is_composing(window, cx),
+                        ) {
+                            return;
+                        }
+                        action(desktop, window, cx);
+                        cx.notify();
+                    });
                 });
             });
         });
@@ -445,17 +467,31 @@ pub fn install(window_handle: AnyWindowHandle, shortcuts: DesktopShortcuts, cx: 
                         dock.move_focused_group(&operation, window, cx)
                     }),
                     "split-down" | "split-right" | "split-up" | "split-left" => {
-                        if desktop.neovim_split_focused(matches!(operation.as_str(), "split-right" | "split-left"), window, cx) { true } else { desktop.dock.update(cx, |dock, cx| {
-                            dock.split_focused_group(
-                                operation.trim_start_matches("split-"),
-                                None,
-                                window,
-                                cx,
-                            )
-                            .unwrap_or(false)
-                        }) }
+                        if desktop.neovim_split_focused(
+                            matches!(operation.as_str(), "split-right" | "split-left"),
+                            window,
+                            cx,
+                        ) {
+                            true
+                        } else {
+                            desktop.dock.update(cx, |dock, cx| {
+                                dock.split_focused_group(
+                                    operation.trim_start_matches("split-"),
+                                    None,
+                                    window,
+                                    cx,
+                                )
+                                .unwrap_or(false)
+                            })
+                        }
                     }
-                    "close" => match desktop.close_focused_pane(window, cx) { Ok(()) => true, Err(error) => { desktop.error = Some(error); true } },
+                    "close" => match desktop.close_focused_pane(window, cx) {
+                        Ok(()) => true,
+                        Err(error) => {
+                            desktop.error = Some(error);
+                            true
+                        }
+                    },
                     "only" => desktop
                         .dock
                         .update(cx, |dock, cx| dock.keep_focused_group(window, cx)),
@@ -789,8 +825,18 @@ impl crate::Desktop {
             V::Split { direction, size } => self.dock.update(cx, |dock, cx| {
                 dock.split_focused_group(&direction, size, window, cx)
             }),
-            V::Terminal => self.dock.update(cx, |dock, cx| dock.add_focused_empty_tab(window, cx))
-                .and_then(|id| self.empty_pane_action(&id, crate::empty_pane::EmptyPaneAction::Terminal, window, cx).map(|_| true)),
+            V::Terminal => self
+                .dock
+                .update(cx, |dock, cx| dock.add_focused_empty_tab(window, cx))
+                .and_then(|id| {
+                    self.empty_pane_action(
+                        &id,
+                        crate::empty_pane::EmptyPaneAction::Terminal,
+                        window,
+                        cx,
+                    )
+                    .map(|_| true)
+                }),
             V::ClosePane(target) => Ok(self
                 .dock
                 .update(cx, |dock, cx| dock.close_focused_group(target, window, cx))),

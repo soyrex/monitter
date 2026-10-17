@@ -37,6 +37,7 @@ fn session_lock_escape_stays_inside_dialog_and_pin_is_masked(cx: &mut TestAppCon
             let current = make(cx);
             let confirmation = make(cx);
             SessionLock {
+                disconnected_fixture: true,
                 focus: cx.focus_handle(),
                 locked: true,
                 configured: Some(true),

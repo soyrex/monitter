@@ -1,5 +1,6 @@
 //! Preferences blur the retained workspace in the ordered GPU paint pass,
 //! before painting the modal card. No readback or delayed snapshot replacement.
+use crate::workspace_windows::DesktopContextExt as _;
 use super::*;
 use gpui_kit::component::{WindowExt as _, FocusTrapElement as _};
 use crate::chat::feedback::{self, Clock, FeedbackClock};
@@ -12,34 +13,37 @@ impl Render for PreferencesOverlay {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let progress = self.clock.borrow_mut().progress(cx.reduce_motion());
         let clock = self.clock.clone();
-        self.owner.update(cx, |view, cx| view.render_preferences_surface(window, cx, progress, clock))
+        self.owner.update(cx, |view, cx| view.with_workspace_window(window, cx, |view, window, cx| view.render_preferences_surface(window, cx, progress, clock)))
             .unwrap_or_else(|_| div().into_any_element())
     }
 }
 
 #[derive(Default)]
-struct WorkspaceOverlayState { open: bool }
+struct WorkspaceOverlayState { windows: std::collections::HashSet<WindowId> }
 impl Global for WorkspaceOverlayState {}
-pub(crate) fn workspace_blocked(cx: &App) -> bool { crate::session_lock::locked(cx) || cx.try_global::<WorkspaceOverlayState>().is_some_and(|state| state.open) }
+pub(crate) fn workspace_blocked(cx: &App) -> bool { crate::session_lock::locked(cx) || cx.try_global::<WorkspaceOverlayState>().is_some_and(|state| cx.active_window().is_some_and(|window|state.windows.contains(&window.window_id()))) }
 
 impl Desktop {
     pub(super) fn show_preferences(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.startup_pending || crate::session_lock::locked(cx) || self.closing || self.preferences_open { return; }
-        self.preferences_previous_focus = window.focused(cx);
-        self.preferences_open = true;
-        cx.set_global(WorkspaceOverlayState { open: true });
+        if self.startup_pending || crate::session_lock::locked(cx) || self.closing || self.window.preferences_open { return; }
+        self.window.preferences_previous_focus = window.focused(cx);
+        self.window.preferences_open = true;
+        if cx.try_global::<WorkspaceOverlayState>().is_none() {cx.set_global(WorkspaceOverlayState::default());}
+        cx.global_mut::<WorkspaceOverlayState>().windows.insert(window.window_handle().window_id());
         cx.stop_active_drag(window);
-        window.focus(&self.preferences_focus, cx);
+        window.focus(&self.window.preferences_focus, cx);
         // Native webviews must not sit above the modal.
-        self.dock.update(cx, |dock, cx| dock.set_shown(false, window, cx));
+        self.window.dock.update(cx, |dock, cx| dock.set_shown(false, window, cx));
         cx.notify();
     }
     pub(super) fn close_preferences(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.session_lock.update(cx,|lock,cx|lock.clear_fields(window,cx));
-        self.preferences_open = false;
-        cx.set_global(WorkspaceOverlayState { open: false });
-        self.dock.update(cx, |dock, cx| dock.set_shown(true, window, cx));
-        if let Some(focus) = self.preferences_previous_focus.take() { window.focus(&focus, cx); }
+        if self.current_workspace_window == crate::workspace_window_state::WindowId::main() {
+            self.session_lock.update(cx,|lock,cx|lock.clear_fields(window,cx));
+        }
+        self.window.preferences_open = false;
+        if cx.try_global::<WorkspaceOverlayState>().is_some() {cx.global_mut::<WorkspaceOverlayState>().windows.remove(&window.window_handle().window_id());}
+        self.window.dock.update(cx, |dock, cx| dock.set_shown(true, window, cx));
+        if let Some(focus) = self.window.preferences_previous_focus.take() { window.focus(&focus, cx); }
         cx.notify();
     }
     pub(super) fn render_preferences_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -59,10 +63,10 @@ impl Desktop {
         let palette = self.apply_native_theme(window, cx);
         let content = self.render_preferences_content(window, cx);
         div().id("native-preferences-modal").role(Role::Dialog).absolute().inset_0().occlude()
-            .track_focus(&self.preferences_focus)
+            .track_focus(&self.window.preferences_focus)
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
-            .capture_key_down(cx.listener(|view, event: &KeyDownEvent, window, cx| {
+            .capture_key_down(cx.workspace_listener(|view, event: &KeyDownEvent, window, cx| {
                 if event.keystroke.key == "escape" && !window.has_active_dialog(cx) && !view.preferences_search_composing(window, cx) {
                     if !view.clear_preferences_search(window, cx) { view.close_preferences(window, cx); } cx.stop_propagation();
                 }
@@ -72,7 +76,7 @@ impl Desktop {
             // so the first modal frame already has its blurred blackout.
             .child(div().id("preferences-backdrop").absolute().inset_0()
                 .bg(Background::from(rgba(0x00000099)).backdrop_blur(20.))
-                .on_mouse_down(MouseButton::Left, cx.listener(|view, _, window, cx| {
+                .on_mouse_down(MouseButton::Left, cx.workspace_listener(|view, _, window, cx| {
                     view.close_preferences(window, cx);
                     cx.stop_propagation();
                 })))
@@ -88,7 +92,7 @@ impl Desktop {
                 .child(div().flex().items_center().justify_between().px(design::ui_scaled_px(design::space::SECTION)).py(design::ui_scaled_px(design::space::INSET)).border_b_1().border_color(rgb(palette.line))
                     .child(div().font_weight(FontWeight::SEMIBOLD).child("Preferences"))
                     .child(Button::new("close-preferences").compact().label("Done").accessibility_label("Close preferences")
-                        .on_click(cx.listener(|view, _, window, cx| view.close_preferences(window, cx)))))
+                        .on_click(cx.workspace_listener(|view, _, window, cx| view.close_preferences(window, cx)))))
                 .child(div().flex_1().min_h_0().min_w_0().child(content))
                 .opacity(progress)
                 // GPUI fades primitives independently; suppress shadow bleed.
@@ -96,7 +100,7 @@ impl Desktop {
                     gpui_kit::BoxShadow::new(px(0.), px(18.), rgba(0x00000066).opacity(progress.powi(3)).into()).blur_radius(px(48.)),
                     gpui_kit::BoxShadow::new(px(0.), px(4.), rgba(0x00000033).opacity(progress.powi(3)).into()).blur_radius(px(12.)),
                 ]), clock))
-            .focus_trap("preferences-modal-focus", &self.preferences_focus)
+            .focus_trap("preferences-modal-focus", &self.window.preferences_focus)
             .into_any_element()
     }
 }
@@ -153,19 +157,19 @@ fn load_sidebar_mode() -> SidebarMode {
 impl Desktop {
     pub(super) fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let from = self.displayed_sidebar_width(cx);
-        if !self.sidebar_motion.active() && !self.sidebar_collapsed && !self.sidebar_is_hidden() {
-            self.sidebar_expanded_width = super::expanded_sidebar_width_for_scale(self.current_sidebar_width(cx),self.sidebar_scale);
+        if !self.window.sidebar_motion.active() && !self.window.sidebar_collapsed && !self.sidebar_is_hidden() {
+            self.window.sidebar_expanded_width = super::expanded_sidebar_width_for_scale(self.current_sidebar_width(cx),self.window.sidebar_scale);
         }
-        let current = if self.sidebar_hidden { SidebarMode::Hidden } else if self.sidebar_collapsed { SidebarMode::Icons } else { SidebarMode::Full };
-        let (next,target) = current.visibility_target(self.sidebar_expanded_width,self.sidebar_scale);
-        self.sidebar_motion_compact = self.sidebar_collapsed;
-        self.sidebar_hidden = next == SidebarMode::Hidden;
+        let current = if self.window.sidebar_hidden { SidebarMode::Hidden } else if self.window.sidebar_collapsed { SidebarMode::Icons } else { SidebarMode::Full };
+        let (next,target) = current.visibility_target(self.window.sidebar_expanded_width,self.window.sidebar_scale);
+        self.window.sidebar_motion_compact = self.window.sidebar_collapsed;
+        self.window.sidebar_hidden = next == SidebarMode::Hidden;
         // The button only changes visibility. Showing restores the last full
         // width; compact presentation is entered solely by a divider gesture.
-        self.sidebar_collapsed = false;
-        if self.sidebar_collapsed || (self.sidebar_is_hidden() && self.sidebar_motion_compact) { crate::shell::set_task_markers_visible(false, self.sidebar_view, cx); }
-        if self.sidebar_is_hidden() && self.sidebar_focus.contains_focused(window, cx) {
-            window.focus(&self.sidebar_toggle_focus, cx);
+        self.window.sidebar_collapsed = false;
+        if self.window.sidebar_collapsed || (self.sidebar_is_hidden() && self.window.sidebar_motion_compact) { crate::shell::set_task_markers_visible(false, self.window.sidebar_view, cx); }
+        if self.sidebar_is_hidden() && self.window.sidebar_focus.contains_focused(window, cx) {
+            window.focus(&self.window.sidebar_toggle_focus, cx);
         }
         save_sidebar_mode(next);
         self.start_sidebar_motion(from, target, window, cx);

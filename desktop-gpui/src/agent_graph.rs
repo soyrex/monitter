@@ -697,6 +697,7 @@ impl Render for AgentGraph {
                             .child(
                                 div()
                                     .id("graph-zoom-reset")
+                                    .debug_selector(|| "graph-zoom-reset".into())
                                     .cursor_pointer()
                                     .text_size(px(10.))
                                     .on_click(cx.listener(|this, _, window, cx| {
@@ -759,10 +760,12 @@ mod tests {
         let base = GraphModel::build(&Value::Null, "root", &items);
         let mut stacked = base.clone();
         layout_nodes(&mut stacked, false);
-        assert_eq!(
-            (stacked.nodes[1].x, stacked.nodes[1].y),
-            (stacked.nodes[2].x, stacked.nodes[2].y)
-        );
+        // Collapsed rendering paints only the first completed node. Hidden
+        // nodes retain their row positions without extending the visible map.
+        assert_eq!(stacked.nodes[1].x, stacked.nodes[2].x);
+        assert_eq!(stacked.nodes[2].y - stacked.nodes[1].y, CARD_HEIGHT + 24.);
+        assert_eq!(stacked.height, stacked.nodes[1].y + CARD_HEIGHT + GRAPH_PADDING);
+        assert!(stacked.nodes[2].y + CARD_HEIGHT > stacked.height);
         let mut expanded = base;
         layout_nodes(&mut expanded, true);
         assert_ne!(

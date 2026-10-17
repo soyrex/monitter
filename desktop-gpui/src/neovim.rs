@@ -444,6 +444,7 @@ pub struct NeovimPane {
     session: Entity<NeovimSession>,
     win: i64,
     focus: FocusHandle,
+    focus_subscription: Option<Subscription>,
     marked: String,
     appearance: Appearance,
     grid_bounds: Option<Bounds<Pixels>>,
@@ -568,21 +569,12 @@ impl NeovimPane {
         )
         .detach();
         let focus = cx.focus_handle();
-        cx.on_focus(&focus, window, |pane, _, cx| {
-            // Focus is an event, not a render side effect. Neovim can change
-            // its current window itself, so the previous request is no proof
-            // that this newly focused native pane still owns editor input.
-            pane.session.update(cx, |session, cx| {
-                session.last_focus = None;
-                session.focus_window(pane.win, cx);
-            });
-            cx.notify();
-        })
-        .detach();
+        let focus_subscription = cx.on_focus(&focus, window, |pane, _, cx| pane.did_focus(cx));
         Self {
             session,
             win,
             focus,
+            focus_subscription: Some(focus_subscription),
             marked: String::new(),
             appearance,
             grid_bounds: None,
@@ -590,6 +582,30 @@ impl NeovimPane {
             files,
             files_visible: true,
         }
+    }
+
+    /// The shared backend session is not window-owned: other panes can paint
+    /// its grids in other hosts. Only this GUI pane and its retained file list
+    /// move, preserving marked input, selection, listing and scroll state.
+    pub(crate) fn rehost_to_window(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Result<(), String> {
+        let pane_id = cx.entity_id();
+        cx.rehost_entity_window(pane_id, window).map_err(|error| error.to_string())?;
+        cx.rehost_entity_window(self.files.entity_id(), window).map_err(|error| error.to_string())?;
+        self.grid_bounds = None;
+        // Focus listeners are native-window scoped, unlike _in callbacks.
+        // Replacing the subscription removes the source window's listener.
+        self.focus_subscription = Some(cx.on_focus(&self.focus, window, |pane, _, cx| pane.did_focus(cx)));
+        Ok(())
+    }
+
+    fn did_focus(&mut self, cx: &mut Context<Self>) {
+        // Neovim can change its current window itself, so an earlier request
+        // is no proof that this native pane still owns editor input.
+        self.session.update(cx, |session, cx| {
+            session.last_focus = None;
+            session.focus_window(self.win, cx);
+        });
+        cx.notify();
     }
 
     pub(crate) fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {

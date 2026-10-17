@@ -347,6 +347,19 @@ fn created_task_matches_draft(task: &Value, state: &DraftFormState, snapshot: &V
 }
 
 impl DraftCreationPane {
+    /// Move the retained form's callback ownership before its first frame in a
+    /// different host. Values, selections, undo history and submission state
+    /// stay in the existing entities; the same helper supports moving back.
+    pub(crate) fn rehost_to_window(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Result<(), String> {
+        let id = cx.entity_id();
+        cx.rehost_entity_window(id, window).map_err(|error| error.to_string())?;
+        for input in [&self.agent_search, &self.project_search, &self.native_session, &self.title, &self.cwd] {
+            input.update(cx, |input, cx| input.rehost_to_window(window, cx))?;
+        }
+        self.message.update(cx, |input, cx| input.rehost_to_window(window, cx))?;
+        Ok(())
+    }
+
     pub fn new(
         service: DesktopService,
         snapshot: Value,

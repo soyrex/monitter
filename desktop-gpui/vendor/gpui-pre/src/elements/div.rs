@@ -17,14 +17,15 @@
 
 use crate::{
     Action, AnyDrag, AnyElement, AnyTooltip, AnyView, App, Bounds, ClickEvent, DispatchPhase,
-    Display, Element, ElementId, Entity, EntityId, ExternalDragPayload, ExternalDragPayloadSource,
-    FileDropEvent, FocusHandle, Global, GlobalElementId, Hitbox, HitboxBehavior, HitboxId,
-    InspectorElementId, IntoElement, IsZero, KeyContext, KeyDownEvent, KeyUpEvent, KeyboardButton,
-    KeyboardClickEvent, LayoutId, LongPressEvent, ModifiersChangedEvent, MouseButton,
-    MouseClickEvent, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MousePressureEvent,
-    MouseUpEvent, OngoingScroll, Overflow, ParentElement, PinchEvent, Pixels, Point, Render,
-    ScrollWheelEvent, SharedString, Size, Style, StyleRefinement, Styled, Task, TooltipId,
-    TouchPhase, Visibility, Window, WindowControlArea, point, px, size,
+    Display, DragCompletion, DragCompletionCallback, Element, ElementId, Entity, EntityId,
+    ExternalDragPayload, ExternalDragPayloadSource, FileDropEvent, FocusHandle, Global,
+    GlobalElementId, Hitbox, HitboxBehavior, HitboxId, InspectorElementId, IntoElement, IsZero,
+    KeyContext, KeyDownEvent, KeyUpEvent, KeyboardButton, KeyboardClickEvent, LayoutId,
+    LongPressEvent, ModifiersChangedEvent, MouseButton, MouseClickEvent, MouseDownEvent,
+    MouseExitEvent, MouseMoveEvent, MousePressureEvent, MouseUpEvent, OngoingScroll, Overflow,
+    ParentElement, PinchEvent, Pixels, Point, Render, ScrollWheelEvent, SharedString, Size, Style,
+    StyleRefinement, Styled, Task, TooltipId, TouchPhase, Visibility, Window, WindowControlArea,
+    point, px, size,
 };
 use collections::HashMap;
 use gpui_util::ResultExt;
@@ -631,6 +632,7 @@ impl Interactivity {
                 constructor(value.downcast_ref().unwrap(), offset, window, cx).into()
             }),
             external_payload: None,
+            completion: None,
         });
     }
 
@@ -662,6 +664,31 @@ impl Interactivity {
         }));
     }
 
+    /// Runs once after a drag gesture completes, in its source window. Must be
+    /// called after `on_drag` with the same value type. A `Released` result means
+    /// no target accepted the drop; use the position to distinguish outside
+    /// release from release over unaccepted window contents. Unsupported native
+    /// platforms complete only if their pointer stream delivers a real mouse-up.
+    pub fn on_drag_complete<T: 'static>(
+        &mut self,
+        listener: impl Fn(&T, &DragCompletion, &mut Window, &mut App) + 'static,
+    ) {
+        let Some(drag) = self.drag_listener.as_mut() else {
+            debug_assert!(false, "on_drag_complete must be called after on_drag");
+            return;
+        };
+        debug_assert_eq!(drag.value.as_ref().type_id(), TypeId::of::<T>());
+        debug_assert!(
+            drag.completion.is_none(),
+            "on_drag_complete registered twice"
+        );
+        drag.completion = Some(Box::new(move |value, result, window, cx| {
+            if let Some(value) = value.downcast_ref::<T>() {
+                listener(value, result, window, cx);
+            }
+        }));
+    }
+
     /// Bind the given callback on the hover start and end events of this element. Note that the boolean
     /// passed to the callback is true when the hover starts and false when it ends.
     /// Transitions caused by layout changes under a stationary mouse also invoke the callback.
@@ -684,7 +711,10 @@ impl Interactivity {
     }
 
     /// Add an independent hover observer without replacing the existing listener.
-    pub fn add_hover_listener(&mut self, listener: impl Fn(&bool, &mut Window, &mut App) + 'static) {
+    pub fn add_hover_listener(
+        &mut self,
+        listener: impl Fn(&bool, &mut Window, &mut App) + 'static,
+    ) {
         self.hover_listener = Some(match self.hover_listener.take() {
             Some(previous) => Box::new(move |hovered, window, cx| {
                 previous(hovered, window, cx);
@@ -1653,6 +1683,15 @@ pub trait StatefulInteractiveElement: InteractiveElement {
         self
     }
 
+    /// The fluent equivalent of [`Interactivity::on_drag_complete`].
+    fn on_drag_complete<T: 'static>(
+        mut self,
+        listener: impl Fn(&T, &DragCompletion, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.interactivity().on_drag_complete(listener);
+        self
+    }
+
     /// Bind the given callback on the hover start and end events of this element. Note that the boolean
     /// passed to the callback is true when the hover starts and false when it ends.
     /// Transitions caused by layout changes under a stationary mouse also invoke the callback.
@@ -1777,10 +1816,14 @@ pub(crate) struct DragListener {
     value: Arc<dyn Any>,
     render: Box<dyn Fn(&dyn Any, Point<Pixels>, &mut Window, &mut App) -> AnyView + 'static>,
     external_payload: Option<ExternalDragPayloadResolver>,
+    completion: Option<DragCompletionListener>,
 }
 
 type ExternalDragPayloadResolver =
     Box<dyn Fn(&dyn Any, &mut Window, &mut App) -> Option<ExternalDragPayload> + 'static>;
+
+type DragCompletionListener =
+    Box<dyn Fn(&dyn Any, &DragCompletion, &mut Window, &mut App) + 'static>;
 
 type DropListener = Box<dyn Fn(&dyn Any, &mut Window, &mut App) + 'static>;
 
@@ -2939,7 +2982,11 @@ impl Interactivity {
                                     listener(drag.value.as_ref(), window, cx);
                                     window.refresh();
                                     cx.stop_propagation();
+                                    cx.accept_drag(drag, window.window_handle().window_id());
+                                } else {
+                                    cx.active_drag = Some(drag);
                                 }
+                                break;
                             }
                         }
                     }
@@ -3013,12 +3060,27 @@ impl Interactivity {
                                     })
                                         as ExternalDragPayloadSource
                                 });
+                            let completion = listener.completion.map(|completion| {
+                                let value = listener.value.clone();
+                                let source = window.window_handle();
+                                Box::new(move |result, cx: &mut App| {
+                                    // A destination may currently be borrowed, and a drop handler
+                                    // may rehost the source entity. Always resolve the source
+                                    // window after event dispatch has finished.
+                                    cx.defer(move |cx| {
+                                        let _ = source.update(cx, |_, window, cx| {
+                                            completion(value.as_ref(), &result, window, cx);
+                                        });
+                                    });
+                                }) as DragCompletionCallback
+                            });
                             cx.active_drag = Some(AnyDrag {
                                 view: drag,
                                 value: listener.value,
                                 cursor_offset,
                                 cursor_style: drag_cursor_style,
                                 external_payload_source,
+                                completion,
                             });
                             pending_mouse_down.take();
                             window.refresh();
