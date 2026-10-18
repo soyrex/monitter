@@ -185,10 +185,55 @@ fn task_duration(task: &Value) -> String {
     format!("{}:{:02}", seconds / 60, seconds % 60)
 }
 
-/// A pane-relative slot is shared by every Watch column in the same window.
-/// It keeps plans aligned while retaining enough room for their useful detail.
+// Intrinsic heights are shared only among Watch panes in the same window.
+// The measured child never receives the shared minimum, so shrinking content
+// can shrink the row again instead of feeding the old height back into itself.
+struct WatchCardMeasurement {
+    window: gpui_kit::WindowId,
+    owner: WeakEntity<ChatPane>,
+    height: Pixels,
+}
+thread_local! {
+    static WATCH_CARD_HEIGHTS: std::cell::RefCell<Vec<WatchCardMeasurement>> = const { std::cell::RefCell::new(Vec::new()) };
+}
 fn watcher_plan_height(window: &Window) -> Pixels {
-    (window.viewport_size().height * 0.36).clamp(px(248.), px(380.))
+    let id = window.window_handle().window_id();
+    WATCH_CARD_HEIGHTS.with(|entries| entries.borrow().iter()
+        .filter(|entry| entry.window == id)
+        .map(|entry| entry.height).fold(px(0.), Pixels::max))
+}
+fn forget_watch_card(owner: &WeakEntity<ChatPane>, cx: &mut App) {
+    WATCH_CARD_HEIGHTS.with(|entries| {
+        let mut entries = entries.borrow_mut();
+        entries.retain(|entry| &entry.owner != owner);
+        for entry in entries.iter() {
+            if let Some(pane) = entry.owner.upgrade() { cx.notify(pane.entity_id()); }
+        }
+    });
+}
+fn measure_watch_card(owner: WeakEntity<ChatPane>, height: Pixels, window: &mut Window, cx: &mut App) {
+    let id = window.window_handle().window_id();
+    window.defer(cx, move |_, cx| {
+        WATCH_CARD_HEIGHTS.with(|entries| {
+            let mut entries = entries.borrow_mut();
+            let before = entries.iter().filter(|entry| entry.window == id)
+                .map(|entry| entry.height).fold(px(0.), Pixels::max);
+            entries.retain(|entry| entry.owner.upgrade().is_some_and(|pane| pane.read(cx).watcher.enabled));
+            if let Some(entry) = entries.iter_mut().find(|entry| entry.owner == owner) {
+                entry.window = id;
+                entry.height = height;
+            } else if owner.upgrade().is_some() {
+                entries.push(WatchCardMeasurement { window: id, owner, height });
+            }
+            let after = entries.iter().filter(|entry| entry.window == id)
+                .map(|entry| entry.height).fold(px(0.), Pixels::max);
+            if (after - before).abs() >= px(0.5) {
+                for entry in entries.iter().filter(|entry| entry.window == id) {
+                    if let Some(pane) = entry.owner.upgrade() { cx.notify(pane.entity_id()); }
+                }
+            }
+        });
+    });
 }
 
 #[derive(Debug)]
@@ -377,6 +422,7 @@ impl ChatPane {
             if pane
                 .update(cx, |pane, cx| {
                     pane.watcher.enabled = target;
+                    if !target { forget_watch_card(&cx.weak_entity(), cx); }
                     pane.watcher.fade_in = true;
                     cx.notify();
                 })
@@ -470,10 +516,6 @@ impl ChatPane {
             .flex_col()
             .gap(px(12.))
             .p(px(16.))
-            .rounded(px(12.))
-            .border_1()
-            .border_color(rgb(palette.line))
-            .bg(design::surface_color(palette.panel))
             .text_color(rgb(palette.ink))
             .child(
                 div()
@@ -1177,8 +1219,22 @@ impl ChatPane {
                 .debug_selector(|| "watcher-plan".into())
                 .w_full()
                 .min_w_0()
-                .h(watcher_plan_height(window))
-                .child(plan_region),
+                .min_h(watcher_plan_height(window))
+                .flex_shrink_0()
+                .rounded(px(12.))
+                .border_1()
+                .border_color(rgb(if state.plan_active {
+                    mix_rgb(palette.panel, palette.accent, 0.45)
+                } else { palette.line }))
+                .bg(design::surface_color(palette.panel))
+                .child({
+                    let owner = cx.weak_entity();
+                    div().relative().w_full().min_w_0().flex_shrink_0().child(plan_region).child(
+                        canvas(move |bounds, window, cx| {
+                            measure_watch_card(owner.clone(), bounds.size.height + px(2.), window, cx);
+                        }, |_, _, _, _| ()).absolute().size_full()
+                    )
+                }),
         );
         let finished_agents = state
             .agents
@@ -1350,11 +1406,12 @@ impl ChatPane {
         let interject_width = (window.viewport_size().width - px(24.)).min(px(390.));
         let interject_open = self.watcher.interject_open && question_count == 0;
         let interject_focus = self.composer.read(cx).focus_handle(cx);
+        let interject_palette = design::palette(&Value::Null, WindowAppearance::Dark);
         let owner = cx.weak_entity();
         let content_owner = owner.clone();
         let interject = Popover::new("watcher-interject-popover")
             .appearance(false)
-            .anchor(Anchor::BottomRight)
+            .anchor(Anchor::BottomCenter)
             .offset(px(7.))
             .open(interject_open)
             .overlay_closable(true)
@@ -1364,7 +1421,18 @@ impl ChatPane {
                     .disabled(question_count > 0)
                     .compact()
                     .xsmall()
-                    .outline()
+                    .custom(
+                        gpui_kit::component::button::ButtonCustomVariant::new(cx)
+                            .foreground(rgb(interject_palette.ink).into())
+                            .hover(rgba(0xffffff14).into())
+                            .active(rgba(0xffffff24).into()),
+                    )
+                    .h_auto()
+                    .px(px(12.))
+                    .py(px(5.))
+                    .rounded_full()
+                    .text_size(px(11. * ratio))
+                    .line_height(px(16. * ratio))
                     .icon(Icon::new(IconName::MessageSquare))
                     .label("Interject")
                     .debug_selector(|| "watcher-back".into())
@@ -1397,21 +1465,37 @@ impl ChatPane {
                     })
                     .unwrap_or_else(|_| div().into_any_element())
             });
-        body = body.child(
-            div()
+        let interject_dock = div()
             .id("watcher-interject-dock")
             .debug_selector(|| "watcher-interject-dock".into())
+            .absolute()
+            .bottom(px(8.))
+            .left_0()
             .w_full()
             .min_w_0()
-            .flex_shrink_0()
+            .px(px(12.))
             .flex()
             .items_center()
-            .justify_end()
-            .child(interject),
-        );
+            .justify_center()
+            .child(
+                div()
+                    .id("watcher-interject-bar")
+                    .debug_selector(|| "watcher-interject-bar".into())
+                    .flex()
+                    .items_center()
+                    .rounded_full()
+                    .border_1()
+                    .border_color(rgb(interject_palette.line))
+                    .bg(crate::surface_blend::floating_control_background(
+                        interject_palette.panel,
+                        true,
+                    ))
+                    .child(interject),
+            );
         div()
             .id("chat-watcher")
             .debug_selector(|| "chat-watcher".into())
+            .relative()
             .size_full()
             .min_w_0()
             .min_h_0()
@@ -1447,12 +1531,14 @@ impl ChatPane {
                             .flex()
                             .justify_center()
                             .px(px(44.))
-                            .py(px(48.))
+                            .pt(px(48.))
+                            .pb(px((16. * ratio + 32.).max(48.)))
                             .child(div().w_full().max_w(px(760.)).min_w_0().child(body)),
                     ),
                 self.watcher.scroll.clone(),
                 px(24.),
             ))
+            .child(interject_dock)
             .into_any_element()
     }
 }
@@ -1648,6 +1734,94 @@ mod native_tests {
         visual.run_until_parked();
         visual.update(|window, cx| window.draw(cx).clear(cx));
     }
+    struct WatchPair(Vec<Entity<ChatPane>>);
+    impl Render for WatchPair {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().flex().children(self.0.iter().map(|pane|
+                div().flex_1().min_w_0().h_full().child(pane.clone())))
+        }
+    }
+    #[gpui_kit::test]
+    fn watcher_short_card_matches_tallest_current_neighbour(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            crate::surface_blend::initialize_for_ui_fixture();
+            crate::native_motion::initialize_for_ui_fixture(cx);
+        });
+        let mut panes = Vec::new();
+        let (_, visual) = cx.add_window_view(|window, cx| {
+            for (task, count) in [("tall", 6), ("short", 1)] {
+                let snapshot = json!({"settings":{"theme":"dark","interfaceFontSize":14},
+                    "tasks":[{"id":task,"title":"Work","agentId":"agent","status":"running","queue":[]}],
+                    "agents":[{"id":"agent","name":"Codex","provider":"codex"}],
+                    "workPlans":[{"id":task,"taskId":task,"title":"Current plan","status":"active","createdAt":20,
+                        "items":(0..count).map(|n| json!({"id":format!("step-{n}"),"title":"Work item","status":"pending"})).collect::<Vec<_>>() }],
+                    "subagentSessions":[],"messages":[],"events":[],"approvalRequests":[],"queuedMessages":[],"hosts":[],"channels":[]});
+                let pane = cx.new(|cx| {
+                    let mut pane = ChatPane::performance_fixture(task.into(), Rc::new(snapshot), window, cx);
+                    pane.watcher.enabled = true;
+                    pane
+                });
+                panes.push(pane.clone());
+            }
+            let pair = cx.new(|_| WatchPair(panes.clone()));
+            gpui_kit::component::Root::new(pair, window, cx)
+        });
+        visual.simulate_resize(size(px(1600.), px(1200.)));
+        draw(visual); draw(visual); draw(visual);
+        let shortest = visual.debug_bounds("watcher-plan").unwrap();
+        visual.update(|window, _| {
+            let id = window.window_handle().window_id();
+            WATCH_CARD_HEIGHTS.with(|entries| {
+                let entries = entries.borrow();
+                let heights: Vec<_> = entries.iter().filter(|entry| entry.window == id).map(|entry| entry.height).collect();
+                assert_eq!(heights.len(), 2);
+                let max = heights.iter().copied().fold(px(0.), Pixels::max);
+                let min = heights.iter().copied().fold(max, Pixels::min);
+                assert!(max > min + px(60.), "fixture has distinct natural heights");
+                assert!((shortest.size.height - max).abs() < px(2.), "short card shares tallest content height: {shortest:?}, {max:?}");
+            });
+        });
+    }
+    #[gpui_kit::test]
+    fn watcher_history_grows_the_card_and_moves_following_content(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            crate::surface_blend::initialize_for_ui_fixture();
+            crate::native_motion::initialize_for_ui_fixture(cx);
+        });
+        let snapshot = json!({"settings":{"theme":"dark","interfaceFontSize":14},
+            "tasks":[{"id":"watch","title":"Work","agentId":"agent","status":"running","queue":[]}],
+            "agents":[{"id":"agent","name":"Codex","provider":"codex"}],
+            "workPlans":[
+                {"id":"new","taskId":"watch","title":"Current","status":"active","createdAt":20,"items":[{"id":"a","title":"Current step","status":"pending"}]},
+                {"id":"old","taskId":"watch","title":"Earlier work","status":"completed","createdAt":10,"items":[{"id":"b","title":"Earlier step","status":"completed"}]}],
+            "subagentSessions":[],"messages":[],"events":[],"approvalRequests":[],"queuedMessages":[],"hosts":[],"channels":[]});
+        let (_, visual) = cx.add_window_view(|window, cx| {
+            let pane = cx.new(|cx| {
+                let mut pane = ChatPane::performance_fixture("watch".into(), Rc::new(snapshot), window, cx);
+                pane.watcher.enabled = true;
+                pane
+            });
+            gpui_kit::component::Root::new(pane, window, cx)
+        });
+        visual.simulate_resize(size(px(800.), px(1200.)));
+        draw(visual); draw(visual);
+        let before = visual.debug_bounds("watcher-plan").unwrap();
+        let below = visual.debug_bounds("watcher-agents").unwrap();
+        let toggle = visual.debug_bounds("work-plan-popup-history").unwrap();
+        visual.simulate_click(toggle.center(), Default::default());
+        draw(visual); draw(visual);
+        let expanded = visual.debug_bounds("watcher-plan").unwrap();
+        let moved = visual.debug_bounds("watcher-agents").unwrap();
+        assert!(expanded.size.height > before.size.height + px(30.), "history expands card: {before:?} -> {expanded:?}");
+        assert!(moved.top() > below.top() + px(30.), "history pushes following content down");
+        let toggle = visual.debug_bounds("work-plan-popup-history").unwrap();
+        visual.simulate_click(toggle.center(), Default::default());
+        draw(visual); draw(visual);
+        let collapsed = visual.debug_bounds("watcher-plan").unwrap();
+        assert!((collapsed.size.height - before.size.height).abs() < px(2.), "collapse restores intrinsic height");
+    }
     #[gpui_kit::test]
     fn watcher_interject_popover_keeps_the_watch_surface_and_retained_draft(
         cx: &mut TestAppContext,
@@ -1721,6 +1895,24 @@ mod native_tests {
                 );
                 assert!((root.bottom() - gpui_kit::px(600.)).abs() <= gpui_kit::px(1.));
                 assert!(root.top() >= header.bottom() - gpui_kit::px(1.));
+                let interject_bar = visual
+                    .debug_bounds("watcher-interject-bar")
+                    .expect("floating Interject bar is visible without scrolling");
+                let interject_trigger = visual.debug_bounds("watcher-back").unwrap();
+                assert!(
+                    (interject_bar.center().x - root.center().x).abs() <= gpui_kit::px(1.),
+                    "Interject bar stays centered within its pane"
+                );
+                assert!(
+                    (root.bottom() - interject_bar.bottom() - px(8.)).abs()
+                        <= gpui_kit::px(1.),
+                    "Interject overlays the bottom of Watch: bar {interject_bar:?}, pane {root:?}, dock {:?}",
+                    visual.debug_bounds("watcher-interject-dock")
+                );
+                assert!(
+                    interject_bar.left() >= root.left() && interject_bar.right() <= root.right(),
+                    "the floating bar fits narrow panes"
+                );
                 assert!(
                     visual.debug_bounds("send").is_none(),
                     "chat composer is hidden in Watch mode"
@@ -1856,21 +2048,16 @@ mod native_tests {
                     first_finished.top() >= finished.bottom() - gpui_kit::px(1.),
                     "finished rows stay below their disclosure: {first_finished:?} after {finished:?}"
                 );
-                let mut back = visual.debug_bounds("watcher-back").unwrap();
-                if back.bottom() > root.bottom() {
-                    visual.simulate_event(gpui_kit::ScrollWheelEvent {
-                        position: root.center(),
-                        delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(
-                            gpui_kit::px(0.),
-                            gpui_kit::px(-1_200.),
-                        )),
-                        ..Default::default()
-                    });
-                    draw(visual);
-                    back = visual
-                        .debug_bounds("watcher-back")
-                        .expect("Interject trigger stays mounted after scrolling");
-                }
+                let back = visual.debug_bounds("watcher-back").unwrap();
+                assert_eq!(
+                    visual.debug_bounds("watcher-interject-bar").unwrap(),
+                    interject_bar,
+                    "content scrolling and completion do not move the overlay bar"
+                );
+                assert_eq!(
+                    back, interject_trigger,
+                    "Interject remains available at the same position after scrolling"
+                );
                 visual.simulate_click(back.center(), Default::default());
                 draw(visual);
                 let menu = visual

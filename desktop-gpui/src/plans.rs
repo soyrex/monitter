@@ -314,12 +314,14 @@ impl Render for PlanPopup {
             .id("work-plan-popup-card")
             .w_full()
             .min_w_0()
-            .when(self.fill_height, |card| card.h_full())
+            // Embedded Watch cards grow naturally; their caller draws the
+            // shared-height surface around the intrinsic content.
+
             .flex()
             .flex_col()
             .overflow_hidden()
             .rounded(px(12.))
-            .border_1()
+            .when(!self.fill_height, |card| card.border_1())
             .border_color(rgb(
                 if plans
                     .first()
@@ -330,7 +332,7 @@ impl Render for PlanPopup {
                     self.palette.line
                 },
             ))
-            .bg(design::surface_color(self.palette.panel))
+            .when(!self.fill_height, |card| card.bg(design::surface_color(self.palette.panel)))
             .text_color(rgb(self.palette.ink));
         if let Some(current) = plans.first() {
             card = card.child(render_plan_card(
