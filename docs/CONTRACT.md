@@ -585,6 +585,8 @@ reconnection and a new authoritative snapshot.
 - `edit_queued_message { id: string, text: string }` -> Snapshot (queued/error only; preserves attachments, recipient, position and status; never retries automatically)
 - `cancel_queued_message { id: string }` -> Snapshot (removes only an unsent queued/error message)
 - `save_settings { settings: Settings }` -> Snapshot
+  `windowTransparency` accepts an integer from 0 to 100 inclusive; it controls background
+  transparency for translucent/glass surfaces. Opaque surfaces remain fully opaque.
 - `save_channel { channel: Channel }` -> Snapshot (empty id creates; preserve existing messages)
 - `set_channel_membership { channelId: string, agentId: string, member: boolean }` -> Snapshot
   validates both records and is idempotent. Removing an agent preserves channel and native history,

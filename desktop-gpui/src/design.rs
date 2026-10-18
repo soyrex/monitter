@@ -177,7 +177,7 @@ pub fn set_surface(settings: &Value) {
     let transparency = settings["windowTransparency"]
         .as_u64()
         .unwrap_or(18)
-        .min(70) as f32;
+        .min(100) as f32;
     let alpha = if matches!(surface.as_str(), "translucent" | "glass") {
         (100.0 - transparency) / 100.0
     } else {

@@ -475,9 +475,9 @@
             {/each}
           </div>
           <label class:disabled={windowSurface === 'opaque'} class="range-setting">Background transparency <strong>{windowTransparency}%</strong>
-            <input class="range" type="range" use:rangeFill={windowTransparency} aria-label="Background transparency" aria-valuetext={`${windowTransparency}%`} min="0" max="70" step="1" disabled={windowSurface === 'opaque'} value={windowTransparency} oninput={(event) => void save({ windowTransparency: Number(event.currentTarget.value) })} />
+            <input class="range" type="range" use:rangeFill={windowTransparency} aria-label="Background transparency" aria-valuetext={`${windowTransparency}%`} min="0" max="100" step="1" disabled={windowSurface === 'opaque'} value={windowTransparency} oninput={(event) => void save({ windowTransparency: Number(event.currentTarget.value) })} />
           </label>
-          <div class="range-footer"><span>Opaque</span><button type="button" onclick={() => void save({ windowTransparency: 18 })}>Reset to default · 18%</button><span>70%</span></div>
+          <div class="range-footer"><span>Opaque</span><button type="button" onclick={() => void save({ windowTransparency: 18 })}>Reset to default · 18%</button><span>100%</span></div>
           <p class="hint">Opaque ignores this slider. Translucent and glass use it for the primary window background; glass also adds blur.</p>
         </section>
 

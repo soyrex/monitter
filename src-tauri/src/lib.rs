@@ -8922,8 +8922,8 @@ fn validate_settings(settings: &Settings) -> Result<(), String> {
     {
         return Err("Inactive pane opacity must be between 10% and 90%.".into());
     }
-    if settings.window_transparency > 70 {
-        return Err("Window transparency must be between 0% and 70%.".into());
+    if settings.window_transparency > 100 {
+        return Err("Window transparency must be between 0% and 100%.".into());
     }
     if !matches!(settings.window_surface.as_str(), "opaque" | "translucent" | "glass") {
         return Err("Window surface must be opaque, translucent, or glass.".into());

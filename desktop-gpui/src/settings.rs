@@ -311,7 +311,7 @@ impl NativeSettings {
             window_transparency: cx.new(|_| {
                 SliderState::new()
                     .min(0.)
-                    .max(70.)
+                    .max(100.)
                     .step(1.)
                     .default_value(settings["windowTransparency"].as_u64().unwrap_or(18) as f32)
             }),

@@ -357,6 +357,7 @@ export interface Settings {
   chatLineHeight?: number; terminalLineHeight?: number;
   terminalFont?: string; chatFont?: string; interfaceFont?: string;
   windowSurface?: 'opaque' | 'translucent' | 'glass';
+  /** Background transparency percentage, from 0 to 100 inclusive. */
   windowTransparency?: number;
   showActivePaneBorder?: boolean; dimInactivePanes?: boolean; inactivePaneOpacity?: number; focusFollowsMouse?: boolean;
   /** Decorative effect shown while an agent is working. */

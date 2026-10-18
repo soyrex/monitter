@@ -221,7 +221,7 @@ pub(super) fn render(
             &state.window_transparency,
             18.,
             "Opaque",
-            "70%",
+            "100%",
             palette,
             cx,
         ));
