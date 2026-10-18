@@ -3476,10 +3476,12 @@ impl Desktop {
                     }
                     "route:projects" => {
                         if self.window.workspace.is_none() {
+                            let preferred_project = self.preferred_project_for_current_pane();
                             self.window.workspace = Some(cx.new(|cx| {
                                 WorkspacePane::new(
                                     service.clone(),
                                     self.snapshot.clone(),
+                                    preferred_project,
                                     window,
                                     cx,
                                 )
@@ -4627,8 +4629,9 @@ impl Desktop {
         if self.window.sidebar == Sidebar::Projects {
             if self.window.workspace.is_none() {
                 if let Some(service) = self.service.clone() {
+                    let preferred_project = self.preferred_project_for_current_pane();
                     self.window.workspace = Some(cx.new(|cx| {
-                        WorkspacePane::new(service, self.snapshot.clone(), window, cx)
+                        WorkspacePane::new(service, self.snapshot.clone(), preferred_project, window, cx)
                     }));
                 }
             }

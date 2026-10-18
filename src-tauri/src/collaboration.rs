@@ -141,6 +141,10 @@ impl Service {
             "project_board_post" => self.project_board_post_protocol(
                 caller_task, &required_string(args, "text")?, &required_string(args, "request_id")?,
             ),
+            "project_ideas_list" => self.project_ideas_list_protocol(caller_task),
+            "project_ideas_read" => self.project_ideas_read_protocol(caller_task, &required_string(args, "idea_id")?),
+            "project_ideas_add" => self.project_ideas_add_protocol(caller_task, &required_string(args, "title")?, string_arg(args, "markdown")?),
+            "project_ideas_update" => self.project_ideas_update_protocol(caller_task, &required_string(args, "idea_id")?, string_arg(args, "title")?, string_arg(args, "markdown")?),
             _ => Err("Unknown Monitter collaboration tool.".into()),
         }
     }
@@ -1366,6 +1370,10 @@ fn validate_tool_args(tool: &str, args: &serde_json::Map<String, Value>) -> Resu
         "archive_chats" => &["scope", "project_id", "older_than_days", "dry_run"],
         "project_board_read" => &["after_sequence"],
         "project_board_post" => &["request_id", "text"],
+        "project_ideas_list" => &[],
+        "project_ideas_read" => &["idea_id"],
+        "project_ideas_add" => &["title", "markdown"],
+        "project_ideas_update" => &["idea_id", "title", "markdown"],
         _ => return Err("Unknown Monitter collaboration tool.".into()),
     };
     if args.keys().any(|key| !allowed.contains(&key.as_str())) {
@@ -1971,6 +1979,7 @@ mod tests {
                         cwd: "/project-folder".into(),
                     }],
                     board_guidance_text: None,
+                    ideas: vec![], ideas_revision: 0,
                 });
                 Ok(())
             })
@@ -2499,8 +2508,43 @@ mod tests {
         service.save_project(crate::model::Project {
             id: "project".into(), name: "Budget tests".into(), description: String::new(),
             icon: "folder".into(), color: "#3f9d6a".into(), workspaces: vec![],
-            board_guidance_text: None, build_management_enabled: false, agent_worktrees_enabled: false,
+            board_guidance_text: None, ideas: vec![], ideas_revision: 0, build_management_enabled: false, agent_worktrees_enabled: false,
         }).unwrap();
+    }
+
+    #[test]
+    fn project_ideas_are_scoped_to_the_callers_project_and_keep_markdown_private_to_reads() {
+        let (service, dir) = service("project-ideas");
+        budget_project(&service);
+        let agent = service.snapshot().unwrap().agents[0].clone();
+        let scoped = task(&service, &agent, "Scoped", None, Some("project".into()));
+        running(&service, &scoped.id);
+
+        let added = service
+            .protocol(
+                &scoped.id,
+                "project_ideas_add",
+                json!({"title":"Capture a follow-up", "markdown":"# Detail\n\nKeep this for later."}),
+            )
+            .unwrap();
+        let idea_id = added["idea"]["id"].as_str().unwrap();
+        let listed = service
+            .protocol(&scoped.id, "project_ideas_list", json!({}))
+            .unwrap();
+        assert_eq!(listed["projectId"], "project");
+        assert_eq!(listed["ideas"][0]["title"], "Capture a follow-up");
+        assert!(listed["ideas"][0].get("markdown").is_none());
+        let read = service
+            .protocol(&scoped.id, "project_ideas_read", json!({"idea_id":idea_id}))
+            .unwrap();
+        assert_eq!(read["idea"]["markdown"], "# Detail\n\nKeep this for later.");
+
+        let unscoped = task(&service, &agent, "Unscoped", None, None);
+        running(&service, &unscoped.id);
+        assert!(service
+            .protocol(&unscoped.id, "project_ideas_list", json!({}))
+            .is_err());
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

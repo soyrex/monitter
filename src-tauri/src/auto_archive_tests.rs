@@ -137,6 +137,7 @@ fn recurring_rules_use_project_override_and_keep_unscoped_global_tasks() {
         color: "#000".into(),
         workspaces: vec![],
         board_guidance_text: None,
+        ideas: vec![], ideas_revision: 0,
     };
     install_tasks(
         &f.service,
@@ -356,6 +357,7 @@ fn protocol_one_time_project_scope_excludes_other_projects_and_unassigned_tasks(
                     color: "#000".into(),
                     workspaces: vec![],
                     board_guidance_text: None,
+                    ideas: vec![], ideas_revision: 0,
                 });
             }
             Ok(())
@@ -480,6 +482,7 @@ fn project_rule_can_be_saved_then_deleted_to_restore_inheritance() {
                 color: "#000".into(),
                 workspaces: vec![],
                 board_guidance_text: None,
+                ideas: vec![], ideas_revision: 0,
             });
             Ok(())
         })

@@ -1253,6 +1253,17 @@ pub struct ProjectWorkspace {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct ProjectIdea {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub markdown: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct Project {
     #[serde(default)]
     pub build_management_enabled: bool,
@@ -1270,6 +1281,10 @@ pub struct Project {
     /// Optional project-specific board guidance; empty values inherit Settings.
     #[serde(default)]
     pub board_guidance_text: Option<String>,
+    #[serde(default)]
+    pub ideas: Vec<ProjectIdea>,
+    #[serde(default)]
+    pub ideas_revision: u64,
 }
 
 fn default_project_icon() -> String {
@@ -2301,6 +2316,8 @@ mod task_migration_tests {
         assert_eq!(project.icon, "folder");
         assert_eq!(project.color, "#3f9d6a");
         assert_eq!(project.board_guidance_text, None);
+        assert!(project.ideas.is_empty());
+        assert_eq!(project.ideas_revision, 0);
     }
 
     #[test]
@@ -2318,6 +2335,7 @@ mod task_migration_tests {
                 cwd: "/workspace".into(),
             }],
             board_guidance_text: Some("Coordinate through the board.".into()),
+            ideas: vec![], ideas_revision: 0,
         });
         snapshot.tasks.push(task_from_agent(
             &snapshot.agents[0],

@@ -114,6 +114,7 @@ mod work_log_integration_tests;
 #[path="work_log/pause_tests.rs"]
 mod work_log_pause_tests;
 mod project_board;
+mod project_ideas;
 mod build_queue;
 pub mod profile_init;
 mod runner;
@@ -1966,6 +1967,7 @@ impl Service {
                 self.set_task_archived(&arg::<String>(&args, "taskId")?, arg(&args, "archived")?)?,
             ),
             "save_project" => snapshot_value(self.save_project(arg(&args, "project")?)?),
+            "save_project_ideas" => snapshot_value(self.save_project_ideas(&arg::<String>(&args, "projectId")?, arg(&args, "ideas")?, arg(&args, "expectedRevision")?)?),
             "delete_project" => snapshot_value(self.delete_project(&arg::<String>(&args, "id")?)?),
             "post_project_board_note" => snapshot_value(self.post_project_board_note(
                 &arg::<String>(&args, "projectId")?, &arg::<String>(&args, "text")?, &arg::<String>(&args, "requestId")?,
@@ -7226,7 +7228,11 @@ fn initial_task_instructions(snapshot: &Snapshot, task_id: &str) -> Option<Strin
 
 fn with_project_board_context(snapshot: &Snapshot, task_id: &str, prompt: String) -> String {
     let prompt = match build_queue::turn_context(snapshot, task_id) { Some(context) => format!("{context}\n\n{prompt}"), None => prompt };
-    match project_board::turn_context(snapshot, task_id) {
+    let prompt = match project_board::turn_context(snapshot, task_id) {
+        Some(context) => format!("{context}\n\n{prompt}"),
+        None => prompt,
+    };
+    match project_ideas::turn_context(snapshot, task_id) {
         Some(context) => format!("{context}\n\n{prompt}"),
         None => prompt,
     }
@@ -7340,6 +7346,10 @@ fn create_task_in_data(data: &mut ServiceData, input: CreateTaskInput) -> Result
     if let Some(board_instructions) = project_board::system_instructions(state, task.project_id.as_deref(), agent.collaboration_enabled) {
         instructions.push_str("\n\n");
         instructions.push_str(&board_instructions);
+    }
+    if task.project_id.is_some() {
+        instructions.push_str("\n\n");
+        instructions.push_str(project_ideas::AGENT_INSTRUCTIONS);
     }
     if !instructions.trim().is_empty() {
         state.messages.push(Message {
@@ -8340,6 +8350,7 @@ fn validate_project(project: &Project, snapshot: &Snapshot) -> Result<(), String
         return Err("Project name is required.".into());
     }
     validate_board_guidance_text(&project.board_guidance_text, "Project")?;
+    project_ideas::validate_ideas(&project.ideas)?;
     if !matches!(
         project.icon.as_str(),
         "folder"
@@ -8393,6 +8404,21 @@ async fn save_project(state: State<'_, AppState>, project: Project) -> Result<Sn
     tauri::async_runtime::spawn_blocking(move || service.save_project(project))
         .await
         .map_err(|error| format!("Project save worker failed: {error}"))?
+}
+
+#[tauri::command]
+async fn save_project_ideas(
+    state: State<'_, AppState>,
+    project_id: String,
+    ideas: Vec<ProjectIdea>,
+    expected_revision: u64,
+) -> Result<Snapshot, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        service.save_project_ideas(&project_id, ideas, expected_revision)
+    })
+    .await
+    .map_err(|error| format!("Idea List save worker failed: {error}"))?
 }
 
 #[tauri::command]
@@ -9270,6 +9296,10 @@ fn send_channel_message_accepted(
                 if let Some(board_instructions) = project_board::system_instructions(state, task.project_id.as_deref(), agent.collaboration_enabled) {
                     instructions.push_str("\n\n");
                     instructions.push_str(&board_instructions);
+                }
+                if task.project_id.is_some() {
+                    instructions.push_str("\n\n");
+                    instructions.push_str(project_ideas::AGENT_INSTRUCTIONS);
                 }
                 if !instructions.trim().is_empty() {
                     state.messages.push(Message { stream_status: None, phase: None, response_metadata: None,
@@ -10260,6 +10290,7 @@ pub fn run() {
             fork_task,
             choose_local_folder,
             save_project,
+            save_project_ideas,
             merge_task_worktree,
             delete_project,
             post_project_board_note,
@@ -12032,6 +12063,7 @@ readline.createInterface({input: process.stdin}).on('line', line => {
                 cwd: cwd.into(),
             }],
             board_guidance_text: None,
+            ideas: vec![], ideas_revision: 0,
         }
     }
 
@@ -13465,6 +13497,7 @@ readline.createInterface({input: process.stdin}).on('line', line => {
                         cwd: "/project-workspace".into(),
                     }],
                     board_guidance_text: None,
+                    ideas: vec![], ideas_revision: 0,
                 });
                 Ok(())
             })

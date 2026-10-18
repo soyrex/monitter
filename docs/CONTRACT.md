@@ -1020,6 +1020,14 @@ project link: cwd, host, native session, running turn, messages and activity tim
 Deleting a project unassigns its chats, including archived/running chats, without deleting them.
 A host referenced by a project workspace cannot be deleted until that mapping is removed.
 
+Each project owns an optional Idea List. An idea has a short list title and an
+optional complete Markdown document for details. Projects persist `ideas` and
+an optimistic `ideasRevision`; absent fields mean an empty list. The Projects
+pane selects the project of the most recently viewed chat when available, while
+its project list remains an explicit switcher. Project agents have task-bound
+MCP tools to list, read, add and update their own project's ideas; idea text is
+untrusted context and parking one never authorizes implementation.
+
 The sidebar offers icon tabs for Agents (agent groups), Projects (collapsible project folders plus
 unassigned chats), and Activity (running first, then most recent), in that order. These tabs replace
 the matching content headings. Their compact heading-scale labels tighten with the sidebar width;

@@ -40,6 +40,10 @@ pub const TOOL_NAMES: &[&str] = &[
     "work_log_report", "work_log_read_context", "work_log_query",
     "project_board_read",
     "project_board_post",
+    "project_ideas_list",
+    "project_ideas_read",
+    "project_ideas_add",
+    "project_ideas_update",
     "build_queue_list", "build_request", "build_request_update", "build_claim", "build_complete", "build_heartbeat",
 ];
 const PROTOCOL_VERSIONS: [&str; 2] = ["2025-03-26", "2025-06-18"];
@@ -110,6 +114,10 @@ fn tools() -> Vec<Value> {
         json!({"name":"build_heartbeat","description":"Renew your running build lease for fifteen minutes.","inputSchema":schema(json!({"build_run_id": {"type": "string"}}),&["build_run_id"])}),
         json!({"name":"project_board_read","description":"Read notes on this running task's project board. With after_sequence, return up to 50 newer notes; otherwise return the 20 latest. Available only when enabled in Settings.","inputSchema":schema(json!({"after_sequence":{"type":"integer","minimum":0}}),&[]),"annotations":{"readOnlyHint":true}}),
         json!({"name":"project_board_post","description":"Post a concise coordination note on this running task's project board. Never wakes other agents. Keep request_id stable on retries.","inputSchema":schema(json!({"request_id":{"type":"string","maxLength":128},"text":{"type":"string","maxLength":2000}}),&["request_id","text"])}),
+        json!({"name":"project_ideas_list","description":"List the current task project's Idea List; use project_ideas_read for the complete Markdown document.","inputSchema":schema(json!({}),&[]),"annotations":{"readOnlyHint":true}}),
+        json!({"name":"project_ideas_read","description":"Read one idea and its complete Markdown document from the current task's project.","inputSchema":schema(json!({"idea_id":{"type":"string","minLength":1,"maxLength":128}}),&["idea_id"]),"annotations":{"readOnlyHint":true}}),
+        json!({"name":"project_ideas_add","description":"Park a possible project idea. Optional markdown replaces the whole detail document and does not authorize implementation.","inputSchema":schema(json!({"title":{"type":"string","minLength":1,"maxLength":240},"markdown":{"type":"string","maxLength":131072}}),&["title"])}),
+        json!({"name":"project_ideas_update","description":"Update an idea title and/or replace its complete Markdown detail document in the current task's project.","inputSchema":schema(json!({"idea_id":{"type":"string","minLength":1,"maxLength":128},"title":{"type":"string","minLength":1,"maxLength":240},"markdown":{"type":"string","maxLength":131072}}),&["idea_id"])}),
     ]
 }
 fn valid(name: &str, args: &Value) -> bool {
@@ -143,6 +151,10 @@ fn valid(name: &str, args: &Value) -> bool {
         "work_log_read_context" => (&["context_ref","cursor","limit"], &["context_ref"]),
         "project_board_read" => (&["after_sequence"], &[]),
         "project_board_post" => (&["request_id", "text"], &["request_id", "text"]),
+        "project_ideas_list" => (&[], &[]),
+        "project_ideas_read" => (&["idea_id"], &["idea_id"]),
+        "project_ideas_add" => (&["title", "markdown"], &["title"]),
+        "project_ideas_update" => (&["idea_id", "title", "markdown"], &["idea_id"]),
         "browser_open" => (&["request_id", "url", "title"], &["request_id", "url"]),
         "terminal_run" => (&["command", "cwd"], &["command"]),
         "install_shared_skill" => (&["url", "name"], &["url"]),
@@ -510,6 +522,9 @@ mod tests {
         assert!(!valid("work_plan_start", &json!({"request_id":"r1","title":"Build","items":[]})));
         assert!(valid("project_board_read", &json!({"after_sequence":1})));
         assert!(!valid("project_board_read", &json!({"after_sequence":-1})));
+        assert!(valid("project_ideas_list", &json!({})));
+        assert!(valid("project_ideas_add", &json!({"title":"Capture this"})));
+        assert!(!valid("project_ideas_add", &json!({"title":"Capture this","project_id":"spoof"})));
         assert!(supported_protocol_version("2025-06-18"));
         assert!(!supported_protocol_version("2025-11-25"));
     }

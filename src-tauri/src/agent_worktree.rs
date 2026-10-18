@@ -375,6 +375,7 @@ mod tests {
                 cwd: p.to_string_lossy().into_owned(),
             }],
             board_guidance_text: None,
+            ideas: vec![], ideas_revision: 0,
             build_management_enabled: false,
             agent_worktrees_enabled: false,
         };

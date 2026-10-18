@@ -682,12 +682,18 @@ impl Desktop {
             });
         }
     }
+    pub(super) fn preferred_project_for_current_pane(&self) -> Option<String> {
+        let task_id = self.window.selected.as_deref()?;
+        rows(&self.snapshot, "tasks").into_iter().find(|task| field(task, "id") == task_id)
+            .and_then(|task| task["projectId"].as_str().map(str::to_owned))
+    }
     fn palette_projects(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.switch_surface(Sidebar::Projects, window, cx);
         if self.window.workspace.is_none() {
             if let Some(service) = self.service.clone() {
+                let preferred_project = self.preferred_project_for_current_pane();
                 self.window.workspace = Some(cx.new(|cx| {
-                    workspace::WorkspacePane::new(service, self.snapshot.clone(), window, cx)
+                    workspace::WorkspacePane::new(service, self.snapshot.clone(), preferred_project, window, cx)
                 }));
             }
         }

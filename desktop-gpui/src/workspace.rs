@@ -57,11 +57,14 @@ pub struct WorkspacePane {
     error: Option<String>,
     pending_note: Option<(String, String, String)>,
     posted_note: Option<(String, String)>,
+    ideas: Vec<Value>, ideas_revision: u64, selected_idea: Option<String>,
+    idea_title: Entity<InputState>, idea_markdown: Entity<TextareaState>,
 }
 impl WorkspacePane {
     pub fn new(
         service: DesktopService,
         snapshot: Rc<Value>,
+        preferred_project: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -77,7 +80,7 @@ impl WorkspacePane {
                 )
             })
             .collect();
-        Self {
+        let mut pane = Self {
             service,
             snapshot,
             selected: None,
@@ -95,7 +98,14 @@ impl WorkspacePane {
             error: None,
             pending_note: None,
             posted_note: None,
+            ideas: vec![], ideas_revision: 0, selected_idea: None,
+            idea_title: cx.new(|cx| InputState::new(window, cx).placeholder("A concise idea")),
+            idea_markdown: cx.new(|cx| TextareaState::new(window, cx).placeholder("Optional full Markdown document…")),
+        };
+        if let Some(id) = preferred_project {
+            if let Some(project) = items(&pane.snapshot, "projects").into_iter().find(|project| text(project, "id") == id) { pane.select(project, window, cx); }
         }
+        pane
     }
     pub fn sync(&mut self, snapshot: Rc<Value>, cx: &mut Context<Self>) {
         let changed = workspace_metadata_changed(&self.snapshot, &snapshot);
@@ -126,7 +136,39 @@ impl WorkspacePane {
         }
         self.pending_note = None;
         self.error = None;
+        self.ideas = items(&project, "ideas");
+        self.ideas_revision = project["ideasRevision"].as_u64().unwrap_or(0);
+        self.selected_idea = None;
+        self.idea_title.update(cx, |s, cx| s.set_value("", window, cx));
+        self.idea_markdown.update(cx, |s, cx| s.set_value("", window, cx));
         cx.notify();
+    }
+    fn sync_idea_editor(&mut self, cx: &mut Context<Self>) {
+        if let Some(id) = self.selected_idea.clone() {
+            if let Some(idea) = self.ideas.iter_mut().find(|idea| text(idea, "id") == id) {
+                idea["title"] = json!(self.idea_title.read(cx).value().to_string());
+                idea["markdown"] = json!(self.idea_markdown.read(cx).value().to_string());
+            }
+        }
+    }
+    fn select_idea(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.sync_idea_editor(cx);
+        let idea = self.ideas.iter().find(|idea| text(idea, "id") == id).cloned().unwrap_or(Value::Null);
+        self.selected_idea = Some(id);
+        self.idea_title.update(cx, |s, cx| s.set_value(text(&idea, "title"), window, cx));
+        self.idea_markdown.update(cx, |s, cx| s.set_value(text(&idea, "markdown"), window, cx));
+        cx.notify();
+    }
+    fn add_idea(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sync_idea_editor(cx);
+        let id = format!("draft-{}", REQUEST.fetch_add(1, Ordering::Relaxed));
+        self.ideas.push(json!({"id":id,"title":"Untitled idea","markdown":"","createdAt":0,"updatedAt":0}));
+        self.select_idea(id, window, cx);
+    }
+    fn save_ideas(&mut self, cx: &mut Context<Self>) {
+        let Some(project_id) = self.selected.clone() else { return; };
+        self.sync_idea_editor(cx);
+        self.invoke("save_project_ideas", json!({"projectId":project_id,"ideas":self.ideas.clone(),"expectedRevision":self.ideas_revision}), cx);
     }
     fn invoke(&mut self, command: &'static str, args: Value, cx: &mut Context<Self>) {
         if self.busy {
@@ -145,6 +187,17 @@ impl WorkspacePane {
                 match result {
                     Ok(snapshot) => {
                         view.snapshot = Rc::new(snapshot);
+                        if command == "save_project_ideas" {
+                            if let Some(project) = items(&view.snapshot, "projects")
+                                .into_iter()
+                                .find(|project| Some(text(project, "id")) == view.selected)
+                            {
+                                view.ideas = items(&project, "ideas");
+                                view.ideas_revision = project["ideasRevision"]
+                                    .as_u64()
+                                    .unwrap_or(view.ideas_revision);
+                            }
+                        }
                         if command == "post_project_board_note" {
                             view.posted_note =
                                 view.pending_note.take().map(|(id, body, _)| (id, body));
@@ -279,6 +332,31 @@ impl Render for WorkspacePane {
                     .disabled(self.busy)
                     .on_click(cx.listener(|v, _, _, cx| v.save(cx))),
             );
+        if self.selected.is_some() {
+            let mut ideas = div().flex().flex_col().gap_1().w(px(220.)).child(
+                Button::new("add-project-idea").label("Add idea").disabled(self.busy)
+                    .on_click(cx.listener(|pane, _, window, cx| pane.add_idea(window, cx))),
+            );
+            for idea in self.ideas.clone() {
+                let id = text(&idea, "id");
+                let label = text(&idea, "title");
+                ideas = ideas.child(Button::new(SharedString::from(format!("project-idea-{id}")))
+                    .label(if label.is_empty() { "Untitled idea".into() } else { label })
+                    .disabled(self.busy)
+                    .on_click(cx.listener(move |pane, _, window, cx| pane.select_idea(id.clone(), window, cx))));
+            }
+            let editor = if self.selected_idea.is_some() {
+                div().flex_1().min_w_0().flex().flex_col().gap_2()
+                    .child(div().text_lg().child("Idea details"))
+                    .child(Input::new(&self.idea_title).disabled(self.busy))
+                    .child(div().text_sm().child("Full Markdown document"))
+                    .child(div().flex_1().min_h(px(240.)).child(Textarea::new(&self.idea_markdown)))
+                    .child(Button::new("save-project-ideas").label("Save Idea List").disabled(self.busy)
+                        .on_click(cx.listener(|pane, _, _, cx| pane.save_ideas(cx))))
+            } else { div().flex_1().child("Select an idea or add a new one.") };
+            detail = detail.child(div().mt_4().border_t_1().border_color(rgb(0xffffff18)).pt_3().text_xl().child("Idea List"))
+                .child(div().flex().gap_4().min_h(px(320.)).child(ideas).child(editor));
+        }
         if let Some(id) = &self.selected {
             let worktree_tasks: Vec<_> = items(&self.snapshot, "tasks")
                 .into_iter()

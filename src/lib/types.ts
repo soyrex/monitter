@@ -90,6 +90,7 @@ export interface JevCommandCandidate { id: string; label: string; description?: 
 export interface JevCommandPlan { traceId: string; candidateId: string; confidence: number; reason: string; }
 export type TaskStatus = 'idle' | 'running' | 'completed' | 'error' | 'interrupted';
 export type SidebarView = 'standard' | 'activity' | 'projects';
+export interface ProjectIdea { id: string; title: string; markdown: string; createdAt: number; updatedAt: number; }
 export interface Project {
   buildManagementEnabled?: boolean;
   agentWorktreesEnabled?: boolean;
@@ -97,6 +98,8 @@ export interface Project {
   workspaces: { hostId: string; cwd: string }[];
   /** Optional project-specific override for project-board coordination guidance. */
   boardGuidanceText?: string | null;
+  ideas?: ProjectIdea[];
+  ideasRevision?: number;
 }
 export interface Host {
   id: string; name: string; kind: 'local' | 'ssh'; address: string;

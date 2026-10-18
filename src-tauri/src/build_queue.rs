@@ -480,7 +480,7 @@ mod tests {
             s.projects.push(Project {
                 id: "build-project".into(), name: "Build project".into(),
                 description: String::new(), icon: "folder".into(), color: "#123456".into(),
-                workspaces: vec![], board_guidance_text: None, build_management_enabled: true, agent_worktrees_enabled: false,
+                workspaces: vec![], board_guidance_text: None, ideas: vec![], ideas_revision: 0, build_management_enabled: true, agent_worktrees_enabled: false,
             });
             Ok(())
         }).unwrap();
@@ -604,6 +604,7 @@ mod tests {
                     color: "#123456".into(),
                     workspaces: vec![],
                     board_guidance_text: None,
+                    ideas: vec![], ideas_revision: 0,
                 });
 
                 Ok(())
