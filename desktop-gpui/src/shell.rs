@@ -939,8 +939,19 @@ impl Desktop {
         // Share the workspace pill's outer height and glyph sizing, including
         // interface font changes. Button::icon would replace our glyph size.
         let tab_metrics = design::workspace_tab_metrics(cx.theme().font_size);
+        // Fade the glyphs before the centred group slides underneath the
+        // native traffic lights. Use physical points: AppKit controls do not
+        // scale with the application's font or interface scale.
+        let sidebar_points = f32::from(design::ui_px(
+            self.displayed_sidebar_width(cx), self.window.sidebar_scale,
+        ));
+        let group_points = f32::from(tab_metrics.height) * 3. + f32::from(px(2.)) * 2.;
+        let glyph_left = (sidebar_points - group_points) / 2.
+            + f32::from(tab_metrics.height - tab_metrics.icon_size) / 2.;
+        let navigation_opacity = ((glyph_left - 72.) / 12.).clamp(0., 1.);
         let mut tern_view_toggles = div()
             .id("tern-sidebar-view-toggles")
+            .opacity(navigation_opacity)
             .flex()
             .items_center()
             .gap(px(2.));

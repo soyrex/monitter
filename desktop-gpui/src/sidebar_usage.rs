@@ -1573,8 +1573,17 @@ impl SidebarUsageWidget {
         let width = SidebarUsageProvider::ALL.len() as f32 * layout.diameter
             + (SidebarUsageProvider::ALL.len() - 1) as f32 * layout.gap
             + if account_controls { CODEX_ACCOUNT_ARROWS_WIDTH } else { 0. };
-        div().id("workspace-usage-rings").w(px(width)).flex_shrink_0()
-            .child(self.render_rings_row(&merged, layout, palette, true, cx)).into_any_element()
+        // This retained header view already observes the sidebar's one-second
+        // tick, so the clock shares its time and palette without another timer.
+        div().id("workspace-usage-rings").flex_shrink_0()
+            .flex().items_center().gap(px(10.))
+            .child(div().w(px(width)).flex_shrink_0()
+                .child(self.render_rings_row(&merged, layout, palette, true, cx)))
+            .child(div().id("workspace-analog-clock")
+                .debug_selector(|| "workspace-analog-clock".into())
+                .flex_shrink_0()
+                .child(crate::native_clock::clock_face(self.now_ms.max(0) as u64, palette, 28.)))
+            .into_any_element()
     }
 
     fn render_rings_row(
