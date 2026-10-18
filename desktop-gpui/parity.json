@@ -4,6 +4,32 @@
   "mobilePolicy": "unchanged",
   "features": [
     {
+      "id": "universal_user_questions",
+      "sourcePaths": [
+        "src-tauri/src/user_questions.rs",
+        "src-tauri/src/acp_protocol.rs",
+        "src-tauri/src/acp_runtime.rs",
+        "src-tauri/src/runner.rs",
+        "desktop-gpui/src/interactions.rs",
+        "desktop-gpui/src/chat_watcher.rs",
+        "desktop-gpui/src/user_question_tests.rs",
+        "src/lib/components/HarnessInput.svelte"
+      ],
+      "status": "implemented_unverified",
+      "evidence": "Canonical macOS verification: 16 backend and 18 native checks pass, including MiniMax ACP and Claude native answer/cancel handling, shared MCP ask_user ownership, composer draft/focus retention and inline Watch forms at 320/960px. Real HarnessInput passes Chromium and WebKit at desktop/mobile widths for single/multiple choice, free text, UTF-8 limits and existing form/URL paths. The shared MCP tool is available to supported harnesses when collaboration is enabled; native question inputs retain their own capability path. Sources stayed stable during checks. An independent existing Watch finished-agent disclosure fixture remains failing before any question is present. No installation, activation or live provider turn was performed; installed and other-platform parity remains unverified."
+    },
+    {
+      "id": "chat_watcher_mode",
+      "sourcePaths": [
+        "desktop-gpui/src/chat.rs",
+        "desktop-gpui/src/chat_watcher.rs",
+        "desktop-gpui/src/plans.rs",
+        "desktop-gpui/src/working_bubble.rs"
+      ],
+      "status": "implemented_unverified",
+      "evidence": "Chat-header Watcher popup shows the task workplan with segmented progress, status-aligned rows, collapsed earlier-plan history, subagents and a compact live activity footer. When the chat has no plan in progress the plan slot instead carries a read-only current-task summary (title, status pill, elapsed run time, provider/model and the owner's latest request), with the most recently finished plan kept below it as a collapsed disclosure so completed work stays reachable. Transcript/composer remain mounted; running pill has no duplicate plan trigger. 15 focused native/projection checks pass for light/dark at 320/800px, live updates/completion, history/notes, Escape/outside dismissal, drafts and approval routing, plus focused projection and native checks for the task-summary swap and the last-plan disclosure. Native synthetic card pixels inspected in dark and light themes. Installed-client visual acceptance and non-macOS runtime remain unverified. No backend protocol change."
+    },
+    {
       "id": "identity_scaffold",
       "sourcePaths": [
         "desktop-gpui/src/main.rs",
