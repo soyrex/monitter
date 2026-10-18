@@ -144,7 +144,13 @@ export function unifiedSubagentsForTask({ tasks, agents, collaborations, message
   const taskById = new Map(tasks.map(task => [task.id, task]));
   const projectById = new Map(projects.map(project => [project.id, project]));
   const delegationById = new Map(collaborations.filter(value => value.kind === 'delegation').map(value => [value.id, value]));
-  const sessions = [...subagentSessions];
+  // Defend against older backends persisting the parent's own Codex thread as
+  // a child. Only exact identity with the actual parent task establishes this;
+  // agent paths, elapsed time and other providers do not.
+  const sessions = subagentSessions.filter(session => !(
+    session.source === 'codex' && session.agentThreadId
+    && session.agentThreadId === taskById.get(session.parentTaskId)?.nativeSessionId
+  ));
   const representedCollaborations = new Set(sessions.flatMap(value => value.collaborationId ? [value.collaborationId] : []));
   // Compatibility for a desktop that has not yet emitted the normalized field.
   for (const collaboration of collaborations) {

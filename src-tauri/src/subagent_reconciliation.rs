@@ -21,7 +21,13 @@ const MAX_DETAIL: usize = 16 * 1024;
 #[derive(Default)]
 pub(crate) struct ReconciliationState {
     owners: HashMap<(String, usize), OwnerProbe>,
-    children: HashMap<(String, String, usize), Instant>,
+    children: HashMap<(String, String, usize), ChildProbe>,
+}
+#[derive(Default)]
+struct ChildProbe {
+    last: Option<Instant>,
+    last_wake: Option<Instant>,
+    wake_pending: bool,
 }
 #[derive(Default)]
 struct OwnerProbe {
@@ -128,26 +134,22 @@ fn owner_current(data: &ServiceData, control: &RunControl, task: &str, root: &st
             t.id == task && t.provider == "codex" && t.native_session_id.as_deref() == Some(root)
         })
 }
-fn idle_for_probe(data: &ServiceData, control: &RunControl, task: &str) -> bool {
+// Child reads are independent from a parent turn. During execution, require
+// the established native turn; a pending send/accepted receipt is transitional.
+fn owner_ready_for_probe(data: &ServiceData, control: &RunControl, task: &str) -> bool {
     control.is_resident()
-        && !control.is_active()
         && !control.has_pending_native_turn()
-        && data
-            .snapshot
-            .tasks
-            .iter()
-            .any(|t| t.id == task && !t.archived && t.status != "running")
+        && !control.has_app_server_native_turn_request()
+        && !control.has_app_server_turn_request()
+        && data.snapshot.tasks.iter().any(|t| {
+            t.id == task
+                && !t.archived
+                && (!(control.is_active() || t.status == "running")
+                    || control
+                        .current_app_server_turn()
+                        .is_some_and(|id| !id.trim().is_empty()))
+        })
         && !data.accepted_turns.contains_key(task)
-        && !data
-            .snapshot
-            .approval_requests
-            .iter()
-            .any(|r| r.task_id == task && r.status == "pending")
-        && !data
-            .snapshot
-            .queued_messages
-            .iter()
-            .any(|m| m.task_id == task && matches!(m.status.as_str(), "queued" | "sending"))
 }
 
 #[derive(Debug, PartialEq)]
@@ -275,15 +277,23 @@ impl ReconciliationState {
                     || (o.waiting_for_query
                         && p.control.pending_app_server_query_count().unwrap_or(1) > 0)
                     || o.next.is_some_and(|next| now < next)
-            }) && !self
-                .children
-                .get(&p.child_key())
-                .is_some_and(|last| now.saturating_duration_since(*last) < CHILD_INTERVAL)
+            }) && !self.children.get(&p.child_key()).is_some_and(|child| {
+                !child.wake_pending
+                    && child
+                        .last
+                        .is_some_and(|last| now.saturating_duration_since(last) < CHILD_INTERVAL)
+            })
         });
         candidates.sort_by_key(|p| {
             (
                 self.owners.get(&p.owner_key()).and_then(|o| o.last),
-                self.children.get(&p.child_key()).copied(),
+                !self
+                    .children
+                    .get(&p.child_key())
+                    .is_some_and(|child| child.wake_pending),
+                self.children
+                    .get(&p.child_key())
+                    .and_then(|child| child.last),
                 p.task_id.clone(),
                 p.session.id.clone(),
             )
@@ -298,7 +308,12 @@ impl ReconciliationState {
             owner.control = Some(Arc::downgrade(&probe.control));
             owner.last = Some(now);
             probe.version = owner.version;
-            self.children.insert(probe.child_key(), now);
+            let child = self.children.entry(probe.child_key()).or_default();
+            child.last = Some(now);
+            if child.wake_pending {
+                child.last_wake = Some(now);
+                child.wake_pending = false;
+            }
             selected.push(probe);
             if selected.len() == MAX_PROBES {
                 break;
@@ -351,7 +366,7 @@ impl Service {
                 let control = runs.tasks.get(&session.parent_task_id)?.clone();
                 let root = control.current_app_server_thread()?;
                 if !owner_current(&data, &control, &session.parent_task_id, &root)
-                    || !idle_for_probe(&data, &control, &session.parent_task_id)
+                    || !owner_ready_for_probe(&data, &control, &session.parent_task_id)
                 {
                     return None;
                 }
@@ -386,7 +401,7 @@ impl Service {
             return false;
         };
         if !owner_current(&data, &probe.control, &probe.task_id, &probe.root)
-            || !idle_for_probe(&data, &probe.control, &probe.task_id)
+            || !owner_ready_for_probe(&data, &probe.control, &probe.task_id)
             || !runs
                 .tasks
                 .get(&probe.task_id)
@@ -417,7 +432,7 @@ impl Service {
         self.mutate_data(Some(probe.task_id.clone()), |data| {
             let runs = self.runs.lock().map_err(|_| "Run registry unavailable.")?;
             if !owner_current(data, &probe.control, &probe.task_id, &probe.root)
-                || !idle_for_probe(data, &probe.control, &probe.task_id)
+                || !owner_ready_for_probe(data, &probe.control, &probe.task_id)
                 || !runs
                     .tasks
                     .get(&probe.task_id)
@@ -523,25 +538,54 @@ impl Service {
         let targets = if matches!(method, "item/started" | "item/completed") {
             crate::runner::parse_codex_subagent_updates(&params["item"], task_id)
                 .into_iter()
-                .filter_map(|u| u.agent_thread_id)
+                .filter_map(|u| {
+                    u.agent_thread_id
+                        .map(|thread| (thread, u.status.as_deref().is_some_and(terminal)))
+                })
                 .collect::<Vec<_>>()
         } else {
-            vec![reporter.to_owned()]
+            let finished = method == "turn/completed"
+                || (method == "thread/status/changed"
+                    && matches!(
+                        params.pointer("/status/type").and_then(Value::as_str),
+                        Some("idle" | "notLoaded" | "systemError")
+                    ));
+            vec![(reporter.to_owned(), finished)]
         };
-        if !targets.iter().any(|target| {
-            known_child(&data.snapshot, task_id, target).is_some_and(|s| {
-                !terminal(&s.status) && lineage(&data.snapshot, task_id, &root, s, None)
+        let known_targets = targets
+            .into_iter()
+            .filter(|(target, _)| {
+                known_child(&data.snapshot, task_id, target).is_some_and(|s| {
+                    !terminal(&s.status) && lineage(&data.snapshot, task_id, &root, s, None)
+                })
             })
-        }) {
+            .collect::<Vec<_>>();
+        if known_targets.is_empty() {
             return;
         }
         if let Ok(mut state) = self.subagent_reconciliation.lock() {
-            let owner = state
-                .owners
-                .entry((task_id.into(), Arc::as_ptr(control) as usize))
-                .or_default();
+            let pointer = Arc::as_ptr(control) as usize;
+            let owner = state.owners.entry((task_id.into(), pointer)).or_default();
             owner.control = Some(Arc::downgrade(control));
             owner.version = owner.version.wrapping_add(1);
+            let at = Instant::now();
+            for (target, finished) in known_targets {
+                if !finished {
+                    continue;
+                }
+                // One expedited read per child per interval. Duplicate/old
+                // completion hints cannot defeat polling or error backoff.
+                let child = state
+                    .children
+                    .entry((task_id.into(), format!("codex:{target}"), pointer))
+                    .or_default();
+                if !child
+                    .last_wake
+                    .is_some_and(|last| at.saturating_duration_since(last) < CHILD_INTERVAL)
+                {
+                    child.wake_pending = true;
+                }
+            }
         }
     }
 
@@ -661,6 +705,21 @@ mod tests {
                 owner,
             }
         }
+        fn start_parent(&self) {
+            self.owner.begin_run().unwrap();
+            self.owner
+                .set_app_server_turn("established-parent-turn".into());
+            self.service
+                .mutate(None, |s| {
+                    s.tasks
+                        .iter_mut()
+                        .find(|t| t.id == self.task)
+                        .unwrap()
+                        .status = "running".into();
+                    Ok(())
+                })
+                .unwrap();
+        }
         fn probe(&self) -> Probe {
             self.service.subagent_probes().pop().unwrap()
         }
@@ -744,6 +803,207 @@ mod tests {
             .unwrap();
         assert_eq!(f.child().status, "error");
         assert_eq!(f.child().updated_at, child.updated_at);
+    }
+
+    #[test]
+    fn subagent_reconciliation_heals_terminal_children_during_established_parent_turn() {
+        for status in ["completed", "failed"] {
+            let f = Fixture::new(status);
+            f.start_parent();
+            // Neither an approval for the parent nor a queued next message
+            // changes the authority of a read of its recorded child.
+            f.service
+                .mutate(None, |s| {
+                    s.approval_requests.push(
+                        serde_json::from_value(json!({
+                            "id":"approval", "taskId":f.task, "provider":"codex",
+                            "runId":f.owner.current_run_id().unwrap(), "tool":"shell",
+                            "summary":"Parent approval", "detail":"", "risk":"low",
+                            "status":"pending", "createdAt":now()
+                        }))
+                        .unwrap(),
+                    );
+                    s.queued_messages.push(serde_json::from_value(json!({
+                    "id":"queued", "taskId":f.task, "channelId":null,
+                    "text":"Later request", "attachmentIds":[], "createdAt":now(), "status":"queued"
+                })).unwrap());
+                    Ok(())
+                })
+                .unwrap();
+            let before = f.service.snapshot().unwrap();
+            let run = f.owner.current_run_id().unwrap();
+            let turn = f.owner.current_app_server_turn();
+            let mut value = f.read();
+            value["thread"]["turns"][0]["status"] = json!(status);
+            assert_eq!(
+                f.service
+                    .reconcile_codex_subagents_with(Instant::now(), |_| Ok(value.clone())),
+                1
+            );
+            assert_eq!(
+                f.child().status,
+                if status == "failed" {
+                    "error"
+                } else {
+                    "completed"
+                }
+            );
+            let after = f.service.snapshot().unwrap();
+            assert_eq!(before.tasks, after.tasks);
+            assert_eq!(before.approval_requests, after.approval_requests);
+            assert_eq!(before.queued_messages, after.queued_messages);
+            assert_eq!(f.owner.current_run_id().unwrap(), run);
+            assert_eq!(f.owner.current_app_server_turn(), turn);
+            assert!(f.owner.is_active());
+            // Child observation never grants retirement of an active parent.
+            let future = Instant::now() + Duration::from_secs(3600);
+            assert!(
+                !f.owner
+                    .try_retire_idle(future, crate::runtime_gc::IDLE_RUNTIME_TIMEOUT)
+            );
+            assert_eq!(f.service.collect_idle_runtimes_at(future), 0);
+            assert!(Arc::ptr_eq(
+                f.service.runs.lock().unwrap().tasks.get(&f.task).unwrap(),
+                &f.owner
+            ));
+        }
+    }
+
+    #[test]
+    fn subagent_reconciliation_active_parent_rechecks_run_and_turn_during_read() {
+        for change in ["run", "turn"] {
+            let f = Fixture::new(change);
+            f.start_parent();
+            let value = f.read();
+            assert_eq!(
+                f.service
+                    .reconcile_codex_subagents_with(Instant::now(), |_| {
+                        if change == "run" {
+                            f.owner.begin_run().unwrap();
+                        } else {
+                            f.owner.set_app_server_turn("next-parent-turn".into());
+                        }
+                        Ok(value.clone())
+                    }),
+                0
+            );
+            assert_eq!(f.child().status, "running");
+            assert!(f.owner.is_active());
+        }
+    }
+
+    #[test]
+    fn subagent_reconciliation_active_parent_preserves_live_child_and_pending_send_fences() {
+        let f = Fixture::new("active-child");
+        f.start_parent();
+        let mut active = f.read();
+        active["thread"]["status"] = json!({"type":"active"});
+        active["thread"]["turns"][0]["status"] = json!("inProgress");
+        assert_eq!(
+            f.service
+                .reconcile_codex_subagents_with(Instant::now(), |_| Ok(active.clone())),
+            0
+        );
+        assert_eq!(f.child().status, "running");
+        assert!(f.owner.is_active());
+        f.owner
+            .set_pending_native_turn(crate::runner::NativeTurnCommand::Compact);
+        assert!(f.service.subagent_probes().is_empty());
+        f.owner.take_pending_native_turn();
+        f.owner.mark_app_server_turn_request(99).unwrap();
+        assert!(f.service.subagent_probes().is_empty());
+        assert!(f.owner.take_app_server_turn_request(99));
+        f.owner.clear_app_server_turn();
+        assert!(f.service.subagent_probes().is_empty());
+        f.owner
+            .set_app_server_turn("established-parent-turn".into());
+        f.service
+            .mutate_data(None, |data| {
+                data.accepted_turns.insert(
+                    f.task.clone(),
+                    crate::AcceptedTurn {
+                        receipt: crate::id(),
+                        prompt: "Accepted send".into(),
+                        slash_command: None,
+                    },
+                );
+                Ok(())
+            })
+            .unwrap();
+        assert!(f.service.subagent_probes().is_empty());
+    }
+
+    #[test]
+    fn subagent_completion_notification_wakes_one_bounded_read_during_parent_turn() {
+        let f = Fixture::new("completion-wake");
+        f.start_parent();
+        let at = Instant::now();
+        let mut active = f.read();
+        active["thread"]["status"] = json!({"type":"active"});
+        active["thread"]["turns"][0]["status"] = json!("inProgress");
+        let mut calls = 0;
+        assert_eq!(
+            f.service.reconcile_codex_subagents_with(at, |_| {
+                calls += 1;
+                Ok(active.clone())
+            }),
+            0
+        );
+        f.notify(json!({"method":"turn/completed","params":{"threadId":"child","turn":{"id":"child-turn","status":"completed"}}}));
+        assert_eq!(
+            f.service
+                .reconcile_codex_subagents_with(at + Duration::from_secs(1), |_| {
+                    calls += 1;
+                    Ok(active.clone())
+                }),
+            0
+        );
+        // Repeated/stale completion hints may invalidate reads but do not
+        // repeatedly bypass the child interval or prematurely close a live turn.
+        for seconds in 2..5 {
+            f.notify(json!({"method":"turn/completed","params":{"threadId":"child","turn":{"id":"old-turn","status":"completed"}}}));
+            assert_eq!(
+                f.service
+                    .reconcile_codex_subagents_with(at + Duration::from_secs(seconds), |_| panic!(
+                        "duplicate wake must remain bounded"
+                    )),
+                0
+            );
+        }
+        assert_eq!(calls, 2);
+        assert_eq!(f.child().status, "running");
+        assert_eq!(
+            f.service
+                .reconcile_codex_subagents_with(at + Duration::from_secs(61), |_| Ok(f.read())),
+            1
+        );
+        assert_eq!(f.child().status, "error");
+        assert!(f.owner.is_active());
+    }
+
+    #[test]
+    fn subagent_completion_wake_preserves_query_error_backoff() {
+        let f = Fixture::new("wake-backoff");
+        f.start_parent();
+        let at = Instant::now();
+        assert_eq!(
+            f.service
+                .reconcile_codex_subagents_with(at, |_| Err("query timed out".into())),
+            0
+        );
+        f.notify(json!({"method":"thread/status/changed","params":{"threadId":"child","status":{"type":"idle"}}}));
+        assert_eq!(
+            f.service
+                .reconcile_codex_subagents_with(at + Duration::from_secs(1), |_| panic!(
+                    "wake must respect timeout backoff"
+                )),
+            0
+        );
+        assert_eq!(
+            f.service
+                .reconcile_codex_subagents_with(at + Duration::from_secs(121), |_| Ok(f.read())),
+            1
+        );
     }
 
     #[test]
@@ -894,7 +1154,7 @@ mod tests {
                 .reconcile_codex_subagents_with(at + CHILD_INTERVAL, |_| Ok(active.clone())),
             0
         );
-        // When the latest native turn actually fails, an idle-parent child
+        // When the latest native turn actually fails, a known child
         // completion wakes the bounded read; it never completes the parent.
         f.notify(json!({"method":"thread/status/changed","params":{"threadId":"child","status":{"type":"notLoaded"}}}));
         assert_eq!(

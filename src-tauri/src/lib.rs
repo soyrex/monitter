@@ -4363,8 +4363,8 @@ impl Service {
             state.tasks[ix].updated_at = now();
             let observed_at = now();
             for update in subagent_updates {
-                crate::model::upsert_subagent_session(
-                    &mut state.subagent_sessions,
+                crate::model::upsert_task_subagent_session(
+                    state,
                     update,
                     observed_at,
                 );

@@ -134,6 +134,60 @@ fn event_edits_deletes_and_reordering_survive_reopen() {
 }
 
 #[test]
+fn subagent_recovery_removes_only_exact_parent_self_rows_and_keeps_history() {
+    let path = directory();
+    let (store, mut snapshot, hosts, attachments) = Store::open(path.clone()).unwrap();
+    snapshot.tasks.push(serde_json::from_value(serde_json::json!({
+        "id":"task", "agentId":"agent", "title":"parent", "nativeSessionId":"native-root",
+        "status":"completed", "createdAt":1, "updatedAt":2, "parentTaskId":null,
+        "channelId":null, "hostId":snapshot.hosts[0].id, "cwd":"/tmp", "provider":"codex",
+        "model":"", "sandbox":"read-only"
+    })).unwrap());
+    let mut root = subagent_session("codex:native-root");
+    root.source = "codex".into();
+    root.agent_thread_id = Some("native-root".into());
+    let mut child = root.clone();
+    child.id = "codex:child".into();
+    child.agent_thread_id = Some("child".into());
+    child.agent_path = Some("/root".into());
+    let mut nested = child.clone();
+    nested.id = "codex:nested".into();
+    nested.agent_thread_id = Some("nested".into());
+    nested.parent_thread_id = Some("child".into());
+    let mut acp = root.clone();
+    acp.id = "acp:native-root".into();
+    acp.source = "acp".into();
+    let mut other_owner = root.clone();
+    other_owner.id = "other-owner-row".into();
+    other_owner.parent_task_id = "another-task".into();
+    snapshot.subagent_sessions = vec![root, child.clone(), nested.clone(), acp.clone(), other_owner.clone()];
+    snapshot.events.push(event("original-root-activity"));
+    store.save(&snapshot, &hosts, &attachments).unwrap();
+    drop(store);
+    let mut expected = vec![child, nested, acp, other_owner];
+    let recovery_started = now();
+    for reopening in 0..2 {
+        let (reopened, loaded, _, _) = Store::open(path.clone()).unwrap();
+        if reopening == 0 {
+            // Existing restart recovery interrupts unfinished children of known
+            // tasks. Preserve those rows and their metadata, then verify that
+            // this terminal observation and the self-row removal are durable.
+            for row in expected.iter_mut().filter(|row| row.parent_task_id == "task") {
+                let recovered = loaded.subagent_sessions.iter().find(|entry| entry.id == row.id).unwrap();
+                assert!(recovered.updated_at >= recovery_started);
+                row.status = "interrupted".into();
+                row.updated_at = recovered.updated_at;
+            }
+        }
+        assert_eq!(loaded.subagent_sessions, expected);
+        assert_eq!(loaded.tasks, snapshot.tasks);
+        assert_eq!(loaded.events, snapshot.events);
+        drop(reopened);
+    }
+    fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
 fn subagent_projection_round_trips_updates_and_deletes_atomically() {
     let path = directory();
     let (store, mut snapshot, hosts, attachments) = Store::open(path.clone()).unwrap();

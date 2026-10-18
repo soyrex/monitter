@@ -415,7 +415,7 @@ impl Service {
             }
             let observed_at = now();
             for update in subagent_updates {
-                upsert_subagent_session(&mut data.snapshot.subagent_sessions, update, observed_at);
+                upsert_task_subagent_session(&mut data.snapshot, update, observed_at);
             }
             if let Some((kind, title, detail)) = parsed.event {
                 if kind == "computer_image" {

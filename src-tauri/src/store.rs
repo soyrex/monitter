@@ -236,6 +236,7 @@ fn recover_after_restart(snapshot: &mut Snapshot) {
     // delegations. Rebuild their compact sub-agent projection before the
     // recovery write below makes the upgraded state durable.
     crate::model::sync_collaboration_subagent_sessions(snapshot);
+    crate::model::prune_parent_subagent_sessions(snapshot);
     crate::Service::recover_collaborations(snapshot);
 }
 

@@ -574,6 +574,51 @@ fn subagent_status_rank(status: &str) -> u8 {
     }
 }
 
+/// Native activity can mention the root itself (for example a peer interaction).
+/// Only the owning task's exact native identity establishes that it is not a child.
+fn is_codex_parent_thread(
+    tasks: &[Task],
+    source: &str,
+    parent_task_id: &str,
+    thread: Option<&str>,
+) -> bool {
+    source == "codex"
+        && thread.filter(|id| !id.trim().is_empty()).is_some_and(|thread| {
+            tasks.iter().any(|task| {
+                task.id == parent_task_id && task.native_session_id.as_deref() == Some(thread)
+            })
+        })
+}
+
+pub(crate) fn upsert_task_subagent_session(
+    snapshot: &mut Snapshot,
+    update: SubagentSessionUpdate,
+    observed_at: i64,
+) {
+    if is_codex_parent_thread(
+        &snapshot.tasks,
+        &update.source,
+        &update.parent_task_id,
+        update.agent_thread_id.as_deref(),
+    ) {
+        return;
+    }
+    upsert_subagent_session(&mut snapshot.subagent_sessions, update, observed_at);
+}
+
+/// Repair only invalid normalized self-rows. Provider history and real children
+/// remain intact; neither the task's status nor a path label proves completion.
+pub(crate) fn prune_parent_subagent_sessions(snapshot: &mut Snapshot) {
+    snapshot.subagent_sessions.retain(|session| {
+        !is_codex_parent_thread(
+            &snapshot.tasks,
+            &session.source,
+            &session.parent_task_id,
+            session.agent_thread_id.as_deref(),
+        )
+    });
+}
+
 /// Upsert a native or routed sub-agent projection.  Terminal observations are
 /// sticky so an out-of-order `interacted` notification cannot resurrect a
 /// completed session.

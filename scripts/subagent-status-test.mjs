@@ -41,4 +41,20 @@ for (const source of ['codex', 'acp']) {
     assert.equal(row.launchedAt, 100);
   }
 }
-console.log('Native terminal subagents leave Active and retain their actual end time.');
+const rootInput = {
+  parentTaskId: 'parent', tasks: [{ id: 'parent', nativeSessionId: 'parent-thread' }, { id: 'other-parent', nativeSessionId: 'child-thread' }],
+  agents: [], collaborations: [], subagentSessions: [
+    { id: 'self', source: 'codex', parentTaskId: 'parent', agentThreadId: 'parent-thread', agentPath: '/root', status: 'running', createdAt: 100, updatedAt: 200 },
+    { id: 'child', source: 'codex', parentTaskId: 'parent', agentThreadId: 'child-thread', agentPath: '/root', status: 'running', createdAt: 100, updatedAt: 200 },
+    { id: 'acp', source: 'acp', parentTaskId: 'parent', agentThreadId: 'parent-thread', status: 'running', createdAt: 100, updatedAt: 200 },
+    { id: 'delegated', source: 'collaboration', parentTaskId: 'parent', agentThreadId: 'parent-thread', status: 'completed', createdAt: 100, updatedAt: 200 },
+    { id: 'unknown-thread', source: 'codex', parentTaskId: 'parent', agentThreadId: '', status: 'completed', createdAt: 100, updatedAt: 200 },
+  ],
+};
+const rootIds = Array.from(unifiedSubagentsForTask(rootInput), row => row.id).sort();
+assert.deepEqual(rootIds, ['acp', 'child', 'delegated', 'unknown-thread']);
+for (const nativeSessionId of [null, '']) {
+  rootInput.tasks[0].nativeSessionId = nativeSessionId;
+  assert.equal(unifiedSubagentsForTask(rootInput).length, 5, 'missing/empty parent identity cannot establish a self row');
+}
+console.log('Native terminal subagents leave Active, retain actual end times, and exclude exact Codex parent roots.');

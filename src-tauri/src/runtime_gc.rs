@@ -118,7 +118,8 @@ impl Service {
             return 0;
         }
         // Stale child rows themselves pin retirement. Reconcile a separate
-        // bounded idle-owner set before applying that exclusion.
+        // bounded child-observation pass before applying that exclusion. Child
+        // observation may run during a parent turn; retirement still requires idle.
         self.reconcile_codex_subagents_at(now);
         let candidates = {
             let Ok(data) = self.data.lock() else { return 0 };

@@ -900,6 +900,48 @@ mod tests {
     }
 
     #[test]
+    fn subagent_ingestion_excludes_parent_root_on_both_native_paths() {
+        for resident in [false, true] {
+            let path = dir("subagent-root");
+            let service = Service::open(None, path.clone()).unwrap();
+            let task = running_task(&service, "/bin/echo");
+            let control = service.reserve_run(&task.id).unwrap();
+            control.set_app_server_thread("native-root".into());
+            control.set_app_server_turn("parent-turn".into());
+            let items = [
+                json!({"type":"subAgentActivity","agentThreadId":"native-root","agentPath":"/root","kind":"interacted"}),
+                // A path label alone must never hide a genuine child.
+                json!({"type":"subAgentActivity","agentThreadId":"real-child","agentPath":"/root","kind":"started"}),
+                json!({"type":"collabAgentToolCall","senderThreadId":"real-child","receiverThreadIds":["native-root","nested-child"],"agentsStates":{"native-root":{"status":"running"},"nested-child":{"status":"running"}}}),
+            ];
+            for (index, item) in items.into_iter().enumerate() {
+                let parsed = Parsed {
+                    native_session_id: (index == 0).then(|| "native-root".into()),
+                    assistant: None,
+                    event: Some(("subagent".into(), "Native activity".into(), item.to_string())),
+                    failed: false,
+                };
+                if resident {
+                    service.app_server_event(&task.id, &control, Some("parent-turn"), parsed).unwrap();
+                } else {
+                    service.apply_event(&task.id, parsed).unwrap();
+                }
+            }
+            let snapshot = service.snapshot().unwrap();
+            let mut ids = snapshot.subagent_sessions.iter().map(|row| row.id.as_str()).collect::<Vec<_>>();
+            ids.sort_unstable();
+            assert_eq!(ids, ["codex:nested-child", "codex:real-child"], "resident={resident}");
+            assert_eq!(snapshot.events.iter().filter(|event| event.kind == "subagent").count(), 3);
+            let parent = snapshot.tasks.iter().find(|row| row.id == task.id).unwrap();
+            assert_eq!(parent.native_session_id.as_deref(), Some("native-root"));
+            assert_eq!(parent.status, "running");
+            service.cleanup();
+            drop(service);
+            std::fs::remove_dir_all(path).unwrap();
+        }
+    }
+
+    #[test]
     fn denial_is_persisted_and_generated_image_is_attached_to_final_message() {
         let service = Service::open(None, dir("deny-image")).unwrap();
         let task = running_task(&service, "/bin/echo");

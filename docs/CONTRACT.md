@@ -1524,8 +1524,8 @@ diagnostic event store.
 
 Native Codex child completion and failure can arrive after the parent turn has
 finished. Notifications for recorded children invalidate pending observations
-and request a status refresh without reopening the parent turn. Idle Codex
-owners reconcile nonterminal children through bounded, read-only `thread/read`
+and request a status refresh without reopening the parent turn. Established Codex
+owners reconcile nonterminal children even while the parent is working, through bounded, read-only `thread/read`
 requests on their existing transport. The latest explicit terminal turn is used
 only when the native thread is inactive and the owner, native session and child
 observation still match. Elapsed time, `notLoaded` alone, missing threads and
@@ -1534,6 +1534,13 @@ and continue to prevent idle runtime retirement. Reconciliation neither starts
 a provider turn nor resumes a native thread. Native terminal timestamps use the
 reported completion time when available; later interaction notices do not
 extend the finished child's elapsed time.
+
+Native activity mentioning a task's own exact native session is not a child.
+Both ingestion paths exclude these self-rows after establishing root identity;
+startup recovery removes previously persisted self-rows while preserving provider
+event history and real children. Desktop and mobile projections apply the same
+identity check when connected to an older backend. Child status observation never
+relaxes the separate idle-runtime retirement conditions.
 
 Unlike Codex, an ACP subagent has no separately re-queryable native thread: its own nested
 `tool_call`/`tool_call_update`/`plan`/message/thought notifications arrive tagged with its

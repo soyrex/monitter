@@ -176,6 +176,10 @@ fn rows_ref<'a>(v: &'a Value, key: &str) -> &'a [Value] {
 pub(crate) fn records(snapshot: &Value, parent: &str) -> Vec<Value> {
     let sessions = rows_ref(snapshot, "subagentSessions");
     let collaborations = rows_ref(snapshot, "collaborations");
+    let native_thread_by_task: HashMap<&str, &str> = rows_ref(snapshot, "tasks")
+        .iter()
+        .filter_map(|task| Some((task["id"].as_str()?, task["nativeSessionId"].as_str()?)))
+        .collect();
     let collab_by_id: HashMap<String, &Value> = collaborations
         .iter()
         .filter(|item| field(item, "kind") == "delegation")
@@ -192,6 +196,15 @@ pub(crate) fn records(snapshot: &Value, parent: &str) -> Vec<Value> {
             .iter()
             .filter(|session| field(session, "parentTaskId") == parent_id)
         {
+            // Older backends may have persisted the parent's own Codex thread
+            // as a child. Compare exact thread identity against its actual
+            // parent task; paths and elapsed time do not establish ownership.
+            if session["source"] == "codex"
+                && session["agentThreadId"].as_str().filter(|thread| !thread.is_empty())
+                    .is_some_and(|thread| native_thread_by_task.get(parent_id.as_str()) == Some(&thread))
+            {
+                continue;
+            }
             let session_id = field(session, "id");
             if !visited_sessions.insert(session_id.clone()) {
                 continue;
@@ -2078,6 +2091,30 @@ mod tests {
         assert_eq!(items[0]["title"], "Summarize the test results");
         assert_eq!(items[0]["agentName"], "Research Helper");
         assert_eq!(items[0]["agentInitials"], "RH");
+    }
+
+    #[::core::prelude::v1::test]
+    fn codex_parent_root_is_hidden_without_hiding_true_children_or_other_sources() {
+        let mut snapshot = json!({
+            "tasks":[{"id":"parent","nativeSessionId":"parent-thread"},{"id":"other-parent","nativeSessionId":"child-thread"}],
+            "subagentSessions":[
+                {"id":"self","source":"codex","parentTaskId":"parent","agentThreadId":"parent-thread","agentPath":"/root","status":"running"},
+                {"id":"child","source":"codex","parentTaskId":"parent","agentThreadId":"child-thread","agentPath":"/root","status":"running"},
+                {"id":"acp","source":"acp","parentTaskId":"parent","agentThreadId":"parent-thread","status":"running"},
+                {"id":"delegated","source":"collaboration","parentTaskId":"parent","agentThreadId":"parent-thread","status":"completed"},
+                {"id":"unknown-thread","source":"codex","parentTaskId":"parent","agentThreadId":"","status":"completed"}
+            ], "collaborations":[],"agents":[],"events":[],"messages":[],"projects":[]
+        });
+        let items = records(&snapshot,"parent");
+        assert_eq!(items.len(),4);
+        assert!(!items.iter().any(|item| item["id"] == "self"));
+        for id in ["child","acp","delegated","unknown-thread"] {
+            assert!(items.iter().any(|item| item["id"] == id), "preserve {id}");
+        }
+        snapshot["tasks"][0]["nativeSessionId"] = Value::Null;
+        assert_eq!(records(&snapshot,"parent").len(),5,"missing parent identity is not evidence of a self row");
+        snapshot["tasks"][0]["nativeSessionId"] = json!("");
+        assert_eq!(records(&snapshot,"parent").len(),5,"empty thread IDs never establish self ownership");
     }
 
     #[::core::prelude::v1::test]
