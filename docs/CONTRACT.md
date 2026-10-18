@@ -1522,6 +1522,19 @@ limited, paged or restarted. Terminal native observations are sticky so late int
 show a completed sub-agent as running again. Raw provider activity stays available in the normal
 diagnostic event store.
 
+Native Codex child completion and failure can arrive after the parent turn has
+finished. Notifications for recorded children invalidate pending observations
+and request a status refresh without reopening the parent turn. Idle Codex
+owners reconcile nonterminal children through bounded, read-only `thread/read`
+requests on their existing transport. The latest explicit terminal turn is used
+only when the native thread is inactive and the owner, native session and child
+observation still match. Elapsed time, `notLoaded` alone, missing threads and
+failed queries are not completion evidence. Uncertain children remain active
+and continue to prevent idle runtime retirement. Reconciliation neither starts
+a provider turn nor resumes a native thread. Native terminal timestamps use the
+reported completion time when available; later interaction notices do not
+extend the finished child's elapsed time.
+
 Unlike Codex, an ACP subagent has no separately re-queryable native thread: its own nested
 `tool_call`/`tool_call_update`/`plan`/message/thought notifications arrive tagged with its
 `subagentSessionId` instead of the root session, and are captured inline into

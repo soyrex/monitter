@@ -587,7 +587,8 @@ pub fn upsert_subagent_session(
     }
     let status = update.status.unwrap_or_else(|| "queued".into());
     if let Some(existing) = sessions.iter_mut().find(|entry| entry.id == update.id) {
-        if subagent_status_rank(&status) >= subagent_status_rank(&existing.status) {
+        let advances_status = subagent_status_rank(&status) >= subagent_status_rank(&existing.status);
+        if advances_status {
             existing.status = status;
         }
         macro_rules! replace_if_some {
@@ -606,7 +607,11 @@ pub fn upsert_subagent_session(
         replace_if_some!(reasoning_effort);
         replace_if_some!(result);
         replace_if_some!(error);
-        existing.updated_at = update.updated_at.unwrap_or(observed_at);
+        // Late interaction/metadata may enrich a terminal child, but cannot
+        // move its terminal occurrence time forward and restart its stopwatch.
+        if advances_status {
+            existing.updated_at = update.updated_at.unwrap_or(observed_at);
+        }
         return;
     }
     sessions.push(SubagentSession {
@@ -2031,6 +2036,7 @@ mod task_migration_tests {
         completed.agent_path = Some("/root/child".into());
         completed.result = None;
         upsert_subagent_session(&mut sessions, completed, 11);
+        assert_eq!(sessions[0].updated_at, 10);
         assert_eq!(sessions[0].status, "completed");
         assert_eq!(sessions[0].result.as_deref(), Some("done"));
         assert_eq!(sessions[0].agent_path.as_deref(), Some("/root/child"));
@@ -2044,6 +2050,23 @@ mod task_migration_tests {
         };
         upsert_subagent_session(&mut sessions, queued, 12);
         assert_eq!(sessions[0].status, "completed");
+        assert_eq!(sessions[0].updated_at, 10);
+        upsert_subagent_session(
+            &mut sessions,
+            SubagentSessionUpdate {
+                id: "codex:child".into(),
+                source: "codex".into(),
+                parent_task_id: "parent".into(),
+                status: Some("error".into()),
+                error: Some("Corrected terminal error".into()),
+                updated_at: Some(9),
+                ..Default::default()
+            },
+            13,
+        );
+        assert_eq!(sessions[0].status, "error");
+        assert_eq!(sessions[0].updated_at, 9);
+        assert_eq!(sessions[0].error.as_deref(), Some("Corrected terminal error"));
     }
 
     #[test]

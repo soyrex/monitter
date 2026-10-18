@@ -118,6 +118,7 @@ mod build_queue;
 pub mod profile_init;
 mod runner;
 mod runtime_gc;
+mod subagent_reconciliation;
 mod auto_archive;
 pub mod server_restart;
 mod scheduler;
@@ -445,6 +446,7 @@ pub(crate) struct Service {
     idle_collector_started: std::sync::atomic::AtomicBool,
     scheduler_started: std::sync::atomic::AtomicBool,
     idle_collection: Mutex<()>,
+    subagent_reconciliation: Mutex<subagent_reconciliation::ReconciliationState>,
     idle_retirement_failures: Mutex<HashSet<(String, usize)>>,
     native_escape_shield: std::sync::atomic::AtomicBool,
     // AppKit's key monitor must never lock or clone transcript state. 0 is
@@ -908,6 +910,7 @@ impl Service {
             idle_collector_started: std::sync::atomic::AtomicBool::new(false),
             scheduler_started: std::sync::atomic::AtomicBool::new(false),
             idle_collection: Mutex::new(()),
+            subagent_reconciliation: Mutex::new(subagent_reconciliation::ReconciliationState::default()),
             idle_retirement_failures: Mutex::new(HashSet::new()),
             native_escape_shield: std::sync::atomic::AtomicBool::new(false),
             native_shortcut_mode: std::sync::atomic::AtomicU8::new(shortcut_mode),

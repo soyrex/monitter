@@ -117,6 +117,9 @@ impl Service {
         if self.stopping.load(Ordering::Acquire) {
             return 0;
         }
+        // Stale child rows themselves pin retirement. Reconcile a separate
+        // bounded idle-owner set before applying that exclusion.
+        self.reconcile_codex_subagents_at(now);
         let candidates = {
             let Ok(data) = self.data.lock() else { return 0 };
             let Ok(runs) = self.runs.lock() else { return 0 };

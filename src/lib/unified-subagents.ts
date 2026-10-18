@@ -207,7 +207,10 @@ export function unifiedSubagentsForTask({ tasks, agents, collaborations, message
         ?? (taskById.get(parentTaskId)?.projectId ? projectById.get(taskById.get(parentTaskId)!.projectId!)?.name : undefined)
         ?? null,
       launchedAt: session.createdAt || task?.createdAt || 0,
-      updatedAt: Math.max(session.updatedAt, task?.updatedAt ?? 0, collaboration?.updatedAt ?? 0, latestEvent?.createdAt ?? 0),
+      // Later interaction notices do not extend a finished native child's run.
+      updatedAt: ['codex', 'acp'].includes(session.source) && ['completed', 'error', 'interrupted'].includes(session.status)
+        ? session.updatedAt
+        : Math.max(session.updatedAt, task?.updatedAt ?? 0, collaboration?.updatedAt ?? 0, latestEvent?.createdAt ?? 0),
     };
   }).sort((a, b) => {
     const activeOrder = Number(activeUnifiedSubagent(b)) - Number(activeUnifiedSubagent(a));

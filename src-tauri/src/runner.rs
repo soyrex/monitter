@@ -3164,6 +3164,15 @@ impl RunControl {
         Ok(response.get("result").cloned().unwrap_or(Value::Null))
     }
 
+    /// Timed-out reads retain correlation until the sole reader consumes them.
+    /// Background observers wait for drainage before retrying this owner.
+    pub(crate) fn pending_app_server_query_count(&self) -> Result<usize, String> {
+        self.app_server_queries
+            .lock()
+            .map(|queries| queries.len())
+            .map_err(|_| "Codex query request lock failed.".into())
+    }
+
     /// Append a user follow-up to the current Codex app-server turn. Unlike a
     /// normal resident send this must not call `begin_run`, alter task
     /// settings, or clear the current turn identity.
@@ -5773,9 +5782,11 @@ for line in sys.stdin.buffer:
             "mcpServerStatus/list", serde_json::json!({}), Duration::ZERO,
         ).unwrap_err();
         assert!(error.contains("timed out"));
+        assert_eq!(control.pending_app_server_query_count().unwrap(), 1);
         let waiter = control.take_app_server_query(10)
             .expect("late startup response must still be recognized");
         assert!(waiter.send(serde_json::json!({"id":10,"result":{}})).is_err());
+        assert_eq!(control.pending_app_server_query_count().unwrap(), 0);
         assert!(control.take_app_server_query(10).is_none());
         assert!(control.take_app_server_query(999).is_none());
         control.mark_app_server_turn_request(11).unwrap();

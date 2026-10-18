@@ -429,16 +429,24 @@ pub(crate) fn records(snapshot: &Value, parent: &str) -> Vec<Value> {
             .map(Value::from)
             .or_else(|| task.map(|task| task["createdAt"].clone()))
             .unwrap_or(Value::from(0));
-        let update_time = [
-            item["updatedAt"].as_i64(),
-            task.and_then(|task| task["updatedAt"].as_i64()),
-            collaboration.and_then(|value| value["updatedAt"].as_i64()),
-            latest_event.and_then(|event| event["createdAt"].as_i64()),
-        ]
-        .into_iter()
-        .flatten()
-        .max()
-        .unwrap_or_default();
+        let native_terminal = matches!(field(item, "source").as_str(), "codex" | "acp")
+            && matches!(field(item, "status").as_str(), "completed" | "error" | "interrupted");
+        // A later interaction notice is not additional execution time for a
+        // finished native child. Keep the backend's terminal timestamp.
+        let update_time = if native_terminal {
+            item["updatedAt"].as_i64().unwrap_or_default()
+        } else {
+            [
+                item["updatedAt"].as_i64(),
+                task.and_then(|task| task["updatedAt"].as_i64()),
+                collaboration.and_then(|value| value["updatedAt"].as_i64()),
+                latest_event.and_then(|event| event["createdAt"].as_i64()),
+            ]
+            .into_iter()
+            .flatten()
+            .max()
+            .unwrap_or_default()
+        };
         item["updatedAt"] = Value::from(update_time);
     }
     result.sort_by(|a, b| {
@@ -2070,6 +2078,33 @@ mod tests {
         assert_eq!(items[0]["title"], "Summarize the test results");
         assert_eq!(items[0]["agentName"], "Research Helper");
         assert_eq!(items[0]["agentInitials"], "RH");
+    }
+
+    #[::core::prelude::v1::test]
+    fn terminal_native_subagent_time_ignores_later_interaction_notices() {
+        let mut snapshot = json!({
+            "subagentSessions": [{
+                "id":"codex:child", "source":"codex", "parentTaskId":"parent",
+                "agentThreadId":"child", "agentPath":"/root/codex_steering",
+                "status":"running", "createdAt":100, "updatedAt":200
+            }],
+            "events": [{"id":"late", "taskId":"parent", "kind":"subagent",
+                "title":"Sub-agent activity", "createdAt":9000,
+                "detail":json!({"type":"subAgentActivity", "kind":"interacted",
+                    "agentThreadId":"child"}).to_string()}],
+            "tasks":[], "agents":[], "collaborations":[], "messages":[], "projects":[]
+        });
+        assert_eq!(records(&snapshot, "parent")[0]["updatedAt"], 9000);
+        for source in ["codex", "acp"] {
+            snapshot["subagentSessions"][0]["source"] = json!(source);
+            for status in ["completed", "error", "interrupted"] {
+                snapshot["subagentSessions"][0]["status"] = json!(status);
+                let rows = records(&snapshot, "parent");
+                assert_eq!(rows[0]["status"], status);
+                assert_eq!(rows[0]["updatedAt"], 200);
+                assert_eq!(rows[0]["createdAt"], 100);
+            }
+        }
     }
 
     #[::core::prelude::v1::test]

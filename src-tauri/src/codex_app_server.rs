@@ -1857,6 +1857,7 @@ fn handle_notification_with_trace(
         .and_then(Value::as_str)
         .or_else(|| params.pointer("/turn/id").and_then(Value::as_str))
         .unwrap_or("");
+    service.observe_codex_child_notification(task_id, control, value);
     let trace_method = traceable_notification_method(method);
     if method == "serverRequest/resolved" {
         let Some(request_id) = params.get("requestId") else {
