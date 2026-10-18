@@ -29,6 +29,8 @@ pub(crate) mod run_activity;
 use super::transcript::TimelineRow;
 #[path = "chat_transcript_view.rs"]
 mod transcript_view;
+#[path = "chat_watcher.rs"]
+mod watcher;
 #[path = "chat_minimap.rs"]
 mod minimap;
 use transcript_view::{TranscriptGeometry, TranscriptPreparationKey, TranscriptViewport};
