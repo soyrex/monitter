@@ -79,6 +79,65 @@ pub fn response(
     Ok(response)
 }
 
+/// Canonical label-based answers used by all harness question transports.
+pub fn questions_response(
+    input: &Value,
+    text: &HashMap<String, String>,
+    selections: &HashMap<String, Vec<String>>,
+) -> Result<Value, String> {
+    let questions = input["questions"]
+        .as_array()
+        .filter(|questions| !questions.is_empty())
+        .ok_or("This request has no supported questions.")?;
+    let mut answers = Map::new();
+    for question in questions {
+        let id = question["id"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .ok_or("Question identity is missing.")?;
+        let mut values = Vec::<String>::new();
+        if question["selectionMode"] == "multiple" {
+            for choice in selections.get(id).into_iter().flatten() {
+                if !question["options"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|option| option["label"] == *choice)
+                {
+                    return Err("A selected answer is no longer available.".into());
+                }
+                if !values.contains(choice) {
+                    values.push(choice.clone());
+                }
+            }
+        }
+        if let Some(value) = text
+            .get(id)
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+        {
+            if !values.iter().any(|selected| selected == value) {
+                values.push(value.to_owned());
+            }
+        }
+        if values.is_empty() {
+            return Err("Please answer each question.".into());
+        }
+        if values.len() > 33 {
+            return Err("A question accepts at most 33 answers.".into());
+        }
+        if values.iter().any(|value| value.len() > 16_384) {
+            return Err("An answer exceeds the 16,384-byte limit.".into());
+        }
+        answers.insert(id.to_owned(), serde_json::json!({"answers":values}));
+    }
+    let response = serde_json::json!({"answers":answers});
+    if response.to_string().len() > 64 * 1024 {
+        return Err("Input response is too large.".into());
+    }
+    Ok(response)
+}
+
 pub fn safe_url(raw: &str) -> Result<String, String> {
     let url = url::Url::parse(raw).map_err(|_| "Invalid browser-step URL")?;
     if !matches!(url.scheme(), "http" | "https")
@@ -112,6 +171,48 @@ mod tests {
             json!({"name":"  literal  ","count":42,"enabled":false})
         );
     }
+    #[::core::prelude::v1::test]
+    fn user_question_multiselect_and_free_text_remain_bounded_and_require_an_answer() {
+        let input = json!({"questions":[{"id":"q","selectionMode":"multiple","options":[{"label":"A"},{"label":"B"}]}]});
+        assert!(questions_response(&input, &HashMap::new(), &HashMap::new()).is_err());
+        assert_eq!(
+            questions_response(
+                &input,
+                &HashMap::from([("q".into(), "Other detail".into())]),
+                &HashMap::from([("q".into(), vec!["A".into(), "B".into()])])
+            )
+            .unwrap(),
+            json!({"answers":{"q":{"answers":["A","B","Other detail"]}}})
+        );
+        assert!(
+            questions_response(
+                &input,
+                &HashMap::from([("q".into(), "x".repeat(16_385))]),
+                &HashMap::new()
+            )
+            .is_err()
+        );
+        let label = "a".repeat(10_000);
+        let input = json!({"questions":[{"id":"q","selectionMode":"multiple","options":[{"label":label}]}]});
+        assert!(
+            questions_response(
+                &input,
+                &HashMap::from([("q".into(), "b".repeat(10_000))]),
+                &HashMap::from([("q".into(), vec![label])])
+            )
+            .is_ok(),
+            "the byte limit applies to individual answers"
+        );
+        assert!(
+            questions_response(
+                &input,
+                &HashMap::new(),
+                &HashMap::from([("q".into(), vec!["Unavailable".into()])])
+            )
+            .is_err()
+        );
+    }
+
     #[::core::prelude::v1::test]
     fn rejects_fractional_integer_nonfinite_and_missing_required() {
         let schema = json!({"properties":{"n":{"type":"integer"}},"required":["n"]});
