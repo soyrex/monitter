@@ -16,6 +16,9 @@ use serde_json::{Value, json};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+#[path = "sidebar_hover.rs"]
+mod rail_hover;
+
 const GIT_WORKER_STACK_SIZE: usize = 8 * 1024 * 1024;
 const STATUS_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 static NEXT_DETECTOR_SESSION: AtomicU64 = AtomicU64::new(1);
@@ -182,17 +185,33 @@ fn status_summary(status: &Value) -> Option<String> {
 
 /// Counts only reported text statistics; absent/binary/untracked data is not zero.
 #[derive(Default, Debug, PartialEq, Eq)]
-struct LineTotals { additions: u64, deletions: u64, known: bool, partial: bool }
+struct LineTotals {
+    additions: u64,
+    deletions: u64,
+    known: bool,
+    partial: bool,
+}
 fn line_totals(status: &Value) -> LineTotals {
     let mut totals = LineTotals::default();
     let files = status["files"].as_array().map(Vec::as_slice).unwrap_or(&[]);
     totals.partial = status["truncated"].as_bool() == Some(true);
     totals.known = files.is_empty() && !totals.partial;
     for file in files {
-        if file["untracked"].as_bool() == Some(true) { totals.partial = true; continue; }
-        for (state, key) in [("indexStatus", "stagedStats"), ("worktreeStatus", "unstagedStats")] {
-            if !file[state].as_str().is_some_and(|v| !v.trim().is_empty()) { continue; }
-            match (file[key]["additions"].as_u64(), file[key]["deletions"].as_u64()) {
+        if file["untracked"].as_bool() == Some(true) {
+            totals.partial = true;
+            continue;
+        }
+        for (state, key) in [
+            ("indexStatus", "stagedStats"),
+            ("worktreeStatus", "unstagedStats"),
+        ] {
+            if !file[state].as_str().is_some_and(|v| !v.trim().is_empty()) {
+                continue;
+            }
+            match (
+                file[key]["additions"].as_u64(),
+                file[key]["deletions"].as_u64(),
+            ) {
                 (Some(add), Some(del)) => {
                     let (a, overflow_a) = totals.additions.overflowing_add(add);
                     let (d, overflow_d) = totals.deletions.overflowing_add(del);
@@ -211,49 +230,167 @@ fn grouped_count(value: u64) -> String {
     let digits = value.to_string();
     let mut result = String::new();
     for (index, digit) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index) % 3 == 0 { result.push(','); }
+        if index > 0 && (digits.len() - index) % 3 == 0 {
+            result.push(',');
+        }
         result.push(digit);
     }
     result
 }
-fn change_bar(status: &Value, palette: crate::design::Palette, ratio: f32) -> Div {
+fn change_bar(status: &Value, palette: crate::design::Palette, ratio: f32, reveal: f32) -> Div {
     let totals = line_totals(status);
     let add = if palette.dark { 0x34d399 } else { 0x087f5b };
     let del = if palette.dark { 0xff5c6c } else { 0xc73545 };
+    let rail_group: SharedString = "composer-git-change-bar".into();
+    let add_idle = mix_rgb(
+        palette.panel,
+        palette.muted,
+        if palette.dark { 0.72 } else { 0.58 },
+    );
+    let del_idle = mix_rgb(
+        palette.panel,
+        palette.muted,
+        if palette.dark { 0.44 } else { 0.34 },
+    );
     let files = status["files"].as_array().map_or(0, Vec::len);
-    let count = format!("{}{} {}", grouped_count(files as u64),
-        if status["truncated"] == true { "+" } else { "" }, if files == 1 { "file" } else { "files" });
-    let branch = status["branch"].as_str().filter(|s| !s.trim().is_empty()).unwrap_or("Detached HEAD");
-    let row = div().w_full().px(px(9.)).py(px(4.)).flex().flex_wrap().items_center().gap(px(7.))
-        .child(div().flex_1().min_w(px(65. * ratio)).flex().items_center().gap(px(7.))
-            .child(div().debug_selector(|| "composer-git-changes-title".into()).flex_shrink_0()
-                .text_size(px(10. * ratio)).font_weight(FontWeight::SEMIBOLD)
-                .text_color(rgb(palette.ink)).child("Changes"))
-            .child(Icon::new(IconName::GitBranch).size(px(10. * ratio)).flex_shrink_0().text_color(rgb(palette.muted)))
-            .child(div().debug_selector(|| "composer-git-branch".into()).min_w_0().flex_1().truncate()
-                .font_family(crate::design::FONT_MONO).text_size(px(8.5 * ratio))
-                .text_color(rgb(palette.muted)).child(branch.to_owned()))
-            .when(status["worktree"] == true, |row| row.child(Icon::new(IconName::FolderGit2)
-                .size(px(10. * ratio)).text_color(rgb(palette.muted)))))
-        .child(div().debug_selector(|| "composer-git-stats".into()).flex_shrink_0().min_w_0().max_w_full().ml_auto()
-            .flex().flex_wrap().justify_end().items_center().gap(px(6.)).font_family(crate::design::FONT_MONO)
-            .text_size(px(8.5 * ratio)).whitespace_nowrap()
-            .child(div().text_color(rgb(palette.muted)).child(count))
-            .child(div().text_color(rgb(palette.muted)).child("·"))
-            .child(div().text_color(rgb(if totals.known { add } else { palette.muted }))
-                .child(if totals.known { format!("+{}", grouped_count(totals.additions)) } else { "+—".into() }))
-            .child(div().text_color(rgb(if totals.known { del } else { palette.muted }))
-                .child(if totals.known { format!("−{}", grouped_count(totals.deletions)) } else { "−—".into() })));
-    let mut rail = div().debug_selector(|| "composer-git-change-rail".into()).w_full().h(px(2.))
-        .overflow_hidden().flex().bg(rgb(palette.line));
+    let count = format!(
+        "{}{} {}",
+        grouped_count(files as u64),
+        if status["truncated"] == true { "+" } else { "" },
+        if files == 1 { "file" } else { "files" }
+    );
+    let branch = status["branch"]
+        .as_str()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("Detached HEAD");
+    let row = div()
+        .w_full()
+        .px(px(9.))
+        .py(px(4.))
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap(px(7.))
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(65. * ratio))
+                .flex()
+                .items_center()
+                .gap(px(7.))
+                .child(
+                    div()
+                        .debug_selector(|| "composer-git-changes-title".into())
+                        .flex_shrink_0()
+                        .text_size(px(10. * ratio))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(palette.ink))
+                        .child("Changes"),
+                )
+                .child(
+                    Icon::new(IconName::GitBranch)
+                        .size(px(10. * ratio))
+                        .flex_shrink_0()
+                        .text_color(rgb(palette.muted)),
+                )
+                .child(
+                    div()
+                        .debug_selector(|| "composer-git-branch".into())
+                        .min_w_0()
+                        .flex_1()
+                        .truncate()
+                        .font_family(crate::design::FONT_MONO)
+                        .text_size(px(8.5 * ratio))
+                        .text_color(rgb(palette.muted))
+                        .child(branch.to_owned()),
+                )
+                .when(status["worktree"] == true, |row| {
+                    row.child(
+                        Icon::new(IconName::FolderGit2)
+                            .size(px(10. * ratio))
+                            .text_color(rgb(palette.muted)),
+                    )
+                }),
+        )
+        .child(
+            div()
+                .debug_selector(|| "composer-git-stats".into())
+                .flex_shrink_0()
+                .min_w_0()
+                .max_w_full()
+                .ml_auto()
+                .flex()
+                .flex_wrap()
+                .justify_end()
+                .items_center()
+                .gap(px(6.))
+                .font_family(crate::design::FONT_MONO)
+                .text_size(px(8.5 * ratio))
+                .whitespace_nowrap()
+                .child(div().text_color(rgb(palette.muted)).child(count))
+                .child(div().text_color(rgb(palette.muted)).child("·"))
+                .child(
+                    div()
+                        .text_color(rgb(if totals.known { add } else { palette.muted }))
+                        .child(if totals.known {
+                            format!("+{}", grouped_count(totals.additions))
+                        } else {
+                            "+—".into()
+                        }),
+                )
+                .child(
+                    div()
+                        .text_color(rgb(if totals.known { del } else { palette.muted }))
+                        .child(if totals.known {
+                            format!("−{}", grouped_count(totals.deletions))
+                        } else {
+                            "−—".into()
+                        }),
+                ),
+        );
+    let mut rail = div()
+        .debug_selector(|| "composer-git-change-rail".into())
+        .w_full()
+        .absolute()
+        .bottom_0()
+        .left_0()
+        .h(px(2. * reveal))
+        .overflow_hidden()
+        .flex()
+        .bg(rgb(palette.line));
     let total = totals.additions as f64 + totals.deletions as f64;
     if total > 0. {
-        if totals.additions > 0 { rail = rail.child(div().debug_selector(|| "composer-git-added-rail".into())
-            .h_full().flex_shrink_0().w(relative((totals.additions as f64 / total) as f32)).bg(rgb(add))); }
-        if totals.deletions > 0 { rail = rail.child(div().debug_selector(|| "composer-git-deleted-rail".into())
-            .h_full().flex_1().bg(rgb(del))); }
+        if totals.additions > 0 {
+            rail = rail.child(
+                div()
+                    .debug_selector(|| "composer-git-added-rail".into())
+                    .h_full()
+                    .flex_shrink_0()
+                    .w(relative((totals.additions as f64 / total) as f32))
+                    .bg(rgb(add_idle))
+                    .group_hover(rail_group.clone(), move |style| style.bg(rgb(add))),
+            );
+        }
+        if totals.deletions > 0 {
+            rail = rail.child(
+                div()
+                    .debug_selector(|| "composer-git-deleted-rail".into())
+                    .h_full()
+                    .flex_1()
+                    .bg(rgb(del_idle))
+                    .group_hover(rail_group.clone(), move |style| style.bg(rgb(del))),
+            );
+        }
     }
-    div().w_full().min_w_0().flex().flex_col().child(row).child(rail)
+    div()
+        .relative()
+        .group(rail_group)
+        .w_full()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .child(row)
+        .child(rail)
 }
 
 fn mix_rgb(base: u32, color: u32, amount: f32) -> u32 {
@@ -318,15 +455,23 @@ fn start_status_worker(
         .spawn(move || {
             // Preserve cheap/silent non-repository detection. Only a confirmed
             // repository requests the existing bounded aggregate line statistics.
-            let result = service.invoke(
-                "get_task_git_status",
-                json!({"taskId":task_id,"detectorSession":detector_session}),
-            ).map(|status| {
-                if status["repository"] == true {
-                    service.invoke("get_task_git_status", json!({"taskId":task_id,"includeStats":true}))
-                        .unwrap_or(status)
-                } else { status }
-            });
+            let result = service
+                .invoke(
+                    "get_task_git_status",
+                    json!({"taskId":task_id,"detectorSession":detector_session}),
+                )
+                .map(|status| {
+                    if status["repository"] == true {
+                        service
+                            .invoke(
+                                "get_task_git_status",
+                                json!({"taskId":task_id,"includeStats":true}),
+                            )
+                            .unwrap_or(status)
+                    } else {
+                        status
+                    }
+                });
             let _ = sender.send(result);
         })
         .map_err(|error| format!("Could not start Git status worker: {error}"))?;
@@ -627,6 +772,9 @@ impl ComposerGitStrip {
 
 impl Render for ComposerGitStrip {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let (rail_hover, rail_reveal) = rail_hover::state(
+            &format!("composer-git-rail-{}", cx.entity_id()), false, window, cx,
+        );
         let palette = self.composed_palette.unwrap_or_else(|| {
             crate::design::palette(&self.snapshot["settings"], window.appearance())
         });
@@ -678,8 +826,14 @@ impl Render for ComposerGitStrip {
         } else {
             mix_rgb(palette.panel, palette.accent, 0.18)
         };
-        let accessible_label = format!("Open Git changes: {branch}, {summary}{}",
-            if status["worktree"] == true { ", linked worktree" } else { "" });
+        let accessible_label = format!(
+            "Open Git changes: {branch}, {summary}{}",
+            if status["worktree"] == true {
+                ", linked worktree"
+            } else {
+                ""
+            }
+        );
         let Some(context) = self.refresh.context.as_ref() else {
             return div().w_full();
         };
@@ -725,9 +879,19 @@ impl Render for ComposerGitStrip {
                         .accessibility_label(accessible_label)
                         .tooltip({
                             let totals = line_totals(status);
-                            format!("Open Git changes · {branch}{}{}",
-                                if status["worktree"] == true { " · linked worktree" } else { "" },
-                                if totals.partial { " · line totals exclude unavailable/binary/untracked changes" } else { "" })
+                            format!(
+                                "Open Git changes · {branch}{}{}",
+                                if status["worktree"] == true {
+                                    " · linked worktree"
+                                } else {
+                                    ""
+                                },
+                                if totals.partial {
+                                    " · line totals exclude unavailable/binary/untracked changes"
+                                } else {
+                                    ""
+                                }
+                            )
                         })
                         .on_click(cx.listener(move |strip, _, _, cx| {
                             strip.refresh_now(cx);
@@ -735,7 +899,13 @@ impl Render for ComposerGitStrip {
                                 task_id: task_id.clone(),
                             });
                         }))
-                        .child(change_bar(status, palette, ratio))
+                        .child(
+                            change_bar(status, palette, ratio, rail_reveal)
+                                .id("composer-git-rail-hover")
+                                .on_hover(cx.listener(move |_, hovered, _, cx| {
+                                    rail_hover::set(&rail_hover, *hovered, cx);
+                                })),
+                        ),
                 ),
         );
         if let Some(error) = self.error.as_deref() {

@@ -1227,6 +1227,14 @@ impl ChatPane {
                     mix_rgb(palette.panel, palette.accent, 0.45)
                 } else { palette.line }))
                 .bg(design::surface_color(palette.panel))
+                .shadow(vec![
+                    gpui_kit::BoxShadow::new(
+                        px(0.),
+                        px(2.),
+                        rgba(if palette.dark { 0x00000024 } else { 0x00000018 }).into(),
+                    )
+                    .blur_radius(px(8.)),
+                ])
                 .child({
                     let owner = cx.weak_entity();
                     div().relative().w_full().min_w_0().flex_shrink_0().child(plan_region).child(
