@@ -942,6 +942,105 @@ mod tests {
     }
 
     #[test]
+    fn subagent_assignment_checks_only_follow_new_durable_codex_children() {
+        for resident in [false, true] {
+            let path = dir("subagent-assignment");
+            let service = Service::open(None, path.clone()).unwrap();
+            let task = running_task(&service, "/bin/echo");
+            let control = service.reserve_run(&task.id).unwrap();
+            control.mark_resident();
+            control.set_app_server_thread("native-root".into());
+            control.set_app_server_turn("parent-turn".into());
+            service.mutate(None, |snapshot| {
+                snapshot.tasks.iter_mut().find(|row| row.id == task.id).unwrap()
+                    .native_session_id = Some("native-root".into());
+                for (thread, status) in [("old-child", "running"), ("finished-child", "completed")] {
+                    let mut item = json!({"type":"collabAgentToolCall", "senderThreadId":"native-root",
+                        "receiverThreadIds":[thread], "agentsStates":{}});
+                    item["agentsStates"][thread] = json!({"status":status});
+                    for update in crate::runner::parse_codex_subagent_updates(&item, &task.id) {
+                        upsert_task_subagent_session(snapshot, update, now());
+                    }
+                }
+                Ok(())
+            }).unwrap();
+            let ingest = |item: serde_json::Value| {
+                let parsed = Parsed { native_session_id: None, assistant: None,
+                    event: Some(("subagent".into(), "Native activity".into(), item.to_string())), failed: false };
+                if resident {
+                    service.app_server_event(&task.id, &control, Some("parent-turn"), parsed)
+                } else {
+                    service.apply_event(&task.id, parsed)
+                }
+            };
+            // Root mentions, existing-row interactions and ACP rows do not wake Codex probes.
+            for item in [
+                json!({"type":"subAgentActivity","agentThreadId":"native-root","kind":"started"}),
+                json!({"type":"subAgentActivity","agentThreadId":"old-child","kind":"interacted"}),
+                json!({"sessionUpdate":"subagent_spawned","subagentSessionId":"acp-child"}),
+            ] {
+                ingest(item).unwrap();
+                assert!(service.pending_subagent_assignment_check_ids().is_empty());
+            }
+            let assigned = json!({"type":"subAgentActivity","agentThreadId":"new-child","kind":"started"});
+            ingest(assigned.clone()).unwrap();
+            assert_eq!(service.pending_subagent_assignment_check_ids(), ["codex:old-child"]);
+            // Replay must not enqueue the newly assigned child as its own older sibling.
+            ingest(assigned).unwrap();
+            assert_eq!(service.pending_subagent_assignment_check_ids(), ["codex:old-child"]);
+            let snapshot = service.snapshot().unwrap();
+            assert!(snapshot.subagent_sessions.iter().any(|row| row.id == "codex:new-child" && row.status == "running"));
+            assert!(snapshot.subagent_sessions.iter().any(|row| row.id == "acp:acp-child"));
+            drop(control);
+            drop(service);
+            std::fs::remove_dir_all(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn subagent_assignment_persistence_failure_does_not_enqueue_or_publish() {
+        for resident in [false, true] {
+            let path = dir("subagent-assignment-failure");
+            let service = Service::open(None, path.clone()).unwrap();
+            let task = running_task(&service, "/bin/echo");
+            let control = service.reserve_run(&task.id).unwrap();
+            control.mark_resident();
+            control.set_app_server_thread("native-root".into());
+            control.set_app_server_turn("parent-turn".into());
+            service.mutate(None, |snapshot| {
+                snapshot.tasks.iter_mut().find(|row| row.id == task.id).unwrap()
+                    .native_session_id = Some("native-root".into());
+                let item = json!({"type":"subAgentActivity","agentThreadId":"old-child","kind":"started"});
+                for update in crate::runner::parse_codex_subagent_updates(&item, &task.id) {
+                    upsert_task_subagent_session(snapshot, update, now());
+                }
+                Ok(())
+            }).unwrap();
+            let connection = rusqlite::Connection::open(path.join("state.sqlite3")).unwrap();
+            connection.execute_batch("CREATE TRIGGER assignment_fail BEFORE INSERT ON entities WHEN NEW.collection='events' BEGIN SELECT RAISE(ABORT,'assignment fixture failure'); END;").unwrap();
+            let before = service.ui_snapshot(None).unwrap();
+            let parsed = Parsed { native_session_id: None, assistant: None,
+                event: Some(("subagent".into(), "Native activity".into(),
+                    json!({"type":"subAgentActivity","agentThreadId":"new-child","kind":"started"}).to_string())), failed: false };
+            let result = if resident {
+                service.app_server_event(&task.id, &control, Some("parent-turn"), parsed)
+            } else {
+                service.apply_event(&task.id, parsed)
+            };
+            assert!(result.is_err());
+            assert!(service.pending_subagent_assignment_check_ids().is_empty());
+            let after = service.ui_snapshot(None).unwrap();
+            assert_eq!(before.revision, after.revision);
+            assert_eq!(before.snapshot, after.snapshot);
+            assert!(!service.snapshot().unwrap().subagent_sessions.iter().any(|row| row.id == "codex:new-child"));
+            drop(connection);
+            drop(control);
+            drop(service);
+            std::fs::remove_dir_all(path).unwrap();
+        }
+    }
+
+    #[test]
     fn denial_is_persisted_and_generated_image_is_attached_to_final_message() {
         let service = Service::open(None, dir("deny-image")).unwrap();
         let task = running_task(&service, "/bin/echo");

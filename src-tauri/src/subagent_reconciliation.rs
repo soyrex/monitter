@@ -7,8 +7,11 @@ use crate::{
 };
 use serde_json::{Value, json};
 use std::{
-    collections::{HashMap, HashSet},
-    sync::{Arc, Weak},
+    collections::{HashMap, HashSet, VecDeque},
+    sync::{
+        Arc, Condvar, Mutex, OnceLock, Weak,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -17,6 +20,112 @@ const CHILD_INTERVAL: Duration = Duration::from_secs(60);
 const QUERY_TIMEOUT: Duration = Duration::from_secs(1);
 const MAX_LINEAGE: usize = 16;
 const MAX_DETAIL: usize = 16 * 1024;
+const MAX_ASSIGNMENT_OWNERS: usize = 32;
+const MAX_ASSIGNMENT_SIBLINGS: usize = 64;
+const ASSIGNMENT_WAIT: Duration = Duration::from_millis(250);
+
+/// One lazy worker per service. The worker owns only this queue and a Weak
+/// service while waiting; assignment ingestion never waits for an RPC.
+#[derive(Default)]
+pub(crate) struct AssignmentChecks {
+    service: OnceLock<Weak<Service>>,
+    started: AtomicBool,
+    pending: Mutex<AssignmentQueue>,
+    wake: Condvar,
+}
+#[derive(Default)]
+struct AssignmentQueue {
+    batches: VecDeque<AssignmentBatch>,
+    active: HashSet<(AssignmentKey, String)>,
+}
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct AssignmentKey {
+    task: String,
+    owner: usize,
+    root: String,
+    run: String,
+    turn: Option<String>,
+}
+/// Capture before saving assignment events, without service-state locks. The
+/// enqueue step rechecks this exact generation after durable publication.
+pub(crate) struct AssignmentSource {
+    key: AssignmentKey,
+    control: Weak<RunControl>,
+}
+impl AssignmentSource {
+    pub(crate) fn capture(task: &str, control: &Arc<RunControl>) -> Option<Self> {
+        Some(Self {
+            key: AssignmentKey {
+                task: task.into(),
+                owner: Arc::as_ptr(control) as usize,
+                root: control.current_app_server_thread()?,
+                run: control.current_run_id().ok()?,
+                turn: control.current_app_server_turn(),
+            },
+            control: Arc::downgrade(control),
+        })
+    }
+}
+struct AssignmentBatch {
+    key: AssignmentKey,
+    control: Weak<RunControl>,
+    siblings: VecDeque<String>,
+}
+struct AssignmentRequest {
+    key: AssignmentKey,
+    control: Weak<RunControl>,
+    sibling: String,
+}
+impl AssignmentQueue {
+    fn enqueue(&mut self, key: AssignmentKey, control: &Arc<RunControl>, siblings: &[String]) {
+        let mut additions = siblings
+            .iter()
+            .filter(|id| !self.active.contains(&(key.clone(), (*id).clone())))
+            .cloned()
+            .collect::<Vec<_>>();
+        if let Some(batch) = self.batches.iter_mut().find(|batch| batch.key == key) {
+            for id in additions.drain(..) {
+                if batch.siblings.len() == MAX_ASSIGNMENT_SIBLINGS {
+                    break;
+                }
+                if !batch.siblings.contains(&id) {
+                    batch.siblings.push_back(id);
+                }
+            }
+        } else if self.batches.len() < MAX_ASSIGNMENT_OWNERS {
+            additions.sort();
+            additions.dedup();
+            additions.truncate(MAX_ASSIGNMENT_SIBLINGS);
+            if !additions.is_empty() {
+                self.batches.push_back(AssignmentBatch {
+                    key,
+                    control: Arc::downgrade(control),
+                    siblings: additions.into(),
+                });
+            }
+        }
+    }
+    fn take_batch(&mut self) -> Vec<AssignmentRequest> {
+        let mut requests = Vec::new();
+        for _ in 0..MAX_PROBES {
+            let Some(mut batch) = self.batches.pop_front() else {
+                break;
+            };
+            if let Some(sibling) = batch.siblings.pop_front() {
+                self.active.insert((batch.key.clone(), sibling.clone()));
+                requests.push(AssignmentRequest {
+                    key: batch.key.clone(),
+                    control: batch.control.clone(),
+                    sibling,
+                });
+            }
+            if !batch.siblings.is_empty() {
+                self.batches.push_back(batch);
+            }
+        }
+        requests
+    }
+}
 
 #[derive(Default)]
 pub(crate) struct ReconciliationState {
@@ -38,6 +147,7 @@ struct OwnerProbe {
     suppressed: bool,
     waiting_for_query: bool,
     version: u64,
+    in_flight: bool,
 }
 
 #[derive(Clone)]
@@ -274,6 +384,7 @@ impl ReconciliationState {
             let owner = self.owners.get(&p.owner_key());
             !owner.is_some_and(|o| {
                 o.suppressed
+                    || o.in_flight
                     || (o.waiting_for_query
                         && p.control.pending_app_server_query_count().unwrap_or(1) > 0)
                     || o.next.is_some_and(|next| now < next)
@@ -307,6 +418,7 @@ impl ReconciliationState {
             let owner = self.owners.entry(probe.owner_key()).or_default();
             owner.control = Some(Arc::downgrade(&probe.control));
             owner.last = Some(now);
+            owner.in_flight = true;
             probe.version = owner.version;
             let child = self.children.entry(probe.child_key()).or_default();
             child.last = Some(now);
@@ -323,6 +435,7 @@ impl ReconciliationState {
     }
     fn outcome(&mut self, probe: &Probe, now: Instant, outcome: &Result<Value, String>) {
         let owner = self.owners.entry(probe.owner_key()).or_default();
+        owner.in_flight = false;
         match outcome {
             Ok(_) => {
                 owner.failures = 0;
@@ -351,6 +464,203 @@ impl ReconciliationState {
 }
 
 impl Service {
+    pub(crate) fn initialize_subagent_assignment_checks(self: &Arc<Self>) {
+        let _ = self
+            .subagent_assignment_checks
+            .service
+            .set(Arc::downgrade(self));
+    }
+
+    /// Call only after the new child and its older sibling IDs are durably
+    /// saved. Capture these IDs before inserting the new child, under the same
+    /// state mutation. The source control prevents a replaced owner inheriting
+    /// an old assignment's work.
+    pub(crate) fn queue_subagent_assignment_check(
+        &self,
+        source: &AssignmentSource,
+        older_sibling_ids: &[String],
+    ) {
+        let Some(control) = source.control.upgrade() else {
+            return;
+        };
+        let task_id = source.key.task.as_str();
+        let root = &source.key.root;
+        if control.current_run_id().ok().as_deref() != Some(source.key.run.as_str())
+            || control.current_app_server_turn() != source.key.turn
+        {
+            return;
+        }
+        if self.stopping.load(Ordering::Acquire) || older_sibling_ids.is_empty() {
+            return;
+        }
+        let Ok(data) = self.data.lock() else {
+            return;
+        };
+        let Ok(runs) = self.runs.lock() else {
+            return;
+        };
+        if !owner_current(&data, &control, task_id, root)
+            || !runs
+                .tasks
+                .get(task_id)
+                .is_some_and(|owner| Arc::ptr_eq(owner, &control))
+        {
+            return;
+        }
+        let siblings = older_sibling_ids
+            .iter()
+            .filter(|id| {
+                data.snapshot.subagent_sessions.iter().any(|s| {
+                    s.id == **id
+                        && s.parent_task_id == task_id
+                        && s.source == "codex"
+                        && !terminal(&s.status)
+                        && s.agent_thread_id.as_deref().is_some_and(|child| {
+                            known_child(&data.snapshot, task_id, child) == Some(s)
+                                && lineage(&data.snapshot, task_id, root, s, None)
+                        })
+                })
+            })
+            .take(MAX_ASSIGNMENT_SIBLINGS)
+            .cloned()
+            .collect::<Vec<_>>();
+        let key = source.key.clone();
+        drop(runs);
+        drop(data);
+        if siblings.is_empty() {
+            return;
+        }
+        if let Ok(mut queue) = self.subagent_assignment_checks.pending.lock() {
+            queue.enqueue(key, &control, &siblings);
+        }
+        self.subagent_assignment_checks.wake.notify_one();
+        #[cfg(not(test))]
+        self.start_subagent_assignment_worker_with(|probe| {
+            probe.control.query_app_server(
+                "thread/read",
+                json!({"threadId":probe.session.agent_thread_id,"includeTurns":true}),
+                QUERY_TIMEOUT,
+            )
+        });
+    }
+
+    fn start_subagent_assignment_worker_with(
+        &self,
+        mut query: impl FnMut(&Probe) -> Result<Value, String> + Send + 'static,
+    ) -> Option<std::thread::JoinHandle<()>> {
+        let checks = self.subagent_assignment_checks.clone();
+        let weak = checks.service.get()?.clone();
+        if checks.started.swap(true, Ordering::AcqRel) {
+            return None;
+        }
+        let worker_checks = checks.clone();
+        let spawned = std::thread::Builder::new()
+            .name("monitter-child-check".into())
+            .spawn(move || {
+                loop {
+                    let requests = {
+                        let Ok(mut queue) = worker_checks.pending.lock() else {
+                            break;
+                        };
+                        if queue.batches.is_empty() {
+                            let Ok((next, _)) =
+                                worker_checks.wake.wait_timeout(queue, ASSIGNMENT_WAIT)
+                            else {
+                                break;
+                            };
+                            queue = next;
+                        }
+                        queue.take_batch()
+                    };
+                    let Some(service) = weak.upgrade() else {
+                        break;
+                    };
+                    if service.stopping.load(Ordering::Acquire) {
+                        break;
+                    }
+                    for request in requests {
+                        if !service.stopping.load(Ordering::Acquire) {
+                            service.reconcile_subagent_assignment_with(
+                                &request,
+                                Instant::now(),
+                                &mut query,
+                            );
+                        }
+                        if let Ok(mut queue) = worker_checks.pending.lock() {
+                            queue.active.remove(&(request.key, request.sibling));
+                        }
+                        worker_checks.wake.notify_all();
+                    }
+                    // Release the Service before waiting or accepting another batch.
+                    drop(service);
+                }
+                if let Ok(mut queue) = worker_checks.pending.lock() {
+                    queue.batches.clear();
+                    queue.active.clear();
+                }
+                worker_checks.started.store(false, Ordering::Release);
+                worker_checks.wake.notify_all();
+            });
+        match spawned {
+            Ok(worker) => Some(worker),
+            Err(_) => {
+                checks.started.store(false, Ordering::Release);
+                None
+            }
+        }
+    }
+
+    fn reconcile_subagent_assignment_with(
+        &self,
+        request: &AssignmentRequest,
+        at: Instant,
+        query: impl FnMut(&Probe) -> Result<Value, String>,
+    ) -> usize {
+        let Some(control) = request.control.upgrade() else {
+            return 0;
+        };
+        let candidates = self
+            .subagent_probes()
+            .into_iter()
+            .filter(|probe| {
+                probe.task_id == request.key.task
+                    && probe.session.id == request.sibling
+                    && Arc::ptr_eq(&probe.control, &control)
+                    && probe.root == request.key.root
+                    && probe.run_id == request.key.run
+                    && probe.turn_id == request.key.turn
+            })
+            .collect::<Vec<_>>();
+        if let Ok(mut state) = self.subagent_reconciliation.lock() {
+            for probe in &candidates {
+                let child = state.children.entry(probe.child_key()).or_default();
+                if !child
+                    .last_wake
+                    .is_some_and(|last| at.saturating_duration_since(last) < CHILD_INTERVAL)
+                {
+                    child.wake_pending = true;
+                }
+            }
+        }
+        self.reconcile_codex_subagent_candidates_with(at, candidates, query)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_subagent_assignment_check_ids(&self) -> Vec<String> {
+        let Ok(queue) = self.subagent_assignment_checks.pending.lock() else {
+            return vec![];
+        };
+        let mut ids = queue
+            .batches
+            .iter()
+            .flat_map(|batch| batch.siblings.iter().cloned())
+            .chain(queue.active.iter().map(|(_, id)| id.clone()))
+            .collect::<Vec<_>>();
+        ids.sort();
+        ids.dedup();
+        ids
+    }
+
     fn subagent_probes(&self) -> Vec<Probe> {
         let Ok(data) = self.data.lock() else {
             return vec![];
@@ -400,7 +710,8 @@ impl Service {
         let Ok(runs) = self.runs.lock() else {
             return false;
         };
-        if !owner_current(&data, &probe.control, &probe.task_id, &probe.root)
+        if self.stopping.load(Ordering::Acquire)
+            || !owner_current(&data, &probe.control, &probe.task_id, &probe.root)
             || !owner_ready_for_probe(&data, &probe.control, &probe.task_id)
             || !runs
                 .tasks
@@ -431,7 +742,8 @@ impl Service {
     fn apply_subagent_read(&self, probe: &Probe, value: &Value) -> Result<bool, String> {
         self.mutate_data(Some(probe.task_id.clone()), |data| {
             let runs = self.runs.lock().map_err(|_| "Run registry unavailable.")?;
-            if !owner_current(data, &probe.control, &probe.task_id, &probe.root)
+            if self.stopping.load(Ordering::Acquire)
+                || !owner_current(data, &probe.control, &probe.task_id, &probe.root)
                 || !owner_ready_for_probe(data, &probe.control, &probe.task_id)
                 || !runs
                     .tasks
@@ -594,7 +906,17 @@ impl Service {
         at: Instant,
         mut query: impl FnMut(&Probe) -> Result<Value, String>,
     ) -> usize {
-        let candidates = self.subagent_probes();
+        self.reconcile_codex_subagent_candidates_with(at, self.subagent_probes(), &mut query)
+    }
+    fn reconcile_codex_subagent_candidates_with(
+        &self,
+        at: Instant,
+        candidates: Vec<Probe>,
+        mut query: impl FnMut(&Probe) -> Result<Value, String>,
+    ) -> usize {
+        if self.stopping.load(Ordering::Acquire) {
+            return 0;
+        }
         let live_owners = match self.runs.lock() {
             Ok(runs) => runs.tasks.clone(),
             Err(_) => return 0,
@@ -608,17 +930,22 @@ impl Service {
             // Earlier owners may have spent the timeout on I/O while this
             // owner accepted a fresh turn. Recheck before issuing each read.
             if !self.subagent_probe_is_current(&probe) {
+                if let Ok(mut state) = self.subagent_reconciliation.lock() {
+                    if let Some(owner) = state.owners.get_mut(&probe.owner_key()) {
+                        owner.in_flight = false;
+                    }
+                }
                 continue;
             }
             // No service, registry or reconciliation lock is held during RPC.
             let response = query(&probe);
-            if let Ok(mut state) = self.subagent_reconciliation.lock() {
-                state.outcome(&probe, at, &response);
-            }
-            if let Ok(value) = response {
-                if self.apply_subagent_read(&probe, &value).unwrap_or(false) {
+            if let Ok(value) = &response {
+                if self.apply_subagent_read(&probe, value).unwrap_or(false) {
                     changed += 1;
                 }
+            }
+            if let Ok(mut state) = self.subagent_reconciliation.lock() {
+                state.outcome(&probe, at, &response);
             }
         }
         changed
@@ -740,6 +1067,281 @@ mod tests {
             self.service.cleanup();
             let _ = std::fs::remove_dir_all(&self.directory);
         }
+    }
+
+    fn wait_for_assignment_idle(service: &Service) {
+        let checks = &service.subagent_assignment_checks;
+        let queue = checks.pending.lock().unwrap();
+        let (queue, _) = checks
+            .wake
+            .wait_timeout_while(queue, Duration::from_secs(3), |queue| {
+                !queue.batches.is_empty() || !queue.active.is_empty()
+            })
+            .unwrap();
+        assert!(queue.batches.is_empty() && queue.active.is_empty());
+    }
+    fn stop_assignment_worker(service: &Service, worker: std::thread::JoinHandle<()>) {
+        service.stopping.store(true, Ordering::Release);
+        service.subagent_assignment_checks.wake.notify_all();
+        worker.join().unwrap();
+    }
+    fn assignment_request(f: &Fixture, sibling: &str) -> AssignmentRequest {
+        let probe = f.probe();
+        AssignmentRequest {
+            key: AssignmentKey {
+                task: f.task.clone(),
+                owner: Arc::as_ptr(&f.owner) as usize,
+                root: probe.root,
+                run: probe.run_id,
+                turn: probe.turn_id,
+            },
+            control: Arc::downgrade(&f.owner),
+            sibling: sibling.into(),
+        }
+    }
+
+    #[test]
+    fn subagent_assignment_check_is_nonblocking_coalesced_and_persists_older_terminal_sibling() {
+        let f = Fixture::new("assignment-background");
+        f.start_parent();
+        f.service.initialize_subagent_assignment_checks();
+        f.service
+            .mutate(None, |s| {
+                for thread in ["older-active", "newly-assigned"] {
+                    let mut child = s.subagent_sessions[0].clone();
+                    child.id = format!("codex:{thread}");
+                    child.agent_thread_id = Some(thread.into());
+                    s.subagent_sessions.push(child);
+                }
+                Ok(())
+            })
+            .unwrap();
+        let before = f.service.snapshot().unwrap().tasks;
+        let revision_before = f.service.data.lock().unwrap().revision;
+        let value = f.read();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let worker = f
+            .service
+            .start_subagent_assignment_worker_with(move |probe| {
+                let child = probe.session.agent_thread_id.as_deref().unwrap();
+                assert_ne!(child, "newly-assigned");
+                let mut response = value.clone();
+                response["thread"]["id"] = json!(child);
+                if child == "child" {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+                } else {
+                    response["thread"]["status"] = json!({"type":"active"});
+                    response["thread"]["turns"][0]["status"] = json!("inProgress");
+                }
+                Ok(response)
+            })
+            .unwrap();
+        let older = vec!["codex:child".into(), "codex:older-active".into()];
+        f.service.queue_subagent_assignment_check(
+            &AssignmentSource::capture(&f.task, &f.owner).unwrap(),
+            &older,
+        );
+        started_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        // Ingestion can enqueue again while the existing owner is blocked on
+        // I/O. Active and queued duplicate IDs are coalesced, with no RPC here.
+        f.service.queue_subagent_assignment_check(
+            &AssignmentSource::capture(&f.task, &f.owner).unwrap(),
+            &older,
+        );
+        assert_eq!(f.service.pending_subagent_assignment_check_ids(), older);
+        assert_eq!(
+            f.service
+                .reconcile_codex_subagents_with(Instant::now(), |_| {
+                    panic!("periodic pass must not race the assignment owner's RPC")
+                }),
+            0
+        );
+        assert_eq!(f.child().status, "running");
+        release_tx.send(()).unwrap();
+        wait_for_assignment_idle(&f.service);
+        let after = f.service.snapshot().unwrap();
+        assert_eq!(after.tasks, before);
+        assert!(f.service.data.lock().unwrap().revision > revision_before);
+        assert_eq!(f.child().status, "error");
+        assert_eq!(
+            after
+                .subagent_sessions
+                .iter()
+                .find(|s| s.id == "codex:older-active")
+                .unwrap()
+                .status,
+            "running"
+        );
+        assert_eq!(
+            after
+                .subagent_sessions
+                .iter()
+                .find(|s| s.id == "codex:newly-assigned")
+                .unwrap()
+                .status,
+            "running"
+        );
+        stop_assignment_worker(&f.service, worker);
+        // Observe SQLite through a read-only connection without acquiring a
+        // second profile lease or applying restart recovery to the live fixture.
+        let database = rusqlite::Connection::open_with_flags(
+            f.directory.join("state.sqlite3"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let payload: String = database.query_row(
+            "SELECT payload FROM entities WHERE collection='subagent_sessions' AND id='codex:child'",
+            [], |row| row.get(0),
+        ).unwrap();
+        let saved: SubagentSession = serde_json::from_str(&payload).unwrap();
+        assert_eq!(saved.status, "error");
+        assert_eq!(saved.error, f.child().error);
+    }
+
+    #[test]
+    fn subagent_assignment_queue_is_bounded_and_coalesces_exact_owner_requests() {
+        let f = Fixture::new("assignment-bounds");
+        let request = assignment_request(&f, "codex:child");
+        let mut queue = AssignmentQueue::default();
+        let ids = (0..MAX_ASSIGNMENT_SIBLINGS * 2)
+            .map(|n| format!("codex:{n:03}"))
+            .collect::<Vec<_>>();
+        for _ in 0..10 {
+            queue.enqueue(request.key.clone(), &f.owner, &ids);
+        }
+        assert_eq!(queue.batches.len(), 1);
+        assert_eq!(queue.batches[0].siblings.len(), MAX_ASSIGNMENT_SIBLINGS);
+        let selected = queue.take_batch();
+        assert_eq!(selected.len(), MAX_PROBES);
+        queue.enqueue(request.key.clone(), &f.owner, &ids[..MAX_PROBES]);
+        assert_eq!(
+            queue.batches[0].siblings.len(),
+            MAX_ASSIGNMENT_SIBLINGS - MAX_PROBES
+        );
+        for index in 0..MAX_ASSIGNMENT_OWNERS * 2 {
+            let mut key = request.key.clone();
+            key.task = format!("owner-{index}");
+            queue.enqueue(key, &f.owner, &["codex:child".into()]);
+        }
+        assert_eq!(queue.batches.len(), MAX_ASSIGNMENT_OWNERS);
+    }
+
+    #[test]
+    fn subagent_assignment_source_generation_changes_before_enqueue_are_rejected() {
+        for change in ["run", "turn", "replace", "shutdown"] {
+            let f = Fixture::new(change);
+            f.start_parent();
+            let source = AssignmentSource::capture(&f.task, &f.owner).unwrap();
+            match change {
+                "run" => {
+                    f.owner.begin_run().unwrap();
+                }
+                "turn" => f.owner.set_app_server_turn("next-turn".into()),
+                "replace" => {
+                    f.service
+                        .runs
+                        .lock()
+                        .unwrap()
+                        .tasks
+                        .insert(f.task.clone(), RunControl::new(false));
+                }
+                "shutdown" => f.service.stopping.store(true, Ordering::Release),
+                _ => unreachable!(),
+            }
+            f.service
+                .queue_subagent_assignment_check(&source, &["codex:child".into()]);
+            assert!(
+                f.service.pending_subagent_assignment_check_ids().is_empty(),
+                "{change}"
+            );
+        }
+    }
+
+    #[test]
+    fn subagent_assignment_read_rejects_owner_run_turn_changes_and_shutdown() {
+        for change in ["replace", "run", "turn", "cancel", "shutdown"] {
+            let f = Fixture::new(change);
+            f.start_parent();
+            let request = assignment_request(&f, "codex:child");
+            let value = f.read();
+            assert_eq!(
+                f.service
+                    .reconcile_subagent_assignment_with(&request, Instant::now(), |_| {
+                        match change {
+                            "replace" => {
+                                f.service
+                                    .runs
+                                    .lock()
+                                    .unwrap()
+                                    .tasks
+                                    .insert(f.task.clone(), RunControl::new(false));
+                            }
+                            "run" => {
+                                f.owner.begin_run().unwrap();
+                            }
+                            "turn" => f.owner.set_app_server_turn("replacement-turn".into()),
+                            "cancel" => f.owner.cancel(),
+                            "shutdown" => f.service.stopping.store(true, Ordering::Release),
+                            _ => unreachable!(),
+                        }
+                        Ok(value.clone())
+                    }),
+                0,
+                "{change}"
+            );
+            assert_eq!(f.child().status, "running", "{change}");
+        }
+    }
+
+    #[test]
+    fn subagent_assignment_queued_owner_changes_and_shutdown_skip_rpc() {
+        for change in ["replace", "run", "turn", "shutdown"] {
+            let f = Fixture::new(change);
+            f.start_parent();
+            let request = assignment_request(&f, "codex:child");
+            match change {
+                "replace" => {
+                    f.service
+                        .runs
+                        .lock()
+                        .unwrap()
+                        .tasks
+                        .insert(f.task.clone(), RunControl::new(false));
+                }
+                "run" => {
+                    f.owner.begin_run().unwrap();
+                }
+                "turn" => f.owner.set_app_server_turn("replacement-turn".into()),
+                "shutdown" => f.service.stopping.store(true, Ordering::Release),
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                f.service
+                    .reconcile_subagent_assignment_with(&request, Instant::now(), |_| panic!(
+                        "stale assignment must not issue an RPC"
+                    )),
+                0
+            );
+            assert_eq!(f.child().status, "running");
+        }
+    }
+
+    #[test]
+    fn subagent_assignment_worker_does_not_retain_service_while_waiting() {
+        let f = Fixture::new("assignment-weak");
+        f.service.initialize_subagent_assignment_checks();
+        let checks = f.service.subagent_assignment_checks.clone();
+        let worker = f
+            .service
+            .start_subagent_assignment_worker_with(|_| panic!("empty queue"))
+            .unwrap();
+        let weak = Arc::downgrade(&f.service);
+        drop(f);
+        worker.join().unwrap();
+        assert!(weak.upgrade().is_none());
+        assert!(!checks.started.load(Ordering::Acquire));
     }
 
     #[test]

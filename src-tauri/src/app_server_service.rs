@@ -384,7 +384,8 @@ impl Service {
                 updates
             })
             .unwrap_or_default();
-        self.app_server_mutate(task_id, control, turn_id, |data, runs| {
+        let assignment_source = subagent_reconciliation::AssignmentSource::capture(task_id, control);
+        let older_sibling_ids = self.app_server_mutate(task_id, control, turn_id, |data, runs| {
             let task = data
                 .snapshot
                 .tasks
@@ -414,8 +415,19 @@ impl Service {
                 task.native_session_id = Some(native);
             }
             let observed_at = now();
+            let older_sibling_ids = if subagent_updates.is_empty() {
+                Vec::new()
+            } else {
+                data.snapshot.subagent_sessions.iter()
+                    .filter(|row| row.source == "codex" && row.parent_task_id == task_id
+                        && !matches!(row.status.as_str(), "completed" | "error" | "interrupted"))
+                    .map(|row| row.id.clone()).collect::<Vec<_>>()
+            };
+            let mut assigned = false;
             for update in subagent_updates {
-                upsert_task_subagent_session(&mut data.snapshot, update, observed_at);
+                assigned |= upsert_task_subagent_session(
+                    &mut data.snapshot, update, observed_at,
+                );
             }
             if let Some((kind, title, detail)) = parsed.event {
                 if kind == "computer_image" {
@@ -465,8 +477,12 @@ impl Service {
                     }));
                 }
             }
-            Ok(())
-        })
+            Ok(if assigned { older_sibling_ids } else { Vec::new() })
+        })?;
+        if let Some(source) = assignment_source.as_ref() {
+            self.queue_subagent_assignment_check(source, &older_sibling_ids);
+        }
+        Ok(())
     }
 
     /// Capture one entry of a native ACP subagent's inline transcript. Unlike

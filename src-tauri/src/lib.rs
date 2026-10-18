@@ -447,6 +447,7 @@ pub(crate) struct Service {
     scheduler_started: std::sync::atomic::AtomicBool,
     idle_collection: Mutex<()>,
     subagent_reconciliation: Mutex<subagent_reconciliation::ReconciliationState>,
+    subagent_assignment_checks: Arc<subagent_reconciliation::AssignmentChecks>,
     idle_retirement_failures: Mutex<HashSet<(String, usize)>>,
     native_escape_shield: std::sync::atomic::AtomicBool,
     // AppKit's key monitor must never lock or clone transcript state. 0 is
@@ -911,6 +912,7 @@ impl Service {
             scheduler_started: std::sync::atomic::AtomicBool::new(false),
             idle_collection: Mutex::new(()),
             subagent_reconciliation: Mutex::new(subagent_reconciliation::ReconciliationState::default()),
+            subagent_assignment_checks: Arc::new(Default::default()),
             idle_retirement_failures: Mutex::new(HashSet::new()),
             native_escape_shield: std::sync::atomic::AtomicBool::new(false),
             native_shortcut_mode: std::sync::atomic::AtomicU8::new(shortcut_mode),
@@ -936,6 +938,7 @@ impl Service {
             admin_turn_broker: AdminTurnBroker::new(),
             admin_activity: Default::default(),
         });
+        service.initialize_subagent_assignment_checks();
         service.work_log_recover();
         #[cfg(not(test))]
         service.start_work_log_collector();
@@ -4272,7 +4275,9 @@ impl Service {
         let work_log_control=self.runs.lock().ok().and_then(|r|r.tasks.get(task_id).cloned());
         let tool_run_id = work_log_control.as_ref()
             .map(|control| control.current_run_id()).transpose()?;
-        if let Some(control)=work_log_control{self.work_log_register_run(task_id,&control);}
+        let assignment_source = work_log_control.as_ref().and_then(|control|
+            subagent_reconciliation::AssignmentSource::capture(task_id, control));
+        if let Some(control)=work_log_control.as_ref(){self.work_log_register_run(task_id,control);}
         let Parsed {
             native_session_id,
             assistant,
@@ -4344,7 +4349,7 @@ impl Service {
         } else {
             vec![]
         };
-        self.mutate_data(Some(task_id.into()), |data| {
+        let older_sibling_ids = self.mutate_data(Some(task_id.into()), |data| {
             let state = &mut data.snapshot;
             let ix = state
                 .tasks
@@ -4362,11 +4367,18 @@ impl Service {
             }
             state.tasks[ix].updated_at = now();
             let observed_at = now();
+            let older_sibling_ids = if subagent_updates.is_empty() {
+                Vec::new()
+            } else {
+                state.subagent_sessions.iter()
+                    .filter(|row| row.source == "codex" && row.parent_task_id == task_id
+                        && !matches!(row.status.as_str(), "completed" | "error" | "interrupted"))
+                    .map(|row| row.id.clone()).collect::<Vec<_>>()
+            };
+            let mut assigned = false;
             for update in subagent_updates {
-                crate::model::upsert_task_subagent_session(
-                    state,
-                    update,
-                    observed_at,
+                assigned |= crate::model::upsert_task_subagent_session(
+                    state, update, observed_at,
                 );
             }
             if let Some((kind, title, detail)) = event {
@@ -4469,8 +4481,13 @@ impl Service {
                     }
                 }
             }
-            Ok(())
-        })
+            Ok(if assigned { older_sibling_ids } else { Vec::new() })
+        })?;
+        // Persistence and UI publication finish before any background native read.
+        if let Some(source) = assignment_source.as_ref() {
+            self.queue_subagent_assignment_check(source, &older_sibling_ids);
+        }
+        Ok(())
     }
 
     /// Ingest normalized usage separately from diagnostic activity. Malformed

@@ -590,20 +590,26 @@ fn is_codex_parent_thread(
         })
 }
 
+/// Report a newly recorded Codex child for a post-commit sibling sweep.
+/// Replayed activity, other providers, and invalid root rows do not trigger work.
 pub(crate) fn upsert_task_subagent_session(
     snapshot: &mut Snapshot,
     update: SubagentSessionUpdate,
     observed_at: i64,
-) {
+) -> bool {
     if is_codex_parent_thread(
         &snapshot.tasks,
         &update.source,
         &update.parent_task_id,
         update.agent_thread_id.as_deref(),
     ) {
-        return;
+        return false;
     }
+    let codex_child = update.source == "codex"
+        && update.agent_thread_id.as_deref().is_some_and(|id| !id.trim().is_empty());
+    let previous_len = snapshot.subagent_sessions.len();
     upsert_subagent_session(&mut snapshot.subagent_sessions, update, observed_at);
+    codex_child && snapshot.subagent_sessions.len() > previous_len
 }
 
 /// Repair only invalid normalized self-rows. Provider history and real children

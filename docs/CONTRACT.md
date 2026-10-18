@@ -1526,7 +1526,12 @@ Native Codex child completion and failure can arrive after the parent turn has
 finished. Notifications for recorded children invalidate pending observations
 and request a status refresh without reopening the parent turn. Established Codex
 owners reconcile nonterminal children even while the parent is working, through bounded, read-only `thread/read`
-requests on their existing transport. The latest explicit terminal turn is used
+requests on their existing transport. Recording a new Codex child also queues an
+immediate background check of its previously recorded nonterminal siblings on
+that same owner. Assignment and event ingestion do not wait for these native
+reads. Duplicate requests coalesce into bounded batches; replayed activity,
+root self-rows and other providers do not schedule another sweep. The periodic
+reconciliation pass remains a backstop. The latest explicit terminal turn is used
 only when the native thread is inactive and the owner, native session and child
 observation still match. Elapsed time, `notLoaded` alone, missing threads and
 failed queries are not completion evidence. Uncertain children remain active
