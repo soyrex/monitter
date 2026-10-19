@@ -1280,7 +1280,7 @@ fn provider_label(snapshot: &Value, task: &Value) -> String {
     }
 }
 
-fn project_icon(id: &str) -> IconName {
+pub(crate) fn project_icon(id: &str) -> IconName {
     match id {
         "briefcase" => IconName::Briefcase,
         "code" => IconName::Code,

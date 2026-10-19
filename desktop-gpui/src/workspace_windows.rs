@@ -29,6 +29,10 @@ pub(super) struct DesktopWindowView {
     pub(super) sidebar_motion_compact: bool,
     pub(super) sidebar_focus: FocusHandle,
     pub(super) sidebar_toggle_focus: FocusHandle,
+    pub(super) activity_overview: Option<Entity<activity_overview::ActivityOverview>>,
+    pub(super) activity_overview_subscription: Option<Subscription>,
+    pub(super) activity_overview_open: bool,
+    pub(super) activity_overview_previous_focus: Option<FocusHandle>,
     pub(super) preferences_open: bool,
     pub(super) preferences_focus: FocusHandle,
     pub(super) preferences_previous_focus: Option<FocusHandle>,
@@ -265,6 +269,14 @@ impl DesktopContextExt for Context<'_, Desktop> {
     }
 }
 impl Desktop {
+    // Overview UI belongs to the native host, rather than a parked workspace.
+    fn carry_activity_overview_to(&mut self, next: &mut DesktopWindowView) {
+        std::mem::swap(&mut next.activity_overview, &mut self.window.activity_overview);
+        std::mem::swap(&mut next.activity_overview_subscription, &mut self.window.activity_overview_subscription);
+        std::mem::swap(&mut next.activity_overview_open, &mut self.window.activity_overview_open);
+        std::mem::swap(&mut next.activity_overview_previous_focus, &mut self.window.activity_overview_previous_focus);
+    }
+
     fn workspace_for_emitter(&self, entity: EntityId, cx: &App) -> Option<String> {
         std::iter::once(&self.window)
             .chain(self.parked_window_views.values())
@@ -711,6 +723,7 @@ impl Desktop {
         self.window
             .dock
             .update(cx, |dock, cx| dock.set_shown(false, source_window, cx));
+        self.carry_activity_overview_to(&mut replacement);
         let mut incoming = std::mem::replace(&mut self.window, replacement);
         let moved = handle
             .update(cx, |_, window, cx| {
@@ -721,6 +734,7 @@ impl Desktop {
         if let Err(error) = moved {
             let rollback =
                 Self::rehost_workspace_view(&mut incoming, browser.as_ref(), source_window, cx);
+            self.carry_activity_overview_to(&mut incoming);
             let replacement = std::mem::replace(&mut self.window, incoming);
             if !needs_restore {
                 if let Some(id) = next {
@@ -738,6 +752,10 @@ impl Desktop {
         // No fallible operation below this point may remove the destination.
         // Both live views remain retained after the ownership commit.
         if let Some(mut previous) = self.parked_window_views.remove(target) {
+            incoming.activity_overview = previous.activity_overview.take();
+            incoming.activity_overview_subscription = previous.activity_overview_subscription.take();
+            incoming.activity_overview_open = std::mem::take(&mut previous.activity_overview_open);
+            incoming.activity_overview_previous_focus = previous.activity_overview_previous_focus.take();
             let _ = handle.update(cx, |_, window, cx| {
                 previous
                     .dock
@@ -948,6 +966,7 @@ impl Desktop {
         next.sidebar_task_navigation_scheduled =
             std::mem::take(&mut self.window.sidebar_task_navigation_scheduled);
         let removal = self.window.pending_workspace_removal.take();
+        self.carry_activity_overview_to(&mut next);
         let old = std::mem::replace(&mut self.window, next);
         if let Some(id) = old.active_workspace_id.clone() {
             self.workspace_view_cache.insert(id, old);
@@ -1433,6 +1452,7 @@ impl Desktop {
         self.window
             .dock
             .update(cx, |dock, cx| dock.set_shown(false, window, cx));
+        self.carry_activity_overview_to(&mut next);
         let old = std::mem::replace(&mut self.window, next);
         if let Some(id) = old.active_workspace_id.clone() {
             self.workspace_view_cache.insert(id, old);
@@ -1446,7 +1466,7 @@ impl Desktop {
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
         self.capture_native_drafts(cx);
-        let next = Self::create_workspace_view(
+        let mut next = Self::create_workspace_view(
             self.chat_panes.clone(),
             self.draft_panes.clone(),
             Sidebar::Chats,
@@ -1456,6 +1476,7 @@ impl Desktop {
         self.window
             .dock
             .update(cx, |dock, cx| dock.set_shown(false, window, cx));
+        self.carry_activity_overview_to(&mut next);
         let old = std::mem::replace(&mut self.window, next);
         // Removing a workspace does not terminate its backend sessions.
         drop(old);
@@ -2060,6 +2081,10 @@ impl Desktop {
             sidebar_motion_compact: false,
             sidebar_focus: cx.focus_handle(),
             sidebar_toggle_focus: cx.focus_handle(),
+            activity_overview: None,
+            activity_overview_subscription: None,
+            activity_overview_open: false,
+            activity_overview_previous_focus: None,
             preferences_open: false,
             preferences_focus: cx.focus_handle(),
             preferences_previous_focus: None,

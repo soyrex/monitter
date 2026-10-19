@@ -6,6 +6,9 @@ use gpui_kit::component::{ThemeStyled as _, popover::Popover};
 #[derive(Default)]
 pub(super) struct WatcherState {
     pub enabled: bool,
+    pub(super) modal_open: bool,
+    modal_generation: u64,
+    modal_tokens: std::collections::BTreeSet<u64>,
     pub(super) interject_open: bool,
     interjection: Option<InterjectionExchange>,
     scroll: ScrollHandle,
@@ -393,6 +396,37 @@ impl WatcherProjection {
 }
 
 impl ChatPane {
+    pub(crate) fn begin_activity_watch_modal(&mut self, cx: &mut Context<Self>) -> u64 {
+        self.watcher.modal_generation = self.watcher.modal_generation.wrapping_add(1);
+        self.watcher.modal_tokens.insert(self.watcher.modal_generation);
+        self.watcher.modal_open = true;
+        self.activity.update(cx, |activity, cx| activity.set_watch_mode(true, cx));
+        cx.notify();
+        self.watcher.modal_generation
+    }
+    pub(crate) fn release_activity_watch_modal(&mut self, generation: u64, cx: &mut Context<Self>) {
+        if !self.watcher.modal_tokens.remove(&generation) { return; }
+        self.watcher.modal_open = !self.watcher.modal_tokens.is_empty();
+        if !self.watcher.modal_open { self.watcher.interject_open = false; }
+        self.activity.update(cx, |activity, cx| activity.set_watch_mode(self.watcher.modal_open || self.watcher.enabled, cx));
+        cx.notify();
+    }
+    pub(crate) fn render_activity_watch_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let palette = design::palette(&self.snapshot, window.appearance());
+        let ratio = self.snapshot["settings"]["interfaceFontSize"].as_f64().unwrap_or(14.).clamp(8., 32.) as f32 / 14.;
+        let inset = match field(&self.snapshot["settings"], "interfaceDensity").as_str() {
+            "tight" => space::TIGHT, "spacious" => space::SECTION, _ => space::INSET,
+        };
+        self.activity.update(cx, |activity, cx| {
+            activity.set_appearance(palette, ratio, inset, cx);
+            activity.set_watch_mode(true, cx);
+        });
+        let form = self.render_user_questions(window, cx);
+        self.render_watcher(palette, Some(form), window, cx)
+    }
+    #[cfg(test)]
+    pub(crate) fn watcher_is_open(&self) -> bool { self.watcher.enabled }
+
     pub(super) fn toggle_watcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.watcher.transitioning {
             return;
@@ -1496,10 +1530,10 @@ impl ChatPane {
             )))
             .text_color(rgb(palette.ink))
             .font_family(cx.theme().font_family.clone())
-            .on_mouse_down(
+            .when(!self.watcher.modal_open, |view| view.on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|pane, _, _, cx| cx.emit(ChatEvent::Focused(pane.task_id()))),
-            )
+            ))
             .child(crate::transcript_edge_fade::TranscriptEdgeFade::for_scroll(
                 div()
                     .id("watcher-scroll")

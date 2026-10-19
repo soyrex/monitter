@@ -2,13 +2,13 @@
 use crate::workspace_windows::DesktopContextExt as _;
 use crate::workspace_window_state::{WindowId as WorkspaceWindowId, WorkspaceWindowState};
 use crate::{
-    Desktop, Sidebar,
+    Desktop, Sidebar, activity_overview, session_lock,
     design::{self, ui_scaled_px as px},
 };
 use gpui_kit::{
     assets::IconName,
     component::{
-        ActiveTheme as _, Disableable, Icon, Sizable,
+        ActiveTheme as _, Disableable, Icon, Sizable, WindowExt as _,
         button::*,
         input::{Input, InputEvent, InputState},
         popover::Popover,
@@ -24,6 +24,16 @@ use monitter_lib::experimental_desktop::{
 use rand_core::{OsRng, RngCore};
 use crate::workspace_favicon::workspace_favicon;
 use serde_json::{Value, json};
+
+struct ActivityWatchModal {
+    pane: Entity<crate::chat::ChatPane>,
+    _subscription: Subscription,
+}
+impl Render for ActivityWatchModal {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.pane.update(cx, |pane, cx| pane.render_activity_watch_modal(window, cx))
+    }
+}
 
 // Kept mounted at zero opacity so releasing Command can finish its fade. Frame
 // requests belong to this small retained view, never Desktop/backend publication.
@@ -286,6 +296,78 @@ fn dispatch_workspace_tab_move(
 }
 
 impl Desktop {
+    pub(super) fn close_activity_overview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.window.activity_overview_open { return; }
+        self.window.activity_overview_open = false;
+        if let Some(focus) = self.window.activity_overview_previous_focus.take() {
+            window.focus(&focus, cx);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn toggle_activity_overview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if session_lock::locked(cx) || !self.workspace_controls_available() { return; }
+        if self.window.activity_overview_open {
+            self.close_activity_overview(window, cx);
+            return;
+        }
+        let overview = self.ensure_activity_overview(window, cx);
+        self.window.activity_overview_previous_focus = window.focused(cx);
+        self.window.activity_overview_open = true;
+        window.focus(&overview.focus_handle(cx), cx);
+        cx.notify();
+    }
+
+    pub(super) fn ensure_activity_overview(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<activity_overview::ActivityOverview> {
+        if let Some(overview) = &self.window.activity_overview { return overview.clone(); }
+        let overview = cx.new(|cx| activity_overview::ActivityOverview::new(window, cx));
+        let subscription = cx.subscribe_in_emitter_window(&overview, window, |desktop, _, event, window, cx| {
+            desktop.with_workspace_window(window, cx, |desktop, window, cx| match event {
+                activity_overview::ActivityOverviewEvent::OpenTask { task_id } => desktop.open_activity_overview_task(task_id.clone(), window, cx),
+                activity_overview::ActivityOverviewEvent::Close => desktop.close_activity_overview(window, cx),
+            });
+        });
+        self.window.activity_overview_subscription = Some(subscription);
+        self.window.activity_overview = Some(overview.clone());
+        overview
+    }
+
+    pub(super) fn open_activity_overview_task(&mut self, task_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        if session_lock::locked(cx) || !self.workspace_controls_available() || self.hidden_task_ids.contains(&task_id) { return; }
+        if !self.snapshot["tasks"].as_array().into_iter().flatten().any(|task| task["id"].as_str() == Some(task_id.as_str()) && task["archived"] != true) { return; }
+        let retained = self.chat_panes.borrow().get(&task_id).cloned();
+        let pane = retained.or_else(|| self.service.clone().map(|service| self.ensure_chat_pane(&task_id, service, window, cx)));
+        let Some(pane) = pane else { return; };
+        let generation = pane.update(cx, |pane, cx| pane.begin_activity_watch_modal(cx));
+        let watch = cx.new(|cx| {
+            let subscription = cx.observe(&pane, |_, _, cx| cx.notify());
+            let release_pane = pane.downgrade();
+            cx.on_release(move |_, cx| {
+                // Defer entity access until the dialog subtree has finished releasing.
+                // A generation guard protects a newer modal opened in the meantime.
+                cx.defer(move |cx| {
+                    let _ = release_pane.update(cx, |pane, cx| pane.release_activity_watch_modal(generation, cx));
+                });
+            }).detach();
+            ActivityWatchModal { pane: pane.clone(), _subscription: subscription }
+        });
+        let previous_focus = window.focused(cx);
+        window.open_dialog(cx, move |dialog, window, _| {
+            let pane = pane.clone();
+            let previous_focus = previous_focus.clone();
+            dialog.title("Watch")
+                .width((window.viewport_size().width - px(48.)).min(px(1040.)))
+                .keyboard(true).close_button(true).overlay_closable(true)
+                .on_close(move |_, window, cx| {
+                    pane.update(cx, |pane, cx| pane.release_activity_watch_modal(generation, cx));
+                    if let Some(focus) = &previous_focus { window.focus(focus, cx); }
+                })
+                .child(div().id("activity-watch-modal").debug_selector(|| "activity-watch-modal".into())
+                    .w_full().h((window.viewport_size().height - px(180.)).min(px(760.)).max(px(180.)))
+                    .child(watch.clone()))
+        });
+    }
+
     fn window_named_workspaces(&self) -> Option<NativeWorkspaceSet> {
         self.named_workspaces.as_ref().map(|set| {
             window_workspace_set(
@@ -495,6 +577,7 @@ impl Desktop {
         self.switch_named_workspace(id, window, cx);
     }
     pub(super) fn switch_named_workspace(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_activity_overview(window, cx);
         // An explicit workspace choice supersedes any queued sidebar click.
         self.window.pending_pane_focus = None;
         self.window.pending_sidebar_task = None;
@@ -832,6 +915,7 @@ impl Desktop {
             design::tile_theme() == monitter_lib::experimental_desktop::NativeTileTheme::Tern;
         let mut tabs = div()
             .id("named-workspace-tabs")
+            .debug_selector(|| "named-workspace-tabs".into())
             .flex()
             .items_center()
             .gap(px(5.))
@@ -843,7 +927,7 @@ impl Desktop {
             }));
         if let Some(set) = self.window_named_workspaces() {
             for (index, item) in set.items.iter().enumerate() {
-                let active = item.id == set.active_id;
+                let active = !self.window.activity_overview_open && item.id == set.active_id;
                 let id = item.id.clone();
                 let edit_id = id.clone();
                 let menu_id = id.clone();
@@ -1052,7 +1136,7 @@ impl Desktop {
             .w_full()
             .flex_shrink_0()
             .pl(gpui_kit::px(
-                if window.is_fullscreen() || (tern && !self.sidebar_is_hidden()) {
+                if window.is_fullscreen() || (tern && !self.sidebar_is_hidden() && !self.window.activity_overview_open) {
                     10.
                 } else {
                     82.
@@ -1090,9 +1174,19 @@ impl Desktop {
                             cx.workspace_listener(|view, _, window, cx| view.toggle_sidebar(window, cx)),
                         ),
                 )
-                .child(div().flex_shrink_0().w(px(1.)).h(px(18.)).mx(px(5.))
-                    .bg(rgb(palette.ink).opacity(0.24)))
             })
+            .child(div().id("activity-overview-toggle-hit").debug_selector(|| "activity-overview-toggle".into()).flex().flex_shrink_0()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(Button::new("toggle-activity-overview")
+                .ghost().compact().flex_shrink_0()
+                .toggled(self.window.activity_overview_open)
+                .icon(Icon::new(IconName::Activity).text_color(rgb(if self.window.activity_overview_open { palette.accent } else { palette.ink })))
+                .accessibility_label("Activity overview")
+                .tooltip("Activity overview")
+                .disabled(!controls_available)
+                .on_click(cx.workspace_listener(|view, _, window, cx| view.toggle_activity_overview(window, cx)))))
+            .child(div().flex_shrink_0().w(px(1.)).h(px(18.)).mx(px(5.))
+                .bg(rgb(palette.ink).opacity(0.24)))
             .child(tabs)
             .children(self.window.workspace_usage_rings.clone())
             .map(|bar| {

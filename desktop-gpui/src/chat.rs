@@ -1716,7 +1716,7 @@ impl ChatPane {
     }
 
     pub(super) fn user_questions_in_watch(&self) -> bool {
-        self.watcher.enabled
+        self.watcher.enabled || self.watcher.modal_open
     }
 
     pub fn task_id(&self) -> String {
@@ -1805,7 +1805,7 @@ impl ChatPane {
         );
     }
     pub(super) fn wants_history_publication(&self) -> bool {
-        self.dock_visible
+        self.watcher.modal_open || self.dock_visible
             || self
                 .transcripts
                 .get(&self.task_id())
@@ -2184,7 +2184,7 @@ impl ChatPane {
         cx.notify();
     }
     pub(super) fn can_trim_hidden_history(&self) -> bool {
-        !self.dock_visible
+        !self.watcher.modal_open && !self.dock_visible
             && self
                 .transcripts
                 .get(&self.task_id())
@@ -5443,7 +5443,7 @@ impl Render for ChatPane {
         };
         self.activity.update(cx, |activity, cx| {
             activity.set_appearance(palette, interface_font_ratio, composer_bottom, cx);
-            activity.set_watch_mode(self.watcher.enabled, cx);
+            activity.set_watch_mode(self.watcher.enabled || self.watcher.modal_open, cx);
         });
         let composer_height = self
             .decoration_bounds

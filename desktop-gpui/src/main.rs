@@ -84,6 +84,9 @@ mod streaming_message;
 mod activity_sparkles;
 mod activity_patterns;
 mod activity_effects;
+mod activity_overview;
+#[cfg(test)]
+mod activity_overview_tests;
 mod naming_title;
 mod native_navigation;
 mod shortcut_desktop;
@@ -4268,6 +4271,36 @@ impl Desktop {
             }
         }
         self.ensure_sidebar_usage(window, cx);
+        // Observe communications from the first snapshot, even before Activity opens.
+        // Its viewing clock advances only when endpoints paint in the foreground.
+        let overview = self.ensure_activity_overview(window, cx);
+        overview.update(cx, |overview, cx| overview.set_snapshot(self.snapshot.clone(), palette, cx));
+        if self.window.activity_overview_open {
+            shell::set_task_markers_visible(false, self.window.sidebar_view, cx);
+            let overview = self.ensure_activity_overview(window, cx);
+            overview.update(cx, |overview, cx| overview.set_snapshot(self.snapshot.clone(), palette, cx));
+            let spacing = design::tern_spacing(&self.snapshot["settings"]);
+            // Match the dock's two half-gutters plus the shell perimeter.
+            // Its top edge already meets the workspace bar with one gutter.
+            let tern = design::tile_theme() == monitter_lib::experimental_desktop::NativeTileTheme::Tern;
+            let inset = px(spacing.gutter + if tern { spacing.outer_padding() } else { 0. });
+            let surface = div().size_full().min_h_0().p(inset)
+                .when(tern, |surface| surface.pt(px(spacing.gutter))).child(
+                div().id("activity-overview-pane")
+                    .debug_selector(|| "activity-overview-pane".into())
+                    .size_full().min_h_0().rounded(px(8.))
+                    .border_1().border_color(design::tile_border_color(palette))
+                    .bg(crate::surface_blend::tinted_pane_background(palette.paper, palette.dark, 0.15))
+                    .overflow_hidden().child(overview),
+            );
+            // Tern normally embeds its workspace bar inside the sidebar split.
+            // The overview replaces that entire split while retaining its bar.
+            return if design::tile_theme() == monitter_lib::experimental_desktop::NativeTileTheme::Tern {
+                div().size_full().flex().flex_col()
+                    .child(self.render_workspace_tabs(palette, window, cx))
+                    .child(div().flex_1().min_h_0().w_full().child(surface))
+            } else { surface };
+        }
         let sidebar_snapshot_changed = self.window.sidebar_usage_snapshot
             .as_ref()
             .is_none_or(|snapshot| !Rc::ptr_eq(snapshot, &self.snapshot))
@@ -4301,6 +4334,7 @@ impl Desktop {
         } else { self.render_sidebar(&agents, &tasks, palette, window, cx) };
         let sidebar = div()
             .id("native-preferences-sidebar")
+            .debug_selector(|| "native-preferences-sidebar".into())
             .track_focus(&self.window.sidebar_focus)
             .w_full()
             .min_w_0()
@@ -4898,7 +4932,7 @@ impl Render for Desktop {
             && self.window.palette
                 .as_ref()
                 .is_some_and(|pane| pane.read(cx).is_open());
-        if self.window.preferences_open || open {
+        if self.window.preferences_open || self.window.activity_overview_open || open {
             native_pane_highlight::clear(window);
         }
         // Hidden native children must not enter the frame arena behind a modal.
@@ -5009,6 +5043,7 @@ impl Render for Desktop {
         // Apply this after route construction, which may open a native pane.
         let native_surfaces_shown = !self.closing
             && !self.window.preferences_open
+            && !self.window.activity_overview_open
             && !open
             && self.window.sidebar != Sidebar::Settings;
         self.window.dock.update(cx, |dock, cx| {
@@ -5392,6 +5427,8 @@ fn main() {
             if workspace_window_preview::open_if_requested(cx) { return; }
             #[cfg(feature = "visual-export")]
             if git::open_preview_if_requested(cx) { return; }
+            #[cfg(all(feature = "visual-export", feature = "performance-profiling"))]
+            if activity_overview::open_preview_if_requested(cx) { return; }
             #[cfg(feature = "visual-export")]
             if design_system_preview::open_if_requested(cx) { return; }
             #[cfg(feature = "visual-export")]
