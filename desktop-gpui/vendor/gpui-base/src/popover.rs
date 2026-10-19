@@ -13,12 +13,14 @@ use crate::{
 };
 
 const CONTEXT: &str = "Popover";
+const CONTENT_CONTEXT: &str = "PopoverContent";
 
 pub(crate) fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("escape", Cancel, Some(CONTEXT)),
         KeyBinding::new("enter", Confirm { secondary: false }, Some(CONTEXT)),
         KeyBinding::new("space", Confirm { secondary: false }, Some(CONTEXT)),
+        KeyBinding::new("escape", Cancel, Some(CONTENT_CONTEXT)),
     ]);
 }
 
@@ -345,6 +347,15 @@ impl RenderOnce for Popover {
             .on_action({
                 let state = state.clone();
                 move |_: &Confirm, window, cx| {
+                    if state
+                        .read(cx)
+                        .tracked_focus_handle
+                        .as_ref()
+                        .is_some_and(|focus| focus.contains_focused(window, cx))
+                    {
+                        cx.propagate();
+                        return;
+                    }
                     state.update(cx, |state, cx| state.toggle_open(window, cx));
                     cx.notify(parent_view_id);
                 }
@@ -374,7 +385,10 @@ impl RenderOnce for Popover {
             .occlude()
             .tab_group()
             .track_focus(&focus_handle)
-            .key_context(CONTEXT)
+            // Trigger activation keys must not leak into editable popup content.
+            // Space and Enter remain available on the trigger while text inputs
+            // inside the surface receive their native keystrokes.
+            .key_context(CONTENT_CONTEXT)
             .on_action(window.listener_for(&state, PopoverState::on_action_cancel))
             .when_some(self.content, |this, content| {
                 this.child(state.update(cx, |state, cx| (content)(state, window, cx)))

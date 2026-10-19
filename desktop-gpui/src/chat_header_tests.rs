@@ -13,7 +13,7 @@ fn draw(visual: &mut VisualTestContext) {
 }
 
 #[gpui_kit::test]
-fn chat_header_icon_opens_owner_menu_without_move_or_overflow_controls(cx: &mut TestAppContext) {
+fn chat_header_and_watcher_chrome_stay_scoped_to_the_owning_pane(cx: &mut TestAppContext) {
     cx.update(|cx| {
         gpui_kit::init(cx);
         crate::surface_blend::initialize_for_ui_fixture();
@@ -74,6 +74,31 @@ fn chat_header_icon_opens_owner_menu_without_move_or_overflow_controls(cx: &mut 
         if tile == NativeTileTheme::Tern {
             let header = visual.debug_bounds("chat-pane-header").unwrap();
             let close = visual.debug_bounds("chat-header-close").expect("close remains available");
+            assert!(close.left() >= header.left() && close.right() <= header.right());
+
+            pane.update(visual, |pane, cx| {
+                pane.watcher.enabled = true;
+                cx.notify();
+            });
+            draw(visual);
+            let header = visual.debug_bounds("chat-pane-header").unwrap();
+            assert!(
+                visual.debug_bounds("chat-header-menu-trigger").is_none(),
+                "Watch removes the pane identity icon"
+            );
+            assert!(
+                visual.debug_bounds("toggle-pane-secondary-sidebar").is_none(),
+                "Watch removes the secondary-sidebar control"
+            );
+            assert!(
+                visual.debug_bounds("watch-header-close").is_none(),
+                "the Watch close control is idle until the header is hovered"
+            );
+            visual.simulate_mouse_move(header.center(), None, Default::default());
+            draw(visual);
+            let close = visual
+                .debug_bounds("watch-header-close")
+                .expect("hover reveals the Watch close control");
             assert!(close.left() >= header.left() && close.right() <= header.right());
         }
     }
