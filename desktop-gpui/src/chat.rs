@@ -5443,6 +5443,7 @@ impl Render for ChatPane {
         };
         self.activity.update(cx, |activity, cx| {
             activity.set_appearance(palette, interface_font_ratio, composer_bottom, cx);
+            activity.set_watch_mode(self.watcher.enabled, cx);
         });
         let composer_height = self
             .decoration_bounds

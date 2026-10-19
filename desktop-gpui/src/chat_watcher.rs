@@ -1213,7 +1213,10 @@ impl ChatPane {
         } else {
             self.render_watcher_task_summary(&state, palette, ratio, cx)
         };
-        body = body.child(now).child(
+        body = body.child(
+            div().w_full().min_w_0().flex().flex_col()
+                .child(now).child(self.activity.clone()),
+        ).child(
             div()
                 .id("watcher-plan")
                 .debug_selector(|| "watcher-plan".into())

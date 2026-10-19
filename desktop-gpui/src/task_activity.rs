@@ -1,6 +1,8 @@
 //! Native goal and observed computer-use HUD. No synthetic lifecycle state.
 #[path = "working_bubble.rs"]
 pub(crate) mod working_bubble;
+#[path = "watch_goal.rs"]
+mod watch_goal;
 use crate::design::{self, ui_scaled_px as px};
 use gpui_kit::{
     assets::__private as icon_assets,
@@ -21,13 +23,15 @@ pub struct TaskActivityPane {
     task_id: String,
     eligible: bool,
     running: bool,
-    // One retained maintenance timer. An absent goal schedules no timer;
+    // One retained maintenance timer. Watch also discovers newly created goals;
     // context changes cancel an obsolete session's pending retry.
     goal_poll: Option<Task<()>>,
     generation: u64,
     read_failures: u32,
     goal: Option<Value>,
     goal_note: String,
+    watch_mode: bool,
+    watch_progress: watch_goal::Progress,
     note_expanded: bool,
     palette: design::Palette,
     font_ratio: f32,
@@ -157,6 +161,8 @@ impl TaskActivityPane {
             read_failures: 0,
             goal: None,
             goal_note: String::new(),
+            watch_mode: false,
+            watch_progress: watch_goal::Progress::default(),
             note_expanded: false,
             palette: design::palette(&Value::Null, WindowAppearance::Light),
             font_ratio: 1.,
@@ -185,7 +191,26 @@ impl TaskActivityPane {
             cx.notify();
         }
     }
+    pub fn set_watch_mode(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.watch_mode == enabled {
+            return;
+        }
+        self.watch_mode = enabled;
+        if enabled {
+            self.refresh(cx);
+        } else {
+            self.schedule_goal_read(cx);
+        }
+        cx.notify();
+    }
     pub fn set_context(&mut self, snapshot: &Value, task_id: &str, cx: &mut Context<Self>) {
+        let progress = watch_goal::Progress::from_snapshot(snapshot, task_id);
+        if self.watch_progress != progress {
+            self.watch_progress = progress;
+            if self.watch_mode {
+                cx.notify();
+            }
+        }
         let Some(task) = snapshot["tasks"]
             .as_array()
             .and_then(|tasks| tasks.iter().find(|task| task["id"] == task_id))
@@ -270,7 +295,11 @@ impl TaskActivityPane {
         if !self.eligible {
             return;
         }
-        let Some(delay) = next_goal_read(self.goal.as_ref(), self.running, self.read_failures)
+        // Watch must also discover goals created by the running harness after
+        // the initial read, and observe paused/completed goals while idle.
+        let Some(delay) = watch_goal::read_delay(
+            self.watch_mode, self.goal.as_ref(), self.running, self.read_failures,
+        )
         else {
             return;
         };
@@ -462,6 +491,9 @@ impl Render for ComputerUseBubble {
 impl Render for TaskActivityPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = self.palette;
+        if self.watch_mode {
+            return watch_goal::render(self, palette, self.font_ratio);
+        }
         let type_size = |size| px(size * self.font_ratio);
         let mut cards = div()
             .w_full()
@@ -716,6 +748,7 @@ impl Render for TaskActivityPane {
             .flex_shrink_0()
             .px(px(self.margin_inline + 8.))
             .child(cards.max_w(px(design::CHAT_MAX_WIDTH - 16.)).mx_auto())
+            .into_any_element()
     }
 }
 #[cfg(test)]
