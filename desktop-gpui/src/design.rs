@@ -168,6 +168,17 @@ pub fn tile_border_color(palette: Palette) -> Rgba {
     color
 }
 
+/// Double the composer outline's RGB contrast against its theme surface,
+/// retaining the one-pixel stroke and configured surface transparency.
+pub fn composer_border_color(palette: Palette) -> Rgba {
+    let mut line = surface_color(palette.line);
+    let surface = gpui_kit::rgb(palette.card);
+    line.r = (surface.r + 2. * (line.r - surface.r)).clamp(0., 1.);
+    line.g = (surface.g + 2. * (line.g - surface.g)).clamp(0., 1.);
+    line.b = (surface.b + 2. * (line.b - surface.b)).clamp(0., 1.);
+    line
+}
+
 /// Set the native background alpha from the same settings as Tauri's
 /// `--window-transparency` CSS mix. Only translucent and glass surfaces use
 /// the percentage; opaque surfaces stay fully opaque. The alpha is intended

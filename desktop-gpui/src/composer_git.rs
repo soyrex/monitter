@@ -842,7 +842,7 @@ impl Render for ComposerGitStrip {
             div()
                 .w_full()
                 .border_1()
-                .border_color(crate::design::surface_color(palette.line))
+                .border_color(crate::design::composer_border_color(palette))
                 .rounded(px(7.))
                 .rounded_bl(px(0.))
                 .rounded_br(px(0.))

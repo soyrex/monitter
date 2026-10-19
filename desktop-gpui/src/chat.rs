@@ -5603,7 +5603,7 @@ impl Render for ChatPane {
                                             })
                                             .p(px(space::INSET))
                                             .border_1()
-                                            .border_color(design::surface_color(palette.line))
+                                            .border_color(design::composer_border_color(palette))
                                             .rounded(px(radius::CONTROL))
                                             .when(git_docked, |this| {
                                                 this.rounded_tl(px(0.)).rounded_tr(px(0.))
