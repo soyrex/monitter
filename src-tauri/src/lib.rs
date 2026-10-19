@@ -1976,7 +1976,7 @@ impl Service {
                 self.set_task_project(&arg::<String>(&args, "taskId")?, arg(&args, "projectId")?)?,
             ),
             "send_message" => snapshot_value(
-                self.send(
+                self.send_with_delivery_mode(
                     arg(&args, "taskId")?,
                     arg(&args, "text")?,
                     args.get("attachmentIds")
@@ -1985,13 +1985,19 @@ impl Service {
                         .transpose()
                         .map_err(|_| "Invalid attachmentIds.")?
                         .unwrap_or_default(),
+                    args.get("deliveryMode")
+                        .filter(|value| !value.is_null())
+                        .cloned()
+                        .map(serde_json::from_value)
+                        .transpose()
+                        .map_err(|_| "Invalid deliveryMode.")?,
                 )?,
             ),
             "clear_task_context" => {
                 snapshot_value(self.clear_task_context(&arg::<String>(&args, "taskId")?)?)
             }
             "send_message_fast" => {
-                self.send_fast(
+                self.send_fast_with_delivery_mode(
                     arg(&args, "taskId")?,
                     arg(&args, "text")?,
                     args.get("attachmentIds")
@@ -2000,6 +2006,12 @@ impl Service {
                         .transpose()
                         .map_err(|_| "Invalid attachmentIds.")?
                         .unwrap_or_default(),
+                    args.get("deliveryMode")
+                        .filter(|value| !value.is_null())
+                        .cloned()
+                        .map(serde_json::from_value)
+                        .transpose()
+                        .map_err(|_| "Invalid deliveryMode.")?,
                 )?;
                 value(lan_sync::Accepted { accepted: true })
             }
@@ -3669,6 +3681,7 @@ impl Service {
                 command.clone(),
                 Vec::new(),
                 Some(format!("/{name}")),
+                None,
             )?;
             self.launch_accepted(task_id, accepted);
             return Ok(SlashCommandExecution { effect: "sent".into(), message: None });
@@ -3686,6 +3699,7 @@ impl Service {
                     command.clone(),
                     Vec::new(),
                     Some(format!("/{normalized}")),
+                    None,
                 )?;
                 self.launch_accepted(task_id, accepted);
                 Ok(SlashCommandExecution { effect: "sent".into(), message: None })
@@ -3912,6 +3926,14 @@ impl Service {
                 project.id = id();
             }
             project.name = project.name.trim().into();
+            // Project settings cannot replace the separately revisioned Idea List.
+            if let Some(current) = snapshot.projects.iter().find(|current| current.id == project.id) {
+                project.ideas = current.ideas.clone();
+                project.ideas_revision = current.ideas_revision;
+            } else {
+                project.ideas.clear();
+                project.ideas_revision = 0;
+            }
             validate_project(&project, snapshot)?;
             if let Some(current) = snapshot
                 .projects
@@ -5455,7 +5477,23 @@ impl Service {
         text: String,
         attachment_ids: Vec<String>,
     ) -> Result<Option<AcceptedTurn>, String> {
-        self.accept_send_inner(task_id, text, attachment_ids, None)
+        self.accept_send_inner(task_id, text, attachment_ids, None, None)
+    }
+
+    fn accept_send_with_delivery_mode(
+        self: &Arc<Self>,
+        task_id: String,
+        text: String,
+        attachment_ids: Vec<String>,
+        delivery_mode: Option<String>,
+    ) -> Result<Option<AcceptedTurn>, String> {
+        self.accept_send_inner(
+            task_id,
+            text,
+            attachment_ids,
+            None,
+            delivery_mode.as_deref(),
+        )
     }
 
     fn accept_send_inner(
@@ -5464,9 +5502,13 @@ impl Service {
         text: String,
         attachment_ids: Vec<String>,
         slash_command: Option<String>,
+        delivery_mode: Option<&str>,
     ) -> Result<Option<AcceptedTurn>, String> {
         if text.trim().is_empty() && attachment_ids.is_empty() {
             return Err("Message cannot be empty.".into());
+        }
+        if !matches!(delivery_mode, None | Some("queue" | "steer")) {
+            return Err("deliveryMode must be queue or steer.".into());
         }
         let user_text = if text.trim().is_empty() { String::new() } else { text };
         // ACP startup makes the process available before the session is
@@ -5510,7 +5552,13 @@ impl Service {
                 if slash_command.is_some() {
                     return Err("Provider commands are available after the current turn finishes.".into());
                 }
-                let steer = (state.settings.busy_message_mode == "steer").then(|| {
+                let wants_steer = match delivery_mode {
+                    Some("steer") => true,
+                    Some("queue") => false,
+                    None => state.settings.busy_message_mode == "steer",
+                    Some(_) => unreachable!("delivery mode validated before mutation"),
+                };
+                let steer = wants_steer.then(|| {
                     match state.tasks[ix].provider.as_str() {
                         "codex" => Some("codex"),
                         "acp" if acp_steering => Some("acp"),
@@ -6056,6 +6104,23 @@ impl Service {
         Ok(())
     }
 
+    fn send_fast_with_delivery_mode(
+        self: &Arc<Self>,
+        task_id: String,
+        text: String,
+        attachment_ids: Vec<String>,
+        delivery_mode: Option<String>,
+    ) -> Result<(), String> {
+        let accepted = self.accept_send_with_delivery_mode(
+            task_id.clone(),
+            text,
+            attachment_ids,
+            delivery_mode,
+        )?;
+        self.launch_accepted(task_id, accepted);
+        Ok(())
+    }
+
     fn send(
         self: &Arc<Self>,
         task_id: String,
@@ -6063,6 +6128,17 @@ impl Service {
         attachment_ids: Vec<String>,
     ) -> Result<Snapshot, String> {
         self.send_accepted(task_id, text, attachment_ids)?;
+        self.snapshot()
+    }
+
+    fn send_with_delivery_mode(
+        self: &Arc<Self>,
+        task_id: String,
+        text: String,
+        attachment_ids: Vec<String>,
+        delivery_mode: Option<String>,
+    ) -> Result<Snapshot, String> {
+        self.send_fast_with_delivery_mode(task_id, text, attachment_ids, delivery_mode)?;
         self.snapshot()
     }
 
@@ -8742,10 +8818,16 @@ async fn send_message(
     task_id: String,
     text: String,
     attachment_ids: Option<Vec<String>>,
+    delivery_mode: Option<String>,
 ) -> Result<Snapshot, String> {
     let service = state.0.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        service.send(task_id, text, attachment_ids.unwrap_or_default())
+        service.send_with_delivery_mode(
+            task_id,
+            text,
+            attachment_ids.unwrap_or_default(),
+            delivery_mode,
+        )
     })
     .await
     .map_err(|error| format!("Send worker failed: {error}"))?
@@ -8757,10 +8839,16 @@ async fn send_message_fast(
     task_id: String,
     text: String,
     attachment_ids: Option<Vec<String>>,
+    delivery_mode: Option<String>,
 ) -> Result<lan_sync::Accepted, String> {
     let service = state.0.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        service.send_fast(task_id, text, attachment_ids.unwrap_or_default())
+        service.send_fast_with_delivery_mode(
+            task_id,
+            text,
+            attachment_ids.unwrap_or_default(),
+            delivery_mode,
+        )
     })
     .await
     .map_err(|error| format!("Send worker failed: {error}"))??;
@@ -13158,6 +13246,72 @@ readline.createInterface({input: process.stdin}).on('line', line => {
             .cancel_queued_message(&queued.queued_messages[0].id)
             .unwrap();
         assert!(cancelled.queued_messages.is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn watcher_interject_explicit_steer_overrides_queue_default_for_one_send() {
+        let dir = temp_dir("watcher-interject-explicit-steer");
+        let service = Service::open(None, dir.clone()).unwrap();
+        let agent_id = service.snapshot().unwrap().agents[0].id.clone();
+        let task = service
+            .create_task(task_input(agent_id, "watch interject", None))
+            .unwrap();
+        service
+            .mutate(None, |snapshot| {
+                snapshot.settings.busy_message_mode = "queue".into();
+                snapshot
+                    .tasks
+                    .iter_mut()
+                    .find(|item| item.id == task.id)
+                    .unwrap()
+                    .status = "running".into();
+                Ok(())
+            })
+            .unwrap();
+
+        let accepted = service
+            .accept_send_with_delivery_mode(
+                task.id.clone(),
+                "look at this now".into(),
+                vec![],
+                Some("steer".into()),
+            )
+            .unwrap();
+        assert!(
+            accepted.is_none(),
+            "a live steer remains on the current provider turn"
+        );
+        let snapshot = service.snapshot().unwrap();
+        let pending = snapshot
+            .queued_messages
+            .iter()
+            .find(|message| message.task_id == task.id)
+            .expect("durable pending steer");
+        assert_eq!(
+            pending.status, "queued",
+            "an unavailable live runtime falls back to durable FIFO"
+        );
+        assert_eq!(pending.origin.as_deref(), Some("steering"));
+        assert_eq!(snapshot.settings.busy_message_mode, "queue");
+        for method in ["send_message", "send_message_fast"] {
+            service.lan_invoke(method, serde_json::json!({
+                "taskId": task.id, "text": format!("null delivery mode via {method}"),
+                "deliveryMode": null
+            })).expect("nullable delivery mode uses the saved default over owner LAN");
+        }
+        assert_eq!(service.snapshot().unwrap().settings.busy_message_mode, "queue");
+        let error = service
+            .accept_send_with_delivery_mode(
+                task.id,
+                "invalid".into(),
+                vec![],
+                Some("later".into()),
+            )
+            .err()
+            .expect("invalid delivery mode is rejected");
+        assert_eq!(error, "deliveryMode must be queue or steer.");
+        drop(service);
         let _ = std::fs::remove_dir_all(dir);
     }
 

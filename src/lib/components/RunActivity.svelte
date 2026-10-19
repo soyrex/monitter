@@ -26,6 +26,7 @@
   import Wrench from "@lucide/svelte/icons/wrench";
   import X from "@lucide/svelte/icons/x";
   import type { ApprovalRequest, AttachmentFileData, RunEvent } from '$lib/types';
+  import { activityNotice, activityNoticeState } from '$lib/activity-notice';
   import { getBridge } from '$lib/bridge';
   import { contextCompactionId, contextCompactionPhase, isContextCompaction, nativeSubagentActivity, toolFamily, isShellActivity, reasoningSummary, readableToolDetail, toolFileChanges, toolImage, toolPresentation, processToolLabel, type ToolPresentation } from '$lib/activity-grouping';
   import { floating } from '$lib/floating';
@@ -42,7 +43,9 @@
   const grouped = $derived(items.length > 1);
   const hasReasoning = $derived(items.some(item => item.kind === 'reasoning'));
   const toolItems = $derived(items.filter(item => item.kind === 'tool' || item.kind === 'subagent'));
-  const failedTools = $derived(toolItems.filter(item => toolPresentation(item, false).label === 'Tool failed').length);
+  const failedTools = $derived(toolItems.filter(item => activityNotice(item).state === 'failed' || toolPresentation(item, false).label === 'Tool failed').length);
+  const noticeState = $derived(activityNoticeState(items, processTree ? running : undefined));
+  let processOpen = $state(false);
   const reasoning = $derived(primary?.kind === 'reasoning');
   const summary = $derived(reasoning ? [...new Set(items.map(item=>reasoningSummary(item.detail)).filter(Boolean))].join('\n\n') : '');
   const summaryPreview = $derived(reasoning && summary ? summary.replace(/\s+/g, ' ').trim() : '');
@@ -82,7 +85,7 @@
   const route = $derived(primary ? routerTraceView(primary) : null);
   const labels = $derived([...new Set(items.map(item => toolPresentation(item, running).label))]);
   const primaryPresentation: ToolPresentation = $derived(
-    primary ? toolPresentation(primary, running) : { icon: 'terminal', label: 'Tool activity' },
+    primary ? { ...toolPresentation(primary, running), label: activityNotice(primary).intent ?? toolPresentation(primary, running).label } : { icon: 'terminal', label: 'Tool activity' },
   );
   const description = $derived(compressed && grouped ? `${labels.join(', ')} · ${items.length} tool calls` : primaryPresentation.label);
   const elapsed = $derived.by(() => {
@@ -185,6 +188,7 @@
   const processPreview = $derived.by(() => {
     const current = toolItems.at(-1) ?? primary;
     if (!current) return '';
+    if (activityNotice(current).intent) return activityNotice(current).intent!;
     const detail = readableToolDetail(current).replace(/\s+/g, ' ').trim().replace(/^Command\s+/i, '');
     if (!detail) return '';
     return detail.length > 100 ? `${detail.slice(0, 100).trimEnd()}…` : detail;
@@ -192,13 +196,14 @@
   const processLabel = $derived(`${hasReasoning ? 'Thinking' : 'Turn'} · ${toolItems.length} ${toolItems.length === 1 ? 'tool' : 'tools'}${approvals.length ? ` · ${approvals.length} approval${approvals.length === 1 ? '' : 's'}` : ''}${failedTools ? ` · ${failedTools} failed` : ''}${processPreview ? `: ${processPreview}` : ''}`);
   const approvalLabel = (request: ApprovalRequest) => request.status === 'approved' && request.ruleId ? `Approved by saved rule: ${request.summary || request.tool}` : `${request.status === 'approved' ? 'Approved' : request.status[0].toUpperCase() + request.status.slice(1)}: ${request.summary || request.tool}`;
   const treeGroups = $derived(processGroups.length ? processGroups : [{ type: 'tool-group' as const, values: items }]);
+  const flatTools = $derived(!approvals.length && treeGroups.length === 1 && treeGroups[0].type === 'tool-group' && treeGroups[0].values.length === items.length && treeGroups[0].values.every((item, index) => item.id === items[index]?.id));
   function processGroupLabel(group: ProcessGroup): string {
     if (group.type === 'reasoning-group') return 'Thought process';
     const values = group.values.filter(item => item.kind === 'tool' || item.kind === 'subagent');
     const count = values.length;
     if (!count) return 'Activity';
     if (values.every(isShellActivity)) return `Ran ${count} ${count === 1 ? 'command' : 'commands'}`;
-    const label = toolPresentation(values[0], false).label;
+    const label = activityNotice(values[0]).intent ?? toolPresentation(values[0], false).label;
     if (count === 1) return label;
     if (/\ba file\b/i.test(label)) return label.replace(/\ba file\b/i, `${count} files`);
     if (/\ba command\b/i.test(label)) return label.replace(/\ba command\b/i, `${count} commands`);
@@ -223,7 +228,7 @@
   {#if isThought && !thought}
     <div class="process-step process-step-static"><BookOpen size={14}/><span>Thinking</span><time>{formatTime(item.createdAt)}</time></div>
   {:else}
-    {@const label=isThought ? 'Thought process' : processToolLabel(displayItem)}
+    {@const label=isThought ? 'Thought process' : activityNotice(displayItem).intent ?? processToolLabel(displayItem)}
     <details class="process-step">
       <summary title={label}><ChevronRight size={12} class="call-chevron"/><span class:failed={presentation.label === 'Tool failed'}><svelte:component this={ICON_COMPONENT[presentation.icon]} size={14}/><span class="process-step-label">{label}</span></span><time>{formatTime(item.createdAt)}</time></summary>
       {#if isThought}<div class="process-thought"><Markdown text={thought}/></div>
@@ -233,6 +238,11 @@
       {#if detailErrors[item.id]}<p class="detail-state error">{detailErrors[item.id]}</p>{/if}
     </details>
   {/if}
+{/snippet}
+{#snippet stateIndicator()}
+  <span class="notice-state" class:spinning={noticeState === 'running'} data-activity-state={noticeState} role="img" aria-label={noticeState === 'unknown' ? 'Tool activity' : noticeState === 'running' ? 'Running' : noticeState === 'completed' ? 'Completed' : 'Failed'}>
+    {#if noticeState === 'unknown'}<TriggerIcon size={14}/>{:else if noticeState === 'completed'}✓{:else if noticeState === 'failed'}!{:else}<span class="spinner-ring"></span>{/if}
+  </span>
 {/snippet}
 <svelte:window onpointerdown={outside} onkeydown={keys}/>
 {#if primary && route}
@@ -249,9 +259,12 @@
 {:else if !processTree && primary && reasoning}
   <details class="activity reasoning"><summary aria-label="Reasoning summary"><ChevronRight size={13} class="chevron"/><Brain size={14}/><span>Reasoning: {summaryPreview}</span><time>{formatTime(latest?.createdAt ?? primary.createdAt)}</time></summary><div class="activity-body"><Markdown text={summary}/></div></details>
 {:else if processTree && primary}
-  <details class="activity process-tree">
-    <summary aria-label={processLabel}><ChevronRight size={13} class="chevron"/><Brain size={14}/><span>{processLabel}</span><time>{formatTime(latest?.createdAt ?? primary.createdAt)}</time></summary>
+  <details class="activity process-tree" bind:open={processOpen} ontoggle={() => { if (processOpen) for (const item of items) { void hydrateDetail(item); void hydrateImage(item); } }}>
+    <summary aria-label={processLabel} aria-expanded={processOpen}>{@render stateIndicator()}<span>{processLabel}</span><time>{formatTime(latest?.createdAt ?? primary.createdAt)}</time><ChevronRight size={13} class="chevron"/></summary>
     <div class="process-steps" aria-label="Process steps">
+      {#if flatTools}
+        {#each items as item (item.id)}{@render processStep(item)}{/each}
+      {:else}
       {#each treeGroups as group, index (group.values[0]?.id ?? index)}
         {#if group.type === 'reasoning-group' && group.values.every(item => !reasoningSummary(item.detail))}
           <div class="process-branch process-branch-static"><BookOpen size={14}/><span>Thinking</span><time>{formatTime(group.values.at(-1)?.createdAt ?? primary.createdAt)}</time></div>
@@ -264,6 +277,7 @@
           </details>
         {/if}
       {/each}
+      {/if}
       {#each approvals as approval (approval.id)}
         <button class="process-approval" type="button" onclick={() => onapproval?.(approval)} title="Open approval history">
           <ShieldCheck size={14}/><span>{approvalLabel(approval)}</span><time>{formatTime(approval.resolvedAt ?? approval.createdAt)}</time>
@@ -275,7 +289,7 @@
   <div class="activity" class:grouped class:compressed={compressed && grouped} class:compaction>
     <button class="activity-trigger" bind:this={anchor} aria-haspopup={compressed && grouped ? undefined : 'dialog'} aria-expanded={open} aria-label={compaction ? compactionDescription : `Tool activity: ${description}, ${items.length} ${items.length===1?'entry':'entries'}`} onclick={toggle}>
       {#if compaction}<Archive size={15}/><span><AnimatedTitle text={compactionDescription} active={compactionActive} activeTooltip="Compacting context..."/></span>
-      {:else}<ChevronRight size={13} class="chevron"/><TriggerIcon size={14}/>{/if}{#if !compaction}<span>{description}</span>{#if grouped && compressed}<small title="Time between the first and latest recorded tool event">· {elapsed}</small>{:else if grouped}<small>{items.length} entries</small>{/if}<time>{formatTime(latest.createdAt)}</time>{/if}
+      {:else}{@render stateIndicator()}{/if}{#if !compaction}<span>{description}</span>{#if grouped && compressed}<small title="Time between the first and latest recorded tool event">· {elapsed}</small>{:else if grouped}<small>{items.length} entries</small>{/if}<time>{formatTime(latest.createdAt)}</time><ChevronRight size={13} class="chevron"/>{/if}
     </button>
     {#if open && compressed && grouped}<div bind:this={panel} class="activity-expanded" role="region" aria-label="Expanded tool calls">
       <div class="calls" aria-label="Tool activity entries">
@@ -316,13 +330,20 @@
   </div>
 {/if}
 <style>
+  .notice-state{display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;flex:0 0 14px;font-size:13px;line-height:1;color:var(--muted)}
+  .notice-state[data-activity-state=failed]{color:var(--danger,#bd655b)}
+  .spinner-ring{width:10px;height:10px;border:1.5px solid var(--line);border-top-color:var(--accent-ink);border-radius:50%;animation:notice-spin .8s linear infinite}
+  @keyframes notice-spin{to{transform:rotate(360deg)}}
+  @media(prefers-reduced-motion:reduce){:global(:root:not([data-motion="on"])) .spinner-ring{animation:none;border-style:dotted}}
   .activity{margin:4px 0 10px;font-size:calc(12px * var(--interface-font-ratio, 1))}.activity.reasoning{margin-bottom:1em;border:1px solid var(--line);border-radius:8px;background:var(--panel)}
   .activity.routing{margin-bottom:1em;border:1px solid color-mix(in srgb,var(--accent) 34%,var(--line));border-radius:8px;background:color-mix(in srgb,var(--accent) 5%,var(--panel))}
   .routing-body{display:grid;gap:8px;padding:10px 12px;border-top:1px solid var(--line)}.routing-body dl{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:0}.routing-body dl div{min-width:0}.routing-body dt{color:var(--muted);font:calc(9px * var(--interface-font-ratio,1)) var(--mono);text-transform:uppercase}.routing-body dd{margin:3px 0 0;overflow-wrap:anywhere;font:calc(11px * var(--interface-font-ratio,1)) var(--mono)}.routing-body p{margin:0;color:var(--muted);line-height:1.45}.routing-body .routing-error{color:#bd655b}
   summary,.activity-trigger{display:flex;align-items:center;gap:8px;padding:11px 12px;color:var(--muted);cursor:pointer;list-style:none;text-align:left}
-  .activity-trigger{box-sizing:border-box;width:100%;font:inherit;padding:8px 4px 8px 0;background:transparent}.activity-trigger:hover{color:var(--ink)}
+  .activity-trigger{box-sizing:border-box;width:100%;font:inherit;padding:8px 0;background:transparent}.activity-trigger:hover{color:var(--ink)}
   summary::-webkit-details-marker{display:none}
   summary span,.activity-trigger span{flex:1;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+  summary .notice-state,.activity-trigger .notice-state{flex:0 0 14px;overflow:visible}
+  summary .spinner-ring,.activity-trigger .spinner-ring{flex:none}
   .compressed .activity-trigger span{flex:0 1 auto}.compressed time{margin-left:auto}
   .compaction .activity-trigger{color:var(--accent-ink)}.compaction .activity-trigger:hover{color:var(--accent-ink)}
   .compaction .activity-trigger span{flex:1;min-width:0;overflow:visible}
@@ -356,7 +377,7 @@
   .detail-state{margin:0;padding:0 9px 9px;color:var(--muted);font-size:calc(10px * var(--interface-font-ratio, 1))}.detail-state.error{color:var(--danger)}
   .tool-image-preview{display:block;width:min(220px,calc(100% - 18px));margin:0 9px 9px;padding:0;border:1px solid var(--line);border-radius:6px;background:var(--soft);cursor:zoom-in;overflow:hidden}.tool-image-preview:focus-visible{outline:2px solid var(--accent);outline-offset:2px}.tool-image-preview img{display:block;width:100%;max-height:150px;object-fit:contain;background:var(--paper)}
   pre{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font:calc(11px * var(--interface-font-ratio, 1))/1.6 var(--mono)}
-  @media (max-width:640px){.activity{margin:2px 0 7px}.activity-trigger{padding:6px 0}}
+  @media (max-width:640px){.activity{margin:2px 0 7px}.activity-trigger{padding:6px 0}summary,.activity-trigger,.process-approval{box-sizing:border-box;min-height:44px}}
   @media (prefers-reduced-motion:reduce){:global(:root:not([data-motion="on"])) .process-tree{transition:none}}
 </style>
 

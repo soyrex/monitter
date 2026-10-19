@@ -207,6 +207,66 @@ fn retained_placeholder(id: &str, cx: &mut Context<DockWorkspace>) -> PaneSpec {
 const MISSING_TERMINAL: &str = "terminal:37fffedc-3272-4039-8d23-31a493a849ae";
 
 #[gpui_kit::test]
+fn ideas_pane_opens_beside_agent_and_reuses_retained_entity(cx: &mut TestAppContext) {
+    let (desktop, visual) = desktop_restore_fixture(cx);
+    visual.update(|window, cx| desktop.update(cx, |view, cx| {
+        view.snapshot = Rc::new(json!({"projects":[{"id":"project","name":"Project","ideas":[],"ideasRevision":0}],"tasks":[{"id":"fixture-task","projectId":"project"}]}));
+        view.selected = Some("fixture-task".into());
+        view.dock.update(cx, |dock, cx| {
+            dock.add(retained_placeholder("chat:fixture-task", cx), gpui_kit::component::dock::DockPlacement::Center, None, window, cx).unwrap();
+            dock.focus("chat:fixture-task", window, cx);
+        });
+        view.open_ideas(window, cx).unwrap();
+        let pane = view.ideas.as_ref().unwrap().entity_id();
+        let dock = view.dock.read(cx);
+        assert_ne!(dock.group_for_pane("route:ideas", cx), dock.group_for_pane("chat:fixture-task", cx), "ideas must split beside the agent, not hide its tab");
+        let saved = dock.serialize(cx).unwrap();
+        assert!(DockWorkspace::saved_ids(&saved).unwrap().contains(&"route:ideas".into()));
+        view.open_ideas(window, cx).unwrap();
+        assert_eq!(view.ideas.as_ref().unwrap().entity_id(), pane);
+        assert_eq!(DockWorkspace::saved_ids(&view.dock.read(cx).serialize(cx).unwrap()).unwrap().iter().filter(|id| *id == "route:ideas").count(), 1);
+        view.dock.update(cx, |dock, cx| dock.remove("route:ideas", window, cx));
+        view.open_ideas(window, cx).unwrap();
+        assert_eq!(view.ideas.as_ref().unwrap().entity_id(), pane, "closing and reopening keeps the same editor");
+        view.finish_workspace_restore(saved, vec![], vec![], 0, window, cx);
+        assert!(view.preferences_error.is_none(), "Idea List is a supported saved route");
+    }));
+}
+
+#[gpui_kit::test]
+fn ideas_split_actions_target_the_owning_pane_and_retain_editors(cx: &mut TestAppContext) {
+    let (desktop, visual) = desktop_restore_fixture(cx);
+    visual.update(|window, cx| desktop.update(cx, |view, cx| {
+        view.snapshot = Rc::new(json!({"projects":[{"id":"project","name":"Project","ideas":[],"ideasRevision":0}],"tasks":[{"id":"fixture-task","projectId":"project"}]}));
+        view.selected = Some("fixture-task".into());
+        view.dock.update(cx, |dock, cx| {
+            dock.add(retained_placeholder("chat:fixture-task", cx), gpui_kit::component::dock::DockPlacement::Center, None, window, cx).unwrap();
+            dock.focus("chat:fixture-task", window, cx);
+        });
+        view.open_ideas(window, cx).unwrap();
+    }));
+    for vertical in [true, false] {
+        let (owner_group, agent_group, editor, before) = visual.update(|window, cx| desktop.update(cx, |view, cx| {
+            view.dock.update(cx, |dock, cx| assert!(dock.focus("chat:fixture-task", window, cx)));
+            let dock = view.dock.read(cx);
+            (dock.group_for_pane("route:ideas", cx), dock.group_for_pane("chat:fixture-task", cx),
+                view.ideas.as_ref().unwrap().entity_id(), DockWorkspace::saved_ids(&dock.serialize(cx).unwrap()).unwrap().len())
+        }));
+        visual.update(|_, cx| desktop.update(cx, |view, cx| {
+            view.ideas.as_ref().unwrap().update(cx, |_, cx| cx.emit(crate::ideas::IdeasEvent::Split { vertical }));
+        }));
+        visual.run_until_parked();
+        visual.update(|_, cx| desktop.update(cx, |view, cx| {
+            let dock = view.dock.read(cx);
+            assert_eq!(dock.group_for_pane("route:ideas", cx), owner_group);
+            assert_eq!(dock.group_for_pane("chat:fixture-task", cx), agent_group);
+            assert_eq!(view.ideas.as_ref().unwrap().entity_id(), editor);
+            assert_eq!(DockWorkspace::saved_ids(&dock.serialize(cx).unwrap()).unwrap().len(), before + 1);
+        }));
+    }
+}
+
+#[gpui_kit::test]
 fn desktop_workspace_restore_prunes_missing_terminal_and_retains_chat_and_outgoing_pane(cx: &mut TestAppContext) {
     let (desktop, visual) = desktop_restore_fixture(cx);
     visual.update(|window, cx| desktop.update(cx, |view, cx| {

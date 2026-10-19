@@ -5,10 +5,13 @@
   import ShieldAlert from "@lucide/svelte/icons/shield-alert";
   import X from "@lucide/svelte/icons/x";
   import type { ApprovalDecision, ApprovalRequest } from '$lib/types';
+  import { clearQuestionDraft, pruneQuestionDrafts, reconcileQuestionDrafts, questionDraftKey } from '$lib/question-drafts';
   import HarnessInput from './HarnessInput.svelte';
 
-  let { requests, disabled = false, resolvingId = null, onresolve, oninput }: {
+  let { requests, taskId, authoritativeRequests, disabled = false, resolvingId = null, onresolve, oninput }: {
     requests: ApprovalRequest[];
+    taskId?: string;
+    authoritativeRequests?: ApprovalRequest[];
     disabled?: boolean;
     resolvingId?: string | null;
     onresolve?: (request: ApprovalRequest, decision: ApprovalDecision) => void;
@@ -40,6 +43,12 @@
     if (input.kind === 'form') return Object.values((input.schema?.properties ?? {}) as Record<string, Record<string, unknown>>).every(field => ['string', 'number', 'integer', 'boolean'].includes(String(field.type)));
     if (input.kind !== 'url') return true;
     try { const url = new URL(input.url ?? ''); return ['https:', 'http:'].includes(url.protocol); } catch { return false; }
+  });
+
+  $effect(() => {
+    if (authoritativeRequests) reconcileQuestionDrafts(authoritativeRequests);
+    else if (taskId) pruneQuestionDrafts(taskId, pendingRequests.filter(request => request.taskId === taskId).map(request => request.id));
+    for (const request of requests) if (request.status !== 'pending') clearQuestionDraft(request.taskId, request.id);
   });
 
   $effect(() => {
@@ -89,7 +98,7 @@
       {#if !request.input && request.rememberable === true}<p class="scope-note">The exact-action option is saved for this agent, host and folder. Revoke it in Settings → Approvals.</p>{/if}
       {#if action}<details><summary>Technical request details</summary><pre>{JSON.stringify(action, null, 2)}</pre></details>{/if}
       {#if request.input}
-        {#key request.id}<HarnessInput input={request.input} formId={inputFormId} hideSubmit={true} disabled={disabled || resolving || !oninput} onsubmit={response => oninput?.(request, response)}/>{/key}
+        {#key request.id}<HarnessInput draftKey={questionDraftKey(request.taskId, request.id)} input={request.input} formId={inputFormId} hideSubmit={true} disabled={disabled || resolving || !oninput} onsubmit={response => oninput?.(request, response)}/>{/key}
       {/if}
     </div>
 

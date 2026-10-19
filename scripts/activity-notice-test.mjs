@@ -1,0 +1,16 @@
+import assert from 'node:assert/strict';
+import { activityNotice, activityNoticeState } from '../src/lib/activity-notice.ts';
+const event = detail => ({ id: 'retained-call', taskId: 'task', kind: 'tool', title: 'mcpToolCall', createdAt: 1, detail: JSON.stringify(detail) });
+const mcp = status => event({ type: 'mcpToolCall', server: 'monitter', tool: 'build_request_update', status, arguments: { status: 'failed' } });
+assert.deepEqual(activityNotice(mcp('inProgress')), { state: 'running', intent: 'Monitter · Build request update' });
+assert.equal(activityNotice(mcp('completed')).state, 'completed');
+for (const status of ['failed', 'cancelled', 'interrupted']) assert.equal(activityNotice(mcp(status)).state, 'failed');
+assert.equal(activityNotice(mcp('')).state, 'unknown', 'Argument status is never execution evidence');
+assert.equal(activityNotice(event({ type: 'mcpToolCall', status: 'completed', result: { isError: true } })).state, 'failed');
+assert.equal(activityNotice(event({ item: { type: 'mcpToolCall', server: 'a', tool: 'b', status: 'running' } })).intent, 'A · B');
+assert.equal(activityNotice(event({ update: { status: 'completed' } })).state, 'completed');
+assert.equal(activityNoticeState([mcp('inProgress'), mcp('failed')]), 'running');
+assert.equal(activityNoticeState([mcp('completed'), mcp('failed')]), 'failed');
+assert.equal(activityNoticeState([mcp('inProgress')], false), 'completed', 'Finished turn header must not keep a stale tool spinner');
+assert.equal(activityNoticeState([], true), 'running');
+console.log('Activity notice execution-envelope assertions passed');

@@ -1,0 +1,28 @@
+import assert from 'node:assert/strict';
+import { questionDraftKey, readQuestionDraft, saveQuestionDraft, pruneQuestionDrafts, clearQuestionDraft, reconcileQuestionDrafts } from '../src/lib/question-drafts.ts';
+const key = questionDraftKey('task-a', 'request');
+const other = questionDraftKey('task-b', 'request');
+const draft = { values: { 'question:__proto__': 'Private answer' }, selections: { 'question:__proto__': ['A', 'B'] } };
+saveQuestionDraft(key, draft);
+saveQuestionDraft(other, { values: { q: 'Other task' }, selections: {} });
+draft.selections['question:__proto__'].pop();
+assert.deepEqual(readQuestionDraft(key).selections['question:__proto__'], ['A', 'B']);
+const read = readQuestionDraft(key);
+read.values['question:__proto__'] = 'Changed copy';
+assert.equal(readQuestionDraft(key).values['question:__proto__'], 'Private answer');
+pruneQuestionDrafts('task-a', ['request']);
+assert.equal(readQuestionDraft(key).values['question:__proto__'], 'Private answer', 'Pending drafts survive retry');
+pruneQuestionDrafts('task-a', []);
+saveQuestionDraft(key, draft);
+assert.deepEqual(Object.keys(readQuestionDraft(key).values), [], 'Unmount must not resurrect an authoritative cleared draft');
+assert.equal(readQuestionDraft(other).values.q, 'Other task');
+clearQuestionDraft('task-b', 'request');
+assert.deepEqual(Object.keys(readQuestionDraft(other).values), []);
+assert.notEqual(questionDraftKey('a:b', 'c'), questionDraftKey('a', 'b:c'));
+console.log('Memory-only question draft lifecycle assertions passed');
+
+const channelKey = questionDraftKey('channel-task', 'channel-request');
+saveQuestionDraft(channelKey, draft);
+reconcileQuestionDrafts([{ taskId: 'channel-task', id: 'channel-request', status: 'completed' }]);
+saveQuestionDraft(channelKey, draft);
+assert.deepEqual(Object.keys(readQuestionDraft(channelKey).values), [], 'Authoritative channel snapshot clears resolved drafts across task scopes');

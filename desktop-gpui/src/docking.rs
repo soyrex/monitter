@@ -218,6 +218,9 @@ impl BasePanel for NativePanel {
     }
     fn on_removed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.dock_group = None;
+        if let Ok(ideas) = self.spec.content.clone().downcast::<crate::ideas::IdeasPane>() {
+            ideas.update(cx, |ideas, cx| ideas.set_dock_group(None, cx));
+        }
         crate::native_pane_highlight::observe_candidate(&self.spec.id, false, window);
         if let Some(background) = &self.background { background.update(cx, |background, cx| background.set_visible(false, cx)); }
         if self.retaining_layout.get() {
@@ -250,6 +253,9 @@ impl BasePanel for NativePanel {
     fn on_added_to(&mut self, group: WeakEntity<TabGroup>, _: &mut Window, cx: &mut Context<Self>) {
         self.removed = false;
         self.dock_group = Some(group.clone());
+        if let Ok(ideas) = self.spec.content.clone().downcast::<crate::ideas::IdeasPane>() {
+            ideas.update(cx, |ideas, cx| ideas.set_dock_group(Some(group.clone()), cx));
+        }
         if let Ok(chat) = self.spec.content.clone().downcast::<crate::chat::ChatPane>() {
             chat.update(cx, |chat, cx| chat.set_dock_group(Some(group.clone()), cx));
         }
@@ -293,7 +299,7 @@ impl Panel for NativePanel {
     fn inner_padding(&self, _: &App) -> bool { false }
     fn toolbar_in_content(&self, _: &App) -> bool {
         self.spec.id.starts_with("chat:") || self.spec.id.starts_with("draft:") || self.spec.id.starts_with(EMPTY_TAB_PREFIX)
-            || self.git_header_visible()
+            || self.spec.id == "route:ideas" || self.git_header_visible()
     }
     fn close_button_visible(&self, cx: &App) -> bool {
         self.spec.content.clone().downcast::<crate::browser::BrowserTab>()

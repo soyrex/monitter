@@ -1,4 +1,4 @@
-import type { Agent, Channel, Task } from '$lib/types';
+import type { Agent, Channel, Project, Task } from '$lib/types';
 import type { PaneTabTransfer } from '$lib/panes';
 import type { TabKey } from '$lib/tab-order';
 
@@ -14,6 +14,7 @@ export type PaneSurfaceHandle<State, Payload> = {
   selectRelativeTab: (direction: 1 | -1) => boolean;
   openAgentSettings: (draft: Agent) => void;
   openSettings: (category?: string) => void;
+  openProjectIdeas: (project: Project) => void;
   openTerminalTab: (id: string) => void;
   newTerminal: () => Promise<void>;
   openEmptyTab: () => void;
@@ -26,7 +27,7 @@ export type PaneSurfaceHandle<State, Payload> = {
   reorderTab: (tab: PaneTabTransfer, before?: TabKey) => void;
   allTabs: () => PaneTabTransfer[];
   captureState: () => State;
-  restoreState: (value: State) => void;
+  restoreState: (value: State, preserveWatchInterjection?: boolean) => void;
   closeActiveTab: () => void;
   maximizePane: () => void;
   restorePaneLayout: () => void;

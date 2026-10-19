@@ -21,6 +21,10 @@
   import RichMarkdownComposer from './LazyRichMarkdownComposer.svelte';
   import VoiceRecorder from './VoiceRecorder.svelte';
   import NativeSpeechRecorder from './NativeSpeechRecorder.svelte';
+  import IdeaListPane from './IdeaListPane.svelte';
+  import { captureWatchInterjection, projectWatchInterjection, type WatchInterjectionState } from '$lib/watch-interjection';
+  import WatchPane from './WatchPane.svelte';
+  import { reconcileQuestionDrafts } from '$lib/question-drafts';
   import CompanionMode from './CompanionMode.svelte';
   import { isCompanionAvailable } from '$lib/companion-voice';
   import { mobileSpeechMode, nativeSpeechPlatform } from '$lib/mobile-speech';
@@ -233,9 +237,9 @@
       parentExpandedPaneId?:string|null; parentGeometryRevision?:string; parentBrowserVisible?:boolean; parentBrowserResizing?:boolean; onExpandPane?:(id:string|null)=>void; onAgentSettingsSelect?:(draft:Agent)=>void; onClosePane?:(id:string)=>void; onLayout?: (mode: PaneLayoutPreset) => void; onSelection?: (taskId: string | null) => void; onTerminalSelect?: (id:string)=>void; onWorkspaceChange?:()=>void; onSettingsSelect?:(category?:string)=>void; onTabPointerStart?:(event:PointerEvent,tab:PaneTabTransfer)=>void; onVimSplit?:(id:string,axis:'horizontal'|'vertical')=>void; onVimWorkspace?:(id:string,command:VimCommand)=>Promise<void>; onExistingChat?:(kind:'task'|'channel',id:string,requester:string)=>boolean } = $props();
   type DropEdge = 'center' | 'left' | 'right' | 'top' | 'bottom';
   type AgentEditorState={draft:Agent|null;edits:Record<string,Agent>};
-  type TabPayload = { settingsEditor?:AgentEditorState;settingsCategory?:string; tab: PaneTabTransfer; draft?: TaskDraft; document?: MarkdownDocument; browser?: BrowserTabMetadata; text?: string; attachments?:Attachment[]; attachmentContext?:string;recipients?:string[] };
+  type TabPayload = { watch?:boolean;ideaDraftKey?:string;settingsEditor?:AgentEditorState;settingsCategory?:string; tab: PaneTabTransfer; draft?: TaskDraft; document?: MarkdownDocument; browser?: BrowserTabMetadata; text?: string; attachments?:Attachment[]; attachmentContext?:string;recipients?:string[] };
   type MarkdownDocument = { taskId: string; path: string; title: string; kind?: 'markdown' | 'image' | 'pdf' | 'html' };
-  type PaneState = { settingsEditor?:AgentEditorState;overviewOpen:boolean;settingsOpen:boolean;settingsCategory:string;openTerminalIds:string[];selectedTerminalId:string|null;openBrowserIds:string[];selectedBrowserId:string|null;browserTabs:Record<string,BrowserTabMetadata>;openGitTaskIds:string[];selectedGitTaskId:string|null;openEmptyIds:string[];selectedEmptyId:string|null;documents:Record<string,MarkdownDocument>;openTaskIds:string[];openDraftIds:string[];openChannelIds:string[];tabOrder:TabKey[];taskDrafts:Record<string,TaskDraft>;drafts:Record<string,string>;selectedTaskId:string|null;currentDraftId:string|null;selectedChannelId:string|null;pane:typeof pane;focusedAgentId:string|null;focusedProjectId:string|null;showDetail:boolean;detailTab:'run'|'timeline'|'approvals'|'subagents';queuedAttachments:Record<string,Attachment[]>;attachmentContexts:Record<string,string>;channelRecipients:Record<string,string[]> };
+  type PaneState = { settingsEditor?:AgentEditorState;overviewOpen:boolean;settingsOpen:boolean;settingsCategory:string;openTerminalIds:string[];selectedTerminalId:string|null;openBrowserIds:string[];selectedBrowserId:string|null;browserTabs:Record<string,BrowserTabMetadata>;ideaDraftKeys?:Record<string,string>;openIdeaProjectIds:string[];selectedIdeaProjectId:string|null;openGitTaskIds:string[];selectedGitTaskId:string|null;openEmptyIds:string[];selectedEmptyId:string|null;documents:Record<string,MarkdownDocument>;openTaskIds:string[];openDraftIds:string[];openChannelIds:string[];tabOrder:TabKey[];taskDrafts:Record<string,TaskDraft>;drafts:Record<string,string>;selectedTaskId:string|null;currentDraftId:string|null;selectedChannelId:string|null;pane:typeof pane;focusedAgentId:string|null;focusedProjectId:string|null;showDetail:boolean;watchTaskIds?:string[];detailTab:'run'|'timeline'|'approvals'|'subagents';queuedAttachments:Record<string,Attachment[]>;attachmentContexts:Record<string,string>;channelRecipients:Record<string,string[]> };
   let layout = $state<PaneLayout>({id:'main'}), activePaneId = $state('main');
   let sidebarSelected = $state(false);
   let pendingEmptyPaneIds = $state<string[]>([]);
@@ -245,7 +249,7 @@
   const paneLocal = createPaneLocalState();
   let expandedPaneId=$state<string|null>(null), focusStep=$state<0|1|2>(0), focusTarget=$state('');
   const workspaceExpansion=$derived(embedded?parentExpandedPaneId:expandedPaneId);
-  const contentKey=$derived.by(()=>`${pane}:${pane==='task'?currentDraftId??selectedTaskId:pane==='channel'?selectedChannelId:pane==='terminal'?selectedTerminalId:pane==='browser'?selectedBrowserId:pane==='git'?selectedGitTaskId:pane==='agent'?focusedAgentId:pane==='project'?focusedProjectId:''}`);
+  const contentKey=$derived.by(()=>`${pane}:${pane==='task'?currentDraftId??selectedTaskId:pane==='channel'?selectedChannelId:pane==='terminal'?selectedTerminalId:pane==='browser'?selectedBrowserId:pane==='git'?selectedGitTaskId:pane==='ideas'?selectedIdeaProjectId:pane==='agent'?focusedAgentId:pane==='project'?focusedProjectId:''}`);
   function setPaneExpansion(id:string|null){if(embedded)onExpandPane?.(id);else{expandedPaneId=id;if(id)activePaneId=id;}}
   function resetTabExpansion(){focusStep=0;focusTarget='';if(workspaceExpansion===paneId)setPaneExpansion(null);}
   function expandTab(workspace=false){
@@ -278,8 +282,8 @@
   type SharedComposer = { text: string; attachments: Attachment[]; context?: string };
   const sharedComposers = getContext<Map<string, SharedComposer>>('monitter-task-composers') ?? new Map<string, SharedComposer>();
   setContext('monitter-task-composers', sharedComposers);
-  const workspaceNavigation = getContext<{ task: (task: Task) => void; channel: (channel: Channel) => void; draft: (payload: TabPayload) => Promise<void> }>('monitter-workspace-navigation')
-    ?? { task: routeTaskWorkspace, channel: routeChannel, draft: moveDraftToWorkspace };
+  const workspaceNavigation = getContext<{ task: (task: Task) => void; channel: (channel: Channel) => void; ideas: (project:Project) => void; draft: (payload: TabPayload) => Promise<void> }>('monitter-workspace-navigation')
+    ?? { task: routeTaskWorkspace, channel: routeChannel, ideas: routeProjectIdeas, draft: moveDraftToWorkspace };
   setContext('monitter-workspace-navigation', workspaceNavigation);
   let compactDetail = $state(false);
   let compactTabs = $state(false);
@@ -544,7 +548,9 @@
   let snapshot = $state.raw<Snapshot | null>(null),
     selectedTaskId = $state<string | null>(null),
     selectedChannelId = $state<string | null>(null),
-    pane = $state<"empty" | "overview" | "task" | "channel" | "agent" | "project" | "terminal" | "browser" | "git" | "settings">(untrack(()=>embedded?"empty":"overview"));
+    pane = $state<"empty" | "overview" | "task" | "channel" | "agent" | "project" | "terminal" | "browser" | "git" | "ideas" | "settings">(untrack(()=>embedded?"empty":"overview"));
+  // Resolution must clear answers even while Watch has unmounted its composer.
+  $effect(() => { if (snapshot) reconcileQuestionDrafts(snapshot.approvalRequests ?? []); });
   // Embedded panes share this projection from the root surface. Only a root
   // snapshot update rebuilds the indexes, rather than every pane re-filtering
   // messages/events/approvals from the full snapshot independently.
@@ -560,6 +566,10 @@
   const visibleActivityTasks = $derived(indexes?.visibleActivityTasks ?? []);
   let openTerminalIds=$state<string[]>([]), selectedTerminalId=$state<string|null>(null), terminalBusy=$state(false);
   let openBrowserIds=$state<string[]>([]), selectedBrowserId=$state<string|null>(null);
+  let ideaDraftKeys=$state<Record<string,string>>({});
+  let ideaSaving = $state(false);
+  let openIdeaProjectIds=$state<string[]>([]), selectedIdeaProjectId=$state<string|null>(null);
+  const selectedIdeaProject = $derived(snapshot?.projects.find(project => project.id === selectedIdeaProjectId) ?? null);
   let openGitTaskIds=$state<string[]>([]), selectedGitTaskId=$state<string|null>(null);
   let browserTabs=$state<Record<string,BrowserTabMetadata>>({});
   let browserHistory=$state<Record<string, { canGoBack: boolean | null; canGoForward: boolean | null }>>({});
@@ -625,6 +635,32 @@
     });
     return () => { disposed = true; unlisten?.(); };
   });
+  let watchExchanges = $state<Record<string, WatchInterjectionState>>({});
+  const watchExchange = $derived(snapshot && selectedTaskId && watchExchanges[selectedTaskId] ? projectWatchInterjection(snapshot, watchExchanges[selectedTaskId]) : null);
+  $effect(() => {
+    if (!snapshot) return;
+    for (const [id, value] of Object.entries(watchExchanges)) {
+      const next = projectWatchInterjection(snapshot, value).state;
+      if (next !== value) watchExchanges[id] = next;
+    }
+  });
+  let watchTaskIds = $state<string[]>([]);
+  let watchInterjectTaskId = $state<string | null>(null);
+  let watchInterjectTrigger = $state<HTMLButtonElement | null>(null);
+  function openWatchInterject() {
+    watchInterjectTaskId = selectedTaskId;
+    focusComposerTextarea();
+  }
+  function closeWatchInterject() {
+    watchInterjectTaskId = null;
+    void tick().then(() => watchInterjectTrigger?.focus({ preventScroll: true }));
+  }
+  function toggleTaskWatch() {
+    if (!selectedTaskId) return;
+    saveCurrentDraft();
+    watchTaskIds = watchingTask ? watchTaskIds.filter(id => id !== selectedTaskId) : [...watchTaskIds, selectedTaskId];
+    watchInterjectTaskId = null;
+  }
   let showDetail = $state(true),
     busy = $state(false),
     error = $state(""),
@@ -811,6 +847,7 @@
   let taskDrafts = $state<Record<string, TaskDraft>>({});
   let openDraftIds = $state<string[]>([]);
   let currentDraftId = $state<string | null>(null);
+  const watchingTask = $derived(!!selectedTaskId && pane === 'task' && !currentDraftId && watchTaskIds.includes(selectedTaskId));
   const draftSendPending=$derived(Boolean(currentDraftId && composerPending[`draft:${currentDraftId}`]));
   let taskAgentId = $state(""),
     taskProjectId = $state(""),
@@ -998,6 +1035,7 @@
   let clearingGoalTaskId = $state("");
   let goalClearError = $state("");
   let goalRequestRevision = 0;
+  let goalReadIdentity = '';
   async function clearSelectedGoal() {
     const taskId = selectedTask?.id;
     if (!taskId || clearingGoalTaskId) return;
@@ -1015,12 +1053,16 @@
     }
   }
   const goalKey = $derived(selectedTask?.nativeSessionId && selectedTask.provider === "codex"
-    ? `${selectedTask.id}|${selectedTask.nativeSessionId}|${selectedTask.status}` : "");
+    ? `${selectedTask.id}|${selectedTask.nativeSessionId}|${selectedTask.status}|${watchingTask ? 'watch' : 'chat'}` : "");
   $effect(() => {
-    const [taskId, , status] = goalKey.split("|");
-    goal = null;
-    goalError = "";
-    goalClearError = "";
+    const [taskId, sessionId, status, mode] = goalKey.split("|");
+    const identity = `${taskId}|${sessionId}`;
+    if (goalReadIdentity !== identity) {
+      goalReadIdentity = identity;
+      goal = null;
+      goalError = "";
+      goalClearError = "";
+    }
     if (!taskId) return;
     let cancelled = false, pending = false;
     async function refreshGoal() {
@@ -1035,7 +1077,8 @@
       } finally { pending = false; }
     }
     untrack(() => { void refreshGoal(); });
-    const interval = status === "running" ? setInterval(refreshGoal, 15000) : undefined;
+    // Watch must discover a goal assigned while its native task is idle too.
+    const interval = status === "running" || mode === 'watch' ? setInterval(refreshGoal, mode === 'watch' ? 60000 : 15000) : undefined;
     return () => { cancelled = true; if (interval) clearInterval(interval); };
   });
   const goalNote = $derived(selectedTask?.provider === "hermes" ? events.filter(event=>event.kind === "goal").at(-1)?.detail ?? "" : "");
@@ -1414,6 +1457,7 @@
       ...openChannelIds.map(id=>({kind:'channel' as const,id})),
       ...openTerminalIds.map(id=>({kind:'terminal' as const,id})),
       ...openBrowserIds.map(id=>({kind:'browser' as const,id})),
+      ...openIdeaProjectIds.map(id=>({kind:'ideas' as const,id})),
       ...openGitTaskIds.map(id=>({kind:'git' as const,id})),
       ...openEmptyIds.map(id=>({kind:'empty' as const,id})),
       ...(settingsOpen ? [{kind:'settings' as const,id:'settings'}] : []),
@@ -1499,10 +1543,10 @@
     paneLocal.swap(current, availableTabs(), direction);
   }
   export function toggleDetail() { showDetail = !showDetail; }
-  export function hasPending() { return terminalBusy || Object.values(composerPending).some(Boolean) || Object.values(pendingUploads).some(Boolean); }
+  export function hasPending() { return ideaSaving || terminalBusy || Object.values(composerPending).some(Boolean) || Object.values(pendingUploads).some(Boolean); }
   export function captureState():PaneState {
     // Persistence must only read reactive state: writing here can recursively trigger itself.
-    const captured:PaneState=JSON.parse(JSON.stringify({settingsEditor:{draft:agentDraft,edits:agentEdits},overviewOpen,settingsOpen,settingsCategory,openTerminalIds,selectedTerminalId,openBrowserIds,selectedBrowserId,browserTabs,openGitTaskIds,selectedGitTaskId,openEmptyIds,selectedEmptyId,documents,openTaskIds,openDraftIds,openChannelIds,tabOrder:orderedTabs(),taskDrafts,drafts,selectedTaskId,currentDraftId,selectedChannelId,pane,focusedAgentId,focusedProjectId,showDetail,detailTab,queuedAttachments,attachmentContexts,channelRecipients}));
+    const captured:PaneState=JSON.parse(JSON.stringify({settingsEditor:{draft:agentDraft,edits:agentEdits},overviewOpen,settingsOpen,settingsCategory,openTerminalIds,selectedTerminalId,openBrowserIds,selectedBrowserId,browserTabs,ideaDraftKeys,openIdeaProjectIds,selectedIdeaProjectId,openGitTaskIds,selectedGitTaskId,openEmptyIds,selectedEmptyId,documents,openTaskIds,openDraftIds,openChannelIds,tabOrder:orderedTabs(),taskDrafts,drafts,selectedTaskId,currentDraftId,selectedChannelId,pane,focusedAgentId,focusedProjectId,showDetail,watchTaskIds,detailTab,queuedAttachments,attachmentContexts,channelRecipients}));
     const key=currentDraftKey();
     if(key)captured.drafts[key]=composer;
     if(pane==='channel' && selectedChannelId)captured.channelRecipients[selectedChannelId]=[...recipients];
@@ -1511,11 +1555,14 @@
     }
     return captured;
   }
-  export function restoreState(value:PaneState) {
+  export function restoreState(value:PaneState, preserveWatchInterjection = false) {
     browserAppliedLayouts.clear(); // A restored pane must reveal its hidden native children.
     value = applySharedComposers(value as unknown as Record<string, unknown>) as unknown as PaneState;
+    ideaDraftKeys = value.ideaDraftKeys ?? {};
+    watchTaskIds = Array.isArray(value.watchTaskIds) ? value.watchTaskIds : [];
+    if (!preserveWatchInterjection || value.pane !== 'task' || value.selectedTaskId !== watchInterjectTaskId || !watchTaskIds.includes(value.selectedTaskId ?? '')) watchInterjectTaskId = null;
     agentDraft=value.settingsEditor?.draft??null;agentEdits=value.settingsEditor?.edits??{};
-    ({overviewOpen,settingsOpen,settingsCategory,openTerminalIds,selectedTerminalId,openBrowserIds,selectedBrowserId,browserTabs,openGitTaskIds,selectedGitTaskId,openEmptyIds,selectedEmptyId,documents,openTaskIds,openDraftIds,openChannelIds,taskDrafts,drafts,selectedTaskId,currentDraftId,selectedChannelId,pane,focusedAgentId,focusedProjectId,showDetail,detailTab,queuedAttachments,attachmentContexts,channelRecipients}=value);
+    ({overviewOpen,settingsOpen,settingsCategory,openTerminalIds,selectedTerminalId,openBrowserIds,selectedBrowserId,browserTabs,openIdeaProjectIds,selectedIdeaProjectId,openGitTaskIds,selectedGitTaskId,openEmptyIds,selectedEmptyId,documents,openTaskIds,openDraftIds,openChannelIds,taskDrafts,drafts,selectedTaskId,currentDraftId,selectedChannelId,pane,focusedAgentId,focusedProjectId,showDetail,detailTab,queuedAttachments,attachmentContexts,channelRecipients}=value);
     paneLocal.restore(Array.isArray(value.tabOrder) ? value.tabOrder : [], availableTabs());
     composer=drafts[currentDraftKey() ?? ''] ?? '';
     recipients=selectedChannelId?channelRecipients[selectedChannelId]??[]:[];
@@ -1614,12 +1661,16 @@
       ...fallback, ...saved,
       overviewOpen: saved.overviewOpen !== false,
       settingsOpen: saved.settingsOpen === true,
+      watchTaskIds: Array.isArray(saved.watchTaskIds) ? saved.watchTaskIds.filter(id => typeof id === 'string') : [],
       // Keep saved panes and legacy links aligned with the preferences menu.
       settingsCategory: normalizeSettingsCategory(saved.settingsCategory ?? ''),
       openTerminalIds: Array.isArray(saved.openTerminalIds) ? saved.openTerminalIds : fallback.openTerminalIds,
       openBrowserIds: Array.isArray(saved.openBrowserIds) ? saved.openBrowserIds.filter(id => typeof id === 'string') : [],
       selectedBrowserId: typeof saved.selectedBrowserId === 'string' ? saved.selectedBrowserId : null,
       openGitTaskIds: Array.isArray(saved.openGitTaskIds) ? saved.openGitTaskIds.filter(id => typeof id === 'string') : [],
+      ideaDraftKeys: saved.ideaDraftKeys && typeof saved.ideaDraftKeys === 'object' ? Object.fromEntries(Object.entries(saved.ideaDraftKeys).filter(([,key]) => typeof key === 'string')) : {},
+      openIdeaProjectIds: Array.isArray(saved.openIdeaProjectIds) ? saved.openIdeaProjectIds.filter(id => typeof id === 'string') : [],
+      selectedIdeaProjectId: typeof saved.selectedIdeaProjectId === 'string' ? saved.selectedIdeaProjectId : null,
       selectedGitTaskId: typeof saved.selectedGitTaskId === 'string' ? saved.selectedGitTaskId : null,
       browserTabs: saved.browserTabs && typeof saved.browserTabs === 'object' && !Array.isArray(saved.browserTabs)
         ? Object.fromEntries(Object.entries(saved.browserTabs).flatMap(([id, value]) => {
@@ -1636,19 +1687,21 @@
       openTaskIds: Array.isArray(saved.openTaskIds) ? saved.openTaskIds : fallback.openTaskIds,
       openDraftIds: Array.isArray(saved.openDraftIds) ? saved.openDraftIds : fallback.openDraftIds,
       openChannelIds: Array.isArray(saved.openChannelIds) ? saved.openChannelIds : fallback.openChannelIds,
-      tabOrder: Array.isArray(saved.tabOrder) ? saved.tabOrder.filter((tab): tab is TabKey => !!tab && typeof tab === 'object' && ['task','draft','channel','terminal','browser','git','settings','empty'].includes((tab as TabKey).kind) && typeof (tab as TabKey).id === 'string') : fallback.tabOrder,
+      tabOrder: Array.isArray(saved.tabOrder) ? saved.tabOrder.filter((tab): tab is TabKey => !!tab && typeof tab === 'object' && ['task','draft','channel','terminal','browser','git','ideas','settings','empty'].includes((tab as TabKey).kind) && typeof (tab as TabKey).id === 'string') : fallback.tabOrder,
       taskDrafts: saved.taskDrafts && typeof saved.taskDrafts === 'object' ? saved.taskDrafts : fallback.taskDrafts,
       drafts: saved.drafts && typeof saved.drafts === 'object' ? saved.drafts : fallback.drafts,
       queuedAttachments: saved.queuedAttachments && typeof saved.queuedAttachments === 'object' ? saved.queuedAttachments : fallback.queuedAttachments,
       attachmentContexts: saved.attachmentContexts && typeof saved.attachmentContexts === 'object' ? saved.attachmentContexts : fallback.attachmentContexts,
       channelRecipients: saved.channelRecipients && typeof saved.channelRecipients === 'object' ? saved.channelRecipients : fallback.channelRecipients,
-      pane: ['empty', 'overview', 'task', 'channel', 'agent', 'project', 'terminal', 'browser', 'git', 'settings'].includes(saved.pane as string) ? saved.pane! : fallback.pane,
+      pane: ['empty', 'overview', 'task', 'channel', 'agent', 'project', 'terminal', 'browser', 'git', 'ideas', 'settings'].includes(saved.pane as string) ? saved.pane! : fallback.pane,
       detailTab: ['run', 'timeline', 'approvals', 'subagents'].includes(saved.detailTab as string) ? saved.detailTab! : fallback.detailTab,
     };
     const taskIds = new Set((snapshot?.tasks ?? []).filter(task => !task.archived && indexes?.visibleAgentIds.has(task.agentId) === true && taskBelongsToWorkspace(task, scope)).map(task => task.id) ?? []);
     const channelIds = new Set(availableChannels.map(channel => channel.id));
     const agentIds = indexes?.visibleAgentIds ?? new Set<string>();
     const projectIds = new Set(snapshot?.projects.map(project => project.id) ?? []);
+    state.openIdeaProjectIds = state.openIdeaProjectIds.filter(id => projectIds.has(id) && (!scope.startsWith('project:') || scope === `project:${id}`));
+    if (!state.selectedIdeaProjectId || !state.openIdeaProjectIds.includes(state.selectedIdeaProjectId)) state.selectedIdeaProjectId = null;
     state.openTaskIds = state.openTaskIds.filter(id => taskIds.has(id));
     state.openChannelIds = state.openChannelIds.filter(id => channelIds.has(id));
     state.openBrowserIds = state.openBrowserIds.filter(id => !!state.browserTabs[id]);
@@ -1667,6 +1720,7 @@
     state.tabOrder = normalizeTabOrder(state.tabOrder, [
       ...state.openTaskIds.map(id=>({kind:'task' as const,id})), ...state.openDraftIds.map(id=>({kind:'draft' as const,id})),
       ...state.openChannelIds.map(id=>({kind:'channel' as const,id})), ...state.openTerminalIds.map(id=>({kind:'terminal' as const,id})), ...state.openBrowserIds.map(id=>({kind:'browser' as const,id})),
+      ...state.openIdeaProjectIds.map(id=>({kind:'ideas' as const,id})),
       ...state.openGitTaskIds.map(id=>({kind:'git' as const,id})),
       ...(state.openEmptyIds ?? []).map(id=>({kind:'empty' as const,id})),
       ...(state.settingsOpen ? [{kind:'settings' as const,id:'settings'}] : []),
@@ -1681,6 +1735,7 @@
     if (state.pane === 'settings' && !state.settingsOpen) state.pane = 'overview';
     if (state.pane === 'terminal' && !state.selectedTerminalId) state.pane = 'overview';
     if (state.pane === 'browser' && !state.selectedBrowserId) state.pane = 'overview';
+    if (state.pane === 'ideas' && !state.selectedIdeaProjectId) state.pane = 'overview';
     if (state.pane === 'git' && !state.selectedGitTaskId) state.pane = 'overview';
     if (state.pane === 'overview' && !state.overviewOpen) state.pane = 'empty';
     return state;
@@ -1689,9 +1744,9 @@
     if (embedded || !workspaceReady || workspaceTransition) return;
     persistWorkspace();
     const terminalIds = Object.fromEntries(Object.keys($terminalSessions).map(id => [id, id]));
-    restoreState(sanitizePaneState(captureState() as unknown as Record<string, unknown>, terminalIds, activeWorkspaceKey));
+    restoreState(sanitizePaneState(captureState() as unknown as Record<string, unknown>, terminalIds, activeWorkspaceKey), true);
     for (const id of paneIds(layout)) if (id !== 'main' && paneRefs[id]) {
-      paneRefs[id].restoreState(sanitizePaneState(paneRefs[id].captureState() as unknown as Record<string, unknown>, terminalIds, activeWorkspaceKey));
+      paneRefs[id].restoreState(sanitizePaneState(paneRefs[id].captureState() as unknown as Record<string, unknown>, terminalIds, activeWorkspaceKey), true);
     }
   }
   async function restoreWorkspace(saved = workspaceSet?.workspaces[activeWorkspaceKey], terminalIds: Record<string, string> = {}) {
@@ -1730,7 +1785,7 @@
   }
   function emptyWorkspace() {
     const state = captureState();
-    return { ...state, settingsEditor: { draft: null, edits: {} }, overviewOpen: true, settingsOpen: false, openTerminalIds: [], selectedTerminalId: null, openBrowserIds: [], selectedBrowserId: null, browserTabs: {}, openGitTaskIds: [], selectedGitTaskId: null, openEmptyIds: [], selectedEmptyId: null, documents: {}, openTaskIds: [], openDraftIds: [], openChannelIds: [], tabOrder: [], taskDrafts: {}, drafts: {}, selectedTaskId: null, currentDraftId: null, selectedChannelId: null, focusedAgentId: null, focusedProjectId: null, pane: 'overview' as const, queuedAttachments: {}, attachmentContexts: {}, channelRecipients: {} };
+    return { ...state, ideaDraftKeys: {}, watchTaskIds: [], settingsEditor: { draft: null, edits: {} }, overviewOpen: true, settingsOpen: false, openTerminalIds: [], selectedTerminalId: null, openBrowserIds: [], selectedBrowserId: null, browserTabs: {}, openIdeaProjectIds: [], selectedIdeaProjectId: null, openGitTaskIds: [], selectedGitTaskId: null, openEmptyIds: [], selectedEmptyId: null, documents: {}, openTaskIds: [], openDraftIds: [], openChannelIds: [], tabOrder: [], taskDrafts: {}, drafts: {}, selectedTaskId: null, currentDraftId: null, selectedChannelId: null, focusedAgentId: null, focusedProjectId: null, pane: 'overview' as const, queuedAttachments: {}, attachmentContexts: {}, channelRecipients: {} };
   }
   export async function suspendBrowserTabs() {
     if (!nativeRuntime || !bridge.available) return;
@@ -1844,7 +1899,7 @@
     });
   });
   function layoutPending() { return hasPending() || paneIds(layout).some(id=>paneRefs[id]?.hasPending()); }
-  function tabCount(state: Pick<PaneState, 'openTaskIds'|'openDraftIds'|'openChannelIds'|'openTerminalIds'|'openGitTaskIds'|'openEmptyIds'|'settingsOpen'>) { return paneTabCount(state); }
+  function tabCount(state: Pick<PaneState, 'openTaskIds'|'openDraftIds'|'openChannelIds'|'openTerminalIds'|'openGitTaskIds'|'openIdeaProjectIds'|'openEmptyIds'|'settingsOpen'>) { return paneTabCount(state); }
   function queueEmptyPaneRemoval(id: string) {
     if (!pendingEmptyPaneIds.includes(id)) pendingEmptyPaneIds = [...pendingEmptyPaneIds, id];
   }
@@ -1867,7 +1922,7 @@
   }
   function takeTabPayload(tab: PaneTabTransfer): TabPayload | null {
     saveCurrentDraft();
-    if (composerPending[`${tab.kind}:${tab.id}`] || pendingUploads[`${tab.kind}:${tab.id}`]) return null;
+    if (ideaSaving || composerPending[`${tab.kind}:${tab.id}`] || pendingUploads[`${tab.kind}:${tab.id}`]) return null;
     if(tab.kind==='empty') {
       if (!openEmptyIds.includes(tab.id)) return null;
       const document = documents[tab.id];
@@ -1894,6 +1949,10 @@
       if (pane === 'browser' && selectedBrowserId === tab.id) { selectedBrowserId = null; openOverview(); }
       forgetTab(tab); return { tab, browser: { ...browser } };
     }
+    if(tab.kind==='ideas') {
+      if (!openIdeaProjectIds.includes(tab.id)) return null;
+      const ideaDraftKey = ideaDraftKeys[tab.id]; closeProjectIdeas(tab.id, false); forgetTab(tab); return {tab,ideaDraftKey};
+    }
     if(tab.kind==='git') {
       if (!openGitTaskIds.includes(tab.id)) return null;
       openGitTaskIds=openGitTaskIds.filter(id=>id!==tab.id);
@@ -1917,7 +1976,7 @@
     }
     delete drafts[key];
     forgetTab(tab);
-    return {tab,text,attachments,attachmentContext,recipients:channelRecipients[tab.id]};
+    return {tab,text,attachments,attachmentContext,recipients:channelRecipients[tab.id],watch:tab.kind==='task' && watchTaskIds.includes(tab.id)};
   }
   export function receiveTab(payload: TabPayload, before?: TabKey) {
     const {tab} = payload;
@@ -1929,6 +1988,10 @@
       const browser = payload.browser;
       if (!browser || browser.id !== tab.id || typeof browser.url !== 'string' || typeof browser.title !== 'string' || typeof browser.unloaded !== 'boolean') return;
       browserTabs[tab.id] = { ...browser }; openBrowser(tab.id); rememberTab(tab,before); return;
+    }
+    if(tab.kind==='ideas') {
+      const project=snapshot?.projects.find(project=>project.id===tab.id);
+      if (project) { if (openIdeaProjectIds.includes(tab.id) && payload.ideaDraftKey && ideaDraftKeys[tab.id] !== payload.ideaDraftKey) throw new Error('This pane already has an Idea List draft for that project.'); if(payload.ideaDraftKey) ideaDraftKeys[tab.id] = payload.ideaDraftKey; openProjectIdeas(project); rememberTab(tab,before); } return;
     }
     if(tab.kind==='git') {
       const task=snapshot?.tasks.find(task=>task.id===tab.id);
@@ -1943,7 +2006,7 @@
       openTaskDraft(payload.draft); rememberTab(tab,before);
     } else if (tab.kind === 'task') {
       const task = snapshot?.tasks.find(task=>task.id===tab.id);
-      if (task) { drafts[`task:${tab.id}`] = payload.text ?? ''; openTask(task); rememberTab(tab,before); }
+      if (task) { if(payload.watch && !watchTaskIds.includes(tab.id)) watchTaskIds=[...watchTaskIds,tab.id]; drafts[`task:${tab.id}`] = payload.text ?? ''; openTask(task); rememberTab(tab,before); }
     } else if (tab.kind === 'channel') {
       const channel = availableChannels.find(channel=>channel.id===tab.id);
       if (channel) { drafts[`channel:${tab.id}`] = payload.text ?? ''; openChannel(channel); rememberTab(tab,before); }
@@ -2013,6 +2076,7 @@
     }
     if (edge!=='center' && ids.length>=MAX_WORKSPACE_PANES) { notice=`Up to ${MAX_WORKSPACE_PANES} panes are available. Drop in the centre to move a tab.`; return; }
     if(edge!=='center' && layoutPending()) {notice='Wait for the message to be accepted before splitting a pane.';return;}
+    if (edge === 'center' && tab.kind === 'ideas' && (targetId === 'main' ? allTabs() : paneRefs[targetId]?.allTabs() ?? []).some(item => item.kind === 'ideas' && item.id === tab.id)) { notice = 'That project’s Idea List is already open in the destination pane.'; return; }
     const source=tab.sourcePaneId==='main'?{takeTab,hasPending}:paneRefs[tab.sourcePaneId];
     if(!source || source.hasPending())return;
     const previousLayout=layout, previousMain=captureState(), previousChildren=captureChildren(), previousActive=activePaneId;
@@ -2838,6 +2902,7 @@
     if(next.kind==='settings')openSettings();
     else if(next.kind==='terminal')openTerminalTab(next.id);
     else if(next.kind==='browser')openBrowser(next.id);
+    else if(next.kind==='ideas'){const project=snapshot?.projects.find(item=>item.id===next.id);if(project)openProjectIdeas(project);}
     else if(next.kind==='git'){const task=snapshot?.tasks.find(item=>item.id===next.id);if(task)openGitReview(task);}
     else if(next.kind==='draft')openTaskDraft(taskDrafts[next.id]);
     else if(next.kind==='task'){const task=snapshot?.tasks.find(item=>item.id===next.id);if(task)openTask(task);}
@@ -2946,6 +3011,33 @@
       const next = openTasks.at(-1);
       if (next) openTask(next); else openOverview();
     }
+    if (collapse) collapseTablessPane();
+  }
+  function routeProjectIdeas(project: Project) {
+    if (embedded) { workspaceNavigation.ideas(project); return; }
+    const scope = activeWorkspaceKey.startsWith('project:') && activeWorkspaceKey !== `project:${project.id}` ? `project:${project.id}` as WorkspaceKey : activeWorkspaceKey;
+    if (scope !== activeWorkspaceKey) { void switchWorkspace(scope).then(changed => { if(changed) routeProjectIdeas(project); }); return; }
+    mobileMain = true;
+    const owner=findPaneTabOwner(paneIds(layout),activePaneId,allTabs(),paneRefs,tab=>tab.kind==='ideas'&&tab.id===project.id);
+    const target=owner ?? activePaneId;
+    activePaneId=target;
+    if(target==='main')openProjectIdeas(project); else paneRefs[target]?.openProjectIdeas(project);
+  }
+  export function openProjectIdeas(project: Project) {
+    if(activeWorkspaceKey.startsWith('project:') && activeWorkspaceKey !== `project:${project.id}`){workspaceNavigation.ideas(project);return;}
+    saveCurrentDraft();
+    ideaDraftKeys[project.id] ??= localUuid();
+    openIdeaProjectIds = [...new Set([...openIdeaProjectIds, project.id])];
+    selectedIdeaProjectId = project.id;
+    selectedTaskId = null; currentDraftId = null; selectedChannelId = null;
+    selectedTerminalId = null; focusedAgentId = null; focusedProjectId = null;
+    pane = 'ideas'; mobileMain = true;
+    rememberTab({kind:'ideas',id:project.id});
+  }
+  function closeProjectIdeas(id: string, collapse = true) {
+    openIdeaProjectIds = openIdeaProjectIds.filter(value => value !== id);
+    forgetTab({kind:'ideas',id});
+    if (selectedIdeaProjectId === id) { selectedIdeaProjectId = null; if (pane === 'ideas') openOverview(); }
     if (collapse) collapseTablessPane();
   }
   export function openGitReview(task: Task) {
@@ -3299,6 +3391,7 @@
     if(pane==='empty'){if(selectedEmptyId)closeEmptyTab(selectedEmptyId);else closeOverview();return;}
     if(pane==='settings'){closeSettings();return;}
     if(pane==='browser' && selectedBrowserId){ void closeBrowserTab(selectedBrowserId); return; }
+    if(pane==='ideas' && selectedIdeaProjectId){ closeProjectIdeas(selectedIdeaProjectId); return; }
     if(pane==='git' && selectedGitTaskId){ closeGitReview(selectedGitTaskId); return; }
     if (pane === 'terminal' && selectedTerminalId) { void closeTerminalTab(selectedTerminalId); return; }
     if (pane === 'task' && currentDraftId) { closeTaskDraft(currentDraftId); return; }
@@ -3397,6 +3490,7 @@
     if (pane === 'channel' && selectedChannelId) return {kind:'channel',id:selectedChannelId};
     if (pane === 'terminal' && selectedTerminalId) return {kind:'terminal',id:selectedTerminalId};
     if (pane === 'browser' && selectedBrowserId) return {kind:'browser',id:selectedBrowserId};
+    if (pane === 'ideas' && selectedIdeaProjectId) return {kind:'ideas',id:selectedIdeaProjectId};
     if (pane === 'git' && selectedGitTaskId) return {kind:'git',id:selectedGitTaskId};
     if (pane === 'empty' && selectedEmptyId) return {kind:'empty',id:selectedEmptyId};
     return pane === 'settings' ? {kind:'settings',id:'settings'} : null;
@@ -3409,6 +3503,7 @@
     if(tab.kind==='task'){const item=snapshot?.tasks.find(item=>item.id===tab.id);if(item)openTask(item);}
     else if(tab.kind==='draft'){const item=taskDrafts[tab.id];if(item)openTaskDraft(item);}
     else if(tab.kind==='channel'){const item=availableChannels.find(item=>item.id===tab.id);if(item)openChannel(item);}
+    else if(tab.kind==='ideas'){const project=snapshot?.projects.find(item=>item.id===tab.id);if(project)openProjectIdeas(project);}
     else if(tab.kind==='terminal')openTerminalTab(tab.id); else if(tab.kind==='browser')openBrowser(tab.id); else if(tab.kind==='git'){const task=snapshot?.tasks.find(item=>item.id===tab.id);if(task)openGitReview(task);} else if(tab.kind==='empty'){selectedEmptyId=tab.id;pane='empty';} else openSettings();
     focusSelectedTabInput();
     return true;
@@ -3518,6 +3613,7 @@
         else if(tab.kind==='task')closeTaskTab(tab.id);
         else if(tab.kind==='draft')closeTaskDraft(tab.id);
         else if(tab.kind==='channel'){openChannelIds=openChannelIds.filter(id=>id!==tab.id);forgetTab(tab);}
+        else if(tab.kind==='ideas')closeProjectIdeas(tab.id);
         else if(tab.kind==='empty')closeEmptyTab(tab.id);
         else closeSettings();
       }
@@ -3646,15 +3742,17 @@
   }
   async function send() {
     if (reportUnavailableConnection()) return;
-    if (handleSlashSubmit()) return;
+    if (!watchingTask && handleSlashSubmit()) return;
     if (currentDraftId) { await createTask(); return; }
-    if (!selectedTask || !canSend) return;
+    if (!selectedTask || !canSend || (watchingTask && pendingApprovalRequests.some(request => request.input))) return;
     const taskId = selectedTask.id;
     if (composerPending[`task:${taskId}`]) return;
     const sentDraft = composer;
     const key = `task:${taskId}`, attachmentIds=currentAttachments.map(item=>item.id);
-    const sentText = operatorPrompt(taskId, promptText(sentDraft));
-    startOptimisticSend({ kind: 'task', targetId: taskId, text: sentText, displayText: sentDraft, attachments: [...currentAttachments], baselineIds: new Set(messages.map(message => message.id)), baselineQueuedIds: new Set((snapshot?.queuedMessages ?? []).filter(message => message.taskId === taskId).map(message => message.id)) }, () => bridge.sendMessage(taskId, sentText, attachmentIds));
+    const sentText = operatorPrompt(taskId, watchingTask ? sentDraft : promptText(sentDraft));
+    const deliveryMode = watchingTask ? 'steer' as const : undefined;
+    if (watchingTask && snapshot) watchExchanges[taskId] = captureWatchInterjection(snapshot, taskId, sentText);
+    startOptimisticSend({ kind: 'task', targetId: taskId, text: sentText, displayText: sentDraft, deliveryMode, attachments: [...currentAttachments], baselineIds: new Set(messages.map(message => message.id)), baselineQueuedIds: new Set((snapshot?.queuedMessages ?? []).filter(message => message.taskId === taskId).map(message => message.id)) }, () => bridge.sendMessage(taskId, sentText, attachmentIds, deliveryMode));
     // Capture and clear synchronously: typing a follow-up must never mutate the
     // request currently in flight.
     clearSentDraft(key, sentDraft); clearAttachments(key, attachmentIds);
@@ -3712,7 +3810,7 @@
       const confirmedOrUnknown = await refreshForOptimisticRetry(message);
       if (confirmedOrUnknown) return;
       if (message.kind === 'task') {
-        startOptimisticSend(message, () => bridge.sendMessage(message.targetId, message.text, message.attachments.map(item => item.id)), message);
+        startOptimisticSend(message, () => bridge.sendMessage(message.targetId, message.text, message.attachments.map(item => item.id), message.deliveryMode), message);
         handedOffToSend = true;
       } else if (message.kind === 'channel') {
         startOptimisticSend(message, () => bridge.sendChannelMessage(message.targetId, message.text, message.recipientIds ?? [], message.attachments.map(item => item.id)), message);
@@ -4257,7 +4355,7 @@
     return value.replace(/^(\s*)\/\//, '$1/');
   }
   function updateSlash(value: string) {
-    slashOpen = isSlashCommand(value);
+    slashOpen = !watchingTask && isSlashCommand(value);
     slashIndex = 0;
   }
   function handleSlashSubmit() {
@@ -4368,6 +4466,10 @@
   }
   function handleComposerKeydown(event: KeyboardEvent) {
     if (event.isComposing) return;
+    if (watchingTask) {
+      if (isSendKey(event)) { event.preventDefault(); void send(); }
+      return;
+    }
     const typedChannelCommand = pane==='channel' ? parseChannelCommand(composer) : null;
     if(event.key==='Enter' && !event.shiftKey && typedChannelCommand && (typedChannelCommand.args || !['invite','kick'].includes(typedChannelCommand.name))) { event.preventDefault(); handleSlashSubmit(); return; }
     if(event.key==='Enter' && !event.shiftKey && /^\/terminal(?:\s|$)/i.test(composer.trim())) { event.preventDefault(); handleSlashSubmit(); return; }
@@ -4382,7 +4484,7 @@
   }
   function handleExpandedComposerKeydown(event: KeyboardEvent) {
     if (event.isComposing) return;
-    if (slashOpen && isSlashCommand(composer) && ['ArrowDown', 'ArrowUp', 'Escape', 'Enter'].includes(event.key)) {
+    if (!watchingTask && slashOpen && isSlashCommand(composer) && ['ArrowDown', 'ArrowUp', 'Escape', 'Enter'].includes(event.key)) {
       handleComposerKeydown(event);
       return;
     }
@@ -4448,6 +4550,7 @@
     if (pane === 'channel') return activeChannel?.name || 'Channel';
     if (pane === 'terminal') return selectedTerminal ? terminalTabTitle(selectedTerminal, snapshot?.hosts ?? []) : 'Terminal';
     if (pane === 'browser') return selectedBrowser?.title || 'Browser';
+    if (pane === 'ideas') return `Ideas · ${selectedIdeaProject?.name ?? 'Project'}`;
     if (pane === 'git') return selectedGitTaskId ? `Git · ${snapshot?.tasks.find(task => task.id === selectedGitTaskId)?.title ?? 'review'}` : 'Git review';
     if (pane === 'empty') return selectedEmptyId && documents[selectedEmptyId]?.title || 'New tab';
     if (pane === 'settings') return settingsTabTitle(settingsCategory);
@@ -5065,7 +5168,7 @@
 
 {#snippet slashMenu()}
   <SlashCommandPalette
-    open={slashOpen && isSlashCommand(composer)}
+    open={!watchingTask && slashOpen && isSlashCommand(composer)}
     items={slashVisibleItems}
     activeIndex={slashIndex}
     loading={slashCommandsLoading}
@@ -5283,6 +5386,9 @@
       {:else}
         {#if activeWorkspaceKey.startsWith('project:')}{@render workspaceContext()}{/if}
       {/if}
+      {#if pane === 'task' && selectedTask && !currentDraftId}
+        <button class="task-watch-toggle" aria-label={watchingTask ? 'Open chat' : 'Watch task'} aria-pressed={watchingTask} onclick={toggleTaskWatch}><Activity size={15}/><span>{watchingTask ? 'Chat' : 'Watch'}</span></button>
+      {/if}
       {#if !globalOverview}
       <nav class="tabs tab-picker" use:tabStripFade data-tauri-drag-region class:tab-picker-open={tabPickerOpen} class:hide-tab-close={snapshot?.settings.showTabCloseButtons === false} class:show-tab-index={tabIndexModifier && (embedded ? active : activePaneId === 'main')} aria-label="Open tasks" ondragover={tabBarOver} ondrop={tabBarDrop}>
         <button class="tab-picker-trigger" type="button" aria-expanded={tabPickerOpen} aria-controls={`open-tabs-${paneId}`} onclick={()=>tabPickerOpen=!tabPickerOpen}><span>{currentTabLabel}</span><ChevronDown size={15}/></button>
@@ -5315,6 +5421,9 @@
           {/if}
           {:else if tab.kind === 'empty'}
             <div class="tab-entry" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={pane==='empty' && selectedEmptyId===tab.id}><button class="tab" aria-pressed={pane==='empty' && selectedEmptyId===tab.id} draggable="false" ondragstart={event=>dragTab(event,'empty',tab.id)} onpointerdown={event=>startTabPointer(event,'empty',tab.id)} onclick={()=>selectTabPicker(()=>{saveCurrentDraft();selectedEmptyId=tab.id;selectedTaskId=null;selectedChannelId=null;selectedTerminalId=null;currentDraftId=null;pane='empty'})}>{#if documents[tab.id]}{#if documents[tab.id].kind==='image'}<ImageIcon size={13}/>{:else if documents[tab.id].kind==='pdf'}<FileIcon size={13}/>{:else if documents[tab.id].kind==='html'}<FileCode size={13}/>{:else}<FileText size={13}/>{/if}<span title={documents[tab.id].path}>{documents[tab.id].title}</span>{:else}<Plus size={13}/><span>New tab</span>{/if}</button><button class="close-tab" aria-label={documents[tab.id] ? `Close document ${documents[tab.id].title}` : 'Close empty tab'} onclick={()=>{closeEmptyTab(tab.id);tabPickerOpen=false;}}><X size={12}/></button></div>
+          {:else if tab.kind === 'ideas'}{@const project=snapshot?.projects.find(item=>item.id===tab.id)}{#if project}
+            <div class="tab-entry ideas-tab" data-tab-kind="ideas" data-tab-id={tab.id} class:active={pane==='ideas' && selectedIdeaProjectId===tab.id}><button class="tab" aria-pressed={pane==='ideas' && selectedIdeaProjectId===tab.id} onpointerdown={event=>startTabPointer(event,'ideas',tab.id)} onclick={()=>selectTabPicker(()=>openProjectIdeas(project))}><FileText size={13}/><span>Ideas · {project.name}</span></button><button class="close-tab" aria-label={`Close Ideas for ${project.name}`} onclick={()=>closeProjectIdeas(tab.id)}><X size={12}/></button></div>
+          {/if}
           {:else if tab.kind === 'settings'}
             <div class="tab-entry settings-tab" data-tab-kind={tab.kind} data-tab-id={tab.id} class:active={pane==='settings'}><button class="tab" aria-pressed={pane==='settings'} draggable="false" ondragstart={event=>dragTab(event,'settings','settings')} onpointerdown={event=>startTabPointer(event,'settings','settings')} title={settingsTabTitle(settingsCategory)} onclick={()=>selectTabPicker(()=>openSettings())}><span class="tab-kind-icon" aria-hidden="true"><Settings2 size={13}/><span class="tab-shortcut"></span></span><span>{settingsTabTitle(settingsCategory)}</span></button><button class="close-tab" aria-label="Close Settings tab" onclick={()=>{closeSettings();tabPickerOpen=false;}}><X size={12}/></button></div>
           {/if}
@@ -5380,7 +5489,7 @@
       {@const ProjectIcon = projectIconComponent(focusedProject.icon)}
       <section class="overview project-overview">
       <div class="overview-head"><div class="overview-expand">{@render paneExpandControl()}</div><div><p class="eyebrow"><ProjectIcon size={13} style={`color:${focusedProject.color}`}/>PROJECT</p><h1>{focusedProject.name}</h1><p>{focusedProject.description || 'A shared project for your agents.'}</p></div>
-        <div class="project-overview-actions"><button class="secondary" aria-label={`Edit project ${focusedProject.name}`} onclick={()=>editProject(focusedProject)}><Settings2 size={15}/>Edit project</button><button class="primary" onclick={()=>routeProjectDraft(focusedProject.id)}><Plus size={16}/>New chat</button></div>
+        <div class="project-overview-actions"><button class="secondary" onclick={()=>routeProjectIdeas(focusedProject)}><FileText size={15}/>Idea List</button><button class="secondary" aria-label={`Edit project ${focusedProject.name}`} onclick={()=>editProject(focusedProject)}><Settings2 size={15}/>Edit project</button><button class="primary" onclick={()=>routeProjectDraft(focusedProject.id)}><Plus size={16}/>New chat</button></div>
       </div>
       {#if focusedProject.workspaces.length}<dl class="project-folders">{#each focusedProject.workspaces as workspace}<div><dt><HardDrive size={13}/>{snapshot.hosts.find(host=>host.id===workspace.hostId)?.name ?? 'Host'}</dt><dd>{workspace.cwd}</dd></div>{/each}</dl>{/if}
       <div class="agent-chats">{#each scopedActivityTasks.filter(task=>task.projectId===focusedProject.id) as task (task.id)}<button class="overview-task" onclick={()=>openTask(task)}><span class={`dot ${task.status}`}></span><div><b>{task.title}</b><small>{visibleAgents.find(agent=>agent.id===task.agentId)?.name ?? 'Agent'} · {task.provider} · {relative(task.updatedAt)}</small></div></button>{:else}<p class="hint">No chats yet. Choose any agent to start working on this project.</p>{/each}</div>
@@ -5542,7 +5651,7 @@
           {#each channelLiveErrors as task}<p class="live-transcript-notice" role="status">{(events.filter(event=>event.taskId===task.id&&event.kind==='error').at(-1)?.detail || 'A channel task stopped with an error.').slice(0, 500)}</p>{/each}
         </div>{/if}
         <QueuedMessages messages={currentQueuedMessages} agents={visibleAgents} tasks={visibleTasks} {busy} onremove={removeQueuedMessage} onedit={editQueuedMessage}/>
-        <ApprovalDock requests={channelPendingApprovals} disabled={busy} resolvingId={resolvingApprovalId} onresolve={resolveApproval} oninput={resolveInput}/>
+        <ApprovalDock authoritativeRequests={snapshot?.approvalRequests} requests={channelPendingApprovals} disabled={busy} resolvingId={resolvingApprovalId} onresolve={resolveApproval} oninput={resolveInput}/>
         {#if !composerExpanded && !projectBoardId(activeChannel.id)}{@render slashMenu()}{/if}
         <dialog open role={composerExpanded ? 'dialog' : 'group'} class="composer" class:expanded={composerExpanded} aria-label={composerExpanded ? 'Expanded channel composer' : 'Channel composer'} use:fileDrop use:composerDialogLifecycle onkeydown={(event)=>{if(composerExpanded && event.key==='Escape' && !event.defaultPrevented){event.preventDefault();void toggleComposerExpanded();}}}>
           {#if composerExpanded}<span class="composer-longform-hint">Markdown · Enter for a new paragraph · ⌘/Ctrl+Enter to send</span>{/if}
@@ -5631,7 +5740,8 @@
           {#if taskParentId}<p class="hint">Delegated from {visibleTasks.find(task=>task.id===taskParentId)?.title ?? 'the selected task'}.</p>{/if}
         </div>
       </section>
-    {:else if selectedTask}<section class="task-layout" class:detail-hidden={!showDetail || compactDetail} class:compact-detail={compactDetail}>
+    {:else if pane === 'ideas' && selectedIdeaProject}<div class="idea-list-surface">{#key `${selectedIdeaProject.id}:${ideaDraftKeys[selectedIdeaProject.id] ?? selectedIdeaProject.id}`}<IdeaListPane project={selectedIdeaProject} draftKey={ideaDraftKeys[selectedIdeaProject.id] ?? selectedIdeaProject.id} onsaving={value => ideaSaving = value} onUpdate={next => applySnapshot(next, ++snapshotIssued)}/>{/key}</div>
+    {:else if selectedTask}<section class="task-layout" class:watch-layout={watchingTask} class:detail-hidden={watchingTask || !showDetail || compactDetail} class:compact-detail={compactDetail}>
         {#snippet detailTabs()}<div class="detail-tabs" role="tablist" aria-label="Task detail views">
           <div class="detail-tab-entry" class:active={detailTab==='run'}><button class="detail-tab" role="tab" aria-selected={detailTab==='run'} onclick={()=>detailTab='run'}>Details</button></div>
           <div class="detail-tab-entry" class:active={detailTab==='timeline'}><button class="detail-tab" role="tab" aria-selected={detailTab==='timeline'} onclick={()=>detailTab='timeline'}>Timeline</button></div>
@@ -5642,7 +5752,8 @@
           <QueuedMessages messages={currentQueuedMessages} agents={visibleAgents} tasks={visibleTasks} {busy} onremove={removeQueuedMessage} onedit={editQueuedMessage}/>
         {/snippet}
         {#snippet taskComposer()}
-          <ApprovalDock requests={pendingApprovalRequests} disabled={busy} resolvingId={resolvingApprovalId} onresolve={resolveApproval} oninput={resolveInput}/>
+          <ApprovalDock authoritativeRequests={snapshot?.approvalRequests} taskId={selectedTask.id} requests={pendingApprovalRequests} disabled={busy} resolvingId={resolvingApprovalId} onresolve={resolveApproval} oninput={resolveInput}/>
+          {#if !(watchingTask && pendingApprovalRequests.some(request => request.input))}
           {#if !composerExpanded}{@render slashMenu()}{/if}
           <dialog open role={composerExpanded ? 'dialog' : 'group'} class="composer" class:expanded={composerExpanded} aria-label={composerExpanded ? 'Expanded task composer' : 'Task composer'} use:fileDrop use:composerDialogLifecycle onkeydown={(event)=>{if(composerExpanded && event.key==='Escape' && !event.defaultPrevented){event.preventDefault();void toggleComposerExpanded();}}}>
             {#if composerExpanded}<span class="composer-longform-hint">Markdown · Enter for a new paragraph · ⌘/Ctrl+Enter to send</span>{/if}
@@ -5664,6 +5775,7 @@
               </div>
             </div>
           </dialog>
+          {/if}
         {/snippet}
         {#snippet subagentDock()}
           {#if activeTaskSubagents.length}
@@ -5672,6 +5784,21 @@
             </div>
           {/if}
         {/snippet}
+        {#if watchingTask}
+          <div class="task-watch" data-testid="task-watch">
+            <div class="watch-scroll"><WatchPane task={selectedTask} {snapshot} {goal} {goalNote} {goalError} onOpenSubagent={id => { const member=taskSubagents.find(item => item.id===id); if(member)inspectSubagent(member); }}/>
+              {#if watchExchange}<section class="watch-delivery" aria-label="Watch interjection exchange"><strong>Interjection</strong><p>{watchExchanges[selectedTask.id].text}</p><p role="status">{watchExchange.status}</p>{#if watchExchange.response}<Markdown text={watchExchange.response.text} taskId={selectedTask.id}/>{/if}</section>{/if}
+              {#each taskOptimisticMessages as message (message.id)}<div class="watch-delivery"><p>{message.displayText}</p>{@render deliveryStatus(message)}</div>{/each}
+              {@render taskQueuedMessages()}
+            </div>
+            <div class="watch-interject" class:open={watchInterjectTaskId === selectedTask.id || pendingApprovalRequests.length > 0}>
+              {#if watchInterjectTaskId === selectedTask.id || pendingApprovalRequests.length > 0}
+                <div class="watch-interject-heading"><strong>Interject</strong><button aria-label="Close Interject" onclick={closeWatchInterject} disabled={pendingApprovalRequests.length > 0}><X size={16}/></button></div>
+                <div onkeydown={event => { if (event.key === 'Escape' && !pendingApprovalRequests.length) { event.preventDefault(); closeWatchInterject(); } }} role="dialog" tabindex="-1" aria-label="Watch interjection">{@render taskComposer()}</div>
+              {:else}<button class="watch-interject-trigger" bind:this={watchInterjectTrigger} onclick={openWatchInterject}>Interject</button>{/if}
+            </div>
+          </div>
+        {:else}
         {#key selectedTask.id}<TaskTranscript
           observers={observedTaskIds.has(selectedTask.id) ? observerNames : []}
           active={embedded ? active : activePaneId === 'main'}
@@ -5679,6 +5806,7 @@
           agent={selectedAgent}
           {snapshot}
           {conversationItems}
+          turnBoundaryEvents={visibleEvents.filter(event => event.kind === 'status' && ['turn.started', 'turn.completed', 'turn.failed', 'You cancelled this run.'].includes(event.title))}
           optimisticMessages={taskOptimisticMessages}
           steeringMessages={taskSteeringMessages}
           {confirmedDeliveryIds}
@@ -5726,8 +5854,9 @@
           onMaximise={() => expandTab(true)}
           getTaskMessages={bridge.getTaskMessages ? bridge.getTaskMessages.bind(bridge) : undefined}
         />{/key}
-        {#if compactDetail && showDetail}<button class="detail-backdrop" aria-label="Dismiss right sidebar" onclick={()=>showDetail=false}></button>{/if}
-        <aside use:motionView={{key:String(showDetail),enabled:showDetail,x:12,y:0,duration:180,opacity:0.4}} class="run-detail" class:closed={!showDetail} aria-label="Right sidebar">
+        {/if}
+        {#if !watchingTask && compactDetail && showDetail}<button class="detail-backdrop" aria-label="Dismiss right sidebar" onclick={()=>showDetail=false}></button>{/if}
+        <aside hidden={watchingTask} use:motionView={{key:String(showDetail),enabled:showDetail && !watchingTask,x:12,y:0,duration:180,opacity:0.4}} class="run-detail" class:closed={!showDetail} aria-label="Right sidebar">
           <SidebarResize side="right"/>
             {@render detailTabs()}
             <GitPane taskId={selectedTask.id} probeKey={`${selectedTask.hostId}\u001f${selectedTask.cwd}`} active={showDetail} statusOnly onStatus={value=>{gitState=value}}/>
@@ -5867,7 +5996,7 @@
           {@const ProjectIcon = projectIconComponent(project.icon)}
           <section class="project-group" aria-label={`Project ${project.name}`}>
             <div use:sidebarReorder={{group:'projects',id:project.id,move:moveSidebar}} class="project-row sidebar-parent-card" class:current={focusedProjectId === project.id || selectedTask?.projectId === project.id}>
-              <button class="project-name" aria-label={`Open project ${project.name}`} onclick={()=>{void openProjectWorkspace(project);}}><span class="project-card-mark" style={`--project-colour:${project.color}`}><ProjectIcon size={16}/>{#if projectTasks.some(task=>task.status==='running')}<span class="activity-status-dot running"></span>{/if}</span><span class="sidebar-card-copy"><strong>{project.name}</strong><small>{projectTasks.length} {projectTasks.length === 1 ? 'chat' : 'chats'}</small></span>{#if approvalCount(`project:${project.id}`)}<span class="approval-badge" aria-label={`${approvalCount(`project:${project.id}`)} pending approvals`}>{approvalCount(`project:${project.id}`)}</span>{/if}</button>
+              <button class="project-name" aria-label={`Open project ${project.name}`} onclick={()=>{void openProjectWorkspace(project);}}><span class="project-card-mark" style={`--project-colour:${project.color}`}><ProjectIcon size={16}/>{#if projectTasks.some(task=>task.status==='running')}<span class="activity-status-dot running"></span>{/if}</span><span class="sidebar-card-copy"><strong>{project.name}</strong><small>{projectTasks.length} {projectTasks.length === 1 ? 'chat' : 'chats'}</small></span>{#if approvalCount(`project:${project.id}`)}<span class="approval-badge" aria-label={`${approvalCount(`project:${project.id}`)} pending approvals`}>{approvalCount(`project:${project.id}`)}</span>{/if}</button><button class="icon project-ideas-action" aria-label={`Open Idea List for ${project.name}`} title="Idea List" onclick={()=>{routeProjectIdeas(project);}}><FileText size={15}/></button>
               <button class="folder-toggle" aria-label={`${collapsedProjects[project.id] ? 'Expand' : 'Collapse'} project ${project.name}`} aria-expanded={!collapsedProjects[project.id]} onclick={event=>toggleSidebarGroup('project',project.id,event.currentTarget)}>
                 <ChevronDown class="group-chevron" style={collapsedProjects[project.id]?'transform:rotate(-90deg)':undefined} size={13}/>
               </button>
@@ -7864,6 +7993,20 @@
     grid-template-columns: minmax(0, 1fr) 292px;
     grid-template-rows: auto minmax(0, 1fr);
   }
+  .idea-list-surface{flex:1;min-height:0;min-width:0;overflow:hidden}
+  .project-ideas-action{min-width:44px;min-height:44px}
+  .task-watch-toggle{display:flex;align-items:center;gap:5px;min-height:44px;border:0;background:transparent;color:var(--muted);padding:8px;flex:none}
+  .task-watch-toggle[aria-pressed=true]{color:var(--accent)}
+  .task-watch{grid-column:1;grid-row:1 / -1;position:relative;min-width:0;min-height:0;display:flex;flex-direction:column;overflow:hidden}
+  .watch-scroll{flex:1;min-height:0;overflow:auto;padding-bottom:80px;overscroll-behavior:contain}
+  .watch-interject{position:absolute;bottom:8px;left:50%;transform:translateX(-50%);width:min(680px,calc(100% - 16px));display:flex;justify-content:center;max-height:calc(100% - 16px);z-index:4}
+  .watch-interject.open{display:block;overflow:auto;border:1px solid var(--line);border-radius:12px;background:var(--panel);box-shadow:0 6px 28px #0002}
+  .watch-interject-heading{display:flex;justify-content:space-between;align-items:center;padding:4px 12px;font-size:12px;color:var(--muted)}
+  .watch-interject-heading button,.watch-interject-trigger{min-height:44px;border:0;border-radius:10px;background:var(--panel);color:var(--ink);padding:8px 16px}
+  .watch-interject-trigger{box-shadow:0 3px 16px #0002;border:1px solid var(--line)}
+  .watch-interject :global(.composer){margin:0;border:0;border-radius:0}
+  .watch-delivery{margin:12px 20px;padding:12px;border:1px solid var(--line);border-radius:8px;overflow-wrap:anywhere}
+  .watch-layout>.run-detail[hidden]{display:none}
   .task-layout.detail-hidden { grid-template-columns: minmax(0, 1fr); }
   .pane-task-header { grid-column: 1 / -1; grid-row: 1; }
   .task-layout > .conversation { grid-column: 1; grid-row: 2; }

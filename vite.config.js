@@ -1,5 +1,6 @@
 import { defineConfig } from "vite";
 import { sveltekit } from "@sveltejs/kit/vite";
+import legacy from "@vitejs/plugin-legacy";
 import process from "node:process";
 import { webDevPlugin, webDevProxy } from './scripts/vite-web-dev.mjs';
 const host = process.env.TAURI_DEV_HOST;
@@ -23,7 +24,12 @@ export default defineConfig(({ command, mode }) => {
   const appUi = command === 'serve' && mode === 'monitter-app-ui';
   const webDev = command === 'serve' && (mode === 'monitter-web' || appUi);
   return {
-  plugins: [...(webDev ? [webDevPlugin()] : []), ...(appUi ? [hotUiMarkerPlugin('/monitter-app-ui/__monitter_dev__')] : []), sveltekit()],
+  plugins: [...(webDev ? [webDevPlugin()] : []), ...(appUi ? [hotUiMarkerPlugin('/monitter-app-ui/__monitter_dev__')] : []), sveltekit(),
+    // Svelte 5 requires modern browsers. Use usage-based API polyfills without
+    // SystemJS chunks, which SvelteKit's manifest/bootstrap cannot consume.
+    // The static adapter below loads this chunk before Kit's client entries.
+    legacy({ renderLegacyChunks: false, modernPolyfills: true }),
+  ],
   // Keep dependency transforms local when isolated worktrees reuse node_modules.
   cacheDir: ".svelte-kit/vite-cache",
 

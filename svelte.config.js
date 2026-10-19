@@ -4,6 +4,7 @@
 // See: https://v2.tauri.app/start/frontend/sveltekit/ for more info
 import adapter from "@sveltejs/adapter-static";
 import { vitePreprocess } from "@sveltejs/vite-plugin-svelte";
+import { withLegacyPolyfills } from './scripts/sveltekit-legacy-polyfills.mjs';
 
 /** @type {import('@sveltejs/kit').Config} */
 const config = {
@@ -14,9 +15,9 @@ const config = {
     paths: {
       base: process.env.MONITTER_APP_UI === '1' ? '/monitter-app-ui' : '',
     },
-    adapter: adapter({
+    adapter: withLegacyPolyfills(adapter({
       fallback: "index.html",
-    }),
+    })),
   },
 };
 

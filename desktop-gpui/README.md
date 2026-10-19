@@ -1,5 +1,7 @@
 # Monitter GPUI desktop experiment
 
+Open **Idea List** from the command menu (⌘K or ⌘P) to place the project's ideas beside the current agent. Drag its header or Move handle to rearrange it; the pane menu offers Split right and Split below, and Close removes only the pane. The project selector stays at the left of its header; Search lives in the secondary filter toolbar. Saved workspace layouts retain the pane. Enter captures a title; selecting a row opens its Markdown note, metadata and retained edit history. Use Back to return to the list.
+
 The [UX style guide](UX_STYLE_GUIDE.md) defines the Tauri-inspired spacing, forms, menu/button/tab treatment, surfaces, typography, and review rules. Shared source tokens live in `src/design.rs`.
 
 ## Tern tile layout

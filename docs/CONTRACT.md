@@ -847,7 +847,13 @@ The per-pane outbox is retained in sessionStorage where available; reloading cha
 item to Not confirmed and never automatically replays it.
 
 `Settings.busyMessageMode` defaults to `queue`; the Settings toggle selects the default queue-versus-steer
-behaviour for busy agents. `Snapshot.queuedMessages` persists FIFO records per task, including the
+behaviour for busy agents. Owner/native `send_message` and `send_message_fast` accept an optional
+`deliveryMode` (`queue` or `steer`) that overrides this preference for that send only; other values are
+rejected before mutation. The responsive owner's Watch Interject action sends literal text with
+`deliveryMode: "steer"`, retaining the backend's normal FIFO fallback when steering is unavailable.
+Structured questions continue through `resolve_input`, never through chat sends. Watch and chat share
+the unsent composer draft; question drafts stay in process memory and are cleared on resolution.
+`Snapshot.queuedMessages` persists FIFO records per task, including the
 original text, attachment IDs, optional channel, status and error. A busy direct chat or selected busy
 channel recipient queues its follow-up; idle recipients still start immediately, and a channel user
 message is recorded once at submission rather than again when a recipient drains. With `steer`, a live
@@ -1029,6 +1035,32 @@ pane selects the project of the most recently viewed chat when available, while
 its project list remains an explicit switcher. Project agents have task-bound
 MCP tools to list, read, add and update their own project's ideas; idea text is
 untrusted context and parking one never authorizes implementation.
+
+Idea records carry backend-owned `authorKind` (`person`, `agent`, or legacy
+`unknown`), nullable `authorId`/`authorName`, `updatedBy` (a nullable actor with
+`kind`, `id`, `name`), nullable `sourceTaskId`, and `status` (`open`, `inPlan`,
+`done`, `dropped`; default `open`). Agent identity and source task are derived
+from the authenticated calling task. Owner-created records use a person actor
+named “You”; this is a local operator label, not verified account identity.
+Whole-list `save_project_ideas` requires the expected revision and preserves
+existing author, creation time, source task, and history regardless of submitted
+metadata. This command is available to authenticated owners over native and LAN
+connections; restricted controller and visitor actions are unchanged. The responsive
+owner interface opens a project Idea List as a workspace tab. Its unsaved drafts
+remain local to the tab identity, and stale revisions leave a visible retained draft.
+Content or status changes append the previous title, Markdown, and
+status to `history`, with `editedAt` and `editedBy`; unchanged records retain
+their timestamps. History retains at most eight versions and 128 KiB per idea.
+`tags` defaults to an empty list and accepts at most 16 unique labels of 1–32
+characters without surrounding whitespace. Tag edits are logged in history.
+General project settings saves preserve existing ideas and their revision; new
+projects start with no ideas, and idea writes use the dedicated command.
+Removing a record from the owner save deletes it; `dropped` keeps the record.
+Idea documents currently live in snapshot persistence. No per-idea workspace
+Markdown files are written: projects may map multiple local or remote workspaces
+and do not define a canonical writable document directory.
+
+
 
 The sidebar offers icon tabs for Agents (agent groups), Projects (collapsible project folders plus
 unassigned chats), and Activity (running first, then most recent), in that order. These tabs replace
@@ -1345,6 +1377,11 @@ to the durable ApprovalRequest, with `response` retained after submission. `reso
 receive no approval/input records. URL elicitations require an explicit user action; links never
 open automatically. Unsupported requests are explicitly declined, never treated as approvals.
 Cancellation, process loss and restart expire pending requests; uncertain turns are not replayed.
+Question inputs may include optional `selectionMode: "single" | "multiple"`; omission means
+single selection. Responses retain `{answers: {[questionId]: {answers: string[]}}}` with
+nonempty answers limited to 16 KiB each in UTF-8. Unsubmitted client answers may survive
+view changes in process memory, scoped by task and approval ID; they are never persisted
+to browser storage and authoritative resolved/expired requests prune these drafts.
 
 SSH host port 0 means use the existing SSH config/default (omit `-p`). An empty user/identity path
 also preserves the SSH config. Expand remote `~/` relative to the remote home, never the local home.

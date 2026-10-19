@@ -179,7 +179,7 @@
     event.preventDefault();event.stopPropagation();
     try {
       const data=JSON.parse(event.dataTransfer.getData(mime));
-      if(typeof data?.sourcePaneId==='string' && typeof data.id==='string' && ['task','draft','channel','terminal','browser','empty','settings'].includes(data.kind)) ondropTab(id,zone,data);
+      if(typeof data?.sourcePaneId==='string' && typeof data.id==='string' && ['task','draft','channel','terminal','browser','ideas','empty','settings'].includes(data.kind)) ondropTab(id,zone,data);
     } catch { /* Ignore unrelated drag data. */ }
   }
   function pointerTarget(event: PointerEvent) {

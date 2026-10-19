@@ -2341,7 +2341,16 @@ mod tests {
         assert_eq!(before.tasks.iter().find(|t| t.id == receiver.id).unwrap().status, "idle");
         assert!(!before.messages.iter().any(|m| m.task_id == receiver.id && m.collaboration_id.is_some()));
         // Provider slash commands must not silently consume peer context they omit.
-        let command = service.accept_send_inner(receiver.id.clone(), "/status".into(), vec![], Some("status".into())).unwrap().unwrap();
+        let command = service
+            .accept_send_inner(
+                receiver.id.clone(),
+                "/status".into(),
+                vec![],
+                Some("status".into()),
+                None,
+            )
+            .unwrap()
+            .unwrap();
         assert!(!command.prompt.contains("Preserve the active server"));
         assert_eq!(service.snapshot().unwrap().collaborations.iter()
             .find(|c| c.id == sent["collaboration_id"]).unwrap().status, "queued");

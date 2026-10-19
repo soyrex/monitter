@@ -66,6 +66,8 @@ pub(super) struct DesktopWindowView {
     pub(super) applied_style: Option<String>,
     pub(super) applied_window_surface: Option<String>,
     pub(super) workspace: Option<Entity<WorkspacePane>>,
+    pub(super) ideas: Option<Entity<ideas::IdeasPane>>,
+    pub(super) ideas_subscription: Option<Subscription>,
     pub(super) archives: Option<Entity<archives::ArchivedChatsPane>>,
     pub(super) archives_subscription: Option<Subscription>,
     pub(super) archives_revision: Option<String>,
@@ -1299,6 +1301,9 @@ impl Desktop {
         if let Some(workspace) = &self.window.workspace {
             workspace.update(cx, |workspace, cx| workspace.sync(snapshot.clone(), cx));
         }
+        if let Some(ideas) = &self.window.ideas {
+            ideas.update(cx, |ideas, cx| ideas.sync(snapshot.clone(), cx));
+        }
         if let Some(mail) = &self.window.mail {
             mail.update(cx, |mail, cx| {
                 mail.set_context(&snapshot, self.window.selected.clone(), cx)
@@ -1543,7 +1548,7 @@ impl Desktop {
         }
         true
     }
-    fn drain_workspace_pane_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn drain_workspace_pane_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.workspace_ready() || self.window.preferences_open || session_lock::locked(cx) {
             return;
         }
@@ -2092,6 +2097,8 @@ impl Desktop {
             applied_style: None,
             applied_window_surface: None,
             workspace: None,
+            ideas: None,
+            ideas_subscription: None,
             archives: None,
             archives_subscription: None,
             archives_revision: None,

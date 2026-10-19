@@ -1251,7 +1251,39 @@ pub struct ProjectWorkspace {
     pub cwd: String,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ProjectIdeaStatus {
+    #[default]
+    Open,
+    InPlan,
+    Done,
+    Dropped,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectIdeaActor {
+    pub kind: String,
+    pub id: Option<String>,
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectIdeaEdit {
+    pub edited_at: i64,
+    pub edited_by: ProjectIdeaActor,
+    pub title: String,
+    pub markdown: String,
+    pub status: ProjectIdeaStatus,
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+fn unknown_idea_author() -> String { "unknown".into() }
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectIdea {
     pub id: String,
@@ -1260,6 +1292,22 @@ pub struct ProjectIdea {
     pub markdown: String,
     pub created_at: i64,
     pub updated_at: i64,
+    #[serde(default = "unknown_idea_author")]
+    pub author_kind: String,
+    #[serde(default)]
+    pub author_id: Option<String>,
+    #[serde(default)]
+    pub author_name: Option<String>,
+    #[serde(default)]
+    pub updated_by: Option<ProjectIdeaActor>,
+    #[serde(default)]
+    pub status: ProjectIdeaStatus,
+    #[serde(default)]
+    pub source_task_id: Option<String>,
+    #[serde(default)]
+    pub history: Vec<ProjectIdeaEdit>,
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

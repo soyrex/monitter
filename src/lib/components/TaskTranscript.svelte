@@ -32,6 +32,8 @@ import ArrowRightLeft from "@lucide/svelte/icons/arrow-right-left";
   import TaskActivity from '$lib/components/TaskActivity.svelte';
   import MessagePane from '$lib/components/MessagePane.svelte';
   import TranscriptVirtualList from '$lib/components/TranscriptVirtualList.svelte';
+  import AgentExchange from '$lib/components/AgentExchange.svelte';
+  import { liveTranscriptActivity, transcriptExchangeGroups } from '$lib/transcript-notices';
   import RunActivity from '$lib/components/RunActivity.svelte';
   import JevDecisionCard from '$lib/components/JevDecisionCard.svelte';
   import UnifiedSubagentItem from '$lib/components/UnifiedSubagentItem.svelte';
@@ -89,6 +91,7 @@ import ArrowRightLeft from "@lucide/svelte/icons/arrow-right-left";
     operatorMessageText,
     approvalEventText,
     collaborations,
+    turnBoundaryEvents = [],
     subagents,
     collaborationWasSteering = () => false,
     menuOpen,
@@ -143,6 +146,7 @@ import ArrowRightLeft from "@lucide/svelte/icons/arrow-right-left";
     senderName: (message: Message) => string | null;
     operatorMessageText: (value: string) => string;
     approvalEventText: (request: ApprovalRequest) => string;
+    turnBoundaryEvents?: RunEvent[];
     collaborations: CollaborationRecord[];
     subagents: UnifiedSubagent[];
     collaborationWasSteering?: (value: CollaborationRecord) => boolean;
@@ -174,12 +178,12 @@ import ArrowRightLeft from "@lucide/svelte/icons/arrow-right-left";
   let inboxView = $state(false);
   let inboxTouched = false;
   let inboxTaskId = '';
-  type TranscriptDisplay = { task: Task; agent: Agent | null; settings: Snapshot['settings']; agents: Agent[]; mailBatches: NonNullable<Snapshot['mailBatches']>; conversationItems: ConversationActivityItem[]; optimisticMessages: OptimisticMessage[]; steeringMessages: QueuedMessage[]; confirmedDeliveryIds: Record<string, true>; collaborations: CollaborationRecord[]; subagents: UnifiedSubagent[]; hasPendingApprovals: boolean; selectedTaskStarting: boolean };
+  type TranscriptDisplay = { task: Task; agent: Agent | null; settings: Snapshot['settings']; agents: Agent[]; mailBatches: NonNullable<Snapshot['mailBatches']>; conversationItems: ConversationActivityItem[]; turnBoundaryEvents: RunEvent[]; optimisticMessages: OptimisticMessage[]; steeringMessages: QueuedMessage[]; confirmedDeliveryIds: Record<string, true>; collaborations: CollaborationRecord[]; subagents: UnifiedSubagent[]; hasPendingApprovals: boolean; selectedTaskStarting: boolean };
   const taskMailBatches = $derived((snapshot.mailBatches ?? []).filter(batch => batch.taskId === task.id));
-  const transcriptFingerprint = $derived(JSON.stringify({ conversationItems, mailBatches: taskMailBatches, optimisticMessages, steeringMessages, confirmedDeliveryIds, taskStatus: task.status, collaborations, subagents, hasPendingApprovals: pendingApprovals.length > 0, selectedTaskStarting }));
+  const transcriptFingerprint = $derived(JSON.stringify({ conversationItems, turnBoundaryEvents, mailBatches: taskMailBatches, optimisticMessages, steeringMessages, confirmedDeliveryIds, taskStatus: task.status, collaborations, subagents, hasPendingApprovals: pendingApprovals.length > 0, selectedTaskStarting }));
   const transcriptBuffer = createTranscriptBuffer<TranscriptDisplay>(
     () => task.id,
-    () => ({ task, agent, settings: snapshot.settings, agents: snapshot.agents, mailBatches: taskMailBatches, conversationItems, optimisticMessages, steeringMessages, confirmedDeliveryIds, collaborations, subagents, hasPendingApprovals: pendingApprovals.length > 0, selectedTaskStarting }),
+    () => ({ task, agent, settings: snapshot.settings, agents: snapshot.agents, mailBatches: taskMailBatches, conversationItems, turnBoundaryEvents, optimisticMessages, steeringMessages, confirmedDeliveryIds, collaborations, subagents, hasPendingApprovals: pendingApprovals.length > 0, selectedTaskStarting }),
     () => transcriptFingerprint,
   );
   const display = $derived(transcriptBuffer.value());
@@ -190,6 +194,8 @@ import ArrowRightLeft from "@lucide/svelte/icons/arrow-right-left";
   let transcriptList: { restoreItemAnchor: (key: string, offset: number) => Promise<boolean> } | undefined = $state();
   let historyLoading = $state(false);
   let historyError = $state('');
+  const displayExchangeGroups = $derived(transcriptExchangeGroups(display.conversationItems));
+  const displayExchangeMembers = $derived(new Set([...displayExchangeGroups.values()].flatMap(events => events.slice(1).map(event => event.id))));
   const displayItems = $derived.by(() => {
     const items = [...display.conversationItems];
     const existing = new Set(items.flatMap(item => item.type === 'message' ? [item.value.id] : []));
@@ -197,7 +203,7 @@ import ArrowRightLeft from "@lucide/svelte/icons/arrow-right-left";
     const at = (item: ConversationActivityItem) => item.type === 'message' || item.type === 'activity' ? item.value.createdAt
       : item.type === 'approval' ? item.value.resolvedAt ?? item.value.createdAt
       : item.values[0]?.createdAt ?? 0;
-    return items.sort((left, right) => at(left) - at(right));
+    return items.filter(item => item.type !== 'activity' || !displayExchangeMembers.has(item.value.id)).sort((left, right) => at(left) - at(right));
   });
   const baseTranscriptMessageCount = $derived(display.conversationItems.filter(item => item.type === 'message').length);
   const hasEarlierMessages = $derived(!!getTaskMessages && (nextHistoryCursor === undefined ? baseTranscriptMessageCount >= 64 : nextHistoryCursor !== null));
@@ -286,6 +292,12 @@ import ArrowRightLeft from "@lucide/svelte/icons/arrow-right-left";
     if (/interrupted$/i.test(title)) return { ...item, status: 'interrupted', activity: `${item.agentName} stopped` };
     return { ...item, activity: title };
   }
+  function exchangePeerName(event: RunEvent): string | undefined {
+    const record = displayCollaborations.find(record => record.id === event.detail);
+    if (!record) return undefined;
+    const id = record.fromTaskId === displayTask.id ? record.toAgentId : record.toTaskId === displayTask.id ? record.fromAgentId : undefined;
+    return display.agents.find(agent => agent.id === id)?.name;
+  }
   function subagentForEvents(events: RunEvent[]) {
     const collaborationId = events.find(event => event.kind === 'collaboration')?.detail;
     if (collaborationId) {
@@ -350,19 +362,21 @@ import ArrowRightLeft from "@lucide/svelte/icons/arrow-right-left";
           {#if dateBreak !== null && dateBreak !== undefined}<ChatDateDivider at={dateBreak}/>{/if}
           {#if item.type === 'activity'}
             {@const inlineSubagent=subagentForEvents([item.value])}
-            {#if item.value.kind === 'jevDecision'}<JevDecisionCard event={item.value} onloaddetail={onLoadFullEventDetail}/>
+            {#if item.value.kind === 'collaboration'}
+              <AgentExchange events={displayExchangeGroups.get(item.value.id) ?? [item.value]} record={displayCollaborations.find(record => record.id === item.value.detail)} taskId={displayTask.id} peer={inlineSubagent} peerName={exchangePeerName(item.value)} messages={display.conversationItems.flatMap(entry => entry.type === 'message' && entry.value.collaborationId === item.value.detail ? [entry.value] : [])} onopen={onOpenSubagent}/>
+            {:else if item.value.kind === 'jevDecision'}<JevDecisionCard event={item.value} onloaddetail={onLoadFullEventDetail}/>
             {:else if inlineSubagent}<div class="subagent-inline"><UnifiedSubagentItem item={inlineSubagent} onclick={onOpenSubagent}/></div>
             {:else}<RunActivity active={active && !transcriptBuffer.held()} event={item.value} onloaddetail={onLoadFullEventDetail}/>
             {/if}
           {:else if item.type === 'reasoning-group'}
-            <RunActivity active={active && !transcriptBuffer.held()} events={item.values} onloaddetail={onLoadFullEventDetail} running={displayTask.status === 'running' && item === displayItems.at(-1) && !display.hasPendingApprovals}>
+            <RunActivity active={active && !transcriptBuffer.held()} events={item.values} onloaddetail={onLoadFullEventDetail} running={liveTranscriptActivity(item.values, display.conversationItems, displayTask.status === 'running', display.turnBoundaryEvents, [...display.optimisticMessages, ...display.steeringMessages].map(message => message.id)) && !display.hasPendingApprovals}>
               {#snippet avatar()}{@render messageAvatar(displayAgent)}{/snippet}
             </RunActivity>
           {:else if item.type === 'tool-group'}
             {@const inlineSubagent=subagentForEvents(item.values)}
-            {#if inlineSubagent}<div class="subagent-inline"><UnifiedSubagentItem item={inlineSubagent} onclick={onOpenSubagent}/></div>{:else}<RunActivity active={active && !transcriptBuffer.held()} events={item.values} onloaddetail={onLoadFullEventDetail} processTree compressed={display.settings.compressToolCalls === true} running={displayTask.status === 'running'}/>{/if}
+            {#if inlineSubagent}<div class="subagent-inline"><UnifiedSubagentItem item={inlineSubagent} onclick={onOpenSubagent}/></div>{:else}<RunActivity active={active && !transcriptBuffer.held()} events={item.values} onloaddetail={onLoadFullEventDetail} processTree compressed={display.settings.compressToolCalls === true} running={liveTranscriptActivity(item.values, display.conversationItems, displayTask.status === 'running', display.turnBoundaryEvents, [...display.optimisticMessages, ...display.steeringMessages].map(message => message.id))}/>{/if}
           {:else if item.type === 'process-group'}
-            <RunActivity active={active && !transcriptBuffer.held()} events={item.values} approvals={item.approvals} processGroups={item.groups} onapproval={onOpenApproval} onloaddetail={onLoadFullEventDetail} processTree running={displayTask.status === 'running'}/>
+            <RunActivity active={active && !transcriptBuffer.held()} events={item.values} approvals={item.approvals} processGroups={item.groups} onapproval={onOpenApproval} onloaddetail={onLoadFullEventDetail} processTree running={liveTranscriptActivity(item.values, display.conversationItems, displayTask.status === 'running', display.turnBoundaryEvents, [...display.optimisticMessages, ...display.steeringMessages].map(message => message.id))}/>
           {:else if item.type === 'approval'}
             {@const approvalText=approvalEventText(item.value)}
             <button class={`approval-inline ${item.value.status}`} onclick={()=>onOpenApproval(item.value)} title={approvalText} aria-label={`${approvalText}. Open approval history`}><span>{approvalText}</span><time>{formatTime(item.value.resolvedAt ?? item.value.createdAt)}</time></button>

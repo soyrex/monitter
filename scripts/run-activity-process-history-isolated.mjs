@@ -8,7 +8,6 @@ const result = await build({
   plugins: [svelte()],
   resolve: { alias: {
     '$lib': `${process.cwd()}/src/lib`,
-    '@lucide/svelte': `${process.cwd()}/scripts/fixtures/run-activity-process-history-lucide-stub.js`,
   } },
   root: process.cwd(),
   build: { write: false, minify: false, rollupOptions: { input: 'scripts/fixtures/run-activity-process-history-entry.js' } },
@@ -52,9 +51,20 @@ try {
   await firstTree.locator(':scope > summary').click();
   // Blank reasoning is transient and must not become an invented thought branch;
   // the completed command history is still rendered as a process tree.
-  await expect(firstTree.locator('.process-branch')).toHaveCount(1);
-  await expect(firstTree.locator('.process-branch')).not.toContainText('Thought process');
-  await expect(firstTree.locator('.process-branch')).toContainText('Ran 2 commands');
+  await expect(firstTree.locator('.process-branch')).toHaveCount(0);
+  await expect(firstTree.locator(':scope > summary')).toHaveAttribute('aria-expanded', 'true');
+  for (const width of [280, 600]) {
+    await page.setViewportSize({ width, height: 700 });
+    const geometry = await firstTree.locator(':scope > summary').evaluate(summary => {
+      const header = summary.getBoundingClientRect();
+      const leading = summary.querySelector('.notice-state').getBoundingClientRect();
+      const caret = summary.querySelector('.chevron').getBoundingClientRect();
+      return { leading: Math.abs(leading.left - header.left), trailing: Math.abs(caret.right - header.right), height: header.height };
+    });
+    expect(geometry.height).toBeGreaterThanOrEqual(44);
+    expect(geometry.leading).toBeLessThanOrEqual(1);
+    expect(geometry.trailing).toBeLessThanOrEqual(1);
+  }
   await expect(firstTree.locator('.process-step')).toHaveCount(2);
   await expect(firstTree.locator('[aria-label="Tool details: command_execution"]').nth(0)).toContainText('printf first');
   await expect(firstTree.locator('[aria-label="Tool details: command_execution"]').nth(1)).toContainText('output for printf first');
@@ -65,8 +75,7 @@ try {
   await expect(page.locator('details.process-tree')).toHaveCount(2);
   const retainedTree = page.locator('details.process-tree').filter({ hasText: 'printf first' });
   await expect(retainedTree).toHaveCount(1);
-  await expect(retainedTree.locator('.process-branch')).toHaveCount(1);
-  await expect(retainedTree.locator('.process-branch')).not.toContainText('Thought process');
+  await expect(retainedTree.locator('.process-branch')).toHaveCount(0);
   await expect(retainedTree).toContainText('output for printf first');
   await expect(page.locator('details.process-tree').filter({ hasText: 'printf second' })).toHaveCount(1);
 

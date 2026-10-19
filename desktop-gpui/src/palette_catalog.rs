@@ -105,6 +105,7 @@ const CREATION_COMMANDS: &[(&str, &str)] = &[
     ("new-agent", "New agent"),
     ("new-channel", "New channel"),
     ("new-project", "New project"),
+    ("ideas", "Idea List"),
     ("new-browser", "New browser tab"),
     ("balance-panes", "Balance panes"),
     ("archived", "Archived chats"),
@@ -394,6 +395,10 @@ pub(super) fn entries(view: &Desktop, cx: &App) -> Vec<E> {
         }
         if id == "balance-panes" {
             row.keyboard_hint = Some("⌘⌥=".into());
+        }
+        if id == "ideas" {
+            row.keywords = "ideas project notes shelf".into();
+            row.subtitle = "Open a pane beside your agents".into();
         }
         result.push(row);
     }
@@ -999,6 +1004,11 @@ impl Desktop {
                     pane.update(cx, |pane, cx| pane.select(json!({}), window, cx));
                 }
             }
+            "ideas" => {
+                if let Err(error) = self.open_ideas(window, cx) {
+                    self.window.error = Some(error);
+                }
+            }
             "new-channel" => {
                 self.palette_channels(window, cx);
                 if let Some(pane) = &self.window.channels {
@@ -1086,6 +1096,7 @@ mod tests {
             "new-agent",
             "new-channel",
             "new-project",
+            "ideas",
             "new-browser",
             "new-neovim",
             "neovim-files",

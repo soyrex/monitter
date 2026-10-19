@@ -90,7 +90,15 @@ export interface JevCommandCandidate { id: string; label: string; description?: 
 export interface JevCommandPlan { traceId: string; candidateId: string; confidence: number; reason: string; }
 export type TaskStatus = 'idle' | 'running' | 'completed' | 'error' | 'interrupted';
 export type SidebarView = 'standard' | 'activity' | 'projects';
-export interface ProjectIdea { id: string; title: string; markdown: string; createdAt: number; updatedAt: number; }
+export type ProjectIdeaStatus = 'open' | 'inPlan' | 'done' | 'dropped';
+export interface ProjectIdeaActor { kind: string; id: string | null; name: string | null; }
+export interface ProjectIdeaEdit { editedAt: number; editedBy: ProjectIdeaActor; title: string; markdown: string; status: ProjectIdeaStatus; tags?: string[]; }
+export interface ProjectIdea {
+  id: string; title: string; markdown: string; createdAt: number; updatedAt: number;
+  authorKind?: string; authorId?: string | null; authorName?: string | null;
+  updatedBy?: ProjectIdeaActor | null; status?: ProjectIdeaStatus;
+  sourceTaskId?: string | null; history?: ProjectIdeaEdit[]; tags?: string[];
+}
 export interface Project {
   buildManagementEnabled?: boolean;
   agentWorktreesEnabled?: boolean;
@@ -332,7 +340,7 @@ export interface ApprovalRule {
 }
 export interface InteractionInput {
   kind: 'questions' | 'form' | 'url';
-  questions: { id: string; header: string; question: string; isSecret: boolean; options: { label: string; description: string }[] }[];
+  questions: { id: string; header: string; question: string; isSecret: boolean; selectionMode?: 'single' | 'multiple'; options: { label: string; description: string }[] }[];
   schema: Record<string, unknown> | null;
   url: string | null;
 }

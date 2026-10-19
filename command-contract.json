@@ -1149,6 +1149,38 @@
         "lan"
       ]
     },
+    "save_project_ideas": {
+      "arguments": [
+        {
+          "name": "projectId",
+          "rustName": "project_id",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "ideas",
+          "rustName": "ideas",
+          "rustType": "Vec<ProjectIdea>",
+          "tsType": "ProjectIdea[]",
+          "optional": false
+        },
+        {
+          "name": "expectedRevision",
+          "rustName": "expected_revision",
+          "rustType": "u64",
+          "tsType": "number",
+          "optional": false
+        }
+      ],
+      "resultRustType": "Snapshot",
+      "resultTsType": "Snapshot",
+      "legacyCompatible": false,
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
     "merge_task_worktree": {
       "arguments": [
         {
@@ -1458,6 +1490,13 @@
           "rustType": "Option<Vec<String>>",
           "tsType": "string[] | null",
           "optional": true
+        },
+        {
+          "name": "deliveryMode",
+          "rustName": "delivery_mode",
+          "rustType": "Option<String>",
+          "tsType": "string | null",
+          "optional": true
         }
       ],
       "resultRustType": "Snapshot",
@@ -1489,6 +1528,13 @@
           "rustName": "attachment_ids",
           "rustType": "Option<Vec<String>>",
           "tsType": "string[] | null",
+          "optional": true
+        },
+        {
+          "name": "deliveryMode",
+          "rustName": "delivery_mode",
+          "rustType": "Option<String>",
+          "tsType": "string | null",
           "optional": true
         }
       ],
@@ -2797,6 +2843,7 @@
       "ModelTarget",
       "ProbeResult",
       "ProcessMetricsSample",
+      "ProjectIdea",
       "ReportDocument",
       "Sandbox",
       "Schedule",

@@ -4,6 +4,17 @@
   "mobilePolicy": "unchanged",
   "features": [
     {
+      "id": "project_idea_pane",
+      "sourcePaths": [
+        "desktop-gpui/src/ideas.rs",
+        "desktop-gpui/src/palette_catalog.rs",
+        "desktop-gpui/src/workspace_windows.rs",
+        "src-tauri/src/project_ideas.rs"
+      ],
+      "status": "implemented_unverified",
+      "evidence": "Dedicated retained Idea List opens beside agents and restores with workspace layouts; the earlier pane release was installed and observed in the main window. This refinement adds native Move/Close, owner-scoped Split right/below, a left project selector, secondary Search, and reference widget structure with theme-driven colours and font sizing. Capture, author filters, grouped rows, compact metadata/tags, note preview/editor, history and agent actions retain revision-fenced editors. Refined verification passed all 9 native pane/palette/docking checks, including 320px geometry, close with neighboring focus, owner-scoped splitting, retained drafts and restoration. Prior 6 backend checks passed. Packaging and installed visual acceptance of this refinement are pending. Installed metadata server bundle is newer than the preserved live backend; full metadata persistence activation is not yet claimed. Canonical per-idea Markdown files remain a separately recorded follow-up."
+    },
+    {
       "id": "universal_user_questions",
       "sourcePaths": [
         "src-tauri/src/user_questions.rs",

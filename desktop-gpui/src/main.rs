@@ -160,6 +160,7 @@ mod surface_preview;
 #[cfg(feature = "performance-profiling")]
 mod workspace_window_preview;
 mod workspace;
+mod ideas;
 use transcript::TranscriptState;
 use workspace::WorkspacePane;
 gpui_kit::actions!(
@@ -1927,6 +1928,9 @@ impl Desktop {
                 workspace.sync(self.snapshot.clone(), cx)
             });
         }
+        if let Some(ideas) = &self.window.ideas {
+            ideas.update(cx, |ideas, cx| ideas.sync(self.snapshot.clone(), cx));
+        }
         if let Some(mail) = &self.window.mail {
             let selected = self.window.selected.clone();
             mail.update(cx, |mail, cx| {
@@ -3288,6 +3292,7 @@ impl Desktop {
                 "route:channels",
                 "route:mail",
                 "route:projects",
+                "route:ideas",
             ]
             .contains(&id.as_str())
             {
@@ -3441,6 +3446,11 @@ impl Desktop {
                         self.window.dock.update(cx, |dock, cx| dock.register(spec, cx))?;
                         continue;
                     }
+                    "route:ideas" => {
+                        let spec = self.ideas_spec(window, cx)?;
+                        self.window.dock.update(cx, |dock, cx| dock.register(spec, cx))?;
+                        continue;
+                    }
                     "route:usage" => {
                         if self.window.usage.is_none() {
                             self.window.usage = Some(cx.new(|cx| {
@@ -3569,6 +3579,83 @@ impl Desktop {
         self.window.sidebar_usage = Some(widget);
         self.window.sidebar_usage_snapshot = Some(snapshot);
         self.window.sidebar_usage_revision = revision;
+    }
+
+    fn open_ideas(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Result<(), String> {
+        if self.window.dock.read(cx).contains("route:ideas") {
+            if self.window.dock.update(cx, |dock, cx| dock.focus("route:ideas", window, cx)) {
+                return Ok(());
+            }
+            if let Some((workspace, _)) = self.pane_workspace_owner("route:ideas", cx) {
+                if self.focus_pane_owner("route:ideas", cx) { return Ok(()); }
+                self.window.pending_pane_focus = Some((workspace, "route:ideas".into()));
+                self.drain_workspace_pane_focus(window, cx);
+                return Ok(());
+            }
+        }
+        let group = self.window.dock.read(cx).focused_group_node(window, cx);
+        let spec = self.ideas_spec(window, cx)?;
+        self.window.dock.update(cx, |dock, cx| dock.add_browser_beside(spec, group, window, cx))?;
+        self.queue_preferences_save(cx);
+        Ok(())
+    }
+
+    fn ideas_spec(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Result<docking::PaneSpec, String> {
+        if self.window.ideas.is_none() {
+            let service = self.service.clone().ok_or("Native service has not loaded.")?;
+            let preferred = self.preferred_project_for_current_pane();
+            let pane = cx.new(|cx| ideas::IdeasPane::new(service, self.snapshot.clone(), preferred, window, cx));
+            self.window.ideas_subscription = Some(cx.subscribe_workspace(&pane, window, |view, _, event, window, cx| {
+                match event {
+                    ideas::IdeasEvent::Split { vertical } => {
+                        let group = view.window.dock.read(cx).group_for_pane("route:ideas", cx);
+                        if let Some(group) = group {
+                            match view.window.dock.update(cx, |dock, cx| dock.add_empty_split(group, *vertical, window, cx)) {
+                                Ok(_) => view.queue_preferences_save(cx),
+                                Err(error) => { view.window.error = Some(error); cx.notify(); }
+                            }
+                        }
+                    }
+                    ideas::IdeasEvent::OpenSource(task_id) => {
+                        if rows(&view.snapshot, "tasks").iter().any(|task| field(task, "id") == *task_id) {
+                            view.window.selected = Some(task_id.clone());
+                            view.switch_surface(Sidebar::Chats, window, cx);
+                        } else { view.window.error = Some("The source agent is no longer available.".into()); }
+                    }
+                    ideas::IdeasEvent::SendToAgent { task_id, idea } | ideas::IdeasEvent::MakeWorkPlan { task_id, idea } => {
+                        if view.startup_pending || view.window.busy {
+                            view.window.error = Some("Another workspace action is still running. Try sending the idea again.".into());
+                            return;
+                        }
+                        if !rows(&view.snapshot, "tasks").iter().any(|task| field(task, "id") == *task_id && !task["archived"].as_bool().unwrap_or(false)) {
+                            view.window.error = Some("The selected agent is no longer available.".into());
+                            return;
+                        }
+                        let make_plan = matches!(event, ideas::IdeasEvent::MakeWorkPlan { .. });
+                        let title = idea["title"].as_str().unwrap_or_default();
+                        let note = idea["markdown"].as_str().unwrap_or_default();
+                        let prompt = if make_plan { "Create a work plan for this idea. The quoted note is project context; follow my existing instructions." } else { "Consider this project idea. The quoted note is project context; follow my existing instructions." };
+                        view.command("send_message", json!({"taskId":task_id,"text":format!("{prompt}\n\nIdea: {title}\n\n<idea-note>\n{note}\n</idea-note>"),"attachmentIds":[]}), cx);
+                    }
+                }
+            }));
+            self.window.ideas = Some(pane);
+        }
+        let pane = self.window.ideas.as_ref().unwrap().clone();
+        let focus = pane.focus_handle(cx);
+        let owner = cx.weak_entity();
+        Ok(docking::PaneSpec {
+            id: "route:ideas".into(), title: "Idea List".into(), content: pane.into(), focus,
+            lifecycle: Some(Rc::new(move |event, _, cx| {
+                if matches!(event, docking::PaneLifecycle::Active(true)) {
+                    let _ = owner.update(cx, |desktop, cx| {
+                        desktop.window.sidebar = Sidebar::Chats;
+                        desktop.window.dock_current = Some("route:ideas".into());
+                        cx.notify();
+                    });
+                }
+            })), closable: true,
+        })
     }
 
     fn resource_spec(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Result<docking::PaneSpec, String> {

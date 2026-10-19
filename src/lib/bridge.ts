@@ -17,6 +17,7 @@ import type {
   Host,
   ProbeResult,
   Project,
+  ProjectIdea,
   Settings,
   Snapshot,
   Task,
@@ -110,10 +111,11 @@ export interface MonitterBridge {
   deleteTask(id: string): Promise<Snapshot>;
   setTaskArchived(taskId: string, archived: boolean): Promise<Snapshot>;
   saveProject(project: Project): Promise<Snapshot>;
+  saveProjectIdeas?(projectId: string, ideas: ProjectIdea[], expectedRevision: number): Promise<Snapshot>;
   postProjectBoardNote(projectId: string, text: string, requestId: string): Promise<Snapshot>;
   deleteProject(id: string): Promise<Snapshot>;
   setTaskProject(taskId: string, projectId: string | null): Promise<Snapshot>;
-  sendMessage(taskId: string, text: string, attachmentIds?: string[]): Promise<Snapshot | SendAccepted>;
+  sendMessage(taskId: string, text: string, attachmentIds?: string[], deliveryMode?: 'queue' | 'steer'): Promise<Snapshot | SendAccepted>;
   refreshMailInbox(taskId: string, accountId: string, query: string): Promise<unknown>;
   requestMailDetail(taskId: string, mailId: string): Promise<MailDetailRequestResult>;
   getMailDetail(taskId: string, mailId: string): Promise<MailDetail | null>;
@@ -401,8 +403,8 @@ async function chooseSendProtocol(): Promise<'fast' | 'legacy'> {
   return commands?.has('send_message_fast') && commands.has('send_channel_message_fast') ? 'fast' : 'legacy';
 }
 
-async function fastSendMessage(taskId: string, text: string, attachmentIds: string[]): Promise<SendAccepted> {
-  const receipt = await invoke('send_message_fast', { taskId, text, attachmentIds });
+async function fastSendMessage(taskId: string, text: string, attachmentIds: string[], deliveryMode?: 'queue' | 'steer'): Promise<SendAccepted> {
+  const receipt = await invoke('send_message_fast', { taskId, text, attachmentIds, ...(deliveryMode ? { deliveryMode } : {}) });
   scheduleSnapshotRefresh();
   return receipt;
 }
@@ -413,12 +415,12 @@ async function fastSendChannelMessage(channelId: string, text: string, agentIds:
   return receipt;
 }
 
-async function sendMessageWithProtocol(taskId: string, text: string, attachmentIds: string[]): Promise<Snapshot | SendAccepted> {
+async function sendMessageWithProtocol(taskId: string, text: string, attachmentIds: string[], deliveryMode?: 'queue' | 'steer'): Promise<Snapshot | SendAccepted> {
   const protocol = await chooseSendProtocol();
-  if (protocol === 'legacy') return rememberSnapshot(await invoke('send_message', { taskId, text, attachmentIds }));
+  if (protocol === 'legacy') return rememberSnapshot(await invoke('send_message', { taskId, text, attachmentIds, ...(deliveryMode ? { deliveryMode } : {}) }));
   // No catch here: after invoking a mutation, even a command-looking error is
   // ambiguous and must never cause a duplicate legacy send.
-  return fastSendMessage(taskId, text, attachmentIds);
+  return fastSendMessage(taskId, text, attachmentIds, deliveryMode);
 }
 
 async function sendChannelMessageWithProtocol(channelId: string, text: string, agentIds: string[], attachmentIds: string[]): Promise<Snapshot | SendAccepted> {
@@ -467,10 +469,11 @@ const nativeBridge: MonitterBridge = {
   deleteTask: (id) => invoke("delete_task", { id }),
   setTaskArchived: (taskId, archived) => invoke("set_task_archived", {taskId, archived}),
   saveProject: project => invoke("save_project", {project}),
+  saveProjectIdeas: (projectId, ideas, expectedRevision) => invoke("save_project_ideas", {projectId, ideas, expectedRevision}),
   postProjectBoardNote: (projectId, text, requestId) => invoke('post_project_board_note', { projectId, text, requestId }),
   deleteProject: id => invoke("delete_project", {id}),
   setTaskProject: (taskId, projectId) => invoke("set_task_project", {taskId, projectId}),
-  sendMessage: (taskId, text, attachmentIds = []) => sendMessageWithProtocol(taskId, text, attachmentIds),
+  sendMessage: (taskId, text, attachmentIds = [], deliveryMode) => sendMessageWithProtocol(taskId, text, attachmentIds, deliveryMode),
   refreshMailInbox: (taskId, accountId, query) => isLanBrowser() ? desktopOnly() : invoke('refresh_mail_inbox', { taskId, accountId, query }),
   requestMailDetail: (taskId, mailId) => isLanBrowser() ? desktopOnly() : invoke('request_mail_detail', { taskId, mailId }),
   getMailDetail: (taskId, mailId) => isLanBrowser() ? desktopOnly() : invoke('get_mail_detail', { taskId, mailId }),
@@ -773,11 +776,12 @@ export function getBridge(): MonitterBridge {
         test.invoke("delete_task", { id }) as Promise<Snapshot>,
       setTaskArchived: (taskId, archived) => test.invoke("set_task_archived", {taskId, archived}) as Promise<Snapshot>,
       saveProject: project => test.invoke("save_project", {project}) as Promise<Snapshot>,
+      saveProjectIdeas: (projectId, ideas, expectedRevision) => test.invoke("save_project_ideas", {projectId, ideas, expectedRevision}) as Promise<Snapshot>,
       postProjectBoardNote: (projectId, text, requestId) => test.invoke('post_project_board_note', { projectId, text, requestId }) as Promise<Snapshot>,
       deleteProject: id => test.invoke("delete_project", {id}) as Promise<Snapshot>,
       setTaskProject: (taskId, projectId) => test.invoke("set_task_project", {taskId, projectId}) as Promise<Snapshot>,
-      sendMessage: (taskId, text, attachmentIds = []) =>
-        test.invoke("send_message", { taskId, text, attachmentIds }) as Promise<Snapshot>,
+      sendMessage: (taskId, text, attachmentIds = [], deliveryMode) =>
+        test.invoke("send_message", { taskId, text, attachmentIds, ...(deliveryMode ? { deliveryMode } : {}) }) as Promise<Snapshot>,
       refreshMailInbox: (taskId, accountId, query) => test.invoke('refresh_mail_inbox', { taskId, accountId, query }),
       requestMailDetail: (taskId, mailId) => test.invoke('request_mail_detail', { taskId, mailId }) as Promise<MailDetailRequestResult>,
       getMailDetail: (taskId, mailId) => test.invoke('get_mail_detail', { taskId, mailId }) as Promise<MailDetail | null>,

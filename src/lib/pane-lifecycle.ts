@@ -4,13 +4,14 @@ export type PaneTabState = {
   openDraftIds: readonly string[];
   openChannelIds: readonly string[];
   openTerminalIds: readonly string[];
+  openIdeaProjectIds?: readonly string[];
   openGitTaskIds: readonly string[];
   openEmptyIds: readonly string[];
   settingsOpen: boolean;
 };
 
 export function paneTabCount(state: PaneTabState) {
-  return state.openTaskIds.length + state.openDraftIds.length + state.openChannelIds.length
+  return (state.openIdeaProjectIds?.length ?? 0) + state.openTaskIds.length + state.openDraftIds.length + state.openChannelIds.length
     + state.openTerminalIds.length + state.openGitTaskIds.length + state.openEmptyIds.length + (state.settingsOpen ? 1 : 0);
 }
 

@@ -14,4 +14,5 @@ export type OptimisticMessage = {
   baselineIds: Set<string>;
   baselineQueuedIds: Set<string>;
   recipientIds?: string[];
+  deliveryMode?: 'queue' | 'steer';
 };
