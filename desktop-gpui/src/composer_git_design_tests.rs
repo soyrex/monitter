@@ -98,9 +98,15 @@ fn mounted(cx: &mut TestAppContext, light: bool) {
         for width in [420., 280.] {
             visual.simulate_resize(size(native_px(width), native_px(180.)));
             visual.update(|window, cx| window.draw(cx).clear(cx));
-            let title = visual
-                .debug_bounds("composer-git-changes-title")
-                .expect("Changes label mounted");
+            assert!(
+                visual
+                    .debug_bounds("composer-git-changes-title")
+                    .is_none(),
+                "Git bar stays icon-and-branch only"
+            );
+            let branch = visual
+                .debug_bounds("composer-git-branch")
+                .expect("branch label mounted");
             let stats = visual
                 .debug_bounds("composer-git-stats")
                 .expect("real line totals mounted");
@@ -125,7 +131,7 @@ fn mounted(cx: &mut TestAppContext, light: bool) {
             let del = visual
                 .debug_bounds("composer-git-deleted-rail")
                 .expect("deleted-line segment");
-            for bounds in [title, stats, rail, add, del] {
+            for bounds in [branch, stats, rail, add, del] {
                 assert!(
                     bounds.left() >= native_px(-1.) && bounds.right() <= native_px(width + 1.),
                     "content stays in narrow pane: {bounds:?}"
@@ -136,7 +142,7 @@ fn mounted(cx: &mut TestAppContext, light: bool) {
                 "rail uses observed line totals"
             );
             assert!((del.right() - rail.right()).abs() <= px(1.));
-            visual.simulate_click(title.center(), Default::default());
+            visual.simulate_click(branch.center(), Default::default());
         }
     }
     assert_eq!(

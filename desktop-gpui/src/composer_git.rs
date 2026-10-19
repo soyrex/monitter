@@ -279,15 +279,6 @@ fn change_bar(status: &Value, palette: crate::design::Palette, ratio: f32, revea
                 .items_center()
                 .gap(px(7.))
                 .child(
-                    div()
-                        .debug_selector(|| "composer-git-changes-title".into())
-                        .flex_shrink_0()
-                        .text_size(px(10. * ratio))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(palette.ink))
-                        .child("Changes"),
-                )
-                .child(
                     Icon::new(IconName::GitBranch)
                         .size(px(10. * ratio))
                         .flex_shrink_0()

@@ -647,7 +647,6 @@ impl TabGroupSkin {
                         // Right -1 for avoid border overlap with the first tab
                         .right(-px(1.))
                         .border_r_1()
-                        .border_b_1()
                         .h_full()
                         .border_color(cx.theme().border)
                             .border_blend_mode(separator_mode)
@@ -899,9 +898,6 @@ impl TabGroupSkin {
                     .min_w_16()
                     .when(modern && !pill, |this| {
                         this.when(!shared_background, |this| this.bg(surface_background(cx.theme().tokens.tab_active.into(), blend_mode)))
-                            .border_b_1()
-                            .border_color(cx.theme().border)
-                            .border_blend_mode(separator_mode)
                     })
                     .when(!pill, |this| this.child(div().absolute().inset_0().bg(surface_background(
                         gpui::rgba(0x0000001a).into(), 2,
@@ -961,7 +957,6 @@ impl TabGroupSkin {
                             .top_0()
                             .right_0()
                             .border_l_1()
-                            .border_b_1()
                             .h_full()
                             .border_color(cx.theme().border)
                             .border_blend_mode(separator_mode)

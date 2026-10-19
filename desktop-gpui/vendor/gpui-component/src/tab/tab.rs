@@ -181,7 +181,6 @@ impl TabVariant {
                 bg: cx.theme().tokens.tab_bar.into(),
                 borders: Edges {
                     right: px(1.),
-                    bottom: px(1.),
                     ..Default::default()
                 },
                 border_color: cx.theme().border,
@@ -250,7 +249,6 @@ impl TabVariant {
                 },
                 borders: Edges {
                     right: px(1.),
-                    bottom: if selected { px(0.) } else { px(1.) },
                     ..Default::default()
                 },
                 border_color: cx.theme().border,
@@ -398,7 +396,6 @@ impl TabVariant {
                 },
                 borders: Edges {
                     right: px(1.),
-                    bottom: if selected { px(0.) } else { px(1.) },
                     ..Default::default()
                 },
                 border_color: cx.theme().border,
