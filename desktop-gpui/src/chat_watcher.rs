@@ -726,36 +726,6 @@ impl ChatPane {
             .overflow_hidden()
             .font_family(font_family.clone())
             .text_color(rgb(palette.ink))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .px(px(14.))
-                    .py(px(11.))
-                    .border_b_1()
-                    .border_color(rgb(palette.line))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(7.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_size(px(12. * ratio))
-                            .child(
-                                Icon::new(IconName::MessageSquare)
-                                    .with_size(px(13.))
-                                    .text_color(rgb(palette.accent)),
-                            )
-                            .child("Interject"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(10. * ratio))
-                            .text_color(rgb(palette.muted))
-                            .child("Watch stays open"),
-                    ),
-            )
             .when_some(exchange, |surface, exchange| {
                 surface.child(
                     div()
@@ -852,10 +822,7 @@ impl ChatPane {
             })
             .child(
                 div()
-                    .px(px(11.))
-                    .py(px(10.))
-                    .border_t_1()
-                    .border_color(rgb(palette.line))
+                    .p(px(12.))
                     .child(
                         div()
                             .id("watcher-interject-composer")
@@ -863,11 +830,14 @@ impl ChatPane {
                             .flex()
                             .items_end()
                             .gap(px(8.))
-                            .p(px(7.))
-                            .rounded(px(9.))
+                            .p(px(design::space::INSET))
+                            .rounded(px(design::radius::CONTROL))
                             .border_1()
-                            .border_color(rgb(palette.line))
-                            .bg(design::surface_color(palette.card))
+                            .border_color(design::surface_color(palette.line))
+                            .bg(crate::surface_blend::raised_background(
+                                crate::surface_blend::Area::Composer,
+                                palette.card,
+                            ))
                             .child(
                                 Textarea::new(&self.composer)
                                     .small()
@@ -875,7 +845,7 @@ impl ChatPane {
                                     .bordered(false)
                                     .font_family(font_family)
                                     .text_size(px(12. * ratio))
-                                    .min_h(px(30.))
+                                    .min_h(px(design::COMPOSER_CONTROL_SIZE))
                                     .max_h(px(108.))
                                     .flex_1()
                                     .disabled(self.busy),
@@ -883,9 +853,12 @@ impl ChatPane {
                             .child(
                                 Button::new("watcher-interject-send")
                                     .debug_selector(|| "watcher-interject-send".into())
-                                    .compact()
                                     .outline()
-                                    .size(px(30.))
+                                    .compact()
+                                    .w(px(design::COMPOSER_CONTROL_SIZE))
+                                    .h(px(design::COMPOSER_CONTROL_SIZE))
+                                    .border_color(rgb(palette.accent))
+                                    .text_color(rgb(palette.accent))
                                     .icon(Icon::new(if self.busy {
                                         IconName::LoaderCircle
                                     } else {
@@ -1442,12 +1415,12 @@ impl ChatPane {
                     .text_size(px(11. * ratio))
                     .line_height(px(16. * ratio))
                     .icon(Icon::new(IconName::MessageSquare))
-                    .label("Interject")
+                    .label("Steer")
                     .debug_selector(|| "watcher-back".into())
-                    .accessibility_label("Interject without leaving Watch")
+                    .accessibility_label("Steer without leaving Watch")
                     .tooltip("Send a steer without leaving Watch"),
             )
-            .on_open_change(move |open, _, cx| {
+            .on_open_change(move |open, window, cx| {
                 let _ = owner.update(cx, |pane, cx| {
                     pane.watcher.interject_open = *open;
                     if *open {
@@ -1457,6 +1430,8 @@ impl ChatPane {
                                 cx,
                             );
                         });
+                        let focus = pane.composer.read(cx).focus_handle(cx);
+                        window.defer(cx, move |window, cx| window.focus(&focus, cx));
                     }
                     cx.notify();
                 });
@@ -2090,6 +2065,20 @@ mod native_tests {
                         "Keep this draft"
                     )
                 });
+                visual.simulate_keystrokes("space");
+                draw(visual);
+                assert!(
+                    visual.debug_bounds("watcher-interject-menu").is_some(),
+                    "Space is captured by the focused Steer composer instead of dismissing it"
+                );
+                pane.read_with(visual, |pane, cx| {
+                    assert_eq!(
+                        pane.composer.read(cx).value().to_string(),
+                        " Keep this draft",
+                        "Steer retains the typed space at the existing caret"
+                    )
+                });
+                visual.simulate_keystrokes("backspace");
                 visual.simulate_keystrokes("escape");
                 draw(visual);
                 assert!(visual.debug_bounds("watcher-interject-menu").is_none());

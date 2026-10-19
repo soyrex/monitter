@@ -6630,6 +6630,8 @@ impl ChatPane {
         let active_border_visible = pane_appearance.show_active_border
             && crate::docking::pane_visual_active(&self.focus, window, cx)
             && !crate::preferences_modal::workspace_blocked(cx);
+        let watcher_header_group =
+            SharedString::from(format!("watch-pane-header-hover-{}", self.task_id()));
         let density = field(&self.snapshot["settings"], "interfaceDensity");
         let header_padding_y = match (tern_tiles, density.as_str()) {
             (true, "spacious") => 8.,
@@ -6814,6 +6816,12 @@ impl ChatPane {
                 }
                 this.border_color(color).border_blend_mode(0)
             })
+            .when(self.watcher.enabled, |this| {
+                this.group(watcher_header_group.clone())
+                    .border_b_0()
+                    .pl(px(12.))
+                    .pr(px(12.))
+            })
             .child({
                 let geometry = self.decoration_bounds.header.clone();
                 canvas(
@@ -6833,9 +6841,37 @@ impl ChatPane {
                     cx,
                 ))
             })
-            .child(identity_mark)
-            .child(identity)
+            .when(!self.watcher.enabled, |header| {
+                header.child(identity_mark).child(identity)
+            })
             .child(self.render_watcher_toggle(palette, cx));
+
+        if self.watcher.enabled {
+            if let Some(group) = self.dock_group.as_ref().and_then(|group| group.upgrade()) {
+                let context = group.read(cx).context(cx);
+                header = header
+                    .child(
+                        gpui_kit::component::dock::pane_drag_region(
+                            div().flex_1().h_full(),
+                            &context,
+                            cx,
+                        ),
+                    )
+                    .child(
+                        div()
+                            .invisible()
+                            .group_hover(watcher_header_group, |style| style.visible())
+                            .child(
+                                gpui_kit::component::dock::pane_close_control(&context, cx)
+                                    .w(px(24.))
+                                    .h(px(24.))
+                                    .p_0()
+                                    .debug_selector(|| "watch-header-close".into()),
+                            ),
+                    );
+            }
+            return header.into_any_element();
+        }
         let sidebar_toggle = Button::new("toggle-pane-secondary-sidebar")
             .compact()
             .text()
