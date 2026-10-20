@@ -20,3 +20,7 @@ No timer, frame request, focus activation, or workload scheduling was added by t
 Require `fullyActiveVisible: true` and demonstrated scenario-appropriate workload progress before comparing new autonomous runs. Do not invent a minimum update threshold from observed performance results: timers, pipeline backpressure, and rendering have different expected counts. Record and inspect the counts and draw samples. These diagnostics do not establish physical display scanout, exact partial-cover geometry, or content correctness. They cannot repair old observations lacking the fields.
 
 Two pure accumulator tests cover hidden intervals retained after reactivation, separate active/visible duration, and a fully active visible interval. They require the parent's coordinated Rust test/build run; no compilation was performed while adding them.
+
+## Native diagnostic verification
+
+The corrected candidate release passed both pure accumulator tests (run `fb96f7dd`, exit 0). Separate qualitative native observations verified the platform callbacks: `diagnostic-smoke-candidate` recorded minimize/restore visibility transitions at 9.096/9.940 seconds, and `diagnostic-focus-candidate` recorded key-window activation transitions with 46.525 active seconds out of 67.592 seconds. Both retained `fullyActiveVisible: false` and are ineligible for benchmarking. The latter accepted typed fixture-only composer text; loss of foreground was recorded despite the retained content. These deliberate interaction checks are not timing evidence. Both collectors and OS samplers exited 0.
