@@ -1723,6 +1723,29 @@ impl ChatPane {
     pub fn task_id(&self) -> String {
         self.selected.clone().unwrap_or_default()
     }
+    /// A generated form can prepare ordinary editable text only. This trusted
+    /// host-click path never calls send, resolves a tool or changes permissions.
+    /// Append to current typing instead of overwriting a user's newer draft.
+    pub(crate) fn prepare_openui_draft(&mut self, task_id: &str, text: &str,
+        window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if task_id.is_empty() || self.task_id() != task_id || text.len() > 8192 || text.trim().is_empty() {
+            return false;
+        }
+        let previous = self.composer.read(cx).value().to_string();
+        if previous.len().saturating_add(text.len()) > 64 * 1024 { return false; }
+        let draft = if previous.trim().is_empty() { text.to_owned() } else { format!("{previous}\n\n{text}") };
+        self.composer.update(cx, |input, cx| input.set_value(draft.clone(), window, cx));
+        self.slash.update(cx, |slash, cx| slash.set_input(draft.clone(), cx));
+        self.voice.update(cx, |voice, cx| voice.set_context(task_id.to_owned(), draft.clone(), cx));
+        self.draft_touched = true;
+        self.slash_notice = None;
+        self.bottom_jump = None;
+        self.composer_scroll_distance = gpui_kit::px(0.);
+        cx.emit(ChatEvent::DraftChanged { task_id: task_id.to_owned(), text: draft });
+        self.composer.read(cx).focus_handle(cx).focus(window, cx);
+        cx.notify();
+        true
+    }
     fn close_agent_graph(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.agent_graph_visible = false;
         for body in self.streaming_bodies.values() {
@@ -3969,7 +3992,8 @@ impl Render for ChatPane {
                     let id = field(message, "id");
                     if field(message, "role") != "assistant"
                         || (field(message, "streamStatus") != "streaming"
-                            && !self.streaming_bodies.contains_key(&id))
+                            && !self.streaming_bodies.contains_key(&id)
+                            && !crate::openui_output::has_output(message))
                     {
                         continue;
                     }

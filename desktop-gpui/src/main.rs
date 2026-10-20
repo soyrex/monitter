@@ -83,6 +83,10 @@ mod dialog_backdrop;
 mod native_motion;
 use monitter_gpui_desktop::streaming_display;
 mod streaming_message;
+mod openui_output;
+mod openui_state;
+#[cfg(test)]
+mod openui_runtime_tests;
 mod activity_sparkles;
 mod activity_patterns;
 mod activity_effects;
