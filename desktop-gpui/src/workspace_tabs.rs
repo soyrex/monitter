@@ -327,10 +327,25 @@ impl Desktop {
 
     pub(super) fn ensure_activity_overview(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<activity_overview::ActivityOverview> {
         if let Some(overview) = &self.window.activity_overview { return overview.clone(); }
-        let overview = cx.new(|cx| activity_overview::ActivityOverview::new(window, cx));
+        let grouping = self
+            .preferences
+            .as_ref()
+            .map(|preferences| preferences.data.activity_grouping)
+            .unwrap_or_default();
+        let overview = cx.new(|cx| {
+            activity_overview::ActivityOverview::new_with_grouping(window, cx, grouping)
+        });
         let subscription = cx.subscribe_in_emitter_window(&overview, window, |desktop, _, event, window, cx| {
             desktop.with_workspace_window(window, cx, |desktop, window, cx| match event {
                 activity_overview::ActivityOverviewEvent::OpenTask { task_id } => desktop.open_activity_overview_task(task_id.clone(), window, cx),
+                activity_overview::ActivityOverviewEvent::GroupingChanged { grouping } => {
+                    if let Some(preferences) = desktop.preferences.as_mut() {
+                        if preferences.data.activity_grouping != *grouping {
+                            preferences.data.activity_grouping = *grouping;
+                            desktop.queue_preferences_save(cx);
+                        }
+                    }
+                }
                 activity_overview::ActivityOverviewEvent::Close => desktop.close_activity_overview(window, cx),
             });
         });

@@ -120,6 +120,14 @@ separate from domain snapshots: fixed isolated-profile `native-ui.json`, bounded
 layout/appearance/explicit composer drafts, atomic private writes and revision
 conflict rejection. No preference method is added to LAN or mobile dispatch;
 the native shell restores supported retained panes and debounces revision-guarded layout saves. The optional `chatPanes` map retains explicit secondary-sidebar visibility, selected lowercase `details|timeline|approvals|subagents` tab, and width in design pixels per task UUID. It admits at most 512 entries and finite widths 260–1600; the whole store remains bounded to 512 KiB. Empty maps are omitted for legacy readers; saving a nonempty map requires the updated experimental backend. Pane deletion removes its state, and preference reload merges pending local changes before restoring retained entities. Automatic compact-mode hiding and width constraints do not overwrite explicit saved visibility or width. These are native presentation preferences only. Normal window close waits for pending saves before pane cleanup; forced/platform quit during an in-flight save remains unverified.
+The optional lowercase `activityGrouping` preference selects `project` (the
+default, omitted for legacy stores) or `workspace`. It changes only the native
+Activity presentation and its Working-group membership. Workspace identity is
+the task snapshot's authoritative host plus `cwd`; missing `cwd` values share a
+visible `Unknown workspace` fallback. Search, task identity, execution, Watch
+navigation and communication records remain unchanged. A nondefault value
+requires the updated experimental backend preference schema and adds no LAN or
+mobile command.
 Named GPUI workspace presentation is stored in private device-local
 `named-workspaces.sqlite3`, using transactional revision guards and a 512 KiB
 payload limit. It stores the local `tileTheme` choice and a workspace set with `activeId` and 1–24 items with unique UUID IDs,

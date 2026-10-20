@@ -96,6 +96,19 @@ pub enum NativeTileTheme {
 
 fn is_default_tile_theme(theme: &NativeTileTheme) -> bool { *theme == NativeTileTheme::Monitter }
 
+/// Client-local presentation choice for the native Activity overview.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NativeActivityGrouping {
+    #[default]
+    Project,
+    Workspace,
+}
+
+fn is_default_activity_grouping(grouping: &NativeActivityGrouping) -> bool {
+    *grouping == NativeActivityGrouping::Project
+}
+
 /// No mail/browser bodies, credentials, harness config or workspace snapshots.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -166,6 +179,10 @@ pub struct NativePreferenceData {
     pub workspaces: Option<NativeWorkspaceSet>,
     #[serde(default)]
     pub appearance: NativeAppearance,
+    /// How the read-only Activity overview groups chats. Execution and task
+    /// ownership remain authoritative in the backend snapshot.
+    #[serde(default, skip_serializing_if = "is_default_activity_grouping")]
+    pub activity_grouping: NativeActivityGrouping,
     /// Explicitly saved chat composer drafts, keyed by task UUID. Never filled
     /// from message bodies, mail details, browser state or credential fields.
     #[serde(default)]
@@ -2058,6 +2075,29 @@ mod tests {
         }
         assert!(serde_json::from_value::<NativeAppearance>(json!({"tileTheme": "unknown"})).is_err());
         assert!(serde_json::from_value::<NativeAppearance>(json!({"tileTheme": "Tern"})).is_err());
+    }
+    #[test]
+    fn native_activity_grouping_is_strict_backward_compatible_and_round_trips() {
+        let legacy: NativePreferenceData = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(legacy.activity_grouping, NativeActivityGrouping::Project);
+        assert!(
+            serde_json::to_value(&legacy)
+                .unwrap()
+                .get("activityGrouping")
+                .is_none(),
+            "the default remains omitted for older preference readers"
+        );
+
+        let mut data = NativePreferenceData::default();
+        data.activity_grouping = NativeActivityGrouping::Workspace;
+        let serialized = serde_json::to_value(&data).unwrap();
+        assert_eq!(serialized["activityGrouping"], "workspace");
+        let restored: NativePreferenceData = serde_json::from_value(serialized).unwrap();
+        assert_eq!(restored.activity_grouping, NativeActivityGrouping::Workspace);
+        assert!(serde_json::from_value::<NativePreferenceData>(json!({
+            "activityGrouping": "repository"
+        }))
+        .is_err());
     }
     #[test]
     fn native_browser_metadata_is_optional_strict_and_bounded() {

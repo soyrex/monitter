@@ -83,7 +83,7 @@ fn event_time(event: &Value) -> Option<String> {
         .map(|timestamp| timestamp.format("%-I:%M %P").to_string())
 }
 
-fn parsed_event_detail(event: &Value) -> Value {
+pub(crate) fn parsed_event_detail(event: &Value) -> Value {
     let mut parsed = serde_json::from_str::<Value>(&field(event, "detail")).unwrap_or(Value::Null);
     for _ in 0..3 {
         if let Some(boxed) = parsed.as_str() {
@@ -258,7 +258,7 @@ fn activity_icon(
 
 /// Compact English intent for the latest step, without promoting incidental
 /// provider/accounting titles into tool labels.
-fn process_tool_preview(events: &[Value]) -> Option<String> {
+pub(crate) fn process_tool_preview(events: &[Value]) -> Option<String> {
     let event = events.iter().rev().find(|event| is_tool_event(event))?;
     let detail = parsed_event_detail(event);
     let update = detail.get("update").unwrap_or(&detail);
@@ -299,9 +299,16 @@ fn process_tool_preview(events: &[Value]) -> Option<String> {
         for key in [
             "error",
             "query",
+            "q",
+            "pattern",
             "path",
             "file_path",
+            "url",
+            "title",
             "summary",
+            "question",
+            "objective",
+            "prompt",
             "message",
             "output",
             "result",
@@ -410,7 +417,7 @@ fn mcp_tool_label(event: &Value) -> Option<String> {
     })
 }
 
-fn tool_intent(event: &Value) -> String {
+pub(crate) fn tool_intent(event: &Value) -> String {
     if let Some(label) = mcp_tool_label(event) {
         return label;
     }
