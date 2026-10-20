@@ -16,6 +16,7 @@ use std::{
 use uuid::Uuid;
 
 mod evaluation;
+mod laya_service;
 pub use evaluation::{
     bundled_corpus as bundled_evaluation_corpus, bundled_outcomes as bundled_evaluation_outcomes,
     load_corpus as load_evaluation_corpus, load_outcomes as load_evaluation_outcomes,
@@ -1021,11 +1022,13 @@ pub(crate) fn live_laya_system_one(
             MAX_JEV_PROMPT_BYTES / 1024
         ));
     }
+    let api_key = crate::environment_secrets::laya_api_key_for_internal_service()?;
+    let served_model = laya_service::ensure_running(api_key.as_deref())?;
     laya_system_one_with_client(
         state,
         questions,
-        &std::env::var("LAYA_DEFAULT_MODEL").unwrap_or_else(|_| "laya-local".into()),
-        crate::environment_secrets::laya_api_key_for_internal_service()?.as_deref(),
+        &std::env::var("LAYA_DEFAULT_MODEL").unwrap_or(served_model),
+        api_key.as_deref(),
         &CurlLayaHttpClient,
     )
 }
