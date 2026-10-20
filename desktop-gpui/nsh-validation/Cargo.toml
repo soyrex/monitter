@@ -1,0 +1,37 @@
+[package]
+name = "monitter-nsh-validation"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+gpui-kit = "=0.7.0"
+nsh-platform-gpui = { path = "../../artifacts/nsh-validation/upstream/crates/gpui/nsh-platform-gpui", default-features = false, features = ["js"] }
+nsh-core = { path = "../../artifacts/nsh-validation/upstream/crates/nsh-core" }
+nsh-engine = { path = "../../artifacts/nsh-validation/upstream/crates/nsh-engine" }
+serde_json = "1"
+
+[build-dependencies]
+nsh-bundler = { path = "../../artifacts/nsh-validation/upstream/crates/nsh-bundler", default-features = false }
+
+[patch.crates-io]
+gpui-pre-platform = { path = "../vendor/gpui-fast/compat/gpui-pre-platform" }
+gpui-pre-macros = { path = "../vendor/gpui-fast/compat/gpui-pre-macros" }
+gpui-pre-sum-tree = { path = "../vendor/gpui-fast/compat/gpui-pre-sum-tree" }
+gpui-pre-web = { path = "../vendor/gpui-fast/compat/gpui-pre-web" }
+gpui-pre = { path = "../vendor/gpui-fast/compat/gpui-pre" }
+gpui-pre-macos = { path = "../vendor/gpui-fast/compat/gpui-pre-macos" }
+gpui-pre-apple = { path = "../vendor/gpui-fast/compat/gpui-pre-apple" }
+gpui-base = { path = "../vendor/gpui-base" }
+gpui-component = { path = "../vendor/gpui-component" }
+gpui-fast = { path = "compat/gpui-fast" }
+gpui-fast-platform = { path = "compat/gpui-fast-platform" }
+
+[profile.dev.package.gpui]
+opt-level = 2
+[profile.dev.package.quickjs-jit-sys]
+opt-level = 3
+[profile.dev.package.taffy]
+opt-level = 3

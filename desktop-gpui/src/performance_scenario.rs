@@ -28,6 +28,121 @@ use std::{
     time::Duration,
 };
 
+// Fixture-only observer: no timers, repaint requests, or focus changes.
+thread_local! {
+    static WINDOW_OBSERVATION: std::cell::RefCell<Option<WindowObservation>> = const { std::cell::RefCell::new(None) };
+    static WORKLOAD_UPDATES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+struct WindowObservation {
+    started: std::time::Instant,
+    last_seconds: f64,
+    active: bool,
+    visible: bool,
+    active_seconds: f64,
+    visible_seconds: f64,
+    all_active_visible: bool,
+    transitions: Vec<Value>,
+    workload_start: u64,
+}
+impl WindowObservation {
+    fn record(&mut self, seconds: f64, active: bool, visible: bool) {
+        let elapsed = (seconds - self.last_seconds).max(0.0);
+        if self.active { self.active_seconds += elapsed; }
+        if self.visible { self.visible_seconds += elapsed; }
+        if active != self.active || visible != self.visible {
+            self.transitions.push(json!({"elapsedSeconds": seconds, "active": active, "visible": visible}));
+        }
+        self.last_seconds = seconds;
+        self.active = active;
+        self.visible = visible;
+        self.all_active_visible &= active && visible;
+    }
+}
+
+fn observe_window_conditions(window: &Window) {
+    WINDOW_OBSERVATION.with_borrow_mut(|observation| {
+        if let Some(observation) = observation {
+            observation.record(observation.started.elapsed().as_secs_f64(), window.is_window_active(), window.is_visible());
+        }
+    });
+}
+
+pub(crate) fn begin_window_observation(window: &Window) {
+    let active = window.is_window_active();
+    let visible = window.is_visible();
+    WINDOW_OBSERVATION.with_borrow_mut(|slot| {
+        *slot = Some(WindowObservation {
+            started: std::time::Instant::now(), last_seconds: 0.0, active, visible,
+            active_seconds: 0.0, visible_seconds: 0.0, all_active_visible: active && visible,
+            transitions: vec![json!({"elapsedSeconds": 0.0, "active": active, "visible": visible})],
+            workload_start: WORKLOAD_UPDATES.get(),
+        });
+    });
+}
+
+pub(crate) fn finish_window_observation(window: &Window) -> Value {
+    observe_window_conditions(window);
+    WINDOW_OBSERVATION.with_borrow_mut(|slot| {
+        let Some(observation) = slot.take() else { return Value::Null; };
+        json!({
+            "schemaVersion": 1,
+            "durationSeconds": observation.last_seconds,
+            "activeSeconds": observation.active_seconds,
+            "visibleSeconds": observation.visible_seconds,
+            "fullyActiveVisible": observation.all_active_visible,
+            "transitions": observation.transitions,
+            "workloadUpdateCallbacks": WORKLOAD_UPDATES.get().saturating_sub(observation.workload_start),
+            "workloadCounterMeaning": "streaming-body: fixture update callbacks delivered (body existence is not proven); pipeline-updates: publications committed; idle: zero",
+            "limitation": "Platform activation/occlusion callbacks bracket the measured observation; partial covering is still visible. No physical display or workload correctness guarantee."
+        })
+    })
+}
+
+fn record_workload_update() {
+    WORKLOAD_UPDATES.set(WORKLOAD_UPDATES.get().saturating_add(1));
+}
+
+#[cfg(test)]
+mod window_observation_tests {
+    use super::*;
+
+    fn observation(active: bool, visible: bool) -> WindowObservation {
+        WindowObservation {
+            started: std::time::Instant::now(), last_seconds: 0.0, active, visible,
+            active_seconds: 0.0, visible_seconds: 0.0, all_active_visible: active && visible,
+            transitions: Vec::new(), workload_start: 0,
+        }
+    }
+
+    #[test]
+    fn hidden_interval_is_retained_after_reactivation() {
+        let mut state = observation(true, true);
+        state.record(10.0, true, false);
+        state.record(20.0, true, true);
+        state.record(60.0, true, true);
+        assert_eq!(state.active_seconds, 60.0);
+        assert_eq!(state.visible_seconds, 50.0);
+        assert!(!state.all_active_visible);
+        assert_eq!(state.transitions.len(), 2);
+    }
+
+    #[test]
+    fn foreground_and_visibility_are_independent() {
+        let mut state = observation(false, true);
+        state.record(5.0, true, true);
+        state.record(60.0, true, true);
+        assert_eq!(state.active_seconds, 55.0);
+        assert_eq!(state.visible_seconds, 60.0);
+        assert!(!state.all_active_visible);
+        let mut state = observation(true, true);
+        state.record(60.0, true, true);
+        assert!(state.all_active_visible);
+        assert_eq!(state.active_seconds, 60.0);
+        assert_eq!(state.visible_seconds, 60.0);
+    }
+}
+
 const TASK: &str = "synthetic-ui-performance-task";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Scenario {
@@ -381,6 +496,7 @@ impl PerformanceScenario {
         changes: &PublicationChanges,
         cx: &mut Context<Self>,
     ) {
+        record_workload_update();
         self.index = Some(prepared.index.clone());
         self.records = prepared.collaboration_records;
         self.child_transcripts = prepared.collaboration_transcripts;
@@ -735,7 +851,10 @@ pub fn open_if_requested(cx: &mut App) -> bool {
                             "Live fixture text. ".repeat((sequence as usize % 80) + 1)
                         );
                         if owner
-                            .update(cx, |chat, cx| chat.advance_performance_stream(&text, cx))
+                            .update(cx, |chat, cx| {
+                                chat.advance_performance_stream(&text, cx);
+                                record_workload_update();
+                            })
                             .is_err()
                         {
                             break;
@@ -777,6 +896,14 @@ pub fn open_if_requested(cx: &mut App) -> bool {
                     disclosure_open: false,
                     disclosure_expanded: false,
                 }
+            });
+            scene.update(cx, |_, cx| {
+                cx.observe_window_activation(window, |_: &mut PerformanceScenario, window, _| {
+                    observe_window_conditions(window);
+                }).detach();
+                cx.observe_window_visibility(window, |_: &mut PerformanceScenario, _, window, _| {
+                    observe_window_conditions(window);
+                }).detach();
             });
             if scenario == Scenario::PipelineUpdates {
                 scene.update(cx, |scene, cx| {

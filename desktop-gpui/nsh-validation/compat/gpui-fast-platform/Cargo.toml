@@ -1,0 +1,16 @@
+[package]
+name = "gpui-fast-platform"
+version = "0.1.9"
+edition = "2024"
+publish = false
+[lib]
+path = "lib.rs"
+[features]
+default = []
+font-kit = ["core/font-kit"]
+wayland = ["core/wayland"]
+x11 = ["core/x11"]
+test-support = ["core/test-support"]
+runtime_shaders = ["core/runtime_shaders"]
+[dependencies]
+core = { package = "gpui_platform", path = "../../../vendor/gpui-fast/crates/gpui_platform", default-features = false }

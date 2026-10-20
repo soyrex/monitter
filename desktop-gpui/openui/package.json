@@ -1,0 +1,8 @@
+{
+  "name": "monitter-openui-nsh",
+  "private": true,
+  "type": "module",
+  "scripts": { "vendor": "node vendor.mjs", "test": "node --test controller.test.mjs" },
+  "dependencies": { "zod": "4.4.3" },
+  "devDependencies": { "esbuild": "0.25.12" }
+}

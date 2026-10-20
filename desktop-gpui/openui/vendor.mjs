@@ -1,0 +1,18 @@
+import { build } from 'esbuild';
+import { execFileSync } from 'node:child_process';
+import { readFile, writeFile, copyFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
+import { resolve, dirname } from 'node:path';
+import { createHash } from 'node:crypto';
+const here = dirname(fileURLToPath(import.meta.url));
+const upstream = resolve(here, '../../artifacts/openui-nsh/upstream');
+const commit = '9823ec05d4b29bc78d101676dc16b44fe17f1830';
+if (execFileSync('git', ['-C', upstream, 'rev-parse', 'HEAD'], {encoding:'utf8'}).trim() !== commit) throw Error('Unexpected OpenUI upstream commit');
+execFileSync('git', ['-C', upstream, 'diff', '--exit-code', commit, '--', 'packages/lang-core/src'], {stdio:'pipe'});
+const source = resolve(upstream, 'packages/lang-core/src/index.ts');
+await build({tsconfigRaw:{}, stdin: {contents: `export { createLibrary, defineComponent, createStreamingParser, createStore, evaluateRoot, resolveStateField, markReactive, parseMessage, buildMessage } from ${JSON.stringify(source)}; export {z} from 'zod/v4';`, resolveDir: here, sourcefile:'official-core-entry.ts', loader:'ts'}, outfile:resolve(here,'vendor/core.js'), bundle:true, format:'esm', platform:'browser', target:'es2022', minify:true, legalComments:'eof', alias:{zod:resolve(here,'node_modules/zod'), 'ci-info':resolve(here,'telemetry-disabled.mjs')}, define:{__OPENUI_LANG_CORE_VERSION__:JSON.stringify('1.0.1')}, treeShaking:true });
+await copyFile(resolve(upstream,'LICENSE'), resolve(here,'vendor/OPENUI-LICENSE'));
+await copyFile(resolve(here,'node_modules/zod/LICENSE'),resolve(here,'vendor/ZOD-LICENSE'));
+const bytes=await readFile(resolve(here,'vendor/core.js'));
+await writeFile(resolve(here,'vendor/provenance.json'),JSON.stringify({source:'https://github.com/thesysdev/openui',commit,package:'@openuidev/lang-core',version:'1.0.1',zod:'4.4.3',sha256:createHash('sha256').update(bytes).digest('hex'),telemetry:'ci-info aliased to inert browser-only module; no network/Node grants'},null,2)+'\n');
+console.log(`Official OpenUI core bundled: ${bytes.length} bytes`);

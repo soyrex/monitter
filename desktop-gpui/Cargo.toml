@@ -2,7 +2,7 @@
 name = "monitter-gpui-desktop"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.95"
+rust-version = "1.97"
 publish = false
 
 [features]
@@ -10,6 +10,10 @@ visual-export = ["gpui-kit/test-support", "monitter/gpui-ui-fixtures"]
 performance-profiling = ["gpui-pre/profiler", "monitter/gpui-ui-fixtures", "gpui-wry/performance-profiling"]
 
 [dependencies]
+nsh-platform-gpui = { path = "vendor/nsh-platform-gpui", default-features = false, features = ["js"] }
+nsh-core = { git = "https://github.com/longbridge/nsh.git", rev = "c1511fa4dda6ce2ed04e8f47ed087a1e7dee876b", default-features = false }
+nsh-engine = { git = "https://github.com/longbridge/nsh.git", rev = "c1511fa4dda6ce2ed04e8f47ed087a1e7dee876b", default-features = false }
+nsh-base = { git = "https://github.com/longbridge/nsh.git", rev = "c1511fa4dda6ce2ed04e8f47ed087a1e7dee876b", default-features = false }
 anyhow = "1"
 rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled"] }
 argon2 = "=0.5.3"
@@ -37,12 +41,21 @@ image = { version = "=0.25.10", default-features = false, features = ["png", "jp
 vt100 = "=0.16.2"
 uuid = { version = "1", features = ["v4"] }
 
+[build-dependencies]
+nsh-bundler = { git = "https://github.com/longbridge/nsh.git", rev = "c1511fa4dda6ce2ed04e8f47ed087a1e7dee876b", default-features = false }
+nsh-core = { git = "https://github.com/longbridge/nsh.git", rev = "c1511fa4dda6ce2ed04e8f47ed087a1e7dee876b", default-features = false }
+nsh-base = { git = "https://github.com/longbridge/nsh.git", rev = "c1511fa4dda6ce2ed04e8f47ed087a1e7dee876b", default-features = false }
+
 [patch.crates-io]
-gpui-pre = { path = "vendor/gpui-pre" }
-gpui-pre-macos = { path = "vendor/gpui-pre-macos" }
-gpui-pre-apple = { path = "vendor/gpui-pre-apple" }
-gpui-pre-wgpu = { path = "vendor/gpui-pre-wgpu" }
-gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
+gpui-fast = { path = "vendor/gpui-fast/compat/gpui-fast" }
+gpui-fast-platform = { path = "vendor/gpui-fast/compat/gpui-fast-platform" }
+gpui-pre-platform = { path = "vendor/gpui-fast/compat/gpui-pre-platform" }
+gpui-pre-macros = { path = "vendor/gpui-fast/compat/gpui-pre-macros" }
+gpui-pre-sum-tree = { path = "vendor/gpui-fast/compat/gpui-pre-sum-tree" }
+gpui-pre-web = { path = "vendor/gpui-fast/compat/gpui-pre-web" }
+gpui-pre = { path = "vendor/gpui-fast/compat/gpui-pre" }
+gpui-pre-macos = { path = "vendor/gpui-fast/compat/gpui-pre-macos" }
+gpui-pre-apple = { path = "vendor/gpui-fast/compat/gpui-pre-apple" }
 gpui-base = { path = "vendor/gpui-base" }
 gpui-component = { path = "vendor/gpui-component" }
 
@@ -64,7 +77,7 @@ objc2-avf-audio = { version = "=0.3.2", default-features = false, features = ["A
 
 # Keep the native layout/render engine fast in experimental debug previews.
 # Application code retains normal debug checks and diagnostics.
-[profile.dev.package.gpui-pre]
+[profile.dev.package.gpui]
 opt-level = 2
 
 [profile.dev.package.taffy]

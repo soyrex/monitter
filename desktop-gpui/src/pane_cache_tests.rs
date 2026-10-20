@@ -2,7 +2,7 @@
 //! used by `NativePanel` in `docking.rs`.
 use super::{NativePanel, PaintState, PaneSpec};
 use gpui::{
-    AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _,
+    AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _, Render, Styled as _,
     TestAppContext, Window, div,
 };
 use std::{
@@ -17,19 +17,26 @@ struct CountedContent {
 impl Render for CountedContent {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         self.renders.set(self.renders.get() + 1);
-        div().size_full()
+        div().debug_selector(|| "counted-pane-content".into()).size_full()
+            .underline().child("Counted pane content")
     }
 }
 
 struct NativePanelCacheHarness {
     panel: Entity<NativePanel>,
     renders: Rc<Cell<usize>>,
+    hidden: bool,
+    mounted: bool,
 }
 
 impl Render for NativePanelCacheHarness {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         self.renders.set(self.renders.get() + 1);
-        div().size_full().child(self.panel.clone())
+        let body = div().size_full();
+        if !self.mounted { return body; }
+        let slot = div().size_full();
+        let slot = if self.hidden { slot.hidden() } else { slot };
+        body.child(slot.child(self.panel.clone()))
     }
 }
 
@@ -75,6 +82,8 @@ fn native_panel_caches_content_but_repaints_visibility_each_frame(cx: &mut TestA
         });
         NativePanelCacheHarness {
             panel,
+            hidden: false,
+            mounted: true,
             renders: retained_harness_renders,
         }
     });
@@ -121,6 +130,32 @@ fn native_panel_caches_content_but_repaints_visibility_each_frame(cx: &mut TestA
         content_baseline + 1,
         "content notification refreshes cache"
     );
+
+    // Paint observers belong to the current drawn range, including when the
+    // panel is retained. A collapsed or unmounted panel must not replay one.
+    for (hidden, mounted, expected_visible) in [
+        (true, true, false),
+        (false, true, true),
+        (false, false, false),
+        (false, true, true),
+    ] {
+        paint.borrow_mut().painted.clear();
+        harness.update(cx, |harness, cx| {
+            harness.hidden = hidden;
+            harness.mounted = mounted;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(paint.borrow().painted.contains("cache-test-pane"), expected_visible,
+            "paint observation follows collapsed and mounted state");
+        paint.borrow_mut().painted.clear();
+        harness.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(paint.borrow().painted.contains("cache-test-pane"), expected_visible,
+            "a later replay cannot resurrect a hidden or removed observation");
+    }
 }
 
 struct ScrollingContent {
@@ -169,6 +204,8 @@ fn cached_native_panel_scrolls_repeatedly_after_parent_replay(cx: &mut TestAppCo
         });
         NativePanelCacheHarness {
             panel,
+            hidden: false,
+            mounted: true,
             renders: Rc::new(Cell::new(0)),
         }
     });
@@ -237,11 +274,16 @@ fn nested_cache_rebuilds_skipped_child_and_respects_changes_and_explicit_refresh
     let child = parent.update(cx, |parent, _| parent.child.clone());
     let initial_child = child_renders.get();
     let initial_parent = parent_renders.get();
+    let initial_bounds = cx.debug_bounds("counted-pane-content").expect("child painted");
     parent.update(cx, |_, cx| cx.notify());
     cx.run_until_parked();
     cx.update(|window, cx| window.draw(cx).clear(cx));
     assert!(parent_renders.get() > initial_parent);
-    assert!(child_renders.get() > initial_child, "a child skipped during parent replay rebuilds its frame-specific ranges");
+    // Fast rebases nested retained records when replaying their parent, so
+    // frame-safe reuse no longer requires rendering the clean child again.
+    assert_eq!(child_renders.get(), initial_child, "clean child reuses rebased frame ranges");
+    assert_eq!(cx.debug_bounds("counted-pane-content"), Some(initial_bounds),
+        "replayed child keeps its actual painted bounds");
     child.update(cx, |_, cx| cx.notify());
     cx.run_until_parked();
     cx.update(|window, cx| window.draw(cx).clear(cx));
@@ -252,11 +294,16 @@ fn nested_cache_rebuilds_skipped_child_and_respects_changes_and_explicit_refresh
     cx.update(|window, cx| window.draw(cx).clear(cx));
     let after_bounds = child_renders.get();
     assert!(after_bounds > after_notify, "changed child bounds invalidate its cache");
+    assert!(cx.debug_bounds("counted-pane-content").unwrap().size.width > initial_bounds.size.width,
+        "painted child output uses the changed width");
+    let inherited_before = cx.update(|window, _| window.painted_underlines()[0].color);
     parent.update(cx, |parent, cx| { parent.color = 0xff0000; cx.notify(); });
     cx.run_until_parked();
     cx.update(|window, cx| window.draw(cx).clear(cx));
     let after_text = child_renders.get();
     assert!(after_text > after_bounds, "inherited text style invalidates its cache");
+    let inherited_after = cx.update(|window, _| window.painted_underlines()[0].color);
+    assert_ne!(inherited_after, inherited_before, "painted child text inherits changed color");
     cx.update(|window, cx| { window.refresh(); window.draw(cx).clear(cx); });
     assert!(child_renders.get() > after_text, "explicit refresh invalidates clean descendants");
 }
@@ -283,7 +330,7 @@ fn pane_background_hover_keeps_focus_cache_and_settles_without_callbacks(cx: &mu
             appearance: Rc::new(Cell::new(Some(appearance))), auto_hide_tabs: Rc::new(Cell::new(false)),
             background: None, working: false, _activity_subscription: None, dock_group: None,
         });
-        NativePanelCacheHarness { panel, renders: Rc::new(Cell::new(0)) }
+        NativePanelCacheHarness { panel, renders: Rc::new(Cell::new(0)), hidden: false, mounted: true }
     });
     visual.simulate_mouse_move(gpui::point(gpui::px(10000.), gpui::px(10000.)), None, gpui::Modifiers::default());
     visual.update(|window, cx| { window.draw(cx).clear(cx); window.simulate_next_frame(cx); });

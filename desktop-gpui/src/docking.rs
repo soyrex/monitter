@@ -507,9 +507,11 @@ impl Render for NativePanel {
             .child(
                 canvas(
                     |_, _, _| (),
-                    move |bounds, _, _, _| {
+                    move |bounds, _, window, _| {
                         if bounds.size.width > px(0.) && bounds.size.height > px(0.) {
-                            paint.borrow_mut().painted.insert(id.clone());
+                            window.observe_paint(move || {
+                                paint.borrow_mut().painted.insert(id.clone());
+                            });
                         }
                     },
                 )

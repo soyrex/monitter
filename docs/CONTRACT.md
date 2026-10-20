@@ -5,6 +5,29 @@ Canonical TS data shapes: `src/lib/types.ts`. Rust serde fields use camelCase.
 All timestamps are Unix milliseconds. IDs are UUID strings. Optional task links use null.
 No fake conversations, progress, token counts, host connections or model replies in the shipped app.
 
+### OpenUI presentation output (Fast desktop)
+
+An assistant message may opt into native presentation with a fenced code block
+whose exact info string is `openui`. Its contents are OpenUI Lang data for the
+fixed, versioned Monitter component library, not JavaScript or a backend command.
+The source remains ordinary `Message.text`: existing message persistence,
+streaming, history paging and mobile/shared clients retain the readable code
+fallback. There is no new privileged IPC method or message DTO field.
+
+Fast retains a native NSH surface while the source streams. Only the trusted
+bundled renderer executes; network, process, filesystem and clipboard grants are
+empty. Generated source has no storage API; native presentation state is host-owned. Unsupported/oversized output falls back to source. The supported library
+and limits are documented in `desktop-gpui/openui/README.md`.
+
+Form values are bounded presentation state saved locally under a host-derived
+library/task/message/block identity. Generated source cannot choose storage paths
+or target conversations. Sensitive field names and password controls are excluded;
+this presentation channel is not for secrets. A completed form may prepare an
+editable response draft. A separate host control inserts it into the original
+conversation composer, preserving existing draft text. Sending still requires the
+normal Send action and existing backend authorization. Output cannot invoke tools,
+grant permissions, execute commands or automatically send messages.
+
 ### Report stylesheet snapshots
 
 The collaboration MCP exposes read-only `get_report_styles({})` and the

@@ -1,0 +1,15 @@
+[package]
+name = "gpui-fast"
+version = "0.1.9"
+edition = "2024"
+publish = false
+[lib]
+path = "lib.rs"
+[features]
+default = []
+font-kit = ["core/font-kit"]
+wayland = ["core/wayland"]
+x11 = ["core/x11"]
+test-support = ["core/test-support"]
+[dependencies]
+core = { package = "gpui", path = "../../../vendor/gpui-fast/crates/gpui", default-features = false }

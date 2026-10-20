@@ -7,7 +7,7 @@ impl Render for TextChild {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         self.renders.set(self.renders.get()+1);
         let clicks = self.clicks.clone();
-        div().id("cached-modal-text-child").size_full().child("Cached attachment transcript text")
+        div().id("cached-modal-text-child").size_full().underline().child("Cached attachment transcript text")
             .on_mouse_down(gpui::MouseButton::Left, move |_,_,_| clicks.set(clicks.get()+1))
     }
 }
@@ -45,6 +45,9 @@ fn cached_modal_replay_rebuilds_skipped_descendant_ranges_and_preserves_hitboxes
     cx.run_until_parked();
     cx.update(|window,cx| window.draw(cx).clear(cx));
     let child_before = children.get(); let parent_before = parents.get();
+    let text_before = cx.update(|window, _| window.painted_underlines().into_iter()
+        .map(|underline| (underline.bounds, underline.color, underline.thickness)).collect::<Vec<_>>());
+    assert!(!text_before.is_empty(), "cached child paints text decoration");
     root.update(cx, |root,cx| { root.prefix = true; cx.notify(); });
     cx.run_until_parked();
     cx.update(|window,cx| window.draw(cx).clear(cx));
@@ -54,9 +57,15 @@ fn cached_modal_replay_rebuilds_skipped_descendant_ranges_and_preserves_hitboxes
     parent.update(cx, |_,cx| cx.notify());
     cx.run_until_parked();
     cx.update(|window,cx| window.draw(cx).clear(cx));
-    assert!(children.get()>child_before,"direct traversal rebuilds stale descendant ranges");
+    // Fast copies and rebases nested records on ancestor replay; traversal can
+    // safely reuse this clean child without an extra Render call.
+    assert_eq!(children.get(), child_before, "direct traversal reuses rebased descendant ranges");
+    let text_after = cx.update(|window, _| window.painted_underlines().into_iter()
+        .map(|underline| (underline.bounds, underline.color, underline.thickness)).collect::<Vec<_>>());
+    assert_eq!(text_after, text_before, "prefix insertion preserves actual child text paint");
     cx.simulate_event(gpui::MouseDownEvent { position: point(px(50.),px(50.)), button: gpui::MouseButton::Left, ..Default::default() });
-    assert_eq!(clicks.get(),1,"rebuilt text child keeps its actual hitbox");
+    assert_eq!(clicks.get(),1,"retained text child keeps its actual hitbox");
+    cx.simulate_event(gpui::MouseUpEvent { position: point(px(50.),px(50.)), button: gpui::MouseButton::Left, ..Default::default() });
     // Removing preceding text is the dangerous shrinking-vector direction.
     root.update(cx, |root,cx| { root.prefix = false; cx.notify(); });
     cx.run_until_parked();
@@ -64,4 +73,9 @@ fn cached_modal_replay_rebuilds_skipped_descendant_ranges_and_preserves_hitboxes
     parent.update(cx, |_,cx| cx.notify());
     cx.run_until_parked();
     cx.update(|window,cx| window.draw(cx).clear(cx));
+    let text_after = cx.update(|window, _| window.painted_underlines().into_iter()
+        .map(|underline| (underline.bounds, underline.color, underline.thickness)).collect::<Vec<_>>());
+    assert_eq!(text_after, text_before, "prefix removal preserves actual child text paint");
+    cx.simulate_event(gpui::MouseDownEvent { position: point(px(50.),px(50.)), button: gpui::MouseButton::Left, ..Default::default() });
+    assert_eq!(clicks.get(),2,"shrinking prior frame ranges preserves child hitbox");
 }

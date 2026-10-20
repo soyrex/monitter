@@ -1,0 +1,16 @@
+[package]
+name = "gpui-pre-macos"
+version = "0.3.7"
+edition = "2024"
+publish = false
+
+[lib]
+name = "gpui_macos"
+path = "lib.rs"
+
+[features]
+default = ["gpui_fast/default"]
+frame-capture = ["gpui_fast/frame-capture"]
+
+[dependencies]
+gpui_fast = { package = "gpui_macos", path = "../../crates/gpui_macos", default-features = false }

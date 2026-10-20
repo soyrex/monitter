@@ -24,6 +24,7 @@ pub struct StreamingMessage {
     list_item: Option<(ListState, usize)>,
     palette: Option<design::Palette>,
     link_owner: Option<WeakEntity<crate::chat::ChatPane>>,
+    openui: crate::openui_output::MessageOutput,
 }
 fn message(source: &Value) -> RevealMessage<'_> {
     RevealMessage {
@@ -76,6 +77,7 @@ impl StreamingMessage {
             list_item: None,
             palette: None,
             link_owner: None,
+            openui: Default::default(),
         };
         body.schedule(cx);
         body
@@ -111,6 +113,7 @@ impl StreamingMessage {
         cx.notify();
     }
     pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        self.openui.set_visible(visible, cx);
         if self.visible == visible {
             return;
         }
@@ -179,9 +182,15 @@ impl StreamingMessage {
     }
 }
 impl Render for StreamingMessage {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(test)]
         { self.render_count += 1; }
+        if self.visible {
+            if let Some(output) = self.openui.render(&self.source, self.link_owner.clone(), self.palette,
+                self.list_item.clone(), window, cx) {
+                return output;
+            }
+        }
         let text = self.source["text"].as_str().unwrap_or_default();
         let typing =
             self.visible && self.options.mode == Mode::Typing && self.reveal.cursor_visible("body");
@@ -263,7 +272,7 @@ impl Render for StreamingMessage {
                     })),
             );
         }
-        content
+        content.into_any_element()
     }
 }
 
