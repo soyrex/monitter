@@ -1,0 +1,9 @@
+{
+  "source": "https://github.com/thesysdev/openui",
+  "commit": "9823ec05d4b29bc78d101676dc16b44fe17f1830",
+  "package": "@openuidev/lang-core",
+  "version": "1.0.1",
+  "zod": "4.4.3",
+  "sha256": "2bc47871dfd78590c52f4252eed121c3f0523200d12bb2422c8b9e82465babf0",
+  "telemetry": "ci-info aliased to inert browser-only module; no network/Node grants"
+}
