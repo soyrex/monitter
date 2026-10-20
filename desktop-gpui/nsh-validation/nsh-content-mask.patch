@@ -1,0 +1,28 @@
+diff --git a/crates/gpui/nsh-platform-gpui/src/native.rs b/crates/gpui/nsh-platform-gpui/src/native.rs
+index 625c8ad..1cd65fc 100644
+--- a/crates/gpui/nsh-platform-gpui/src/native.rs
++++ b/crates/gpui/nsh-platform-gpui/src/native.rs
+@@ -751,9 +751,7 @@ impl ComponentItem {
+         let element = component.render(window, cx);
+         self.put(component);
+         let size = geometry.document.size;
+-        let mask = ContentMask {
+-            bounds: geometry.visible,
+-        };
++        let mask = ContentMask::new(geometry.visible);
+         let (focus, element) = window.with_content_mask(Some(mask), |window| {
+             // Under the component's own hitboxes: nsh's input (and the
+             // embedding app's, under the surface) stays away from its box.
+diff --git a/crates/gpui/nsh-platform-gpui/src/render.rs b/crates/gpui/nsh-platform-gpui/src/render.rs
+index 27ddc65..d864548 100644
+--- a/crates/gpui/nsh-platform-gpui/src/render.rs
++++ b/crates/gpui/nsh-platform-gpui/src/render.rs
+@@ -365,7 +365,7 @@ impl<'a> DrawCx<'a> {
+ 
+     /// Runs `f` with the window inside the current clip.
+     pub(crate) fn paint<R>(&mut self, f: impl FnOnce(&mut Window, &mut App) -> R) -> R {
+-        let mask = ContentMask { bounds: self.clip };
++        let mask = ContentMask::new(self.clip);
+         let app = &mut *self.app;
+         self.window
+             .with_content_mask(Some(mask), |window| f(window, app))
