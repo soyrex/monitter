@@ -17,7 +17,7 @@ vite.config.ts.timestamp-*
 verification/
 artifacts/
 /.cargo-target/
-/.toolchain/
+/.toolchain
 /desktop-gpui/target/
 .DS_Store
 
