@@ -348,10 +348,22 @@ impl OverviewModel {
     }
     fn visible(&self, filter: Filter, query: &str) -> Vec<Card> {
         let query = query.trim().to_lowercase();
+        // Establish project membership before search so a matching quiet card
+        // remains visible even when its working sibling does not match the query.
+        let working_projects: HashSet<_> = if filter == Filter::Working {
+            self.cards.iter().filter(|card| card.state == State::Working)
+                .map(|card| card.project_id.as_str()).collect()
+        } else {
+            HashSet::new()
+        };
         self.cards
             .iter()
             .filter(|card| {
-                filter.matches(card.state)
+                (if filter == Filter::Working {
+                    working_projects.contains(card.project_id.as_str())
+                } else {
+                    filter.matches(card.state)
+                })
                     && (query.is_empty()
                         || format!(
                             "{} {} {} {}",
@@ -674,9 +686,25 @@ struct Motion {
     vy: f32,
 }
 impl Motion {
+    // Velocity is in map pixels per 16ms tick. Dragging caps throw speed, and
+    // exponential drag gives a short, predictable glide rather than endless drift.
+    fn coast(&mut self, min_x: f32, min_y: f32) -> bool {
+        self.x += self.vx;
+        self.y += self.vy;
+        if self.x < min_x { self.x = min_x; self.vx = 0.; }
+        if self.y < min_y { self.y = min_y; self.vy = 0.; }
+        self.vx *= 0.86;
+        self.vy *= 0.86;
+        if self.vx.hypot(self.vy) < 0.12 { self.vx = 0.; self.vy = 0.; }
+        self.vx != 0. || self.vy != 0.
+    }
+    fn stop(&mut self) { self.vx = 0.; self.vy = 0.; }
     fn settle(&mut self, target: Placement) -> bool {
-        self.vx = (self.vx + (target.x - self.x) * 0.16) * 0.64;
-        self.vy = (self.vy + (target.y - self.y) * 0.16) * 0.64;
+        self.spring(target, 0.16)
+    }
+    fn spring(&mut self, target: Placement, stiffness: f32) -> bool {
+        self.vx = (self.vx + (target.x - self.x) * stiffness) * 0.64;
+        self.vy = (self.vy + (target.y - self.y) * stiffness) * 0.64;
         self.x += self.vx;
         self.y += self.vy;
         let moving =
@@ -694,10 +722,47 @@ impl Motion {
 #[derive(Default)]
 struct RetainedProject {
     cards: HashMap<String, MapRect>,
+    card_motion: HashMap<String, Motion>,
     hub: Option<MapRect>,
     bounds: Option<MapRect>,
     target: Motion,
-    followers: Motion,
+    followers: HashMap<String, Motion>,
+}
+impl RetainedProject {
+    fn follower(&self, id: &str) -> Motion {
+        self.followers.get(id).copied().unwrap_or(self.target)
+    }
+    fn spring_strength(&self, id: &str) -> f32 {
+        let rect = self.card_rect(id);
+        let hub = self.hub.unwrap();
+        let distance = (rect.x + rect.w / 2. - hub.x - hub.w / 2.)
+            .hypot(rect.y + rect.h / 2. - hub.y - hub.h / 2.);
+        // Distance adds a little weight; stable variation keeps equidistant
+        // siblings from moving as one rigid group. No randomness or slot changes.
+        let variation = id.bytes().fold(0u32, |hash, byte| hash.wrapping_mul(31).wrapping_add(byte as u32)) % 17;
+        (0.20 / (1. + distance / 450.)) * (0.94 + variation as f32 * 0.0075)
+    }
+    fn card_rect(&self, id: &str) -> MapRect {
+        let mut rect = self.cards[id];
+        if let Some(offset) = self.card_motion.get(id) { rect.x += offset.x; rect.y += offset.y; }
+        rect
+    }
+}
+#[derive(Clone)]
+enum DragTarget { Project(String), Card(String, String) }
+struct DragState {
+    target: DragTarget,
+    start: Point<Pixels>,
+    last: Point<Pixels>,
+    sampled_at: std::time::Instant,
+    velocity: Placement,
+    moved: bool,
+}
+impl DragState {
+    fn new(target: DragTarget, position: Point<Pixels>) -> Self {
+        Self { target, start: position, last: position, sampled_at: std::time::Instant::now(),
+            velocity: Placement { x: 0., y: 0. }, moved: false }
+    }
 }
 #[derive(Default)]
 struct RetainedLayout {
@@ -738,16 +803,19 @@ impl RetainedLayout {
                     project.cards.insert(card.task_id, rect);
                 }
             }
+            for id in project.cards.keys() {
+                project.followers.entry(id.clone()).or_insert(project.target);
+            }
             {
                 let w = project
                     .cards
-                    .values()
-                    .map(|r| r.x + r.w + 12.)
+                    .iter()
+                    .map(|(id, _)| { let r = project.card_rect(id); r.x + r.w + 12. })
                     .fold(HUB_W + 24., f32::max);
                 let h = project
                     .cards
-                    .values()
-                    .map(|r| r.y + r.h + 12.)
+                    .iter()
+                    .map(|(id, _)| { let r = project.card_rect(id); r.y + r.h + 12. })
                     .fold(HUB_H + 24., f32::max);
                 if let Some(bounds) = project.bounds.as_mut() {
                     bounds.w = w;
@@ -778,7 +846,8 @@ pub struct ActivityOverview {
     list: bool,
     zoom: f32,
     layout: RetainedLayout,
-    dragging: Option<(String, Point<Pixels>)>,
+    dragging: Option<DragState>,
+    suppress_card_click: Option<String>,
     motion_task: Option<Task<()>>,
     communications: Rc<RefCell<communications::Communications>>,
     _communication_clock: Task<()>,
@@ -834,6 +903,7 @@ impl ActivityOverview {
             zoom: 1.,
             layout: RetainedLayout::default(),
             dragging: None,
+            suppress_card_click: None,
             motion_task: None,
             communications,
             _communication_clock: communication_clock,
@@ -867,60 +937,137 @@ impl ActivityOverview {
         let pair = if a < b { (a.to_owned(), b.to_owned()) } else { (b.to_owned(), a.to_owned()) };
         self.communications.borrow().links.get(&pair).map(|link| link.viewed)
     }
-    fn drag_mouse_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
-        let Some((key, last)) = self.dragging.as_mut() else {
-            return;
+    fn motion_enabled(cx: &App) -> bool {
+        !cx.reduce_motion() && crate::native_motion::motion_allowed()
+    }
+    fn begin_drag(&mut self, target: DragTarget, position: Point<Pixels>, cx: &mut Context<Self>) {
+        self.suppress_card_click = None;
+        match &target {
+            DragTarget::Project(key) => self.layout.projects.get_mut(key).unwrap().target.stop(),
+            DragTarget::Card(key, id) => self.layout.projects.get_mut(key).unwrap().card_motion.entry(id.clone()).or_default().stop(),
+        }
+        self.dragging = Some(DragState::new(target, position));
+        cx.notify();
+    }
+    fn end_drag(&mut self, cx: &mut Context<Self>) {
+        let Some(drag) = self.dragging.take() else { return; };
+        let velocity = if drag.moved && drag.sampled_at.elapsed() < Duration::from_millis(100) && Self::motion_enabled(cx) {
+            drag.velocity
+        } else { Placement { x: 0., y: 0. } };
+        let motion = match drag.target {
+            DragTarget::Project(key) => &mut self.layout.projects.get_mut(&key).unwrap().target,
+            DragTarget::Card(key, id) => {
+                if drag.moved { self.suppress_card_click = Some(id.clone()); }
+                self.layout.projects.get_mut(&key).unwrap().card_motion.entry(id).or_default()
+            }
         };
+        motion.vx = velocity.x;
+        motion.vy = velocity.y;
+        self.start_motion(cx);
+    }
+    fn drag_mouse_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if self.dragging.is_none() { return; }
         if event.pressed_button != Some(MouseButton::Left) {
-            self.dragging = None;
+            self.end_drag(cx);
             return;
         }
         let scale = f32::from(px(1.)) * self.zoom * interface_font_ratio(cx.theme().font_size);
-        let project = self.layout.projects.get_mut(key).unwrap();
-        let bounds = project.bounds.unwrap();
-        project.target.x =
-            (project.target.x + f32::from(event.position.x - last.x) / scale).max(-bounds.x);
-        project.target.y =
-            (project.target.y + f32::from(event.position.y - last.y) / scale).max(-bounds.y);
-        *last = event.position;
-        if self.motion_task.is_none() {
-            self.motion_task = Some(cx.spawn(async move |entity, cx| {
-                for _ in 0..240 {
-                    cx.background_executor()
-                        .timer(std::time::Duration::from_millis(16))
-                        .await;
-                    let moving = entity
-                        .update(cx, |overview, cx| {
-                            let mut moving = false;
-                            for p in overview.layout.projects.values_mut() {
-                                moving |= p.followers.settle(Placement {
-                                    x: p.target.x,
-                                    y: p.target.y,
-                                });
-                            }
-                            cx.notify();
-                            if !moving {
-                                overview.motion_task = None;
-                            }
-                            moving
-                        })
-                        .unwrap_or(false);
-                    if !moving {
-                        break;
-                    }
-                }
-                let _ = entity.update(cx, |overview, _| overview.motion_task = None);
-            }));
+        let animate = Self::motion_enabled(cx);
+        let drag = self.dragging.as_mut().unwrap();
+        let distance = event.position - drag.start;
+        if !drag.moved && f32::from(distance.x).hypot(f32::from(distance.y)) < 4. { return; }
+        drag.moved = true;
+        let delta = event.position - drag.last;
+        let dx = f32::from(delta.x) / scale;
+        let dy = f32::from(delta.y) / scale;
+        let ticks = (drag.sampled_at.elapsed().as_secs_f32() / 0.016).max(1.);
+        let speed = (dx / ticks).hypot(dy / ticks);
+        let cap = if speed > 18. { 18. / speed } else { 1. };
+        drag.velocity = Placement { x: dx / ticks * cap, y: dy / ticks * cap };
+        drag.last = event.position;
+        drag.sampled_at = std::time::Instant::now();
+        match &drag.target {
+            DragTarget::Project(key) => {
+                let project = self.layout.projects.get_mut(key).unwrap();
+                let bounds = project.bounds.unwrap();
+                project.target.x = (project.target.x + dx).max(-bounds.x);
+                project.target.y = (project.target.y + dy).max(-bounds.y);
+                if !animate { for follower in project.followers.values_mut() { *follower = project.target; } }
+            }
+            DragTarget::Card(key, id) => {
+                let project = self.layout.projects.get_mut(key).unwrap();
+                let rect = project.cards[id];
+                let bounds = project.bounds.unwrap();
+                let follower = project.follower(id);
+                let offset = project.card_motion.entry(id.clone()).or_default();
+                offset.x = (offset.x + dx).max(-bounds.x - follower.x - rect.x);
+                offset.y = (offset.y + dy).max(-bounds.y - follower.y - rect.y);
+            }
         }
+        self.start_motion(cx);
         cx.notify();
     }
+    fn step_motion(&mut self, animate: bool) -> bool {
+        let mut moving = false;
+        for p in self.layout.projects.values_mut() {
+            let bounds = p.bounds.unwrap();
+            if animate {
+                moving |= p.target.coast(-bounds.x, -bounds.y);
+
+            } else {
+                p.target.stop();
+            }
+            let springs: Vec<_> = p.cards.keys().map(|id| (id.clone(), p.spring_strength(id))).collect();
+            for (id, stiffness) in springs {
+                let rect = p.card_rect(&id);
+                let follower = p.followers.entry(id).or_insert(p.target);
+                if animate {
+                    moving |= follower.spring(Placement { x: p.target.x, y: p.target.y }, stiffness);
+                    if follower.x < -bounds.x - rect.x { follower.x = -bounds.x - rect.x; follower.vx = 0.; }
+                    if follower.y < -bounds.y - rect.y { follower.y = -bounds.y - rect.y; follower.vy = 0.; }
+                } else { *follower = p.target; }
+            }
+            for (id, offset) in &mut p.card_motion {
+                if animate {
+                    let rect = p.cards[id];
+                    let follower = p.followers.get(id).copied().unwrap_or(p.target);
+                    moving |= offset.coast(-bounds.x - follower.x - rect.x, -bounds.y - follower.y - rect.y);
+                } else { offset.stop(); }
+            }
+        }
+        moving
+    }
+    fn start_motion(&mut self, cx: &mut Context<Self>) {
+        if self.motion_task.is_some() { return; }
+        self.motion_task = Some(cx.spawn(async move |entity, cx| {
+            for _ in 0..240 {
+                cx.background_executor().timer(Duration::from_millis(16)).await;
+                let moving = entity.update(cx, |overview, cx| {
+                    let moving = overview.step_motion(Self::motion_enabled(cx));
+                    cx.notify();
+                    moving
+                }).unwrap_or(false);
+                if !moving { break; }
+            }
+            let _ = entity.update(cx, |overview, _| overview.motion_task = None);
+        }));
+    }
     fn card(&self, card: &Card, list: bool, cx: &mut Context<Self>) -> AnyElement {
-        let p = self.palette;
+        let quiet = matches!(card.state, State::Idle | State::Done);
+        let tone = |color: u32| {
+            if !quiet { return color; }
+            let color = rgb(color);
+            let gray = ((0.2126 * color.r + 0.7152 * color.g + 0.0722 * color.b) * 255.).round() as u32;
+            (gray << 16) | (gray << 8) | gray
+        };
+        let mut p = self.palette;
+        p.ink = tone(p.ink); p.muted = tone(p.muted); p.accent = tone(p.accent);
+        p.card = tone(p.card); p.soft = tone(p.soft);
         let zoom = if list { 1. } else { self.zoom };
         let ratio = interface_font_ratio(cx.theme().font_size);
         let scaled = |n: f32| px(n * zoom * ratio);
         let small = scaled(10.);
-        let color = card.state.color(p);
+        let color = tone(card.state.color(p));
         let mut background = design::surface_color(p.card);
         // Tint the selected theme surface while retaining configured translucency.
         background.r *= 0.96;
@@ -958,7 +1105,7 @@ impl ActivityOverview {
                 } else {
                     State::Idle
                 };
-                let mut fill = rgb(state.color(p));
+                let mut fill = rgb(tone(state.color(p)));
                 if state == State::Idle {
                     fill.a = 0.28;
                 }
@@ -978,7 +1125,7 @@ impl ActivityOverview {
             ));
         }
         let identity = crate::branding::provider_for_ink(&card.provider, &card.model, p.ink)
-            .map(|image| img(image).size(scaled(14.)).into_any_element())
+            .map(|image| img(image).grayscale(quiet).size(scaled(14.)).into_any_element())
             .unwrap_or_else(|| {
                 gpui_kit::component::Icon::new(gpui_kit::assets::IconName::MessageSquare)
                     .size(scaled(14.))
@@ -1047,7 +1194,18 @@ impl ActivityOverview {
             .border_1()
             .border_color(outline)
             .bg(background)
-            .shadow_sm()
+            .when(self.filter == Filter::Working && matches!(card.state, State::Idle | State::Done),
+                |body| body.opacity(0.6))
+            .shadow({
+                let mut shadows = vec![BoxShadow::new(px(0.), scaled(3.), rgb(0x000000).opacity(0.32).into())
+                    .blur_radius(scaled(10.))];
+                if card.state == State::Working {
+                    shadows.push(BoxShadow::new(px(0.), px(0.), rgb(color).opacity(0.30).into())
+                        .blur_radius(scaled(14.)).spread_radius(scaled(2.)));
+                }
+                shadows
+            })
+            .text_color(rgb(p.ink))
             .text_size(scaled(11.))
             .line_height(scaled(12.))
             .cursor_pointer()
@@ -1097,7 +1255,16 @@ impl ActivityOverview {
                     )),
             );
         let task_id = card.task_id.clone();
-        body = body.on_click(cx.listener(move |_, _, _, cx| {
+        if !list {
+            let project = card.project_id.clone();
+            let id = card.task_id.clone();
+            body = body.on_mouse_down(MouseButton::Left, cx.listener(move |overview, event: &MouseDownEvent, _, cx| {
+                overview.begin_drag(DragTarget::Card(project.clone(), id.clone()), event.position, cx);
+                cx.stop_propagation();
+            }));
+        }
+        body = body.on_click(cx.listener(move |overview, _, _, cx| {
+            if overview.suppress_card_click.take().as_deref() == Some(task_id.as_str()) { return; }
             cx.emit(ActivityOverviewEvent::OpenTask {
                 task_id: task_id.clone(),
             });
@@ -1118,13 +1285,13 @@ impl ActivityOverview {
             let a=*endpoints.get(&link.pair.0)?; let b=*endpoints.get(&link.pair.1)?;
             let mut obstacles=hubs.clone();
             obstacles.extend(endpoints.iter().filter(|(id,_)| **id!=link.pair.0 && **id!=link.pair.1).map(|(_,r)| *r));
-            let curve=communications::Curve::routed(a,b,&obstacles);
-            Some((link.clone(),a,b,curve))
+            let curves=communications::Curve::directed(a,b,&obstacles,link.forward,link.reverse);
+            Some((link.clone(),a,b,curves))
         }).collect();
-        let has_links = !links.is_empty();
         let state = self.communications.clone();
-        let color = self.palette.accent;
-        let motion = !cx.reduce_motion() && crate::native_motion::motion_allowed();
+        // Match recorded agent exchanges in the chat stream (agent_exchange.rs).
+        let color = 0x6594db;
+        let animate = !links.is_empty() && Self::motion_enabled(cx);
         let phase = Rc::new(Cell::new(0.));
         let paint_phase = phase.clone();
         let layer = div().id("activity-communications")
@@ -1137,40 +1304,21 @@ impl ActivityOverview {
                     origin.x < clip.right() && origin.y < clip.bottom()
                         && origin.x + px(r.w * scale) > clip.left() && origin.y + px(r.h * scale) > clip.top()
                 };
-                for (link, a, b, curve) in &links {
+                for (link, a, b, curves) in &links {
                     if !visible(*a) || !visible(*b) { continue; }
                     if window.is_window_active() { state.borrow_mut().painted.insert(link.pair.clone()); }
                     let alpha = link.opacity();
-                    for (width, opacity) in [(8., 0.05), (4., 0.14), (1.4, 0.85)] {
-                        let mut path = PathBuilder::stroke(px(width * scale));
-                        path.move_to(scaled(curve.start));
-                        for step in 1..=32 { path.line_to(scaled(curve.at(step as f32 / 32.))); }
-                        if let Ok(path) = path.build() { window.paint_path(path, rgb(color).opacity(opacity * alpha)); }
-                    }
-                    for forward in [true, false] {
-                        if (forward && !link.forward) || (!forward && !link.reverse) { continue; }
-                        for index in 0..3 {
-                            let travel = (index as f32 / 3. + paint_phase.get()) % 1.;
-                            let t = 0.07 + 0.86 * if forward { travel } else { 1. - travel };
-                            let (x,y) = curve.at(t);
-                            let (mut dx,mut dy) = curve.tangent(t);
-                            if !forward { dx = -dx; dy = -dy; }
-                            let length = dx.hypot(dy).max(0.001); dx /= length; dy /= length;
-                            // Opposing traffic shares the curve, with a small lane offset.
-                            let lane = if link.forward && link.reverse { 2.5 } else { 0. };
-                            let tip = (x - dy*lane, y + dx*lane);
-                            let mut arrow = PathBuilder::stroke(px(1.7 * scale));
-                            arrow.move_to(scaled((tip.0-dx*7.-dy*3.5,tip.1-dy*7.+dx*3.5)));
-                            arrow.line_to(scaled(tip));
-                            arrow.line_to(scaled((tip.0-dx*7.+dy*3.5,tip.1-dy*7.-dx*3.5)));
-                            if let Ok(arrow) = arrow.build() { window.paint_path(arrow,rgb(color).opacity(alpha)); }
+                    for curve in curves {
+                        for dot in curve.dots(paint_phase.get()) {
+                            let bounds = Bounds::new(scaled((dot.0 - 1., dot.1 - 1.)), size(px(2. * scale), px(2. * scale)));
+                            window.paint_quad(fill(bounds, rgb(color).opacity(alpha)).corner_radii(px(scale)));
                         }
                     }
                 }
             }).absolute().size_full());
-        if has_links && motion {
-            layer.with_animation("activity-communication-flow", Animation::new(Duration::from_millis(1800))
-                .repeat_synced().with_max_fps(30.), move |layer, progress| { phase.set(progress); layer }).into_any_element()
+        if animate {
+            layer.with_animation("activity-communication-flow", Animation::new(Duration::from_millis(180))
+                .repeat_synced().with_max_fps(30.), move |layer, progress| { phase.set(progress * 6.); layer }).into_any_element()
         } else { layer.into_any_element() }
     }
     fn cluster(
@@ -1192,15 +1340,12 @@ impl ActivityOverview {
         let retained = &self.layout.projects[&key];
         let bounds = retained.bounds.unwrap();
         let (width, height) = (bounds.w, bounds.h);
-        let lag = Placement {
-            x: retained.followers.x - retained.target.x,
-            y: retained.followers.y - retained.target.y,
-        };
         let mut placements = vec![retained.hub.unwrap()];
         placements.extend(cards.iter().map(|c| {
-            let mut r = retained.cards[&c.task_id];
-            r.x += lag.x;
-            r.y += lag.y;
+            let mut r = retained.card_rect(&c.task_id);
+            let follower = retained.follower(&c.task_id);
+            r.x += follower.x - retained.target.x;
+            r.y += follower.y - retained.target.y;
             r
         }));
         let hub = Placement {
@@ -1313,8 +1458,7 @@ impl ActivityOverview {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |overview, event: &MouseDownEvent, _, cx| {
-                            overview.dragging = Some((key.clone(), event.position));
-                            cx.notify();
+                            overview.begin_drag(DragTarget::Project(key.clone()), event.position, cx);
                             cx.stop_propagation();
                         }),
                     )
@@ -1323,20 +1467,23 @@ impl ActivityOverview {
                     .top(scaled(hub.y - 30.))
                     .w(scaled(144.))
                     .min_h(scaled(60.))
-                    .rounded(scaled(27.))
+                    .rounded(scaled(10.))
                     .p(scaled(8.))
-                    .border_1()
-                    .border_color(rgb(project_color).opacity(0.7))
-                    .bg(rgb(project_color).opacity(0.5))
+                    .border_2()
+                    .border_color(rgb(project_color).opacity(0.9))
+                    .bg(rgb(project_color).opacity(0.2))
+                    .shadow(vec![BoxShadow::new(px(0.), scaled(3.), rgb(0x000000).opacity(0.32).into())
+                        .blur_radius(scaled(10.))])
+                    .flex().flex_col().items_center().justify_center().text_center()
                     .child(
                         div()
-                            .flex().items_center().gap(scaled(5.)).min_w_0()
+                            .flex().items_center().justify_center().gap(scaled(5.)).min_w_0().w_full()
                             .font_weight(FontWeight::MEDIUM)
                             .text_size(cx.theme().font_size * zoom)
                             .child(div().flex_shrink_0()
                                 .debug_selector(|| "activity-project-icon".into())
                                 .child(gpui_kit::component::Icon::new(project_icon).with_size(scaled(16.))))
-                            .child(div().flex_1().min_w_0().truncate().child(name))
+                            .child(div().min_w_0().truncate().child(name))
                             .when(has_working, |title| title.child(div()
                                 .debug_selector(|| "activity-project-spinner".into())
                                 .child(working_indicator(scaled(12.), project_color, motion)))),
@@ -1383,6 +1530,7 @@ impl Render for ActivityOverview {
                     "activity-filter-{}",
                     filter.label()
                 )))
+                .debug_selector(move || format!("activity-filter-{}", filter.label()).into())
                 .compact()
                 .ghost()
                 .label(format!("{} {}", filter.label(), self.model.count(filter)))
@@ -1526,9 +1674,10 @@ impl Render for ActivityOverview {
             for card in &visible {
                 let project = &self.layout.projects[&card.project_id];
                 let bounds = project.bounds.unwrap();
-                let mut rect = project.cards[&card.task_id];
-                rect.x += bounds.x + project.followers.x;
-                rect.y += bounds.y + project.followers.y;
+                let mut rect = project.card_rect(&card.task_id);
+                let follower = project.follower(&card.task_id);
+                rect.x += bounds.x + follower.x;
+                rect.y += bounds.y + follower.y;
                 endpoints.insert(card.task_id.clone(), rect);
             }
             let groups = grouped(visible);
@@ -1596,7 +1745,7 @@ impl Render for ActivityOverview {
             );
         }
         legend = legend
-            .child(div().child("Dashed line = working · Glowing arrows = communication"))
+            .child(div().child("Dashed line = working · Dotted blue line = communication"))
             .child(div().flex_1())
             .child(div().child("Click a card to open Watch"));
         div()
@@ -1615,7 +1764,7 @@ impl Render for ActivityOverview {
                         let released = entity.clone();
                         window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
                             if phase.capture() && event.button == MouseButton::Left {
-                                let _ = released.update(cx, |overview, _| overview.dragging = None);
+                                let _ = released.update(cx, |overview, cx| overview.end_drag(cx));
                             }
                         });
                     }
@@ -1647,7 +1796,23 @@ impl Render for ActivityOverview {
                 }
             }))
             .child(header)
-            .child(content)
+            .child(div().relative().flex_1().min_h_0().overflow_hidden()
+                .child(div().debug_selector(|| "activity-dot-grid".into()).absolute().size_full()
+                    .child(canvas(|_, _, _| (), move |bounds, _, window, _| {
+                        let spacing = px(40.);
+                        let diameter = px(1.5);
+                        let color = rgb(p.muted).opacity(if p.dark { 0.22 } else { 0.26 });
+                        let columns = (f32::from(bounds.size.width) / f32::from(spacing)).ceil() as usize;
+                        let rows = (f32::from(bounds.size.height) / f32::from(spacing)).ceil() as usize;
+                        for row in 0..rows {
+                            for column in 0..columns {
+                                window.paint_quad(fill(Bounds::new(
+                                    bounds.origin + point(spacing * (column as f32 + 0.5), spacing * (row as f32 + 0.5)),
+                                    size(diameter, diameter)), color).corner_radii(diameter / 2.));
+                            }
+                        }
+                    }).absolute().size_full()))
+                .child(content.size_full()))
             .child(legend)
     }
 }
@@ -1696,14 +1861,15 @@ pub(super) fn open_preview_if_requested(cx: &mut App) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        CARD_H, Filter, Motion, OverviewModel, Placement, RetainedLayout, State,
+        CARD_H, CARD_W, HUB_H, HUB_W, MapRect, RetainedProject, Filter, Motion, OverviewModel, Placement, RetainedLayout, State,
         child_inputs_changed, clamped_zoom, cluster_layout, grouped, interface_font_ratio,
         organic_positions, px, relevant_changed, updated_label,
     };
     use serde_json::json;
     #[gpui_kit::test]
     fn activity_overview_native_communication_paint_and_card_interaction(cx: &mut gpui_kit::TestAppContext) {
-        use gpui_kit::{AppContext as _, IntoElement, Entity, Render, Window, Context};
+        use gpui_kit::{AppContext as _, IntoElement, Entity, Render, Window, Context, MouseButton, point};
+        use std::time::Duration;
         struct Harness(Entity<super::ActivityOverview>);
         impl Render for Harness {
             fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement { self.0.clone() }
@@ -1734,6 +1900,39 @@ mod tests {
         visual.run_until_parked();
         visual.update(|window,cx| window.draw(cx).clear(cx));
         assert!(visual.debug_bounds("activity-communications").is_some());
+        let dot_size = overview.read_with(visual, |view, cx| {
+            use gpui_kit::component::ActiveTheme as _;
+            f32::from(px(2. * view.zoom * super::interface_font_ratio(cx.theme().font_size)))
+        });
+        visual.update(|window, _| {
+            let dots: Vec<_> = window.painted_quads().into_iter().filter(|quad| {
+                quad.background.as_solid().is_some_and(|color| {
+                    let ink = gpui_kit::Rgba::from(color);
+                    (ink.r - 101. / 255.).abs() < 0.005 && (ink.g - 148. / 255.).abs() < 0.005
+                        && (ink.b - 219. / 255.).abs() < 0.005 && ink.a > 0.99
+                })
+            }).collect();
+            assert!(dots.len() > 5, "real communication curve paints chat-stream blue dots");
+            for dot in dots {
+                let width = dot.bounds.size.width.as_f32() / window.scale_factor();
+                let height = dot.bounds.size.height.as_f32() / window.scale_factor();
+                let raster_tolerance = 1. / window.scale_factor() + 0.01;
+                assert!((width - dot_size).abs() < raster_tolerance && (height - dot_size).abs() < raster_tolerance,
+                    "dots are 2px circles at configured scale without a broad glow stroke: {width}x{height}, expected {dot_size}");
+            }
+        });
+        let blue_positions = |visual: &mut gpui_kit::VisualTestContext| visual.update(|window, _| {
+            window.painted_quads().into_iter().filter(|quad| quad.background.as_solid().is_some_and(|color| {
+                let ink = gpui_kit::Rgba::from(color);
+                (ink.r - 101./255.).abs() < 0.005 && (ink.g - 148./255.).abs() < 0.005
+                    && (ink.b - 219./255.).abs() < 0.005 && ink.a > 0.99
+            })).map(|quad| (quad.bounds.origin.x.as_f32(), quad.bounds.origin.y.as_f32())).collect::<Vec<_>>()
+        });
+        let before_flow = blue_positions(visual);
+        visual.executor().advance_clock(Duration::from_millis(70));
+        visual.run_until_parked();
+        visual.update(|window,cx| window.draw(cx).clear(cx));
+        assert_ne!(before_flow, blue_positions(visual), "actual blue dots flow between native frames");
         overview.read_with(visual, |view,_| {
             let state = view.communications.borrow();
             assert_eq!(state.links.len(),1);
@@ -1751,6 +1950,73 @@ mod tests {
         visual.simulate_click(card_bounds.center(),Default::default());
         visual.run_until_parked();
         assert!(opened.get(),"communication canvas must not intercept chat clicks");
+        opened.set(false);
+        let hub_before = visual.debug_bounds("activity-hub-p").unwrap();
+        let start = visual.debug_bounds("activity-card-b").unwrap().center();
+        let end = point(start.x + px(65.), start.y + px(30.));
+        visual.simulate_mouse_down(start, MouseButton::Left, Default::default());
+        visual.simulate_mouse_move(end, Some(MouseButton::Left), Default::default());
+        visual.simulate_mouse_up(end, MouseButton::Left, Default::default());
+        visual.run_until_parked();
+        visual.update(|window,cx| window.draw(cx).clear(cx));
+        let released = visual.debug_bounds("activity-card-b").unwrap();
+        assert!(!opened.get(), "dragging a card cannot open Watch");
+        for _ in 0..120 {
+            visual.executor().advance_clock(Duration::from_millis(16));
+            visual.run_until_parked();
+            visual.update(|window,cx| window.draw(cx).clear(cx));
+        }
+        let settled = visual.debug_bounds("activity-card-b").unwrap();
+        assert!(settled.left() > released.left() + px(10.), "individual card coasts after release");
+        assert!(settled.left() < released.left() + px(150.), "throw distance is bounded");
+        assert_eq!(visual.debug_bounds("activity-hub-p").unwrap(), hub_before, "card drag leaves its project fixed");
+        overview.read_with(visual, |view,_| assert!(view.motion_task.is_none(), "motion loop stops at rest"));
+        visual.simulate_click(settled.center(), Default::default());
+        visual.run_until_parked();
+        assert!(opened.get(), "normal click after a drag still opens Watch");
+        // Motion preference changes stop an in-flight glide on its next frame.
+        visual.update(|_,cx| {
+            cx.set_reduce_motion(true);
+            overview.update(cx, |view,cx| {
+                let offset = view.layout.projects.get_mut("p").unwrap().card_motion.get_mut("b").unwrap();
+                offset.vx = 18.; offset.vy = 8.;
+                view.start_motion(cx);
+            });
+        });
+        visual.executor().advance_clock(Duration::from_millis(16));
+        visual.run_until_parked();
+        overview.read_with(visual, |view,_| {
+            let offset = view.layout.projects["p"].card_motion["b"];
+            assert_eq!((offset.vx, offset.vy), (0., 0.));
+        });
+        visual.update(|_,cx| cx.set_reduce_motion(false));
+
+        let children_before = [visual.debug_bounds("activity-card-a").unwrap(), visual.debug_bounds("activity-card-b").unwrap()];
+        let hub_start = visual.debug_bounds("activity-hub-p").unwrap().center();
+        let hub_end = hub_start + point(px(95.), px(45.));
+        visual.simulate_mouse_down(hub_start, MouseButton::Left, Default::default());
+        visual.simulate_mouse_move(hub_end, Some(MouseButton::Left), Default::default());
+        visual.executor().advance_clock(Duration::from_millis(16));
+        visual.run_until_parked();
+        visual.update(|window,cx| window.draw(cx).clear(cx));
+        let displacement_a = visual.debug_bounds("activity-card-a").unwrap().left() - children_before[0].left();
+        let displacement_b = visual.debug_bounds("activity-card-b").unwrap().left() - children_before[1].left();
+        assert!((f32::from(displacement_a - displacement_b)).abs() > 0.1,
+            "native siblings move independently during the same project drag");
+        visual.simulate_mouse_up(hub_end, MouseButton::Left, Default::default());
+        for _ in 0..240 {
+            visual.executor().advance_clock(Duration::from_millis(16));
+            visual.run_until_parked();
+        }
+        overview.read_with(visual, |view,_| {
+            let project = &view.layout.projects["p"];
+            assert!(view.motion_task.is_none(), "project followers stop scheduling at rest");
+            for id in ["a", "b"] {
+                let follower = project.follower(id);
+                assert_eq!((follower.x, follower.y), (project.target.x, project.target.y));
+            }
+        });
+
         // A communication publication must repaint even when task/model data is identical.
         overview.update(visual,|view,cx| {
             view.communications.borrow_mut().links.clear();
@@ -1830,6 +2096,122 @@ mod tests {
         );
     }
     #[test]
+    fn working_filter_includes_whole_projects_before_applying_search() {
+        let mut snapshot = json!({
+            "projects":[{"id":"p","name":"Active"},{"id":"q","name":"Quiet"},{"id":"r","name":"Queued"}],
+            "tasks":[
+                {"id":"run","projectId":"p","status":"running"},
+                {"id":"idle","projectId":"p","status":"idle","title":"Find this"},
+                {"id":"done","projectId":"p","status":"completed"},
+                {"id":"failed","projectId":"p","status":"failed"},
+                {"id":"quiet","projectId":"q","status":"idle"},
+                {"id":"archived","projectId":"q","status":"running","archived":true},
+                {"id":"queued","projectId":"r","status":"queued"},
+                {"id":"queued-sibling","projectId":"r","status":"idle"}]
+        });
+        let model = OverviewModel::from_snapshot(&snapshot);
+        let ids: std::collections::HashSet<_> = model.visible(Filter::Working, "")
+            .into_iter().map(|card| card.task_id).collect();
+        assert_eq!(ids, ["run", "idle", "done", "failed", "queued", "queued-sibling"].map(String::from).into());
+        assert_eq!(model.count(Filter::Working), 2, "badge still counts working agents");
+        assert_eq!(model.visible(Filter::Working, "find this")[0].task_id, "idle");
+        assert!(model.visible(Filter::Working, "Quiet").is_empty());
+        snapshot["tasks"][0]["status"] = json!("idle");
+        assert!(OverviewModel::from_snapshot(&snapshot).visible(Filter::Working, "Active").is_empty(),
+            "a project disappears when its last working agent stops");
+        assert_eq!(model.visible(Filter::All, "").len(), 7);
+        assert_eq!(model.visible(Filter::Idle, "").len(), 3);
+    }
+    #[gpui_kit::test]
+    fn activity_overview_working_filter_click_keeps_and_dims_quiet_cards(cx: &mut gpui_kit::TestAppContext) {
+        use gpui_kit::{AppContext as _, Context, Entity, IntoElement, Render, Window};
+        struct Harness(Entity<super::ActivityOverview>);
+        impl Render for Harness {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement { self.0.clone() }
+        }
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            crate::surface_blend::initialize_for_ui_fixture();
+            crate::native_motion::initialize_for_ui_fixture(cx);
+        });
+        let (_, visual) = cx.add_window_view(|window, cx| {
+            let overview = cx.new(|cx| {
+                let mut view = super::ActivityOverview::new(window, cx);
+                view.set_snapshot(std::rc::Rc::new(json!({
+                    "projects":[{"id":"p","name":"Active"},{"id":"q","name":"Quiet"}],
+                    "tasks":[
+                        {"id":"run","projectId":"p","status":"running","updatedAt":chrono::Utc::now().timestamp_millis()},
+                        {"id":"idle","projectId":"p","status":"idle","updatedAt":chrono::Utc::now().timestamp_millis()},
+                        {"id":"done","projectId":"p","status":"completed","updatedAt":chrono::Utc::now().timestamp_millis()},
+                        {"id":"quiet","projectId":"q","status":"idle","updatedAt":chrono::Utc::now().timestamp_millis()}]
+                })), view.palette, cx);
+                view
+            });
+            gpui_kit::component::Root::new(cx.new(|_| Harness(overview)), window, cx)
+        });
+        visual.simulate_resize(gpui_kit::size(px(1800.), px(1200.)));
+        let draw = |visual: &mut gpui_kit::VisualTestContext| {
+            visual.run_until_parked();
+            visual.update(|window, cx| window.draw(cx).clear(cx));
+        };
+        let alpha = |visual: &mut gpui_kit::VisualTestContext, id: &str| {
+            let bounds = visual.debug_bounds(match id { "run" => "activity-card-run", "idle" => "activity-card-idle", "done" => "activity-card-done", _ => unreachable!() }).expect("card mounted");
+            visual.update(|window, _| {
+                let bounds = bounds.scale(window.scale_factor());
+                window.painted_quads().iter().find_map(|quad| {
+                    let near = |a: gpui_kit::ScaledPixels, b: gpui_kit::ScaledPixels| (a.as_f32() - b.as_f32()).abs() < 0.5;
+                    (near(quad.bounds.origin.x, bounds.origin.x) && near(quad.bounds.origin.y, bounds.origin.y)
+                        && near(quad.bounds.size.width, bounds.size.width) && near(quad.bounds.size.height, bounds.size.height))
+                        .then(|| quad.background.as_solid().map(|color| gpui_kit::Rgba::from(color).a)).flatten()
+                }).expect("actual card background painted")
+            })
+        };
+        draw(visual);
+        assert!(visual.debug_bounds("activity-dot-grid").is_some());
+        let idle_bounds = visual.debug_bounds("activity-card-done").unwrap();
+        visual.update(|window, _| {
+            let card = idle_bounds.scale(window.scale_factor());
+            let quads = window.painted_quads();
+            let paints: Vec<_> = quads.iter().filter(|quad| card.contains(&quad.bounds.center()))
+                .filter_map(|quad| quad.background.as_solid().map(gpui_kit::Rgba::from))
+                .filter(|ink| ink.a > 0.30).collect();
+            assert!(paints.len() >= 2, "quiet card paints its surface, badge and status");
+            assert!(paints.iter().all(|ink| (ink.r - ink.g).abs() < 0.005 && (ink.g - ink.b).abs() < 0.005),
+                "completed card surface, badge and semantic status are grayscale");
+            let grid_dots = quads.iter().filter(|quad| {
+                let width = quad.bounds.size.width.as_f32() / window.scale_factor();
+                let height = quad.bounds.size.height.as_f32() / window.scale_factor();
+                width > 0.5 && width < 3. && height > 0.5 && height < 3.
+                    && quad.background.as_solid().is_some_and(|color| {
+                        let ink = gpui_kit::Rgba::from(color); ink.a > 0.15 && ink.a < 0.30
+                    })
+            }).count();
+            assert!(grid_dots > 100, "native background paints the reference dot grid");
+        });
+        for list in [false, true] {
+            if list {
+                let button = visual.debug_bounds("activity-list").unwrap();
+                visual.simulate_click(button.center(), Default::default());
+                draw(visual);
+            }
+            let original = [alpha(visual, "run"), alpha(visual, "idle"), alpha(visual, "done")];
+            let working = visual.debug_bounds("activity-filter-Working").unwrap();
+            visual.simulate_click(working.center(), Default::default());
+            draw(visual);
+            assert!(visual.debug_bounds("activity-card-quiet").is_none(), "inactive projects are hidden");
+            for (index, id) in ["run", "idle", "done"].into_iter().enumerate() {
+                let expected = if id == "run" { 1. } else { 0.6 };
+                assert!((alpha(visual, id) / original[index] - expected).abs() < 0.01,
+                    "{id} has the expected painted opacity in list={list}");
+            }
+            let all = visual.debug_bounds("activity-filter-All").unwrap();
+            visual.simulate_click(all.center(), Default::default());
+            draw(visual);
+            assert!(visual.debug_bounds("activity-card-quiet").is_some());
+            assert!((alpha(visual, "idle") - original[1]).abs() < 0.01, "All restores full opacity");
+        }
+    }
+    #[test]
     fn current_turn_events_and_latest_active_plan_are_truthful() {
         let model = OverviewModel::from_snapshot(&json!({
             "tasks":[{"id":"t","status":"running","createdAt":1}],
@@ -1904,7 +2286,11 @@ mod tests {
         for filter in [Filter::Working, Filter::Idle, Filter::All] {
             let model = OverviewModel::from_snapshot_at(&snapshot, now);
             let visible = model.visible(filter, "");
-            assert!(visible.iter().all(|card| filter.matches(card.state)));
+            if filter == Filter::Working {
+                assert_eq!(visible.iter().map(|card| card.task_id.as_str()).collect::<Vec<_>>(), ["b", "a"]);
+            } else {
+                assert!(visible.iter().all(|card| filter.matches(card.state)));
+            }
             // Render allocates from the complete population before applying visibility.
             layout.sync(model.cards, 1200.);
             assert_eq!(a, coordinates(&layout, "p", "a"));
@@ -1961,6 +2347,19 @@ mod tests {
         );
     }
     #[test]
+    fn activity_overview_inertia_decays_and_stops_at_map_edges() {
+        let mut motion = Motion { x: 20., y: 20., vx: 18., vy: 8. };
+        let ticks = (0..120).find(|_| !motion.coast(0., 0.)).expect("finite glide");
+        assert!(ticks < 60);
+        assert!(motion.x > 50. && motion.x < 150.);
+        let stopped = (motion.x, motion.y);
+        assert!(!motion.coast(0., 0.));
+        assert_eq!((motion.x, motion.y), stopped);
+        motion = Motion { x: 1., y: 1., vx: -18., vy: -18. };
+        assert!(!motion.coast(0., 0.));
+        assert_eq!((motion.x, motion.y, motion.vx, motion.vy), (0., 0., 0., 0.));
+    }
+    #[test]
     fn follower_spring_converges_without_unbounded_animation() {
         let mut motion = Motion::default();
         let target = Placement { x: 310., y: 120. };
@@ -1968,6 +2367,24 @@ mod tests {
         assert!(settled);
         assert_eq!(motion.x, target.x);
         assert_eq!(motion.y, target.y);
+    }
+    #[test]
+    fn activity_overview_children_have_distance_sensitive_springs() {
+        let mut project = RetainedProject::default();
+        project.hub = Some(MapRect { x: 0., y: 0., w: HUB_W, h: HUB_H });
+        project.cards.insert("near".into(), MapRect { x: 180., y: 0., w: CARD_W, h: CARD_H });
+        project.cards.insert("far".into(), MapRect { x: 650., y: 0., w: CARD_W, h: CARD_H });
+        let near_strength = project.spring_strength("near");
+        let far_strength = project.spring_strength("far");
+        assert!(near_strength > far_strength, "farther cards have more lag");
+        let target = Placement { x: 120., y: 45. };
+        let mut near = Motion::default();
+        let mut far = Motion::default();
+        near.spring(target, near_strength); far.spring(target, far_strength);
+        assert!(near.x > far.x && near.x < target.x);
+        for _ in 0..240 { near.spring(target, near_strength); far.spring(target, far_strength); }
+        assert_eq!((near.x, near.y), (target.x, target.y));
+        assert_eq!((far.x, far.y), (target.x, target.y));
     }
     #[test]
     fn twelve_hour_population_expires_without_trusting_stale_running_status() {

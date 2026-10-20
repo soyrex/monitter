@@ -1445,6 +1445,7 @@ fn handle_server_request(
                         .as_str()?
                         .to_owned();
                     Some(InputQuestion {
+                        selection_mode: None,
                         id,
                         header: question
                             .get("header")

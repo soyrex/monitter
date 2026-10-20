@@ -405,7 +405,6 @@ fn build_field(config: SparkleFieldRender) -> AnyElement {
     );
     let anchor = config.anchor.clone();
     let field = SparkleCanvas {
-        active_pane: config.active_pane,
         stars: config.stars,
         layout,
         mirror: config.mirror,
@@ -465,7 +464,9 @@ fn build_field(config: SparkleFieldRender) -> AnyElement {
         .when(layout != SparkleLayout::Pane || config.paint_bounds.is_some(), |field| field.top(px(0.)))
         .overflow_hidden()
         .child(animated);
-    let base_opacity = if config.dark {
+    // Working decoration has its own focus emphasis; content dimming is separate.
+    let focus_opacity = if config.active_pane { 1. } else { 0.9 };
+    let base_opacity = focus_opacity * if config.dark {
         1.0
     } else if layout == SparkleLayout::Compact {
         0.65
@@ -516,7 +517,6 @@ fn continuous_wash_alpha(y: f32, top: f32, bottom: f32) -> f32 {
 
 #[derive(IntoElement)]
 struct SparkleCanvas {
-    active_pane: bool,
     stars: Stars,
     layout: SparkleLayout,
     mirror: bool,
@@ -547,7 +547,6 @@ impl RenderOnce for SparkleCanvas {
                 );
             }
         }
-        let active_pane = self.active_pane;
         let stars = self.stars;
         let layout = self.layout;
         let mirror = self.mirror;
@@ -600,13 +599,10 @@ impl RenderOnce for SparkleCanvas {
                 );
                 let clear = rgba(accent << 8);
                 if layout == SparkleLayout::Pane {
-                    let mut pane_wash = wash;
-                    if !active_pane { pane_wash.a *= 0.5; }
-                    // Inactive working panes retain the same wash at half strength.
-                    // The field's lifecycle opacity also handles exit/reduced motion.
+                    // Focus and lifecycle opacity apply once to the whole field.
                     window.paint_quad(fill(bounds, linear_gradient(
                         180., linear_color_stop(clear, 0.), linear_color_stop(
-                            pane_wash, 1.),
+                            wash, 1.),
                     )));
                 }
                 if layout == SparkleLayout::Compact {

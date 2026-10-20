@@ -43,6 +43,147 @@ fn fixture(name: &str) -> ServiceFixture {
     ServiceFixture { service, root }
 }
 
+fn configure_mcode_admin(service: &Service, command: &str, model: &str) -> Agent {
+    let mut admin = service.internal_admin().unwrap();
+    admin.provider = "acp".into();
+    admin.model = model.into();
+    admin.sandbox = "harness-configured".into();
+    admin.acp = Some(AcpLaunch { command: command.into(), args: vec!["acp".into()] });
+    // Model an existing persisted profile whose hidden tasks predate it.
+    // The public save path now proactively restarts the pool; these tests
+    // exercise the admission-time repair for legacy stale snapshots.
+    service.mutate(None, |snapshot| {
+        let current = snapshot.agents.iter_mut().find(|agent| agent.id == admin.id).unwrap();
+        *current = admin;
+        Ok(())
+    }).unwrap();
+    service.internal_admin().unwrap()
+}
+
+fn admin_task(service: &Service, task_id: &str) -> Task {
+    service.snapshot().unwrap().tasks.into_iter().find(|task| task.id == task_id).unwrap()
+}
+
+#[test]
+fn admin_admission_replaces_stale_codex_configuration_without_starting_a_provider() {
+    let fixture = fixture("adopt-acp");
+    let service = &fixture.service;
+    let task_id = service.ensure_internal_admin_task().unwrap();
+    service.mutate_data(None, |data| {
+        let task = data.snapshot.tasks.iter_mut().find(|task| task.id == task_id).unwrap();
+        task.native_session_id = Some("old-codex-session".into());
+        task.model_settings = Some(ModelSettings {
+            model: "old-sol".into(), reasoning_effort: Some("high".into()), fast_mode: None,
+        });
+        Ok(())
+    }).unwrap();
+    let before = admin_task(service, &task_id);
+    let admin = configure_mcode_admin(service, "mcode", "m:minimax:MiniMax-M3.1-Flash-Preview:v:");
+    assert_eq!(admin_task(service, &task_id), before, "legacy stale slots remain untouched until admission");
+    let permit = service.admin_turn_broker.acquire_slot(&[task_id.clone()]).unwrap();
+    service.prepare_internal_admin_task(&permit).unwrap();
+    let task = admin_task(service, &task_id);
+    assert_eq!(task.id, before.id);
+    assert_eq!(task.title, before.title);
+    assert_eq!(task.provider, admin.provider);
+    assert_eq!(task.model, admin.model);
+    assert_eq!(task.acp, admin.acp);
+    assert_eq!(task.sandbox, admin.sandbox);
+    assert!(task.native_session_id.is_none(), "Codex session must never resume through ACP");
+    assert!(task.model_settings.is_none(), "old per-task model overrides must not select Sol");
+    assert_ne!(task.status, "running");
+    assert!(service.runs.lock().unwrap().tasks.is_empty());
+    assert!(service.admin_turn_broker.active_task_id().is_none());
+    assert!(service.snapshot().unwrap().messages.is_empty());
+}
+
+#[test]
+fn admin_admission_adopts_acp_command_and_model_changes() {
+    let fixture = fixture("acp-command-change");
+    let service = &fixture.service;
+    configure_mcode_admin(service, "old-mcode", "old-model");
+    let task_id = service.ensure_internal_admin_task().unwrap();
+    service.mutate_data(None, |data| {
+        data.snapshot.tasks.iter_mut().find(|task| task.id == task_id).unwrap()
+            .native_session_id = Some("old-acp-session".into());
+        Ok(())
+    }).unwrap();
+    let admin = configure_mcode_admin(service, "new-mcode", "new-model");
+    let permit = service.admin_turn_broker.acquire_slot(&[task_id.clone()]).unwrap();
+    service.prepare_internal_admin_task(&permit).unwrap();
+    let task = admin_task(service, &task_id);
+    assert_eq!(task.provider, "acp");
+    assert_eq!(task.acp, admin.acp);
+    assert_eq!(task.model, "new-model");
+    assert!(task.native_session_id.is_none());
+    assert!(service.runs.lock().unwrap().tasks.is_empty());
+}
+
+#[test]
+fn unchanged_admin_admission_preserves_native_session_and_task_identity() {
+    let fixture = fixture("unchanged-admin");
+    let service = &fixture.service;
+    configure_mcode_admin(service, "mcode", "unchanged-model");
+    let task_id = service.ensure_internal_admin_task().unwrap();
+    service.mutate_data(None, |data| {
+        data.snapshot.tasks.iter_mut().find(|task| task.id == task_id).unwrap()
+            .native_session_id = Some("keep-acp-session".into());
+        Ok(())
+    }).unwrap();
+    let before = admin_task(service, &task_id);
+    let permit = service.admin_turn_broker.acquire_slot(&[task_id.clone()]).unwrap();
+    service.prepare_internal_admin_task(&permit).unwrap();
+    assert_eq!(admin_task(service, &task_id), before);
+    service.prepare_internal_admin_task(&permit).unwrap();
+    assert_eq!(admin_task(service, &task_id), before, "adoption must be idempotent");
+}
+
+#[test]
+fn admin_slots_adopt_lazily_without_changing_user_tasks() {
+    let fixture = fixture("all-admin-slots");
+    let service = &fixture.service;
+    let ids = (0..3).map(|slot| service.ensure_internal_admin_task_slot(slot).unwrap()).collect::<Vec<_>>();
+    let user_agent = service.snapshot().unwrap().agents.into_iter().find(|agent| !agent.internal).unwrap();
+    let user = service.create_task(CreateTaskInput {
+        agent_id: user_agent.id, title: "Unaffected user chat".into(), native_session_id: None,
+        parent_task_id: None, channel_id: None, project_id: None, cwd: None,
+        model_settings: None, sandbox: None,
+    }).unwrap();
+    let old = ids.iter().map(|id| admin_task(service, id)).collect::<Vec<_>>();
+    let admin = configure_mcode_admin(service, "mcode", "new-admin-model");
+    let mut permits = Vec::new();
+    for (index, id) in ids.iter().enumerate() {
+        permits.push(service.admin_turn_broker.acquire_slot(&ids).unwrap());
+        assert_eq!(permits[index].task_id(), id);
+        service.prepare_internal_admin_task(&permits[index]).unwrap();
+        assert_eq!(admin_task(service, id).provider, admin.provider);
+        assert_eq!(admin_task(service, id).model, admin.model);
+        for untouched in index + 1..3 {
+            assert_eq!(admin_task(service, &ids[untouched]), old[untouched]);
+        }
+        assert_eq!(admin_task(service, &user.id), user);
+    }
+    assert!(service.runs.lock().unwrap().tasks.is_empty());
+}
+
+#[test]
+fn admin_admission_does_not_cancel_or_reconfigure_an_active_owner() {
+    let fixture = fixture("active-admin-preserved");
+    let service = &fixture.service;
+    let task_id = service.ensure_internal_admin_task().unwrap();
+    service.mark_internal_admin_task_running(&task_id).unwrap();
+    let control = service.reserve_run(&task_id).unwrap();
+    let before = admin_task(service, &task_id);
+    configure_mcode_admin(service, "mcode", "next-model");
+    let permit = service.admin_turn_broker.acquire_slot(&[task_id.clone()]).unwrap();
+    assert!(service.prepare_internal_admin_task(&permit).is_err());
+    assert_eq!(admin_task(service, &task_id), before);
+    assert!(!control.is_cancelled());
+    assert!(!control.is_retiring());
+    assert!(Arc::ptr_eq(service.runs.lock().unwrap().tasks.get(&task_id).unwrap(), &control));
+    service.release_run_if_current(&task_id, &control);
+}
+
 #[test]
 fn admin_shutdown_before_launch_does_not_leave_a_running_hidden_task() {
     let fixture = fixture("shutdown-before-launch");
@@ -58,6 +199,120 @@ fn admin_shutdown_before_launch_does_not_leave_a_running_hidden_task() {
     assert!(snapshot.tasks.iter().filter(|task| task.agent_id == admin_id)
         .all(|task| task.status != "running"));
     assert!(snapshot.messages.is_empty());
+}
+
+#[test]
+fn saving_admin_configuration_replaces_all_workers_and_preserves_user_owners() {
+    let fixture = fixture("save-restarts-pool");
+    let service = &fixture.service;
+    let task_ids: Vec<_> = (0..3).map(|slot| service.ensure_internal_admin_task_slot(slot).unwrap()).collect();
+    let user = service.snapshot().unwrap().agents.into_iter().find(|agent| !agent.internal).unwrap();
+    let user_task = service.create_task(CreateTaskInput {
+        agent_id: user.id, title: "Untouched user chat".into(), native_session_id: None,
+        parent_task_id: None, channel_id: None, project_id: None, cwd: None,
+        model_settings: None, sandbox: None,
+    }).unwrap();
+    let user_owner = crate::runner::RunControl::new(false);
+    service.runs.lock().unwrap().tasks.insert(user_task.id.clone(), Arc::clone(&user_owner));
+    let owners: Vec<_> = task_ids.iter().map(|id| {
+        let control = crate::runner::RunControl::new(false);
+        service.runs.lock().unwrap().tasks.insert(id.clone(), Arc::clone(&control));
+        control
+    }).collect();
+    service.mutate(None, |snapshot| {
+        for task in snapshot.tasks.iter_mut().filter(|task| task_ids.contains(&task.id)) {
+            task.native_session_id = Some("old-codex-session".into());
+        }
+        Ok(())
+    }).unwrap();
+    let mut edited = service.internal_admin().unwrap();
+    edited.provider = "acp".into();
+    edited.model = "m:minimax:MiniMax-M3.1-Flash-Preview:v:".into();
+    edited.sandbox = "harness-configured".into();
+    edited.codex_home = None;
+    edited.acp = Some(AcpLaunch { command: "mcode".into(), args: vec!["acp".into()] });
+    let snapshot = service.save_agent(edited.clone()).unwrap();
+    for id in &task_ids {
+        let task = snapshot.tasks.iter().find(|task| &task.id == id).unwrap();
+        assert_eq!(task.provider, "acp");
+        assert_eq!(task.model, edited.model);
+        assert_eq!(task.acp, edited.acp);
+        assert!(task.native_session_id.is_none());
+        assert!(task.model_settings.is_none());
+        assert!(!service.runs.lock().unwrap().tasks.contains_key(id));
+    }
+    assert!(owners.iter().all(|owner| owner.is_cancelled()));
+    assert!(!user_owner.is_cancelled());
+    assert_eq!(snapshot.tasks.iter().find(|task| task.id == user_task.id).unwrap(), &user_task);
+    assert!(Arc::ptr_eq(service.runs.lock().unwrap().tasks.get(&user_task.id).unwrap(), &user_owner));
+    service.release_run_if_current(&user_task.id, &user_owner);
+}
+
+#[test]
+fn saving_admin_configuration_interrupts_a_pending_request_before_resetting_its_slot() {
+    let fixture = fixture("save-cancels-request");
+    let service = &fixture.service;
+    let task_id = service.ensure_internal_admin_task().unwrap();
+    let permit = service.admin_turn_broker.acquire_slot(&[task_id.clone()]).unwrap();
+    let control = crate::runner::RunControl::new(false);
+    service.runs.lock().unwrap().tasks.insert(task_id.clone(), Arc::clone(&control));
+    let receiver = service.admin_turn_broker.try_register("old-request".into(), task_id.clone(),
+        Arc::downgrade(&control), Instant::now() + Duration::from_secs(30)).unwrap();
+    let waiter = thread::spawn(move || {
+        let reply = receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+        drop(permit);
+        reply
+    });
+    let mut edited = service.internal_admin().unwrap();
+    edited.instructions = "Use the updated instructions.".into();
+    service.save_agent(edited).unwrap();
+    let reply = waiter.join().unwrap();
+    assert!(matches!(reply, AdminTurnReply::Error(message) if message.contains("configuration")));
+    assert!(control.is_cancelled());
+    assert!(!service.admin_turn_broker.complete(&task_id));
+    assert!(admin_task(service, &task_id).native_session_id.is_none());
+    assert!(!service.runs.lock().unwrap().tasks.contains_key(&task_id));
+}
+
+#[test]
+fn saving_unchanged_admin_configuration_preserves_its_worker() {
+    let fixture = fixture("save-unchanged");
+    let service = &fixture.service;
+    let task_id = service.ensure_internal_admin_task().unwrap();
+    let control = crate::runner::RunControl::new(false);
+    service.runs.lock().unwrap().tasks.insert(task_id.clone(), Arc::clone(&control));
+    let before = admin_task(service, &task_id);
+    service.save_agent(service.internal_admin().unwrap()).unwrap();
+    assert_eq!(admin_task(service, &task_id), before);
+    assert!(!control.is_cancelled());
+    service.release_run_if_current(&task_id, &control);
+}
+
+#[test]
+fn saving_admin_configuration_reaps_an_actual_owned_worker_process() {
+    let fixture = fixture("save-reaps-process");
+    let service = &fixture.service;
+    let task_id = service.ensure_internal_admin_task().unwrap();
+    let mut command = std::process::Command::new("/bin/sleep");
+    command.arg("30");
+    crate::runner::isolate_child(&mut command);
+    let child = command.spawn().unwrap();
+    let pid = child.id() as libc::pid_t;
+    let control = crate::runner::RunControl::new(false);
+    control.work_log_fixture_child(child);
+    service.runs.lock().unwrap().tasks.insert(task_id.clone(), Arc::clone(&control));
+    let mut edited = service.internal_admin().unwrap();
+    edited.model = "replacement-model".into();
+    let result = service.save_agent(edited);
+    let reaped = control.root_pid().is_none();
+    let process_gone = unsafe { libc::kill(pid, 0) } == -1;
+    // Always reap the fixture, including on an assertion failure below.
+    control.work_log_stop_fixture_child();
+    assert!(result.is_ok(), "{result:?}");
+    assert!(reaped);
+    assert!(process_gone, "old child must already be gone");
+    assert!(!service.runs.lock().unwrap().tasks.contains_key(&task_id));
+    assert_eq!(admin_task(service, &task_id).model, "replacement-model");
 }
 
 #[test]

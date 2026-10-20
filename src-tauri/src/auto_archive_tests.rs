@@ -129,7 +129,7 @@ fn selection_is_strict_at_cutoff_and_uses_latest_message_activity() {
 fn recurring_rules_use_project_override_and_keep_unscoped_global_tasks() {
     let f = fixture("rule-precedence");
     let project_id = uuid::Uuid::new_v4().to_string();
-    let project = Project { build_management_enabled: false, agent_worktrees_enabled: false,
+    let project = Project { ideas: vec![], ideas_revision: 0, build_management_enabled: false, agent_worktrees_enabled: false,
         id: project_id.clone(),
         name: "Project".into(),
         description: String::new(),
@@ -137,7 +137,6 @@ fn recurring_rules_use_project_override_and_keep_unscoped_global_tasks() {
         color: "#000".into(),
         workspaces: vec![],
         board_guidance_text: None,
-        ideas: vec![], ideas_revision: 0,
     };
     install_tasks(
         &f.service,
@@ -349,7 +348,7 @@ fn protocol_one_time_project_scope_excludes_other_projects_and_unassigned_tasks(
     f.service
         .mutate(None, |s| {
             for (id, name) in [(&included, "Included"), (&other, "Other")] {
-                s.projects.push(Project { build_management_enabled: false, agent_worktrees_enabled: false,
+                s.projects.push(Project { ideas: vec![], ideas_revision: 0, build_management_enabled: false, agent_worktrees_enabled: false,
                     id: (*id).clone(),
                     name: name.into(),
                     description: String::new(),
@@ -357,7 +356,6 @@ fn protocol_one_time_project_scope_excludes_other_projects_and_unassigned_tasks(
                     color: "#000".into(),
                     workspaces: vec![],
                     board_guidance_text: None,
-                    ideas: vec![], ideas_revision: 0,
                 });
             }
             Ok(())
@@ -474,7 +472,7 @@ fn project_rule_can_be_saved_then_deleted_to_restore_inheritance() {
     let project_id = uuid::Uuid::new_v4().to_string();
     f.service
         .mutate(None, |s| {
-            s.projects.push(Project { build_management_enabled: false, agent_worktrees_enabled: false,
+            s.projects.push(Project { ideas: vec![], ideas_revision: 0, build_management_enabled: false, agent_worktrees_enabled: false,
                 id: project_id.clone(),
                 name: "Project".into(),
                 description: String::new(),
@@ -482,7 +480,6 @@ fn project_rule_can_be_saved_then_deleted_to_restore_inheritance() {
                 color: "#000".into(),
                 workspaces: vec![],
                 board_guidance_text: None,
-                ideas: vec![], ideas_revision: 0,
             });
             Ok(())
         })

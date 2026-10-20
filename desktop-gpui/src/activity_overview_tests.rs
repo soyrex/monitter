@@ -249,12 +249,20 @@ fn activity_overview_card_opens_live_watch_modal_without_workspace_navigation(
     draw(visual);
     let selected = desktop.read_with(visual, |desktop, _| desktop.window.selected.clone());
     let pane = retained_chat.unwrap();
-    for _ in 0..2 {
+    for iteration in 0..2 {
         let card = visual.debug_bounds("activity-card-overview-task").unwrap();
         visual.simulate_click(card.center(), Default::default());
         draw(visual);
         assert!(visual.debug_bounds("activity-watch-modal").is_some());
         assert!(visual.debug_bounds("chat-watcher").is_some());
+        let modal = visual.debug_bounds("activity-watch-modal").unwrap();
+        assert!(modal.size.width <= px(880.) && modal.size.height <= px(440.), "compact modal bounds: {modal:?}");
+        assert!(visual.debug_bounds("watcher-now").unwrap().size.height < px(78.), "modal status uses intrinsic height");
+        assert!(visual.debug_bounds("watcher-agents").is_none(), "empty subagent section is omitted");
+        if iteration == 0 {
+            assert!(visual.debug_bounds("activity-watch-active-glow").is_some());
+            assert!(visual.debug_bounds("activity-watch-sparkles").is_some());
+        }
         desktop.read_with(visual, |desktop, cx| {
             assert!(desktop.window.activity_overview_open);
             assert_eq!(desktop.window.selected, selected);
@@ -292,6 +300,8 @@ fn activity_overview_card_opens_live_watch_modal_without_workspace_navigation(
             visual.debug_bounds("watcher-latest-update").is_some(),
             "retained Watch remains mounted after publication"
         );
+        assert!(visual.debug_bounds("activity-watch-active-glow").is_none(), "completed task stops pulsing");
+        assert!(visual.debug_bounds("activity-watch-sparkles").is_none(), "completed task drops its animation field");
         // First Escape dismisses the native steer popover; next dismisses Watch.
         visual.simulate_keystrokes("escape");
         draw(visual);
@@ -358,8 +368,11 @@ fn activity_hub_native_drag_moves_hub_and_settles_connected_card(cx: &mut TestAp
         draw(visual);
     }
     let followed = visual.debug_bounds("activity-card-overview-task").unwrap();
-    assert!((f32::from(followed.left() - card.left()) - f32::from(end.x - start.x)).abs() < 1.);
-    assert!((f32::from(followed.top() - card.top()) - f32::from(end.y - start.y)).abs() < 1.);
+    let settled_hub = visual.debug_bounds("activity-hub-overview-project").unwrap();
+    assert!(settled_hub.left() > moved.left() + px(10.), "released project carries momentum");
+    assert!(settled_hub.left() < moved.left() + px(150.), "glide stays bounded");
+    assert!((f32::from(followed.left() - card.left()) - f32::from(settled_hub.left() - hub.left())).abs() < 1.);
+    assert!((f32::from(followed.top() - card.top()) - f32::from(settled_hub.top() - hub.top())).abs() < 1.);
 }
 
 #[gpui_kit::test]

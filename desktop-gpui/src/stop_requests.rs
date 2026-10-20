@@ -13,12 +13,16 @@ impl StopRequests {
         }
     }
     pub fn next(&mut self, busy: bool) -> Option<String> {
-        if busy || self.active.is_some() { return None; }
+        if busy || self.active.is_some() {
+            return None;
+        }
         let task = self.pending.pop_front()?;
         self.active = Some(task.clone());
         Some(task)
     }
-    pub fn complete(&mut self) { self.active = None; }
+    pub fn complete(&mut self) {
+        self.active = None;
+    }
     pub fn contains(&self, task: &str) -> bool {
         self.active.as_deref() == Some(task) || self.pending.iter().any(|id| id == task)
     }
@@ -30,7 +34,8 @@ mod tests {
     #[test]
     fn stop_requests_accept_while_busy_coalesce_and_keep_original_task() {
         let mut queue = StopRequests::default();
-        queue.request("first".into()); queue.request("first".into());
+        queue.request("first".into());
+        queue.request("first".into());
         assert!(queue.contains("first"));
         assert_eq!(queue.next(true), None);
         queue.request("second".into());

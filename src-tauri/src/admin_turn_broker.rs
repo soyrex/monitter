@@ -69,6 +69,13 @@ struct AdminTurnRequest {
     closed: bool,
 }
 
+impl AdminTurnRequest {
+    fn owned_by(&self, owner: Option<&Arc<RunControl>>) -> bool {
+        owner.is_none_or(|expected| self.owner.upgrade()
+            .is_some_and(|current| Arc::ptr_eq(&current, expected)))
+    }
+}
+
 const MAX_CONCURRENT_TURNS: usize = 3;
 
 #[derive(Debug, Default)]
@@ -84,6 +91,62 @@ struct AdminTurnPoolState {
     serving_ticket: u64,
     reserved: std::collections::HashSet<String>,
     shutting_down: bool,
+    reconfiguring: bool,
+    invalidating: bool,
+}
+
+const CONFIGURATION_CHANGED: &str = "Monitter Admin configuration changed. The previous request was stopped; submit a new request to use the updated settings.";
+
+/// Exclusive admission fence for an Admin configuration save. Existing slot
+/// owners retain their permits until cleanup; no old prompt is replayed.
+pub(crate) struct AdminReconfigurationPermit {
+    state: Arc<AdminTurnBrokerState>,
+}
+
+impl AdminReconfigurationPermit {
+    pub(crate) fn cancel_pending(&self) {
+        // Admission is already fenced. Remove generations before callbacks
+        // wake callers, and never cancel a process while holding broker locks.
+        let pending = {
+            // Match try_register/reset ordering: a prelaunch registration
+            // either joins this drain or observes the invalidation fence.
+            let Ok(mut pool) = self.state.pool.lock() else { return };
+            pool.invalidating = true;
+            let Ok(mut current) = self.state.current.lock() else { return };
+            current.drain().map(|(_, request)| request).collect::<Vec<_>>()
+        };
+        for request in pending {
+            if let Some(owner) = request.owner.upgrade() {
+                owner.cancel();
+            }
+            let _ = request.completion.send(AdminTurnReply::Error(CONFIGURATION_CHANGED.into()));
+        }
+    }
+
+    pub(crate) fn wait_for_slots(&self, timeout: Duration) -> Result<(), String> {
+        let deadline = Instant::now() + timeout;
+        let mut pool = self.state.pool.lock().map_err(|_| "Monitter Admin pool lock failed.")?;
+        loop {
+            if pool.shutting_down { return Err("Monitter Admin broker is shutting down.".into()); }
+            if pool.reserved.is_empty() { return Ok(()); }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err("Monitter Admin configuration changed, but previous requests have not finished stopping. Try saving again.".into());
+            }
+            pool = self.state.pool_changed.wait_timeout(pool, remaining)
+                .map_err(|_| "Monitter Admin pool lock failed.")?.0;
+        }
+    }
+}
+
+impl Drop for AdminReconfigurationPermit {
+    fn drop(&mut self) {
+        if let Ok(mut pool) = self.state.pool.lock() {
+            pool.reconfiguring = false;
+            pool.invalidating = false;
+            self.state.pool_changed.notify_all();
+        }
+    }
 }
 
 /// A FIFO reservation for one invisible admin task. Dropping it only makes the
@@ -125,6 +188,20 @@ impl AdminTurnBroker {
         Self::default()
     }
 
+    /// Serialize saves without retaining a mutex across persistence or process
+    /// teardown. Shutdown permanently closes admission, including waiting saves.
+    pub(crate) fn pause_admission(&self) -> Result<AdminReconfigurationPermit, String> {
+        let mut pool = self.state.pool.lock().map_err(|_| "Monitter Admin pool lock failed.")?;
+        loop {
+            if pool.shutting_down { return Err("Monitter Admin broker is shutting down.".into()); }
+            if !pool.reconfiguring {
+                pool.reconfiguring = true;
+                return Ok(AdminReconfigurationPermit { state: Arc::clone(&self.state) });
+            }
+            pool = self.state.pool_changed.wait(pool).map_err(|_| "Monitter Admin pool lock failed.")?;
+        }
+    }
+
     /// Blocks in FIFO order until one of the supplied hidden task slots is
     /// available. Queue time deliberately does not start a model deadline.
     pub(crate) fn acquire_slot(&self, task_ids: &[String]) -> Result<AdminTurnPermit, String> {
@@ -134,7 +211,7 @@ impl AdminTurnBroker {
         pool.next_ticket = pool.next_ticket.wrapping_add(1);
         loop {
             if pool.shutting_down { return Err("Monitter Admin broker is shutting down.".into()); }
-            if pool.serving_ticket == ticket && pool.reserved.len() < MAX_CONCURRENT_TURNS {
+            if !pool.reconfiguring && pool.serving_ticket == ticket && pool.reserved.len() < MAX_CONCURRENT_TURNS {
                 if let Some(task_id) = task_ids.iter().find(|id| !pool.reserved.contains(id.as_str())).cloned() {
                     pool.reserved.insert(task_id.clone());
                     pool.serving_ticket = pool.serving_ticket.wrapping_add(1);
@@ -178,6 +255,7 @@ impl AdminTurnBroker {
         let pool = self.state.pool.lock()
             .map_err(|_| "Monitter Admin pool lock failed.".to_string())?;
         if pool.shutting_down { return Err("Monitter Admin broker is shutting down.".into()); }
+        if pool.invalidating { return Err(CONFIGURATION_CHANGED.into()); }
         let mut guard = self
             .state
             .current
@@ -211,6 +289,14 @@ impl AdminTurnBroker {
     /// matching active entry — late output from a timed-out or completed turn
     /// is intentionally dropped instead of mutating any snapshot record.
     pub(crate) fn capture_assistant_text(&self, task_id: &str, delta: &str) -> bool {
+        self.capture_assistant_text_inner(task_id, delta, None)
+    }
+
+    pub(crate) fn capture_assistant_text_owned(&self, task_id: &str, owner: &Arc<RunControl>, delta: &str) -> bool {
+        self.capture_assistant_text_inner(task_id, delta, Some(owner))
+    }
+
+    fn capture_assistant_text_inner(&self, task_id: &str, delta: &str, owner: Option<&Arc<RunControl>>) -> bool {
         let mut guard = match self.state.current.lock() {
             Ok(guard) => guard,
             Err(_) => return false,
@@ -218,7 +304,7 @@ impl AdminTurnBroker {
         let Some(request) = guard.get_mut(task_id) else {
             return false;
         };
-        if request.task_id != task_id || request.closed {
+        if request.task_id != task_id || request.closed || !request.owned_by(owner) {
             return false;
         }
         if request.owner.strong_count() == 0 {
@@ -246,6 +332,14 @@ impl AdminTurnBroker {
     /// completed-item snapshot; use the opaque item id to replace the
     /// authoritative text while preserving first-seen item order.
     pub(crate) fn capture_app_server_item(&self, task_id: &str, item_id: &str, text: &str) -> bool {
+        self.capture_app_server_item_inner(task_id, item_id, text, None)
+    }
+
+    pub(crate) fn capture_app_server_item_owned(&self, task_id: &str, owner: &Arc<RunControl>, item_id: &str, text: &str) -> bool {
+        self.capture_app_server_item_inner(task_id, item_id, text, Some(owner))
+    }
+
+    fn capture_app_server_item_inner(&self, task_id: &str, item_id: &str, text: &str, owner: Option<&Arc<RunControl>>) -> bool {
         let mut guard = match self.state.current.lock() {
             Ok(guard) => guard,
             Err(_) => return false,
@@ -253,7 +347,7 @@ impl AdminTurnBroker {
         let Some(request) = guard.get_mut(task_id) else {
             return false;
         };
-        if request.task_id != task_id || request.closed || request.owner.strong_count() == 0 {
+        if request.task_id != task_id || request.closed || request.owner.strong_count() == 0 || !request.owned_by(owner) {
             return false;
         }
         if !request.app_server_items.contains_key(item_id) {
@@ -299,6 +393,14 @@ impl AdminTurnBroker {
     /// second call is a no-op. Returns `true` when the broker delivered the
     /// reply, `false` when there was no matching entry.
     pub(crate) fn complete(&self, task_id: &str) -> bool {
+        self.complete_inner(task_id, None)
+    }
+
+    pub(crate) fn complete_owned(&self, task_id: &str, owner: &Arc<RunControl>) -> bool {
+        self.complete_inner(task_id, Some(owner))
+    }
+
+    fn complete_inner(&self, task_id: &str, owner: Option<&Arc<RunControl>>) -> bool {
         let mut guard = match self.state.current.lock() {
             Ok(guard) => guard,
             Err(_) => return false,
@@ -306,7 +408,7 @@ impl AdminTurnBroker {
         let Some(request) = guard.get_mut(task_id) else {
             return false;
         };
-        if request.task_id != task_id || request.closed {
+        if request.task_id != task_id || request.closed || !request.owned_by(owner) {
             return false;
         }
         let text = std::mem::take(&mut request.buffer);
@@ -320,6 +422,14 @@ impl AdminTurnBroker {
     /// reply to leak back into the snapshot. The receiver observes a
     /// disconnected channel.
     pub(crate) fn cancel_silently(&self, task_id: &str) -> bool {
+        self.cancel_silently_inner(task_id, None)
+    }
+
+    pub(crate) fn cancel_silently_owned(&self, task_id: &str, owner: &Arc<RunControl>) -> bool {
+        self.cancel_silently_inner(task_id, Some(owner))
+    }
+
+    fn cancel_silently_inner(&self, task_id: &str, owner: Option<&Arc<RunControl>>) -> bool {
         let mut guard = match self.state.current.lock() {
             Ok(guard) => guard,
             Err(_) => return false,
@@ -327,7 +437,7 @@ impl AdminTurnBroker {
         let Some(request) = guard.get(task_id) else {
             return false;
         };
-        if request.task_id != task_id {
+        if request.task_id != task_id || !request.owned_by(owner) {
             return false;
         }
         guard.remove(task_id);
@@ -338,6 +448,14 @@ impl AdminTurnBroker {
     /// the caller is still waiting. Returns whether an entry was removed.
     #[allow(dead_code)] // Currently exercised only from the unit tests.
     pub(crate) fn cancel_with_error(&self, task_id: &str, message: String) -> bool {
+        self.cancel_with_error_inner(task_id, message, None)
+    }
+
+    pub(crate) fn cancel_with_error_owned(&self, task_id: &str, owner: &Arc<RunControl>, message: String) -> bool {
+        self.cancel_with_error_inner(task_id, message, Some(owner))
+    }
+
+    fn cancel_with_error_inner(&self, task_id: &str, message: String, owner: Option<&Arc<RunControl>>) -> bool {
         let mut guard = match self.state.current.lock() {
             Ok(guard) => guard,
             Err(_) => return false,
@@ -345,7 +463,7 @@ impl AdminTurnBroker {
         let Some(request) = guard.get_mut(task_id) else {
             return false;
         };
-        if request.task_id != task_id || request.closed {
+        if request.task_id != task_id || request.closed || !request.owned_by(owner) {
             return false;
         }
         let _ = request.completion.send(AdminTurnReply::Error(message));
@@ -559,6 +677,167 @@ mod tests {
         thread::spawn(move || { tx.send(waiting.acquire_slot(&waiting_tasks).err().unwrap()).unwrap(); });
         broker.reset();
         assert!(rx.recv_timeout(Duration::from_secs(1)).unwrap().contains("shutting down"));
+    }
+
+    #[test]
+    fn reconfiguration_fences_admission_and_preserves_waiter_fifo() {
+        let broker = AdminTurnBroker::new();
+        let gate = broker.pause_admission().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let mut handles = Vec::new();
+        for index in 0..2 {
+            let waiting = broker.clone();
+            let tx = tx.clone();
+            handles.push(thread::spawn(move || {
+                let permit = waiting.acquire_slot(&["slot-0".into()]).unwrap();
+                tx.send(index).unwrap();
+                drop(permit);
+            }));
+            // Observe ticket assignment, rather than relying on thread spawn
+            // order, before starting the next FIFO waiter.
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while broker.state.pool.lock().unwrap().next_ticket != index + 1 {
+                assert!(Instant::now() < deadline);
+                thread::yield_now();
+            }
+        }
+        assert!(matches!(rx.recv_timeout(Duration::from_millis(20)), Err(RecvTimeoutError::Timeout)));
+        gate.wait_for_slots(Duration::ZERO).unwrap();
+        drop(gate);
+        assert_eq!(rx.recv_timeout(Duration::from_secs(1)).unwrap(), 0);
+        assert_eq!(rx.recv_timeout(Duration::from_secs(1)).unwrap(), 1);
+        for handle in handles { handle.join().unwrap(); }
+    }
+
+    #[test]
+    fn reconfiguration_cancels_exact_pending_owner_and_never_replays_buffer() {
+        let broker = AdminTurnBroker::new();
+        let permit = broker.acquire_slot(&["slot-0".into()]).unwrap();
+        let owner = RunControl::new(false);
+        let receiver = broker.try_register("old-request".into(), "slot-0".into(),
+            Arc::downgrade(&owner), Instant::now() + Duration::from_secs(5)).unwrap();
+        assert!(broker.capture_assistant_text("slot-0", "old reply"));
+        let gate = broker.pause_admission().unwrap();
+        gate.cancel_pending();
+        assert!(owner.is_cancelled());
+        assert_eq!(receiver.recv_timeout(Duration::from_secs(1)).unwrap(),
+            AdminTurnReply::Error(CONFIGURATION_CHANGED.into()));
+        assert!(!broker.capture_assistant_text("slot-0", "late reply"));
+        assert!(!broker.complete("slot-0"));
+        assert!(gate.wait_for_slots(Duration::from_millis(1)).is_err(), "request completion alone does not release its cleanup permit");
+        drop(permit);
+        gate.wait_for_slots(Duration::from_secs(1)).unwrap();
+        drop(gate);
+        let fresh = RunControl::new(false);
+        let receiver = broker.try_register("new-request".into(), "slot-0".into(),
+            Arc::downgrade(&fresh), Instant::now() + Duration::from_secs(5)).unwrap();
+        assert!(broker.capture_assistant_text("slot-0", "new reply"));
+        assert!(broker.complete("slot-0"));
+        assert_eq!(receiver.recv_timeout(Duration::from_secs(1)).unwrap(), AdminTurnReply::Text("new reply".into()));
+        assert!(!fresh.is_cancelled());
+    }
+
+    #[test]
+    fn reconfiguration_rejects_registration_from_a_previously_admitted_slot() {
+        let broker = AdminTurnBroker::new();
+        let permit = broker.acquire_slot(&["slot-0".into()]).unwrap();
+        let gate = broker.pause_admission().unwrap();
+        gate.cancel_pending();
+        let owner = RunControl::new(false);
+        let result = broker.try_register("prelaunch".into(), "slot-0".into(),
+            Arc::downgrade(&owner), Instant::now() + Duration::from_secs(5));
+        assert!(matches!(result, Err(message) if message == CONFIGURATION_CHANGED));
+        assert!(broker.active_task_id().is_none());
+        drop(permit);
+        gate.wait_for_slots(Duration::ZERO).unwrap();
+    }
+
+    #[test]
+    fn cosmetic_save_pause_allows_admitted_registration_and_preserves_its_request() {
+        let broker = AdminTurnBroker::new();
+        let permit = broker.acquire_slot(&["slot-0".into()]).unwrap();
+        let gate = broker.pause_admission().unwrap();
+        let owner = RunControl::new(false);
+        let receiver = broker.try_register("unchanged".into(), "slot-0".into(),
+            Arc::downgrade(&owner), Instant::now() + Duration::from_secs(5)).unwrap();
+        assert!(broker.capture_assistant_text("slot-0", "preserved reply"));
+        drop(gate);
+        assert!(!owner.is_cancelled());
+        assert!(broker.complete("slot-0"));
+        assert_eq!(receiver.recv_timeout(Duration::from_secs(1)).unwrap(),
+            AdminTurnReply::Text("preserved reply".into()));
+        drop(permit);
+    }
+
+    #[test]
+    fn real_save_invalidates_a_request_registered_during_validation_pause() {
+        let broker = AdminTurnBroker::new();
+        let _permit = broker.acquire_slot(&["slot-0".into()]).unwrap();
+        let gate = broker.pause_admission().unwrap();
+        let owner = RunControl::new(false);
+        let receiver = broker.try_register("before-invalidation".into(), "slot-0".into(),
+            Arc::downgrade(&owner), Instant::now() + Duration::from_secs(5)).unwrap();
+        gate.cancel_pending();
+        assert!(owner.is_cancelled());
+        assert_eq!(receiver.recv_timeout(Duration::from_secs(1)).unwrap(),
+            AdminTurnReply::Error(CONFIGURATION_CHANGED.into()));
+        let fresh = RunControl::new(false);
+        assert!(matches!(broker.try_register("after-invalidation".into(), "slot-0".into(),
+            Arc::downgrade(&fresh), Instant::now() + Duration::from_secs(5)),
+            Err(message) if message == CONFIGURATION_CHANGED));
+    }
+
+    #[test]
+    fn old_owner_cannot_capture_complete_or_cancel_a_new_request_on_the_same_task() {
+        let broker = AdminTurnBroker::new();
+        let old = RunControl::new(false);
+        let first = broker.try_register("old".into(), "same-task".into(),
+            Arc::downgrade(&old), Instant::now() + Duration::from_secs(5)).unwrap();
+        assert!(broker.capture_assistant_text_owned("same-task", &old, "old reply"));
+        let gate = broker.pause_admission().unwrap();
+        gate.cancel_pending();
+        assert!(matches!(first.recv_timeout(Duration::from_secs(1)).unwrap(), AdminTurnReply::Error(_)));
+        drop(gate);
+        let new = RunControl::new(false);
+        let second = broker.try_register("new".into(), "same-task".into(),
+            Arc::downgrade(&new), Instant::now() + Duration::from_secs(5)).unwrap();
+        assert!(!broker.capture_assistant_text_owned("same-task", &old, "stale delta"));
+        assert!(!broker.capture_app_server_item_owned("same-task", &old, "old-item", "stale item"));
+        assert!(!broker.complete_owned("same-task", &old));
+        assert!(!broker.cancel_with_error_owned("same-task", &old, "stale failure".into()));
+        assert!(!broker.cancel_silently_owned("same-task", &old));
+        assert!(matches!(second.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        assert!(!new.is_cancelled());
+        assert!(broker.capture_assistant_text_owned("same-task", &new, "new prefix "));
+        assert!(broker.capture_app_server_item_owned("same-task", &new, "new-item", "new item"));
+        assert!(broker.complete_owned("same-task", &new));
+        assert_eq!(second.recv_timeout(Duration::from_secs(1)).unwrap(),
+            AdminTurnReply::Text("new prefix new item".into()));
+    }
+
+    #[test]
+    fn reconfiguration_saves_serialize_and_shutdown_cannot_reopen_admission() {
+        let broker = AdminTurnBroker::new();
+        let gate = broker.pause_admission().unwrap();
+        let waiting = broker.clone();
+        let (tx, rx) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            let second = waiting.pause_admission();
+            tx.send(second.is_ok()).unwrap();
+        });
+        assert!(matches!(rx.recv_timeout(Duration::from_millis(20)), Err(RecvTimeoutError::Timeout)));
+        drop(gate);
+        assert!(rx.recv_timeout(Duration::from_secs(1)).unwrap());
+        handle.join().unwrap();
+        let gate = broker.pause_admission().unwrap();
+        broker.reset();
+        assert!(gate.wait_for_slots(Duration::ZERO).unwrap_err().contains("shutting down"));
+        drop(gate);
+        assert!(broker.pause_admission().is_err());
+        assert!(broker.acquire_slot(&["slot-0".into()]).is_err());
+        let owner = RunControl::new(false);
+        assert!(broker.try_register("after-shutdown".into(), "slot-0".into(),
+            Arc::downgrade(&owner), Instant::now() + Duration::from_secs(1)).is_err());
     }
 
     #[test]

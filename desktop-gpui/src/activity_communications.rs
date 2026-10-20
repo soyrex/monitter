@@ -100,7 +100,7 @@ impl Curve {
         let mut best_score = usize::MAX;
         // Choose the shallowest clear arc whose painted path stays within the map.
         // A control point may sit outside the map while its entire curve stays inside.
-        // Canonical task-pair order makes replies follow exactly the same route.
+        // Each directed route prefers its own side of the task pair.
         for extra in [0.,80.,180.,300.,500.] {
             for sign in [1.,-1.] {
                 let control = (((ac.0+bc.0)/2.-dy/length*(bend+extra)*sign).max(-ac.0.min(bc.0)*0.25),
@@ -115,6 +115,44 @@ impl Curve {
             }
         }
         best.expect("at least one route candidate")
+    }
+    pub fn directed(a: MapRect, b: MapRect, obstacles: &[MapRect], forward: bool, reverse: bool) -> Vec<Self> {
+        let mut routes = Vec::new();
+        if forward { routes.push(Self::routed(a, b, obstacles)); }
+        if reverse {
+            let mut reply_obstacles = obstacles.to_vec();
+            if let Some(outbound) = routes.first() {
+                // Keep the reply visibly separate, including when a project label
+                // forces both directions into the same general corridor.
+                reply_obstacles.extend((2..15).map(|step| {
+                    let (x, y) = outbound.at(step as f32 / 16.);
+                    MapRect { x: x - 3., y: y - 3., w: 6., h: 6. }
+                }));
+            }
+            routes.push(Self::routed(b, a, &reply_obstacles));
+        }
+        routes
+    }
+    pub fn dots(&self, phase: f32) -> Vec<(f32, f32)> {
+        let length_bound = (self.control.0 - self.start.0).hypot(self.control.1 - self.start.1)
+            + (self.end.0 - self.control.0).hypot(self.end.1 - self.control.1);
+        let steps = (length_bound / 2.).ceil().clamp(1., 4096.) as usize;
+        let mut dots = Vec::new();
+        let mut previous = self.start;
+        let mut remaining = phase.rem_euclid(6.);
+        for step in 1..=steps {
+            let next = self.at(step as f32 / steps as f32);
+            let distance = (next.0 - previous.0).hypot(next.1 - previous.1);
+            while remaining <= distance && distance > 0. {
+                let t = remaining / distance;
+                dots.push((previous.0 + (next.0 - previous.0) * t,
+                    previous.1 + (next.1 - previous.1) * t));
+                remaining += 6.;
+            }
+            remaining -= distance;
+            previous = next;
+        }
+        dots
     }
     pub fn at(&self, t: f32) -> (f32, f32) {
         let u = 1. - t;
@@ -131,6 +169,24 @@ impl Curve {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn activity_overview_reciprocal_dots_follow_separate_directed_arcs() {
+        let a = MapRect { x: 100., y: 180., w: 120., h: 80. };
+        let b = MapRect { x: 600., y: 180., w: 120., h: 80. };
+        assert!(Curve::directed(a, b, &[], false, false).is_empty());
+        assert_eq!(Curve::directed(a, b, &[], true, false).len(), 1);
+        let routes = Curve::directed(a, b, &[], true, true);
+        assert_eq!(routes.len(), 2);
+        let p = routes[0].at(0.5); let q = routes[1].at(0.5);
+        assert!((p.0-q.0).hypot(p.1-q.1) > 10., "reply paints a distinct arc");
+        for curve in routes {
+            let before = curve.dots(0.)[0]; let after = curve.dots(2.)[0];
+            let tangent = curve.tangent(0.);
+            assert!((after.0-before.0)*tangent.0 + (after.1-before.1)*tangent.1 > 0.,
+                "dots advance from the real sender toward the recipient");
+            assert!((after.0-before.0).hypot(after.1-before.1) > 1.9);
+        }
+    }
     fn record(id: &str, from: &str, to: &str) -> Value {
         json!({"id":id,"kind":"message","fromTaskId":from,"toTaskId":to,
             "fromAgentId":"same-profile","toAgentId":"same-profile","status":"completed","createdAt":100_000})

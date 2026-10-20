@@ -65,6 +65,134 @@ pub fn permission_response(request_id: &str, allow: bool, input: &Value) -> Valu
     })
 }
 
+/// Native AskUserQuestion arrives through can_use_tool, but needs answers,
+/// never a permission grant. Keep the original tool input for the reply.
+pub(crate) fn user_question_input(input: &Value) -> Result<crate::model::InteractionInput, String> {
+    let questions = input
+        .get("questions")
+        .and_then(Value::as_array)
+        .ok_or("Missing Claude questions.")?;
+    if questions.is_empty() || questions.len() > 8 || input.to_string().len() > 64 * 1024 {
+        return Err("Unsupported Claude question request.".into());
+    }
+    let mut texts = std::collections::HashSet::new();
+    let mut normalized = Vec::new();
+    for (index, question) in questions.iter().enumerate() {
+        let text = question
+            .get("question")
+            .and_then(Value::as_str)
+            .filter(|text| !text.trim().is_empty() && text.len() <= 8000)
+            .ok_or("Invalid Claude question.")?;
+        if !texts.insert(text) {
+            return Err("Duplicate Claude question.".into());
+        }
+        let header = question.get("header").and_then(Value::as_str).unwrap_or("");
+        if header.len() > 240 {
+            return Err("Claude question header is too long.".into());
+        }
+        let choices = question
+            .get("options")
+            .and_then(Value::as_array)
+            .ok_or("Missing Claude question options.")?;
+        if choices.is_empty() || choices.len() > 16 {
+            return Err("Unsupported Claude question options.".into());
+        }
+        let mut labels = std::collections::HashSet::new();
+        let mut options = Vec::new();
+        for option in choices {
+            let label = option
+                .get("label")
+                .and_then(Value::as_str)
+                .filter(|label| !label.trim().is_empty() && label.len() <= 240)
+                .ok_or("Invalid Claude option.")?;
+            let description = option
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if !labels.insert(label) || description.len() > 2000 {
+                return Err("Ambiguous Claude option.".into());
+            }
+            options.push(crate::model::InputOption {
+                label: label.into(),
+                description: description.into(),
+            });
+        }
+        let multiple = match question.get("multiSelect") {
+            None | Some(Value::Bool(false)) => false,
+            Some(Value::Bool(true)) => true,
+            _ => return Err("Invalid Claude selection mode.".into()),
+        };
+        normalized.push(crate::model::InputQuestion {
+            id: format!("question_{}", index + 1),
+            header: header.into(),
+            question: text.into(),
+            is_secret: false,
+            selection_mode: Some(if multiple { "multiple" } else { "single" }.into()),
+            options,
+        });
+    }
+    Ok(crate::model::InteractionInput {
+        kind: "questions".into(),
+        questions: normalized,
+        schema: None,
+        url: None,
+    })
+}
+
+pub(crate) fn user_question_response(input: &Value, response: &Value) -> Result<Value, String> {
+    let normalized = user_question_input(input)?;
+    let answers = response
+        .get("answers")
+        .and_then(Value::as_object)
+        .ok_or("Missing Claude answers.")?;
+    if answers.len() != normalized.questions.len() {
+        return Err("Answer each Claude question.".into());
+    }
+    let mut native = serde_json::Map::new();
+    for question in normalized.questions {
+        let values = answers
+            .get(&question.id)
+            .and_then(|value| value.get("answers"))
+            .and_then(Value::as_array)
+            .ok_or("Missing Claude answer.")?;
+        if values.is_empty()
+            || values.len() > question.options.len() + 1
+            || (question.selection_mode.as_deref() != Some("multiple") && values.len() != 1)
+        {
+            return Err("Invalid Claude answer count.".into());
+        }
+        let values = values
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .filter(|text| !text.trim().is_empty() && text.len() <= 16_384)
+                    .ok_or("Invalid Claude answer text.")
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut seen = std::collections::HashSet::new();
+        let mut other_count = 0;
+        for text in &values {
+            if !seen.insert(*text) {
+                return Err("Duplicate Claude answer selection.".into());
+            }
+            if !question.options.iter().any(|option| option.label == *text) {
+                other_count += 1;
+            }
+        }
+        if other_count > 1 {
+            return Err("Provide at most one Other answer.".into());
+        }
+        native.insert(question.question, Value::String(values.join(", ")));
+    }
+    let mut updated = input.clone();
+    updated
+        .as_object_mut()
+        .ok_or("Invalid Claude tool input.")?
+        .insert("answers".into(), Value::Object(native));
+    Ok(updated)
+}
+
 fn session_id(value: &Value) -> Option<String> {
     value
         .get("session_id")
@@ -273,8 +401,61 @@ mod tests {
             sandbox: "read-only".into(),
             project_id: None,
             acp: None,
-            archived_agent_name: None, agent_worktree: None,
+            archived_agent_name: None,
+            agent_worktree: None,
         }
+    }
+
+    #[test]
+    fn input_request_claude_question_roundtrip_preserves_original_input_and_multi_select() {
+        let input = serde_json::json!({"questions":[{"question":"Which features?","header":"Features","multiSelect":true,"options":[{"label":"Alpha","description":"A"},{"label":"Beta","description":"B"}]}],"opaque":"preserved"});
+        let normalized = user_question_input(&input).unwrap();
+        assert_eq!(
+            normalized.questions[0].selection_mode.as_deref(),
+            Some("multiple")
+        );
+        let updated = user_question_response(
+            &input,
+            &serde_json::json!({"answers":{"question_1":{"answers":["Alpha","Beta"]}}}),
+        )
+        .unwrap();
+        assert_eq!(updated["answers"]["Which features?"], "Alpha, Beta");
+        assert_eq!(updated["opaque"], "preserved");
+        assert_eq!(updated["questions"], input["questions"]);
+        assert_eq!(
+            permission_response("request", true, &updated)["response"]["response"]["updatedInput"],
+            updated
+        );
+        assert_eq!(
+            permission_response("request", false, &input)["response"]["response"]["behavior"],
+            "deny"
+        );
+    }
+    #[test]
+    fn input_request_claude_all_options_plus_other_roundtrip() {
+        let options = (0..16)
+            .map(|n| serde_json::json!({"label":format!("Option {n}")}))
+            .collect::<Vec<_>>();
+        let input = serde_json::json!({"questions":[{"question":"Pick features","multiSelect":true,"options":options}]});
+        let mut selections = (0..16).map(|n| format!("Option {n}")).collect::<Vec<_>>();
+        selections.push("Custom choice".into());
+        let response = serde_json::json!({"answers":{"question_1":{"answers":selections}}});
+        let native = user_question_response(&input, &response).unwrap();
+        assert_eq!(native["answers"]["Pick features"], selections.join(", "));
+        assert!(user_question_response(&input,&serde_json::json!({"answers":{"question_1":{"answers":["Custom one","Custom two"]}}})).is_err());
+        assert!(
+            user_question_response(
+                &input,
+                &serde_json::json!({"answers":{"question_1":{"answers":["Option 0","Option 0"]}}})
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn input_request_claude_rejects_ambiguous_question_options() {
+        let input = serde_json::json!({"questions":[{"question":"Choose","options":[{"label":"Same"},{"label":"Same"}]}]});
+        assert!(user_question_input(&input).is_err());
     }
 
     #[test]
@@ -327,9 +508,11 @@ mod tests {
     fn yolo_uses_claudes_documented_permission_bypass() {
         let mut task = task(None, "sonnet");
         task.sandbox = "yolo".into();
-        assert!(args(&task)
-            .iter()
-            .any(|arg| arg == "--dangerously-skip-permissions"));
+        assert!(
+            args(&task)
+                .iter()
+                .any(|arg| arg == "--dangerously-skip-permissions")
+        );
     }
 
     #[test]

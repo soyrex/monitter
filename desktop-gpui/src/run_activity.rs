@@ -170,46 +170,96 @@ fn event_tool_status(event: &Value) -> Option<String> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ToolState { Running, Completed, Failed, Unknown }
+enum ToolState {
+    Running,
+    Completed,
+    Failed,
+    Unknown,
+}
 fn tool_state(event: &Value) -> ToolState {
     let detail = parsed_event_detail(event);
-    if detail["type"] == "mcpToolCall" && (!detail["error"].is_null() || detail["result"]["isError"].as_bool() == Some(true)) {
+    if detail["type"] == "mcpToolCall"
+        && (!detail["error"].is_null() || detail["result"]["isError"].as_bool() == Some(true))
+    {
         return ToolState::Failed;
     }
-    match event_tool_status(event).unwrap_or_default().to_ascii_lowercase().replace(['_', '-'], "").as_str() {
+    match event_tool_status(event)
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .replace(['_', '-'], "")
+        .as_str()
+    {
         "inprogress" | "running" | "pending" | "queued" | "started" => ToolState::Running,
         "completed" | "succeeded" | "success" => ToolState::Completed,
         "failed" | "error" | "cancelled" | "canceled" | "interrupted" => ToolState::Failed,
         _ => ToolState::Unknown,
     }
 }
-fn activity_icon(events: &[Value], fallback: IconName, cache: &PresentationCache, turn_running: Option<bool>) -> AnyElement {
-    let states: Vec<_> = events.iter().filter(|event| is_tool_event(event)).map(|event|cache.get(event).state).collect();
+fn activity_icon(
+    events: &[Value],
+    fallback: IconName,
+    cache: &PresentationCache,
+    turn_running: Option<bool>,
+) -> AnyElement {
+    let states: Vec<_> = events
+        .iter()
+        .filter(|event| is_tool_event(event))
+        .map(|event| cache.get(event).state)
+        .collect();
     // Turn headers describe the turn lifecycle. Individual provider tool
     // records can retain an in-progress status after their turn has ended.
     let state = if let Some(running) = turn_running {
-        if running { ToolState::Running } else { ToolState::Completed }
-    } else if states.contains(&ToolState::Running) { ToolState::Running }
-        else if states.contains(&ToolState::Failed) { ToolState::Failed }
-        else if !states.is_empty() && states.iter().all(|state| *state == ToolState::Completed) { ToolState::Completed }
-        else { ToolState::Unknown };
-    let id = events.first().map(|event|field(event,"id")).unwrap_or_default();
-    let (name, icon) = match state {
-        ToolState::Running => ("running", Spinner::new().with_size(px(12.)).into_any_element()),
-        ToolState::Completed => ("completed", Icon::new(IconName::CircleCheck).size(px(12.)).into_any_element()),
-        ToolState::Failed => ("failed", Icon::new(IconName::CircleAlert).size(px(12.)).into_any_element()),
-        ToolState::Unknown => ("unknown", Icon::new(fallback).size(px(12.)).into_any_element()),
+        if running {
+            ToolState::Running
+        } else {
+            ToolState::Completed
+        }
+    } else if states.contains(&ToolState::Running) {
+        ToolState::Running
+    } else if states.contains(&ToolState::Failed) {
+        ToolState::Failed
+    } else if !states.is_empty() && states.iter().all(|state| *state == ToolState::Completed) {
+        ToolState::Completed
+    } else {
+        ToolState::Unknown
     };
-    fixture_bounds(div().flex_shrink_0().child(icon),format!("run-state-{id}-{name}")).into_any_element()
+    let id = events
+        .first()
+        .map(|event| field(event, "id"))
+        .unwrap_or_default();
+    let (name, icon) = match state {
+        ToolState::Running => (
+            "running",
+            Spinner::new().with_size(px(12.)).into_any_element(),
+        ),
+        ToolState::Completed => (
+            "completed",
+            Icon::new(IconName::CircleCheck)
+                .size(px(12.))
+                .into_any_element(),
+        ),
+        ToolState::Failed => (
+            "failed",
+            Icon::new(IconName::CircleAlert)
+                .size(px(12.))
+                .into_any_element(),
+        ),
+        ToolState::Unknown => (
+            "unknown",
+            Icon::new(fallback).size(px(12.)).into_any_element(),
+        ),
+    };
+    fixture_bounds(
+        div().flex_shrink_0().child(icon),
+        format!("run-state-{id}-{name}"),
+    )
+    .into_any_element()
 }
 
 /// Compact English intent for the latest step, without promoting incidental
 /// provider/accounting titles into tool labels.
 fn process_tool_preview(events: &[Value]) -> Option<String> {
-    let event = events
-        .iter()
-        .rev()
-        .find(|event| is_tool_event(event))?;
+    let event = events.iter().rev().find(|event| is_tool_event(event))?;
     let detail = parsed_event_detail(event);
     let update = detail.get("update").unwrap_or(&detail);
     let arguments = detail
@@ -329,21 +379,41 @@ fn grouped_tool_label(events: &[Value]) -> String {
 
 fn mcp_tool_label(event: &Value) -> Option<String> {
     let detail = parsed_event_detail(event);
-    let item = detail.get("item").or_else(||detail.get("update")).unwrap_or(&detail);
-    if item["type"].as_str() != Some("mcpToolCall") { return None; }
+    let item = detail
+        .get("item")
+        .or_else(|| detail.get("update"))
+        .unwrap_or(&detail);
+    if item["type"].as_str() != Some("mcpToolCall") {
+        return None;
+    }
     fn friendly(value: &str) -> String {
-        let words = value.replace(['_', '-'], " ").split_whitespace().collect::<Vec<_>>().join(" ");
-        let mut chars=words.chars();
-        chars.next().map(|first| first.to_uppercase().collect::<String>() + chars.as_str()).unwrap_or_default()
+        let words = value
+            .replace(['_', '-'], " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut chars = words.chars();
+        chars
+            .next()
+            .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
+            .unwrap_or_default()
     }
     let server = friendly(item["server"].as_str().unwrap_or_default());
     let tool = friendly(item["tool"].as_str().unwrap_or_default());
-    if tool.is_empty() { return None; }
-    Some(if server.is_empty() { tool } else { format!("{server} · {tool}") })
+    if tool.is_empty() {
+        return None;
+    }
+    Some(if server.is_empty() {
+        tool
+    } else {
+        format!("{server} · {tool}")
+    })
 }
 
 fn tool_intent(event: &Value) -> String {
-    if let Some(label) = mcp_tool_label(event) { return label; }
+    if let Some(label) = mcp_tool_label(event) {
+        return label;
+    }
     if event_tool_status(event).as_deref() == Some("failed") {
         return "Tool failed".to_owned();
     }
@@ -423,7 +493,7 @@ fn thinking_row(
         .flex()
         .items_center()
         .gap(px(6.))
-        .py(px(6.))
+        .py(px(3.))
         .text_size(px(11.))
         .text_color(cx.theme().muted_foreground)
         .child(Icon::new(IconName::BookOpen).size(px(14.)))
@@ -443,8 +513,12 @@ fn thinking_row(
 }
 
 fn context_compaction_label(compaction: &crate::transcript::ContextCompaction) -> String {
-    if compaction.active { return "Compacting context…".into(); }
-    if !compaction.completed { return "Context compaction".into(); }
+    if compaction.active {
+        return "Compacting context…".into();
+    }
+    if !compaction.completed {
+        return "Context compaction".into();
+    }
     match compaction.duration_ms {
         Some(ms) if ms < 1_000 => "Context compacted · <1s".into(),
         Some(ms) if ms < 60_000 => format!("Context compacted · {}s", ms / 1_000),
@@ -460,23 +534,54 @@ fn context_compaction_row(
 ) -> Option<AnyElement> {
     let compaction = crate::transcript::context_compaction(events, running)?;
     let label = context_compaction_label(&compaction);
-    let state = if compaction.active { "running" } else if compaction.completed { "completed" } else { "unknown" };
+    let state = if compaction.active {
+        "running"
+    } else if compaction.completed {
+        "completed"
+    } else {
+        "unknown"
+    };
     let icon = if compaction.active {
         Spinner::new().with_size(px(13.)).into_any_element()
     } else {
-        Icon::new(if compaction.completed { IconName::Check } else { IconName::BookOpen }).size(px(13.)).into_any_element()
+        Icon::new(if compaction.completed {
+            IconName::Check
+        } else {
+            IconName::BookOpen
+        })
+        .size(px(13.))
+        .into_any_element()
     };
-    let id = events.first().map(|event| field(event, "id")).unwrap_or_default();
-    let mut row = fixture_bounds(div().w_full().min_w_0().flex().items_center()
-        .gap(px(6.)).py(px(6.)).text_size(px(11.))
-        .text_color(cx.theme().muted_foreground)
-        .child(icon).child(div().flex_1().min_w_0().child(label.clone())),
-        format!("context-compaction-{id}-{state}"))
-        .id(SharedString::from(format!("context-compaction-{id}")))
-        .role(Role::Label).aria_label(label);
+    let id = events
+        .first()
+        .map(|event| field(event, "id"))
+        .unwrap_or_default();
+    let mut row = fixture_bounds(
+        div()
+            .w_full()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .py(px(3.))
+            .text_size(px(11.))
+            .text_color(cx.theme().muted_foreground)
+            .child(icon)
+            .child(div().flex_1().min_w_0().child(label.clone())),
+        format!("context-compaction-{id}-{state}"),
+    )
+    .id(SharedString::from(format!("context-compaction-{id}")))
+    .role(Role::Label)
+    .aria_label(label);
     if let Some(time) = events.last().and_then(event_time) {
-        row = row.child(div().ml_auto().flex_shrink_0()
-            .font_family(crate::design::FONT_MONO).text_size(px(9.)).child(time));
+        row = row.child(
+            div()
+                .ml_auto()
+                .flex_shrink_0()
+                .font_family(crate::design::FONT_MONO)
+                .text_size(px(9.))
+                .child(time),
+        );
     }
     Some(row.into_any_element())
 }
@@ -625,16 +730,27 @@ pub struct RunActivityRow {
 }
 
 fn fixture_bounds(d: Div, name: String) -> Div {
-    #[cfg(test)] { return d.debug_selector(move ||name.clone()); }
-    #[cfg(not(test))] { let _=name; d }
+    #[cfg(test)]
+    {
+        return d.debug_selector(move || name.clone());
+    }
+    #[cfg(not(test))]
+    {
+        let _ = name;
+        d
+    }
 }
 impl RunActivityRow {
     pub(crate) fn header_icon_bounds(&self) -> Option<crate::activity_sparkles::PaintBounds> {
         // Compact thinking/compaction rows use their own presentation rather
         // than the Turn header measured below. Preserve their existing rail.
         if crate::transcript::context_compaction(&self.events, self.group_running).is_some()
-            || (self.mode == GroupMode::Reasoning && self.events.iter()
-                .all(|event| self.presentation_cache.get(event).reasoning.is_empty())) {
+            || (self.mode == GroupMode::Reasoning
+                && self
+                    .events
+                    .iter()
+                    .all(|event| self.presentation_cache.get(event).reasoning.is_empty()))
+        {
             return None;
         }
         Some(self.header_icon_bounds.clone())
@@ -650,7 +766,9 @@ impl RunActivityRow {
         cx.notify();
     }
     #[cfg(test)]
-    pub(crate) fn fixture_loaded_detail(&self) -> &str { &self.detail }
+    pub(crate) fn fixture_loaded_detail(&self) -> &str {
+        &self.detail
+    }
     pub fn set_git_owner(&mut self, owner: WeakEntity<crate::chat::ChatPane>) {
         self.git_owner = Some(owner);
     }
@@ -1019,10 +1137,16 @@ impl RunActivityRow {
     /// A sole tool branch with the same events adds no information to its turn.
     /// Mixed reasoning/tool branches and approval history keep their own structure.
     fn repeats_only_tool_branch(&self) -> bool {
-        let [branch] = self.process_branches.as_slice() else { return false; };
-        branch.mode == GroupMode::Tool && self.process_approvals.is_empty()
+        let [branch] = self.process_branches.as_slice() else {
+            return false;
+        };
+        branch.mode == GroupMode::Tool
+            && self.process_approvals.is_empty()
             && !branch.events.is_empty()
-            && branch.events.iter().map(|event| field(event, "id"))
+            && branch
+                .events
+                .iter()
+                .map(|event| field(event, "id"))
                 .eq(self.events.iter().map(|event| field(event, "id")))
     }
 
@@ -1106,7 +1230,9 @@ impl Render for RunActivityRow {
 
 impl RunActivityRow {
     fn render_single(&self, window: &mut Window, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
-        if let Some(compaction) = context_compaction_row(&self.events, false, cx) { return compaction; }
+        if let Some(compaction) = context_compaction_row(&self.events, false, cx) {
+            return compaction;
+        }
         let is_reasoning = self.kind == "reasoning";
         let presentation_event = self.events.first().unwrap_or(&Value::Null);
         let presentation = self.presentation_cache.with_loaded_detail(
@@ -1179,9 +1305,16 @@ impl RunActivityRow {
                     .when(
                         is_reasoning || matches!(self.kind.as_str(), "tool" | "subagent"),
                         |button| {
-                            button.child(
-                                activity_icon(&self.events, if is_reasoning { IconName::BookOpen } else { IconName::Wrench }, &self.presentation_cache, None),
-                            )
+                            button.child(activity_icon(
+                                &self.events,
+                                if is_reasoning {
+                                    IconName::BookOpen
+                                } else {
+                                    IconName::Wrench
+                                },
+                                &self.presentation_cache,
+                                None,
+                            ))
                         },
                     )
                     .child(
@@ -1201,14 +1334,29 @@ impl RunActivityRow {
                             button
                         }
                     })
-                    .child(fixture_bounds(div().flex_shrink_0().child(Icon::new(if expanded { IconName::ChevronDown } else { IconName::ChevronRight }).size(px(12.))), format!("run-caret-{event_id}")))
+                    .child(fixture_bounds(
+                        div().flex_shrink_0().child(
+                            Icon::new(if expanded {
+                                IconName::ChevronDown
+                            } else {
+                                IconName::ChevronRight
+                            })
+                            .size(px(12.)),
+                        ),
+                        format!("run-caret-{event_id}"),
+                    ))
                     .accessibility_label(action)
                     .disabled(loading)
                     .on_click(cx.listener(|row, _, _, cx| row.toggle(cx))),
             );
 
         #[cfg(test)]
-        { row = row.debug_selector({let id=self.event_id.clone();move ||format!("run-single-{id}")}); }
+        {
+            row = row.debug_selector({
+                let id = self.event_id.clone();
+                move || format!("run-single-{id}")
+            });
+        }
         if expanded {
             let mut detail_panel = div()
                 .w_full()
@@ -1222,7 +1370,12 @@ impl RunActivityRow {
                 .flex_col()
                 .gap(px(10.));
             #[cfg(test)]
-            { detail_panel=detail_panel.debug_selector({let id=self.event_id.clone();move ||format!("run-detail-{id}")}); }
+            {
+                detail_panel = detail_panel.debug_selector({
+                    let id = self.event_id.clone();
+                    move || format!("run-detail-{id}")
+                });
+            }
             if loading {
                 detail_panel = detail_panel.child(
                     div()
@@ -1347,7 +1500,9 @@ impl RunActivityRow {
     }
 
     fn render_group(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
-        if let Some(compaction) = context_compaction_row(&self.events, self.group_running, cx) { return compaction; }
+        if let Some(compaction) = context_compaction_row(&self.events, self.group_running, cx) {
+            return compaction;
+        }
         if self.mode == GroupMode::Reasoning
             && !self.events.is_empty()
             && self
@@ -1408,13 +1563,18 @@ impl RunActivityRow {
         let mut row = div()
             .w_full()
             .min_w_0()
-            .py_1()
+            .py(px(2.))
             .flex()
             .flex_col()
             .items_start()
-            .gap(px(10.));
+            .gap(px(6.));
         #[cfg(test)]
-        { row = row.debug_selector({let id=self.stable_first_id.clone();move ||format!("run-group-{id}")}); }
+        {
+            row = row.debug_selector({
+                let id = self.stable_first_id.clone();
+                move || format!("run-group-{id}")
+            });
+        }
         // Group disclosures are kept lazy: each retained event id remains
         // available through its own retained row in the grouped projection.
         let anchor = self.stable_first_id.clone();
@@ -1433,8 +1593,26 @@ impl RunActivityRow {
             .min_w_0()
             .justify_start()
             .px(px(0.))
-            .child(fixture_bounds(div().relative().flex_shrink_0().child(activity_icon(&self.events, IconName::Brain, &self.presentation_cache, Some(self.group_running)))
-                .child(canvas(move |bounds, _, _| icon_bounds.set(Some(bounds)), |_, _, _, _| {}).absolute().inset_0()), format!("run-leading-{anchor}")))
+            .child(fixture_bounds(
+                div()
+                    .relative()
+                    .flex_shrink_0()
+                    .child(activity_icon(
+                        &self.events,
+                        IconName::Brain,
+                        &self.presentation_cache,
+                        Some(self.group_running),
+                    ))
+                    .child(
+                        canvas(
+                            move |bounds, _, _| icon_bounds.set(Some(bounds)),
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .inset_0(),
+                    ),
+                format!("run-leading-{anchor}"),
+            ))
             .child(
                 div()
                     .flex_1()
@@ -1452,7 +1630,17 @@ impl RunActivityRow {
         {
             toggle = toggle.child(time);
         }
-        toggle = toggle.child(fixture_bounds(div().flex_shrink_0().child(Icon::new(if self.expanded { IconName::ChevronDown } else { IconName::ChevronRight }).size(px(12.))), format!("run-caret-{anchor}")));
+        toggle = toggle.child(fixture_bounds(
+            div().flex_shrink_0().child(
+                Icon::new(if self.expanded {
+                    IconName::ChevronDown
+                } else {
+                    IconName::ChevronRight
+                })
+                .size(px(12.)),
+            ),
+            format!("run-caret-{anchor}"),
+        ));
         row = row.child(
             toggle
                 .accessibility_label(format!("{action}: {summary}"))
@@ -1460,7 +1648,8 @@ impl RunActivityRow {
         );
         if self.expanded {
             if matches!(self.mode, GroupMode::Process | GroupMode::Tool)
-                && !self.process_branches.is_empty() && !self.repeats_only_tool_branch()
+                && !self.process_branches.is_empty()
+                && !self.repeats_only_tool_branch()
             {
                 for branch in &self.process_branches {
                     let key = process_branch_key(branch);
@@ -1482,7 +1671,7 @@ impl RunActivityRow {
                     let branch_action = if branch_open { "Hide" } else { "Show" };
                     let branch_accessibility = format!("{branch_action} branch: {label}");
                     row = row.child(
-                        fixture_bounds(div(),format!("run-branch-{key}"))
+                        fixture_bounds(div(), format!("run-branch-{key}"))
                             .w_full()
                             .min_w_0()
                             // Keep nested steps indented beneath their parent;
@@ -1525,7 +1714,14 @@ impl RunActivityRow {
                                                 .child(time),
                                         )
                                     })
-                                    .child(Icon::new(if branch_open { IconName::ChevronDown } else { IconName::ChevronRight }).size(px(12.)))
+                                    .child(
+                                        Icon::new(if branch_open {
+                                            IconName::ChevronDown
+                                        } else {
+                                            IconName::ChevronRight
+                                        })
+                                        .size(px(12.)),
+                                    )
                                     .on_click(cx.listener(move |row, _, _, cx| {
                                         row.toggle_process_branch(toggle_key.clone(), cx);
                                     })),
@@ -1607,9 +1803,30 @@ mod tests {
     #[::core::prelude::v1::test]
     fn context_compaction_uses_concise_lifecycle_labels_and_no_tool_count() {
         use crate::transcript::ContextCompaction;
-        assert_eq!(context_compaction_label(&ContextCompaction {active:true,completed:false,duration_ms:None}), "Compacting context…");
-        assert_eq!(context_compaction_label(&ContextCompaction {active:false,completed:true,duration_ms:Some(65_000)}), "Context compacted · 1m 5s");
-        assert_eq!(context_compaction_label(&ContextCompaction {active:false,completed:false,duration_ms:None}), "Context compaction");
+        assert_eq!(
+            context_compaction_label(&ContextCompaction {
+                active: true,
+                completed: false,
+                duration_ms: None
+            }),
+            "Compacting context…"
+        );
+        assert_eq!(
+            context_compaction_label(&ContextCompaction {
+                active: false,
+                completed: true,
+                duration_ms: Some(65_000)
+            }),
+            "Context compacted · 1m 5s"
+        );
+        assert_eq!(
+            context_compaction_label(&ContextCompaction {
+                active: false,
+                completed: false,
+                duration_ms: None
+            }),
+            "Context compaction"
+        );
         let event = json!({"kind":"tool","title":"ContextCompaction","detail":json!({"type":"contextCompaction","id":"native","monitterPhase":"started"}).to_string()});
         assert_eq!(tool_count(&[event.clone()]), 0);
         assert_eq!(process_tool_preview(&[event]), None);

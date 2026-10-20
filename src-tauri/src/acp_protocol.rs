@@ -1,5 +1,5 @@
 //! Provider-independent ACP v1 wire helpers. No processes, persistence or UI.
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::io::BufRead;
 
 pub const PROTOCOL_VERSION: u64 = 1;
@@ -132,11 +132,326 @@ pub fn initialize_params() -> Value {
         // Advertising `subagents` asks agents that support it (e.g. claude-agent-acp) to
         // announce Task/Agent-tool delegation as `subagent_spawned`/`subagent_state_update`
         // notifications instead of silently folding that activity into the root transcript.
-        "clientCapabilities":{"subagents":{},
+        "clientCapabilities":{"subagents":{},"elicitation":{"form":{}},
         // Mcode's namespaced extensions are opt-in. Other ACP agents ignore
         // this opaque metadata, while Mcode uses it to expose its advertised
         // active-turn steering method.
         "_meta":{"minimax-code/extensions":{"version":1,"notifications":true}}}})
+}
+
+// ACP form elicitation is also the native MiniMax ask_user transport. Keep
+// provider option IDs in the original schema; the desktop answers with labels.
+struct ElicitationQuestion {
+    id: String,
+    question: String,
+    options: Vec<(String, String, String)>,
+    other: Option<String>,
+    multiple: bool,
+}
+fn elicitation_questions(schema: &Value) -> Result<Vec<ElicitationQuestion>, String> {
+    let unsupported = || "Unsupported ACP question schema.".to_string();
+    if schema.get("type").and_then(Value::as_str) != Some("object") {
+        return Err(unsupported());
+    }
+    if schema.as_object().is_none_or(|object| {
+        object.keys().any(|key| {
+            !matches!(
+                key.as_str(),
+                "type"
+                    | "properties"
+                    | "required"
+                    | "additionalProperties"
+                    | "title"
+                    | "description"
+                    | "$schema"
+            )
+        })
+    }) || schema
+        .get("additionalProperties")
+        .is_some_and(|value| !value.is_boolean())
+    {
+        return Err(unsupported());
+    }
+    let properties = schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .ok_or_else(unsupported)?;
+    if properties.is_empty() || properties.len() > 16 {
+        return Err(unsupported());
+    }
+    if let Some(required) = schema.get("required") {
+        let required = required.as_array().ok_or_else(unsupported)?;
+        let mut unique = std::collections::HashSet::new();
+        for key in required {
+            let key = key.as_str().ok_or_else(unsupported)?;
+            if !properties.contains_key(key) || !unique.insert(key) {
+                return Err(unsupported());
+            }
+        }
+    }
+    // Admit only the emitted MiniMax/string-choice subset. Unknown validation
+    // keywords cannot be silently ignored while promising a schema-valid reply.
+    for field in properties.values() {
+        let kind = field
+            .get("type")
+            .and_then(Value::as_str)
+            .ok_or_else(unsupported)?;
+        if field.as_object().is_none_or(|object| {
+            object.keys().any(|key| match kind {
+                "string" => !matches!(
+                    key.as_str(),
+                    "type" | "title" | "description" | "oneOf" | "enum"
+                ),
+                "array" => !matches!(key.as_str(), "type" | "title" | "description" | "items"),
+                _ => true,
+            })
+        }) || (field.get("oneOf").is_some() && field.get("enum").is_some())
+        {
+            return Err(unsupported());
+        }
+        if kind == "array" {
+            let items = field.get("items").ok_or_else(unsupported)?;
+            if items.as_object().is_none_or(|object| {
+                object.keys().any(|key| {
+                    !matches!(
+                        key.as_str(),
+                        "type" | "title" | "description" | "anyOf" | "oneOf" | "enum"
+                    )
+                })
+            }) || items
+                .get("type")
+                .is_some_and(|kind| kind.as_str() != Some("string"))
+                || ["anyOf", "oneOf", "enum"]
+                    .iter()
+                    .filter(|key| items.get(**key).is_some())
+                    .count()
+                    != 1
+            {
+                return Err(unsupported());
+            }
+        }
+    }
+    let mut others = std::collections::HashMap::new();
+    for (id, field) in properties {
+        if field.get("type").and_then(Value::as_str) != Some("string") {
+            continue;
+        }
+        for base in properties.keys() {
+            let prefix = format!("{base}__other");
+            if id
+                .strip_prefix(&prefix)
+                .is_some_and(|tail| tail.chars().all(|c| c == '_'))
+            {
+                if field.get("oneOf").is_some() || field.get("enum").is_some() {
+                    return Err(unsupported());
+                }
+                if others.insert(base.clone(), id.clone()).is_some() {
+                    return Err(unsupported());
+                }
+            }
+        }
+    }
+    let mut questions = Vec::new();
+    for (id, field) in properties {
+        if others.values().any(|other| other == id) {
+            continue;
+        }
+        if id.is_empty() || id.len() > 128 {
+            return Err(unsupported());
+        }
+        let multiple = match field.get("type").and_then(Value::as_str) {
+            Some("string") => false,
+            Some("array") => true,
+            _ => return Err(unsupported()),
+        };
+        let choices = if multiple {
+            field.get("items").ok_or_else(unsupported)?
+        } else {
+            field
+        };
+        let mut options = Vec::new();
+        if let Some(variants) = choices.get("oneOf").or_else(|| choices.get("anyOf")) {
+            let variants = variants.as_array().ok_or_else(unsupported)?;
+            if variants.is_empty() || variants.len() > 16 {
+                return Err(unsupported());
+            }
+            for choice in variants {
+                if choice.as_object().is_none_or(|object| {
+                    object.keys().any(|key| {
+                        !matches!(key.as_str(), "const" | "title" | "description" | "type")
+                    })
+                }) || choice
+                    .get("type")
+                    .is_some_and(|kind| kind.as_str() != Some("string"))
+                {
+                    return Err(unsupported());
+                }
+                let key = choice
+                    .get("const")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty() && s.len() <= 240)
+                    .ok_or_else(unsupported)?;
+                let label = choice.get("title").and_then(Value::as_str).unwrap_or(key);
+                let description = choice
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                if label.trim().is_empty() || label.len() > 240 || description.len() > 2000 {
+                    return Err(unsupported());
+                }
+                options.push((key.into(), label.into(), description.into()));
+            }
+        } else if let Some(variants) = choices.get("enum") {
+            let variants = variants.as_array().ok_or_else(unsupported)?;
+            if variants.is_empty() || variants.len() > 16 {
+                return Err(unsupported());
+            }
+            for choice in variants {
+                let key = choice
+                    .as_str()
+                    .filter(|s| !s.is_empty() && s.len() <= 240)
+                    .ok_or_else(unsupported)?;
+                options.push((key.into(), key.into(), String::new()));
+            }
+        } else if multiple {
+            return Err(unsupported());
+        }
+        let mut keys = std::collections::HashSet::new();
+        let mut labels = std::collections::HashSet::new();
+        if options
+            .iter()
+            .any(|(key, label, _)| !keys.insert(key) || !labels.insert(label))
+        {
+            return Err(unsupported());
+        }
+        let question = field.get("title").and_then(Value::as_str).unwrap_or(id);
+        if question.trim().is_empty() || question.len() > 8000 {
+            return Err(unsupported());
+        }
+        questions.push(ElicitationQuestion {
+            id: id.clone(),
+            question: question.into(),
+            options,
+            other: others.get(id).cloned(),
+            multiple,
+        });
+    }
+    if questions.is_empty() || questions.len() > 8 {
+        return Err(unsupported());
+    }
+    Ok(questions)
+}
+
+pub(crate) fn elicitation_input(params: &Value) -> Result<crate::model::InteractionInput, String> {
+    if params.get("mode").and_then(Value::as_str) != Some("form")
+        || params.to_string().len() > 64 * 1024
+    {
+        return Err("Unsupported ACP elicitation request.".into());
+    }
+    let schema = params
+        .get("requestedSchema")
+        .ok_or("Missing ACP question schema.")?;
+    let fields = elicitation_questions(schema)?;
+    Ok(crate::model::InteractionInput {
+        kind: "questions".into(),
+        questions: fields
+            .into_iter()
+            .map(|field| crate::model::InputQuestion {
+                id: field.id,
+                header: String::new(),
+                question: field.question,
+                is_secret: false,
+                selection_mode: Some(if field.multiple { "multiple" } else { "single" }.into()),
+                options: field
+                    .options
+                    .into_iter()
+                    .map(|(_, label, description)| crate::model::InputOption { label, description })
+                    .collect(),
+            })
+            .collect(),
+        schema: Some(schema.clone()),
+        url: None,
+    })
+}
+
+/// Validate before resolve_input persists the canonical response, and convert
+/// only at the exact provider request boundary. Cancellation uses action:cancel.
+pub(crate) fn elicitation_response(
+    input: &crate::model::InteractionInput,
+    response: &Value,
+) -> Result<Value, String> {
+    let fields = elicitation_questions(
+        input
+            .schema
+            .as_ref()
+            .ok_or("Missing ACP question schema.")?,
+    )?;
+    let answers = response
+        .get("answers")
+        .and_then(Value::as_object)
+        .ok_or("Missing question answers.")?;
+    if answers.len() != fields.len() {
+        return Err("Answer each ACP question exactly once.".into());
+    }
+    let mut content = serde_json::Map::new();
+    for field in fields {
+        let values = answers
+            .get(&field.id)
+            .and_then(|v| v.get("answers"))
+            .and_then(Value::as_array)
+            .ok_or("Missing ACP question answer.")?;
+        let maximum = (field.options.len() + usize::from(field.other.is_some())).max(1);
+        if values.is_empty() || values.len() > maximum || (!field.multiple && values.len() != 1) {
+            return Err("Invalid ACP answer selection count.".into());
+        }
+        let mut selected = Vec::new();
+        let mut other = None;
+        let mut seen = std::collections::HashSet::new();
+        for value in values {
+            let text = value
+                .as_str()
+                .filter(|s| !s.trim().is_empty() && s.len() <= 16_384)
+                .ok_or("ACP answers must contain text.")?;
+            if !seen.insert(text) {
+                return Err("Duplicate ACP answer selection.".into());
+            }
+            if let Some((key, _, _)) = field.options.iter().find(|(_, label, _)| label == text) {
+                selected.push(Value::String(key.clone()));
+            } else if field.options.is_empty() {
+                selected.push(Value::String(text.into()));
+            } else if field.other.is_some() && other.is_none() {
+                other = Some(Value::String(text.into()));
+            } else {
+                return Err("Choose an offered option for this question.".into());
+            }
+        }
+        if !selected.is_empty() {
+            content.insert(
+                field.id,
+                if field.multiple {
+                    Value::Array(selected)
+                } else {
+                    selected.remove(0)
+                },
+            );
+        }
+        if let Some(text) = other {
+            content.insert(field.other.unwrap(), text);
+        }
+    }
+    for key in input
+        .schema
+        .as_ref()
+        .and_then(|schema| schema.get("required"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if !content.contains_key(key.as_str().ok_or("Invalid required ACP field.")?) {
+            return Err("The native question requires an offered choice for this field.".into());
+        }
+    }
+    Ok(json!({"action":"accept","content":content}))
 }
 
 /// Only explicit capabilities enable optional methods. Null is not support.
@@ -218,6 +533,98 @@ mod tests {
     use std::io::Cursor;
 
     #[test]
+    fn input_request_acp_minimax_questionnaire_roundtrip_preserves_native_ids_and_multiple() {
+        let params = json!({"mode":"form","requestedSchema":{"type":"object","properties":{
+            "single":{"type":"string","title":"Pick a route","oneOf":[{"const":"opaque-one","title":"First"},{"const":"opaque-two","title":"Second"}]},
+            "single__other":{"type":"string","title":"Pick a route — Other"},
+            "many":{"type":"array","title":"Pick features","items":{"anyOf":[{"const":"feature-a","title":"Alpha"},{"const":"feature-b","title":"Beta"}]}}
+        }}});
+        let input = elicitation_input(&params).unwrap();
+        assert_eq!(input.questions.len(), 2);
+        assert_eq!(
+            input
+                .questions
+                .iter()
+                .find(|q| q.id == "many")
+                .unwrap()
+                .selection_mode
+                .as_deref(),
+            Some("multiple")
+        );
+        let response = json!({"answers":{"single":{"answers":["Custom route"]},"many":{"answers":["Alpha","Beta"]}}});
+        assert_eq!(
+            elicitation_response(&input, &response).unwrap(),
+            json!({"action":"accept","content":{"single__other":"Custom route","many":["feature-a","feature-b"]}})
+        );
+        assert!(elicitation_response(&input,&json!({"answers":{"single":{"answers":["First","Second"]},"many":{"answers":["Alpha"]}}})).is_err());
+        assert!(
+            elicitation_response(
+                &input,
+                &json!({"answers":{"single":{"answers":["First"]},"many":{"answers":["Unknown"]}}})
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn input_request_acp_all_options_plus_other_roundtrip() {
+        let options = (0..16)
+            .map(|n| json!({"const":format!("id-{n}"),"title":format!("Option {n}")}))
+            .collect::<Vec<_>>();
+        let params = json!({"mode":"form","requestedSchema":{"type":"object","properties":{
+            "many":{"type":"array","title":"Pick features","items":{"anyOf":options}},
+            "many__other":{"type":"string","title":"Other"}
+        }}});
+        let input = elicitation_input(&params).unwrap();
+        let mut selections = (0..16).map(|n| format!("Option {n}")).collect::<Vec<_>>();
+        selections.push("Custom choice".into());
+        let response = json!({"answers":{"many":{"answers":selections}}});
+        let native = elicitation_response(&input, &response).unwrap();
+        assert_eq!(native["content"]["many"].as_array().unwrap().len(), 16);
+        assert_eq!(native["content"]["many__other"], "Custom choice");
+        let invalid = json!({"answers":{"many":{"answers":["Custom one","Custom two"]}}});
+        assert!(elicitation_response(&input, &invalid).is_err());
+    }
+
+    #[test]
+    fn input_request_acp_declines_unimplemented_constraints_and_enforces_required_other_layout() {
+        for field in [
+            json!({"type":"string","maxLength":1}),
+            json!({"type":"string","pattern":"^a$"}),
+            json!({"type":"string","enum":["a"],"oneOf":[{"const":"b"}]}),
+            json!({"type":"array","enum":["a"],"items":{"enum":["a"]}}),
+            json!({"type":"array","items":{"enum":["a"],"anyOf":[{"const":"b"}]}}),
+            json!({"type":"array","maxItems":1,"items":{"enum":["a","b"]}}),
+        ] {
+            assert!(elicitation_input(&json!({"mode":"form","requestedSchema":{"type":"object","properties":{"q":field}}})).is_err());
+        }
+        let params = json!({"mode":"form","requestedSchema":{"type":"object","required":["q"],"properties":{
+            "q":{"type":"string","oneOf":[{"const":"a","title":"Alpha"}]},
+            "q__other":{"type":"string","title":"Other"}
+        }}});
+        let input = elicitation_input(&params).unwrap();
+        assert!(
+            elicitation_response(&input, &json!({"answers":{"q":{"answers":["Custom"]}}})).is_err()
+        );
+        assert_eq!(
+            elicitation_response(&input, &json!({"answers":{"q":{"answers":["Alpha"]}}})).unwrap()
+                ["content"],
+            json!({"q":"a"})
+        );
+    }
+
+    #[test]
+    fn input_request_acp_rejects_ambiguous_unsupported_and_oversized_questionnaires() {
+        let mut params = json!({"mode":"form","requestedSchema":{"type":"object","properties":{"q":{"type":"string","oneOf":[{"const":"a","title":"Same"},{"const":"b","title":"Same"}]}}}});
+        assert!(elicitation_input(&params).is_err());
+        params["requestedSchema"]["properties"]["q"] = json!({"type":"object"});
+        assert!(elicitation_input(&params).is_err());
+        params["mode"] = json!("url");
+        assert!(elicitation_input(&params).is_err());
+        params = json!({"mode":"form","requestedSchema":{"type":"object","properties":{"q":{"type":"string","title":"x".repeat(8001)}}}});
+        assert!(elicitation_input(&params).is_err());
+    }
+
+    #[test]
     fn diagnostics_are_bounded_and_drain_the_entire_line() {
         let mut bytes = vec![b'x'; MAX_FRAME_BYTES + 1];
         bytes.extend_from_slice(b"\nnext\npartial");
@@ -234,7 +641,9 @@ mod tests {
 
     #[test]
     fn lf_framing_preserves_unicode_and_crlf() {
-        let mut input = Cursor::new("\n{\"jsonrpc\":\"2.0\",\"method\":\"_update\",\"params\":{\"text\":\"a\u{2028}b\u{2029}c\"}}\r\n");
+        let mut input = Cursor::new(
+            "\n{\"jsonrpc\":\"2.0\",\"method\":\"_update\",\"params\":{\"text\":\"a\u{2028}b\u{2029}c\"}}\r\n",
+        );
         assert_eq!(
             read_frame(&mut input).unwrap().unwrap()["params"]["text"],
             "a\u{2028}b\u{2029}c"
@@ -277,7 +686,7 @@ mod tests {
         assert_eq!(caps.recovery_method().unwrap(), "session/resume");
         assert_eq!(
             initialize_params()["clientCapabilities"],
-            json!({"subagents":{},"_meta":{"minimax-code/extensions":{"version":1,"notifications":true}}})
+            json!({"subagents":{},"elicitation":{"form":{}},"_meta":{"minimax-code/extensions":{"version":1,"notifications":true}}})
         );
     }
 

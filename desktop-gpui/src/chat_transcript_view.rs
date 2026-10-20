@@ -14,7 +14,9 @@ pub(super) struct TranscriptGeometry {
 }
 impl TranscriptGeometry {
     pub(super) fn from_viewport_width(width: f32) -> Self {
-        Self { width: width - (space::SECTION + 5.) * 2. }
+        Self {
+            width: width - (space::SECTION + 5.) * 2.,
+        }
     }
     pub(super) fn bubble_fraction(self) -> f32 {
         if self.width <= 420. { 1. } else { 0.9 }
@@ -22,14 +24,18 @@ impl TranscriptGeometry {
     pub(super) fn attachment_width(self) -> f32 {
         self.width.min(design::CHAT_MAX_WIDTH).max(120.) * self.bubble_fraction()
     }
-    pub(super) fn attachment_layout(self, preferred: message_attachments::AttachmentLayout) -> message_attachments::AttachmentLayout {
+    pub(super) fn attachment_layout(
+        self,
+        preferred: message_attachments::AttachmentLayout,
+    ) -> message_attachments::AttachmentLayout {
         use message_attachments::AttachmentLayout;
         if self.attachment_width() < 320. && preferred == AttachmentLayout::PortraitLeft {
             AttachmentLayout::LandscapeBottom
-        } else { preferred }
+        } else {
+            preferred
+        }
     }
 }
-
 
 #[derive(Clone)]
 pub(super) struct TranscriptPreparationKey {
@@ -98,12 +104,19 @@ impl TranscriptPreparationKey {
     }
     /// Text-only substitution preserves every prepared wrapper and grouping.
     /// Do not erase an already-pending structural invalidation.
-    pub(super) fn advance_stream_rows(&mut self, previous: &Rc<im::Vector<TimelineRow>>, next: &Rc<im::Vector<TimelineRow>>) {
-        if self.rows.as_ref().is_some_and(|rows| Rc::ptr_eq(rows, previous)) {
+    pub(super) fn advance_stream_rows(
+        &mut self,
+        previous: &Rc<im::Vector<TimelineRow>>,
+        next: &Rc<im::Vector<TimelineRow>>,
+    ) {
+        if self
+            .rows
+            .as_ref()
+            .is_some_and(|rows| Rc::ptr_eq(rows, previous))
+        {
             self.rows = Some(next.clone());
         }
     }
-
 }
 impl PartialEq for TranscriptPreparationKey {
     fn eq(&self, other: &Self) -> bool {
@@ -324,7 +337,9 @@ impl TranscriptViewport {
             render_count: 0,
         }
     }
-    pub(super) fn cancel_minimap_jump(&mut self) { self.minimap_jump = None; }
+    pub(super) fn cancel_minimap_jump(&mut self) {
+        self.minimap_jump = None;
+    }
     pub(super) fn set_composer_hidden(&mut self, hidden: Pixels, cx: &mut Context<Self>) {
         if self.minimap_bottom_inset != hidden {
             self.minimap_bottom_inset = hidden;
@@ -333,40 +348,73 @@ impl TranscriptViewport {
     }
     pub(super) fn minimap_marker_jump(&mut self, row: usize, cx: &mut Context<Self>) {
         self.minimap_navigated(false, cx);
-        let Some(list) = &self.list else { return; };
+        let Some(list) = &self.list else {
+            return;
+        };
         let state = list.read(cx).state.clone();
         state.set_follow_mode(FollowMode::Normal);
         if crate::native_motion::motion_allowed() {
-            self.minimap_jump = Some(minimap::MarkerJump::new(row.min(state.item_count().saturating_sub(1))));
-        } else { state.scroll_to(gpui_kit::ListOffset { item_ix: row, offset_in_item: gpui_kit::px(0.) }); }
+            self.minimap_jump = Some(minimap::MarkerJump::new(
+                row.min(state.item_count().saturating_sub(1)),
+            ));
+        } else {
+            state.scroll_to(gpui_kit::ListOffset {
+                item_ix: row,
+                offset_in_item: gpui_kit::px(0.),
+            });
+        }
         self.repaint_scroll(cx);
     }
     fn advance_minimap_jump(&mut self, cx: &mut Context<Self>) {
-        let Some(list) = &self.list else { self.minimap_jump = None; return; };
+        let Some(list) = &self.list else {
+            self.minimap_jump = None;
+            return;
+        };
         let state = list.read(cx).state.clone();
-        if self.minimap_jump.as_mut().is_some_and(|jump| jump.advance(&state)) {
+        if self
+            .minimap_jump
+            .as_mut()
+            .is_some_and(|jump| jump.advance(&state))
+        {
             self.minimap_navigated(false, cx);
-        } else { self.repaint_scroll(cx); }
+        } else {
+            self.repaint_scroll(cx);
+        }
     }
     pub(super) fn minimap_navigated(&mut self, at_bottom: bool, cx: &mut Context<Self>) {
         self.cancel_minimap_jump();
-        let Some(owner) = self.owner.clone() else { self.repaint_scroll(cx); return; };
+        let Some(owner) = self.owner.clone() else {
+            self.repaint_scroll(cx);
+            return;
+        };
         let task_id = self.task_id.clone();
         cx.defer(move |cx| {
             let _ = owner.update(cx, |pane, cx| {
-                if pane.selected.as_deref() != Some(task_id.as_str()) { return; }
-                if at_bottom { pane.finish_bottom_jump(cx); return; }
+                if pane.selected.as_deref() != Some(task_id.as_str()) {
+                    return;
+                }
+                if at_bottom {
+                    pane.finish_bottom_jump(cx);
+                    return;
+                }
                 pane.bottom_jump = None;
                 if let Some(state) = pane.transcripts.get_mut(&task_id) {
                     state.list.set_follow_mode(FollowMode::Normal);
                     pane.composer_scroll_distance = crate::composer_scroll::remaining_tail_distance(
                         state.list.max_offset_for_scrollbar().y,
-                        state.list.scroll_px_offset_for_scrollbar().y, gpui_kit::px(0.));
+                        state.list.scroll_px_offset_for_scrollbar().y,
+                        gpui_kit::px(0.),
+                    );
                 }
                 let earlier = pane.transcripts.get(&task_id).is_some_and(|state| {
-                    state.list.logical_scroll_top().item_ix <= 2 && !state.loading && !state.complete() && state.error.is_none()
+                    state.list.logical_scroll_top().item_ix <= 2
+                        && !state.loading
+                        && !state.complete()
+                        && state.error.is_none()
                 });
-                if earlier { pane.load_earlier(cx); }
+                if earlier {
+                    pane.load_earlier(cx);
+                }
                 pane.invalidate_transcript_list(cx);
                 cx.notify();
             });
@@ -374,7 +422,9 @@ impl TranscriptViewport {
         self.repaint_scroll(cx);
     }
     pub(super) fn repaint_scroll(&mut self, cx: &mut Context<Self>) {
-        if let Some(list) = &self.list { list.update(cx, |_, cx| cx.notify()); }
+        if let Some(list) = &self.list {
+            list.update(cx, |_, cx| cx.notify());
+        }
         cx.notify();
     }
     pub(super) fn set_content(
@@ -385,7 +435,13 @@ impl TranscriptViewport {
         palette: design::Palette,
         cx: &mut Context<Self>,
     ) {
-        if self.task_id != task_id { self.selection_group = TextSelectionGroupId::new(); self.minimap_visible = false; self.minimap_exit = None; self.minimap_jump = None; self.minimap_emphasis = minimap::Emphasis::default(); }
+        if self.task_id != task_id {
+            self.selection_group = TextSelectionGroupId::new();
+            self.minimap_visible = false;
+            self.minimap_exit = None;
+            self.minimap_jump = None;
+            self.minimap_emphasis = minimap::Emphasis::default();
+        }
         self.task_id = task_id;
         self.list = list;
         self.error = error;
@@ -401,7 +457,9 @@ impl Render for TranscriptViewport {
         }
         if self.minimap_jump.is_some() {
             let owner = cx.weak_entity();
-            window.on_next_frame(move |_, cx| { let _ = owner.update(cx, |view, cx| view.advance_minimap_jump(cx)); });
+            window.on_next_frame(move |_, cx| {
+                let _ = owner.update(cx, |view, cx| view.advance_minimap_jump(cx));
+            });
             window.request_animation_frame();
         }
         let load_unmeasured_history = self.load_unmeasured_history.clone();
@@ -412,10 +470,17 @@ impl Render for TranscriptViewport {
             .id("transcript")
             .relative()
             // Run before the cached list's prepaint, using this frame's allocation.
-            .child(canvas(move |bounds, _, _| {
-                let width_design = bounds.size.width / design::ui_scaled_px(1.);
-                geometry.set(TranscriptGeometry::from_viewport_width(width_design));
-            }, |_, _, _, _| ()).absolute().inset_0())
+            .child(
+                canvas(
+                    move |bounds, _, _| {
+                        let width_design = bounds.size.width / design::ui_scaled_px(1.);
+                        geometry.set(TranscriptGeometry::from_viewport_width(width_design));
+                    },
+                    |_, _, _, _| (),
+                )
+                .absolute()
+                .inset_0(),
+            )
             // A cached view renders as a layout root. Explicitly fill its
             // assigned bounds; flex_1 alone has no parent flex layout here.
             .size_full()
@@ -428,7 +493,12 @@ impl Render for TranscriptViewport {
             .gap(px(space::SECTION))
             .on_scroll_wheel(move |event: &ScrollWheelEvent, _, cx| {
                 let repaint = repaint.clone();
-                cx.defer(move |cx| { let _ = repaint.update(cx, |view, cx| { view.cancel_minimap_jump(); cx.notify(); }); });
+                cx.defer(move |cx| {
+                    let _ = repaint.update(cx, |view, cx| {
+                        view.cancel_minimap_jump();
+                        cx.notify();
+                    });
+                });
                 // An empty scroll extent does not prove older history should
                 // load. Only an upward user gesture can fetch the earlier page.
                 if event.delta.pixel_delta(px(20.)).y <= gpui_kit::px(0.) {
@@ -437,7 +507,9 @@ impl Render for TranscriptViewport {
                 load_unmeasured_history(&scroll_task_id, cx);
             });
         #[cfg(test)]
-        { transcript = transcript.debug_selector(|| "retained-transcript-viewport".into()); }
+        {
+            transcript = transcript.debug_selector(|| "retained-transcript-viewport".into());
+        }
         if let Some(error) = self.error.clone() {
             let load_earlier = self.load_earlier.clone();
             let retry_task_id = self.task_id.clone();
@@ -460,19 +532,43 @@ impl Render for TranscriptViewport {
             transcript =
                 transcript.child(list.clone().cached(StyleRefinement::default().size_full()));
             let retained = list.read(cx);
-            let visible = (retained.state.item_count() > 0 && !retained.state.is_following_tail()) || retained.state.is_scrollbar_dragging();
-            if visible { self.minimap_exit = None; }
-            else if self.minimap_visible && crate::native_motion::motion_allowed() {
+            let visible = (retained.state.item_count() > 0 && !retained.state.is_following_tail())
+                || retained.state.is_scrollbar_dragging();
+            if visible {
+                self.minimap_exit = None;
+            } else if self.minimap_visible && crate::native_motion::motion_allowed() {
                 self.minimap_exit = Some(std::time::Instant::now());
             }
             self.minimap_visible = visible;
-            let exit = self.minimap_exit.map(|start| (start.elapsed().as_secs_f32() / 0.15).min(1.));
-            if exit == Some(1.) { self.minimap_exit = None; }
+            let exit = self
+                .minimap_exit
+                .map(|start| (start.elapsed().as_secs_f32() / 0.15).min(1.));
+            if exit == Some(1.) {
+                self.minimap_exit = None;
+            }
             if visible || self.minimap_exit.is_some() {
                 let emphasis = self.minimap_emphasis.advance(std::time::Instant::now());
-                transcript = transcript.child(minimap::render(retained.state.clone(), retained.minimap.clone(), retained.rows.clone(), self.geometry.get(), self.palette, cx.weak_entity(), window, cx, exit, emphasis, self.minimap_bottom_inset));
-                if self.minimap_emphasis.animating() { window.request_animation_frame(); cx.notify(); }
-                if self.minimap_exit.is_some() { window.request_animation_frame(); cx.notify(); }
+                transcript = transcript.child(minimap::render(
+                    retained.state.clone(),
+                    retained.minimap.clone(),
+                    retained.rows.clone(),
+                    self.geometry.get(),
+                    self.palette,
+                    cx.weak_entity(),
+                    window,
+                    cx,
+                    exit,
+                    emphasis,
+                    self.minimap_bottom_inset,
+                ));
+                if self.minimap_emphasis.animating() {
+                    window.request_animation_frame();
+                    cx.notify();
+                }
+                if self.minimap_exit.is_some() {
+                    window.request_animation_frame();
+                    cx.notify();
+                }
             }
         } else {
             transcript = transcript.child(transcript_column(div().child(
@@ -495,11 +591,23 @@ mod geometry_tests {
         assert_eq!(narrow.bubble_fraction(), 1.);
         let portrait = TranscriptGeometry::from_viewport_width(370.);
         let landscape = TranscriptGeometry::from_viewport_width(369.);
-        assert_eq!(portrait.attachment_layout(AttachmentLayout::PortraitLeft), AttachmentLayout::PortraitLeft);
-        assert_eq!(landscape.attachment_layout(AttachmentLayout::PortraitLeft), AttachmentLayout::LandscapeBottom);
-        assert_eq!(landscape.attachment_layout(AttachmentLayout::Cards), AttachmentLayout::Cards);
+        assert_eq!(
+            portrait.attachment_layout(AttachmentLayout::PortraitLeft),
+            AttachmentLayout::PortraitLeft
+        );
+        assert_eq!(
+            landscape.attachment_layout(AttachmentLayout::PortraitLeft),
+            AttachmentLayout::LandscapeBottom
+        );
+        assert_eq!(
+            landscape.attachment_layout(AttachmentLayout::Cards),
+            AttachmentLayout::Cards
+        );
         assert!(landscape.attachment_width() < portrait.attachment_width());
-        assert_eq!(TranscriptGeometry::from_viewport_width(1_000.).attachment_width(), design::CHAT_MAX_WIDTH * 0.9);
+        assert_eq!(
+            TranscriptGeometry::from_viewport_width(1_000.).attachment_width(),
+            design::CHAT_MAX_WIDTH * 0.9
+        );
     }
 }
 #[cfg(all(test, feature = "visual-export"))]

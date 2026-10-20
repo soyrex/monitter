@@ -65,13 +65,25 @@ struct DecodeResult {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AttachmentLayout { Cards, PortraitLeft, LandscapeBottom }
+pub enum AttachmentLayout {
+    Cards,
+    PortraitLeft,
+    LandscapeBottom,
+}
 
 fn image_layout(width: u32, height: u32) -> AttachmentLayout {
-    if height > width { AttachmentLayout::PortraitLeft } else { AttachmentLayout::LandscapeBottom }
+    if height > width {
+        AttachmentLayout::PortraitLeft
+    } else {
+        AttachmentLayout::LandscapeBottom
+    }
 }
 fn portrait_geometry(width: u32, height: u32, bubble_width: f32) -> (f32, f32) {
-    let bubble_width = if bubble_width.is_finite() { bubble_width.max(1.) } else { 300. };
+    let bubble_width = if bubble_width.is_finite() {
+        bubble_width.max(1.)
+    } else {
+        300.
+    };
     let maximum_width = (bubble_width * 0.3).min(180.);
     let minimum_width = 40_f32.min(maximum_width);
     let aspect = height.max(1) as f32 / width.max(1) as f32;
@@ -79,8 +91,12 @@ fn portrait_geometry(width: u32, height: u32, bubble_width: f32) -> (f32, f32) {
     let min_height = (left_width * aspect).clamp(180., 320.);
     (left_width, min_height)
 }
-fn hero_height(width: f32) -> f32 { (width.max(0.) * 0.48).clamp(120., 220.) }
-fn wide_strip(width: u32, height: u32) -> bool { width >= height.max(1).saturating_mul(3) }
+fn hero_height(width: f32) -> f32 {
+    (width.max(0.) * 0.48).clamp(120., 220.)
+}
+fn wide_strip(width: u32, height: u32) -> bool {
+    width >= height.max(1).saturating_mul(3)
+}
 fn strip_height(width: u32, height: u32, bubble_width: f32) -> f32 {
     bubble_width.max(1.).min(width.max(1) as f32) * height.max(1) as f32 / width.max(1) as f32
 }
@@ -258,10 +274,19 @@ impl MessageAttachments {
                 item.preview = Some(PreviewState::Pending);
             }
         }
-        Self { service: self.service.clone(), attachments, omitted: self.omitted,
-            generation: self.generation, error: self.error.clone(), palette: self.palette,
-            list_item: None, bubble_width: self.bubble_width, bubble_layout: self.bubble_layout,
-            compact_images: self.compact_images, presentation_scale: scale }
+        Self {
+            service: self.service.clone(),
+            attachments,
+            omitted: self.omitted,
+            generation: self.generation,
+            error: self.error.clone(),
+            palette: self.palette,
+            list_item: None,
+            bubble_width: self.bubble_width,
+            bubble_layout: self.bubble_layout,
+            compact_images: self.compact_images,
+            presentation_scale: scale,
+        }
     }
 
     pub fn set_attachments(&mut self, attachments: &[Value], cx: &mut Context<Self>) {
@@ -337,7 +362,8 @@ impl MessageAttachments {
                     identity: item.data.identity.clone(),
                     data_url,
                     generation: item.preview_generation,
-                    original_id: (!item.data.generated && !item.data.id.is_empty()).then(|| item.data.id.clone()),
+                    original_id: (!item.data.generated && !item.data.id.is_empty())
+                        .then(|| item.data.id.clone()),
                 })
             })
             .collect();
@@ -364,30 +390,39 @@ impl MessageAttachments {
             .spawn(move || {
                 let results = worker_requests
                     .into_iter()
-                    .map(|(identity, data_url, generation, original_id)| DecodeResult {
-                        decoded: if let Some(id) = data_url.strip_prefix("attachment-id:") {
-                            super::attachments::image_thumbnail(service.clone(), id).map(
-                                |(image, width, height)| DecodedPreview {
-                                    image,
-                                    width,
-                                    height,
-                                },
-                            )
-                        } else {
-                            decode_preview(&data_url).and_then(|preview| {
-                                if wide_strip(preview.width, preview.height) {
-                                    if let Some(id) = original_id {
-                                        return super::attachments::image_thumbnail(service.clone(), &id)
-                                            .map(|(image, width, height)| DecodedPreview { image, width, height });
+                    .map(
+                        |(identity, data_url, generation, original_id)| DecodeResult {
+                            decoded: if let Some(id) = data_url.strip_prefix("attachment-id:") {
+                                super::attachments::image_thumbnail(service.clone(), id).map(
+                                    |(image, width, height)| DecodedPreview {
+                                        image,
+                                        width,
+                                        height,
+                                    },
+                                )
+                            } else {
+                                decode_preview(&data_url).and_then(|preview| {
+                                    if wide_strip(preview.width, preview.height) {
+                                        if let Some(id) = original_id {
+                                            return super::attachments::image_thumbnail(
+                                                service.clone(),
+                                                &id,
+                                            )
+                                            .map(|(image, width, height)| DecodedPreview {
+                                                image,
+                                                width,
+                                                height,
+                                            });
+                                        }
                                     }
-                                }
-                                Ok(preview)
-                            })
+                                    Ok(preview)
+                                })
+                            },
+                            identity,
+                            data_url,
+                            generation,
                         },
-                        identity,
-                        data_url,
-                        generation,
-                    })
+                    )
                     .collect::<Vec<_>>();
                 let _ = sender.send(results);
             });
@@ -431,11 +466,18 @@ impl MessageAttachments {
 
     /// First decoded image determines placement; pending images retain cards until ready.
     pub fn layout(&self) -> AttachmentLayout {
-        if self.compact_images { return AttachmentLayout::Cards; }
-        self.attachments.iter().find_map(|item| match item.preview.as_ref() {
-            Some(PreviewState::Ready(preview)) => Some(image_layout(preview.width, preview.height)),
-            _ => None,
-        }).unwrap_or(AttachmentLayout::Cards)
+        if self.compact_images {
+            return AttachmentLayout::Cards;
+        }
+        self.attachments
+            .iter()
+            .find_map(|item| match item.preview.as_ref() {
+                Some(PreviewState::Ready(preview)) => {
+                    Some(image_layout(preview.width, preview.height))
+                }
+                _ => None,
+            })
+            .unwrap_or(AttachmentLayout::Cards)
     }
     /// Assistant screenshots share one compact row; full-size viewing keeps
     /// the same original/inline lightbox path as the larger previews.
@@ -443,14 +485,30 @@ impl MessageAttachments {
         self.compact_images = compact;
     }
     pub fn portrait_dimensions(&self, width_design: f32) -> (f32, f32) {
-        self.attachments.iter().find_map(|item| match item.preview.as_ref() {
-            Some(PreviewState::Ready(preview)) => Some(portrait_geometry(preview.width, preview.height, width_design)),
-            _ => None,
-        }).unwrap_or_else(|| portrait_geometry(1, 2, width_design))
+        self.attachments
+            .iter()
+            .find_map(|item| match item.preview.as_ref() {
+                Some(PreviewState::Ready(preview)) => Some(portrait_geometry(
+                    preview.width,
+                    preview.height,
+                    width_design,
+                )),
+                _ => None,
+            })
+            .unwrap_or_else(|| portrait_geometry(1, 2, width_design))
     }
     /// Width is in design pixels, before interface scaling.
-    pub fn set_bubble_layout(&mut self, width_design: f32, layout: AttachmentLayout, _cx: &mut Context<Self>) {
-        let width = if width_design.is_finite() { width_design.max(1.) } else { 300. };
+    pub fn set_bubble_layout(
+        &mut self,
+        width_design: f32,
+        layout: AttachmentLayout,
+        _cx: &mut Context<Self>,
+    ) {
+        let width = if width_design.is_finite() {
+            width_design.max(1.)
+        } else {
+            300.
+        };
         // Called during the parent's row render: no notify/splice feedback loop.
         self.bubble_width = Some(width);
         self.bubble_layout = layout;
@@ -497,7 +555,9 @@ impl MessageAttachments {
         let portrait = self.bubble_layout == AttachmentLayout::PortraitLeft;
         if hero {
             body = div().w_full().min_w_0().flex().flex_col().gap(px(0.));
-            if portrait { body = body.h_full(); }
+            if portrait {
+                body = body.h_full();
+            }
         }
         for (index, item) in self.attachments.iter().enumerate() {
             let mut card = div()
@@ -518,15 +578,29 @@ impl MessageAttachments {
                 let service = service.clone();
                 let pane = pane.clone();
                 let (width, height) = fit_dimensions(preview.width, preview.height, 284., 300.);
-                let mut preview_image = img(preview.image.clone()).w(px(width)).h(px(height)).max_w(px(284.)).max_h(px(300.)).rounded(px(5.));
+                let mut preview_image = img(preview.image.clone())
+                    .w(px(width))
+                    .h(px(height))
+                    .max_w(px(284.))
+                    .max_h(px(300.))
+                    .rounded(px(5.));
                 if self.compact_images {
-                    preview_image = img(preview.image.clone()).w(px(96.)).h(px(72.))
+                    preview_image = img(preview.image.clone())
+                        .w(px(96.))
+                        .h(px(72.))
                         .object_fit(ObjectFit::Contain);
                 }
                 let strip = !portrait && wide_strip(preview.width, preview.height);
                 if hero {
-                    preview_image = img(preview.image.clone()).w_full().h_full()
-                        .object_fit(if strip { ObjectFit::Contain } else { ObjectFit::Cover });
+                    preview_image =
+                        img(preview.image.clone())
+                            .w_full()
+                            .h_full()
+                            .object_fit(if strip {
+                                ObjectFit::Contain
+                            } else {
+                                ObjectFit::Cover
+                            });
                 }
                 let mut preview_button = Button::new(format!("message-attachment-preview-{index}"))
                     .ghost()
@@ -561,10 +635,20 @@ impl MessageAttachments {
                         }
                     });
                 if hero {
-                    preview_button = preview_button.rounded(px(0.)).tooltip(item.data.name.clone());
-                    let image_height = if portrait { 180. } else if strip {
-                        strip_height(preview.width, preview.height, self.bubble_width.unwrap_or(300.))
-                    } else { hero_height(self.bubble_width.unwrap_or(300.)) };
+                    preview_button = preview_button
+                        .rounded(px(0.))
+                        .tooltip(item.data.name.clone());
+                    let image_height = if portrait {
+                        180.
+                    } else if strip {
+                        strip_height(
+                            preview.width,
+                            preview.height,
+                            self.bubble_width.unwrap_or(300.),
+                        )
+                    } else {
+                        hero_height(self.bubble_width.unwrap_or(300.))
+                    };
                     card = div().w_full().min_w_0().overflow_hidden().flex().flex_col();
                     if portrait && index == 0 {
                         card = card.flex_1().h_full().min_h(px(120.));
@@ -575,13 +659,30 @@ impl MessageAttachments {
                     }
                     card = card.child(preview_button);
                 } else if self.compact_images {
-                    preview_button = preview_button.w(px(96.)).h(px(72.))
+                    preview_button = preview_button
+                        .w(px(96.))
+                        .h(px(72.))
                         .tooltip(item.data.name.clone());
-                    card = card.p_0().w(px(98.)).h(px(74.)).flex_shrink_0()
-                        .overflow_hidden().rounded(px(6.)).child(preview_button);
+                    card = card
+                        .p_0()
+                        .w(px(98.))
+                        .h(px(74.))
+                        .flex_shrink_0()
+                        .overflow_hidden()
+                        .rounded(px(6.))
+                        .child(preview_button);
                 } else {
-                    card = card.flex().flex_col().gap(px(6.)).p(px(8.)).child(preview_button)
-                        .child(attachment_info(&item.data, palette, self.presentation_scale));
+                    card = card
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.))
+                        .p(px(8.))
+                        .child(preview_button)
+                        .child(attachment_info(
+                            &item.data,
+                            palette,
+                            self.presentation_scale,
+                        ));
                 }
             } else {
                 let image_file = item.data.mime_type.starts_with("image/");
@@ -631,7 +732,11 @@ impl MessageAttachments {
                             .child(icon),
                     );
                 }
-                card = card.child(file_row.child(attachment_info(&item.data, palette, self.presentation_scale)));
+                card = card.child(file_row.child(attachment_info(
+                    &item.data,
+                    palette,
+                    self.presentation_scale,
+                )));
                 if let Some(PreviewState::Failed(error)) = item.preview.as_ref() {
                     card = card.child(
                         div()

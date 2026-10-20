@@ -101,8 +101,10 @@ pub(crate) fn render(
         .flex()
         .items_center()
         .gap(px(1.))
-        .child(endpoint(exchange.direction == Direction::Outgoing)
-            .debug_selector(move || first_dot_selector.clone()))
+        .child(
+            endpoint(exchange.direction == Direction::Outgoing)
+                .debug_selector(move || first_dot_selector.clone()),
+        )
         .child(
             div()
                 .w(px(5.))
@@ -111,12 +113,26 @@ pub(crate) fn render(
                 .when(inflight || failed, |line| line.border_dashed()),
         )
         .child(if exchange.direction == Direction::Mixed {
-            div().w(px(10.)).text_size(px(10.)).text_color(ink).child("↔").into_any_element()
+            div()
+                .w(px(10.))
+                .text_size(px(10.))
+                .text_color(ink)
+                .child("↔")
+                .into_any_element()
         } else {
-            Icon::new(if exchange.direction == Direction::Unknown { IconName::Minus } else { IconName::ArrowRight })
-                .size(px(10.)).text_color(ink).into_any_element()
+            Icon::new(if exchange.direction == Direction::Unknown {
+                IconName::Minus
+            } else {
+                IconName::ArrowRight
+            })
+            .size(px(10.))
+            .text_color(ink)
+            .into_any_element()
         })
-        .child(endpoint(matches!(exchange.direction, Direction::Incoming | Direction::Mixed)));
+        .child(endpoint(matches!(
+            exchange.direction,
+            Direction::Incoming | Direction::Mixed
+        )));
     let route = match exchange.direction {
         Direction::Incoming => format!("{} → this pane", exchange.peer),
         Direction::Outgoing => format!("This pane → {}", exchange.peer),
@@ -133,97 +149,81 @@ pub(crate) fn render(
         Direction::Mixed => "mixed",
     };
     let direction_selector = format!("exchange-direction-{id}-{direction}");
-    let peer_selector=format!("exchange-peer-{id}-{}",exchange.peer);
+    let peer_selector = format!("exchange-peer-{id}-{}", exchange.peer);
     let time = exchange
         .timestamp
         .and_then(crate::timestamps::local_datetime)
-        .map(|v| v.format("%H:%M").to_string());
-    let mut root = div()
-        .w_full()
-        .min_w_0()
-        .flex()
-        .flex_col()
-        .when(expanded, |root| {
-            root.rounded(px(8.))
-                .bg(blue.opacity(0.05))
-                .border_1()
-                .border_color(blue.opacity(0.12))
-        })
-        .child(
-            div()
-                .w_full()
-                .min_w_0()
-                .debug_selector(move || toggle_selector.clone())
-                .child(
-                    Button::new(SharedString::from(format!("exchange-toggle-{id}")))
-                        .ghost()
-                        .compact()
-                        .w_full()
-                        .h(px(28.))
-                        .px(px(0.))
-                        .accessibility_label(format!(
-                            "{} exchange details: {route}",
-                            if expanded { "Hide" } else { "Show" }
-                        ))
-                        .child(
-                            div()
-                                .w_full()
-                                .min_w_0()
-                                .flex()
-                                .items_center()
-                                .gap(px(6.))
-                                .text_size(px(11.))
-                                .font_weight(FontWeight::NORMAL)
-                                .text_color(rgb(palette.muted))
-                                .child(
+        .map(|v| v.format("%H:%M:%S").to_string());
+    let mut root = div().w_full().min_w_0().flex().flex_col().child(
+        div()
+            .w_full()
+            .min_w_0()
+            .debug_selector(move || toggle_selector.clone())
+            .child(
+                Button::new(SharedString::from(format!("exchange-toggle-{id}")))
+                    .ghost()
+                    .compact()
+                    .w_full()
+                    .h(px(28.))
+                    .px(px(0.))
+                    .accessibility_label(format!(
+                        "{} exchange details: {route}",
+                        if expanded { "Hide" } else { "Show" }
+                    ))
+                    .child(
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .text_size(px(11.))
+                            .font_weight(FontWeight::NORMAL)
+                            .text_color(rgb(palette.muted))
+                            .child(
+                                div()
+                                    .debug_selector(move || direction_selector.clone())
+                                    .child(glyph),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .debug_selector(move || peer_selector.clone())
+                                    .child(exchange.peer),
+                            )
+                            .when(!hide_status, |row| {
+                                row.child(
                                     div()
-                                        .debug_selector(move || direction_selector.clone())
-                                        .child(glyph),
+                                        .min_w(px(28.))
+                                        .max_w(px(160.))
+                                        .truncate()
+                                        .debug_selector(move || status_selector.clone())
+                                        .text_color(if failed { ink } else { rgb(palette.muted) })
+                                        .child(exchange.status),
                                 )
-                                .child(div().min_w_0().truncate().debug_selector(move||peer_selector.clone()).child(exchange.peer))
-                                .when(!hide_status, |row| {
-                                    row.child(
-                                        div()
-                                            .min_w(px(28.))
-                                            .max_w(px(160.))
-                                            .truncate()
-                                            .debug_selector(move || status_selector.clone())
-                                            .text_color(if failed {
-                                                ink
-                                            } else {
-                                                rgb(palette.muted)
-                                            })
-                                            .child(exchange.status),
-                                    )
-                                })
-                                .child(
+                            })
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(4.))
+                                    .border_t_1()
+                                    .border_dashed()
+                                    .border_color(rgb(palette.line)),
+                            )
+                            .when_some(time, |row, time| {
+                                row.child(
                                     div()
-                                        .flex_1()
-                                        .min_w(px(4.))
-                                        .border_t_1()
-                                        .border_dashed()
-                                        .border_color(rgb(palette.line)),
+                                        .flex_shrink_0()
+                                        .font_family(design::FONT_MONO)
+                                        .child(time),
                                 )
-                                .when_some(time, |row, time| {
-                                    row.child(
-                                        div()
-                                            .flex_shrink_0()
-                                            .font_family(design::FONT_MONO)
-                                            .child(time),
-                                    )
-                                })
-                                .child(
-                                    Icon::new(if expanded {
-                                        IconName::ChevronDown
-                                    } else {
-                                        IconName::ChevronRight
-                                    })
-                                    .size(px(12.)),
-                                ),
-                        )
-                        .on_click(toggle),
-                ),
-        );
+                            })
+                            .child(Icon::new(IconName::Info).size(px(12.))),
+                    )
+                    .on_click(toggle),
+            ),
+    );
     if expanded {
         let content_selector = format!("exchange-content-{id}");
         let mut content = div()
@@ -312,12 +312,22 @@ pub(crate) fn render(
     root
 }
 /// A delivery may omit senderAgentId while its recorded route still names the peer.
-pub(crate) fn peer_agent_id(record:Option<&Value>,task:&str,sender:&str)->String {
-    if !sender.is_empty(){return sender.into();}
-    record.and_then(|record|{
-        if record["fromTaskId"].as_str()==Some(task){record["toAgentId"].as_str()}
-        else if record["toTaskId"].as_str()==Some(task){record["fromAgentId"].as_str()}else{None}
-    }).unwrap_or_default().into()
+pub(crate) fn peer_agent_id(record: Option<&Value>, task: &str, sender: &str) -> String {
+    if !sender.is_empty() {
+        return sender.into();
+    }
+    record
+        .and_then(|record| {
+            if record["fromTaskId"].as_str() == Some(task) {
+                record["toAgentId"].as_str()
+            } else if record["toTaskId"].as_str() == Some(task) {
+                record["fromAgentId"].as_str()
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default()
+        .into()
 }
 /// Preserve observed failure/in-flight facts in a mixed run's collapsed glyph.
 pub(crate) fn aggregate(exchanges: &[Exchange]) -> Option<Exchange> {
@@ -357,7 +367,11 @@ pub(crate) fn render_group(
     toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> Div {
     if count > 0 {
-        summary.peer = format!("{} · {count} {}", summary.peer, if count == 1 { "exchange" } else { "exchanges" });
+        summary.peer = format!(
+            "{} · {count} {}",
+            summary.peer,
+            if count == 1 { "exchange" } else { "exchanges" }
+        );
     }
     summary.steps.clear();
     render(
@@ -379,7 +393,10 @@ pub(crate) fn timeline(id: &str) -> Div {
 }
 
 /// A terminal Turn ends the rail at its icon, even when its details expand.
-pub(crate) fn timeline_ending_at(id: &str, endpoint: Option<crate::activity_sparkles::PaintBounds>) -> Div {
+pub(crate) fn timeline_ending_at(
+    id: &str,
+    endpoint: Option<crate::activity_sparkles::PaintBounds>,
+) -> Div {
     let timeline_selector = format!("exchange-timeline-{id}");
     let rail_selector = format!("exchange-rail-{id}");
     div()
@@ -390,28 +407,45 @@ pub(crate) fn timeline_ending_at(id: &str, endpoint: Option<crate::activity_spar
         .flex_col()
         .gap(px(12.))
         .debug_selector(move || timeline_selector.clone())
-        .when_some(endpoint.clone(), |this, endpoint| this.child(
-            canvas(|_, _, _| (), move |bounds, _, window, _| {
-                // Descendant prepaint records this frame's actual icon position.
-                let bottom = endpoint.get().map(|icon| icon.center().y)
-                    .unwrap_or(bounds.top()).clamp(bounds.top(), bounds.bottom());
-                let top = bounds.top() + px(9.);
-                if bottom > top {
-                    window.paint_quad(fill(Bounds::new(point(bounds.left() + px(5.5), top),
-                        size(px(1.), bottom - top)), rgb(0x6594db).opacity(0.25)));
-                }
-            }).absolute().inset_0()
-        ))
-        .when(endpoint.is_none(), |this| this.child(
-            div()
+        .when_some(endpoint.clone(), |this, endpoint| {
+            this.child(
+                canvas(
+                    |_, _, _| (),
+                    move |bounds, _, window, _| {
+                        // Descendant prepaint records this frame's actual icon position.
+                        let bottom = endpoint
+                            .get()
+                            .map(|icon| icon.center().y)
+                            .unwrap_or(bounds.top())
+                            .clamp(bounds.top(), bounds.bottom());
+                        let top = bounds.top() + px(9.);
+                        if bottom > top {
+                            window.paint_quad(fill(
+                                Bounds::new(
+                                    point(bounds.left() + px(5.5), top),
+                                    size(px(1.), bottom - top),
+                                ),
+                                rgb(0x6594db).opacity(0.25),
+                            ));
+                        }
+                    },
+                )
                 .absolute()
-                .left(px(5.5))
-                .top(px(9.))
-                .bottom(px(0.))
-                .w(px(1.))
-                .bg(rgb(0x6594db).opacity(0.25))
-                .debug_selector(move || rail_selector.clone()),
-        ))
+                .inset_0(),
+            )
+        })
+        .when(endpoint.is_none(), |this| {
+            this.child(
+                div()
+                    .absolute()
+                    .left(px(5.5))
+                    .top(px(9.))
+                    .bottom(px(0.))
+                    .w(px(1.))
+                    .bg(rgb(0x6594db).opacity(0.25))
+                    .debug_selector(move || rail_selector.clone()),
+            )
+        })
 }
 /// Each member keeps its own direction, observed label and second-resolution time.
 pub(crate) fn render_step(
@@ -439,20 +473,16 @@ pub(crate) fn render_step(
         .gap(px(10.))
         .debug_selector(move || format!("exchange-member-{id}"))
         .child(
-            div()
-                .relative()
-                .w(px(12.))
-                .flex_shrink_0()
-                .child(
-                    div()
-                        .absolute()
-                        .left(px(3.))
-                        .top(px(6.))
-                        .size(px(6.))
-                        .rounded_full()
-                        .bg(rgb(0x6594db))
-                        .debug_selector(move || dot_selector.clone()),
-                ),
+            div().relative().w(px(12.)).flex_shrink_0().child(
+                div()
+                    .absolute()
+                    .left(px(3.))
+                    .top(px(6.))
+                    .size(px(6.))
+                    .rounded_full()
+                    .bg(rgb(0x6594db))
+                    .debug_selector(move || dot_selector.clone()),
+            ),
         )
         .child(
             div()
@@ -498,11 +528,14 @@ mod tests {
     use serde_json::json;
     #[::core::prelude::v1::test]
     fn exchange_group_senderless_summary_resolves_recorded_peer() {
-        let record=serde_json::json!({"fromTaskId":"here","toTaskId":"peer-task","fromAgentId":"main","toAgentId":"codex"});
-        assert_eq!(peer_agent_id(Some(&record),"here",""),"codex");
-        assert_eq!(peer_agent_id(Some(&record),"peer-task",""),"main");
-        assert_eq!(peer_agent_id(Some(&record),"unrelated",""),"");
-        assert_eq!(peer_agent_id(Some(&record),"here","reported-sender"),"reported-sender");
+        let record = serde_json::json!({"fromTaskId":"here","toTaskId":"peer-task","fromAgentId":"main","toAgentId":"codex"});
+        assert_eq!(peer_agent_id(Some(&record), "here", ""), "codex");
+        assert_eq!(peer_agent_id(Some(&record), "peer-task", ""), "main");
+        assert_eq!(peer_agent_id(Some(&record), "unrelated", ""), "");
+        assert_eq!(
+            peer_agent_id(Some(&record), "here", "reported-sender"),
+            "reported-sender"
+        );
     }
     #[::core::prelude::v1::test]
     fn exchange_group_summary_preserves_failure_and_mixed_directions() {

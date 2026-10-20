@@ -1286,6 +1286,91 @@ fn claude_approval(value: &Value) -> Option<(String, String, Value, String, Stri
     Some((request_id.into(), tool, input, summary, detail, risk))
 }
 
+/// Native questions belong to one active generation and exact registered owner.
+/// Durable completion can precede the local idle transition, so check both.
+pub(crate) fn user_question_run_is_current(
+    service: &Service,
+    task_id: &str,
+    control: &Arc<RunControl>,
+    expected_run: &str,
+) -> bool {
+    let Ok(data) = service.data.lock() else {
+        return false;
+    };
+    let Ok(runs) = service.runs.lock() else {
+        return false;
+    };
+    !control.is_cancelled()
+        && control.is_active()
+        && control.current_run_id().ok().as_deref() == Some(expected_run)
+        && runs
+            .tasks
+            .get(task_id)
+            .is_some_and(|owner| Arc::ptr_eq(owner, control))
+        && data
+            .snapshot
+            .tasks
+            .iter()
+            .any(|task| task.id == task_id && task.status == "running")
+}
+
+fn handle_claude_user_question(
+    service: Arc<Service>,
+    task: String,
+    control: Arc<RunControl>,
+    request_id: String,
+    input: Value,
+    summary: String,
+    detail: String,
+) {
+    let expected_run = match control.current_run_id() {
+        Ok(run) => run,
+        Err(_) => return,
+    };
+    let request = adapters::claude::user_question_input(&input).and_then(|interaction| {
+        service.create_user_question_request(
+            &task,
+            &control,
+            &expected_run,
+            None,
+            &format!("claude:{request_id}"),
+            &summary,
+            detail,
+            interaction,
+        )
+    });
+    // Normalize and durably reserve a bounded pending slot before spawning.
+    // The stdout reader remains available to observe cancellation/process loss.
+    let request = match request {
+        Ok(request) => request,
+        Err(_) => {
+            let frame = adapters::claude::permission_response(&request_id, false, &input);
+            let _ = control.send_control(&frame.to_string());
+            return;
+        }
+    };
+    thread::spawn(move || {
+        let response = service.wait_for_input(&request.id, || {
+            user_question_run_is_current(&service, &task, &control, &expected_run)
+        });
+        if response.is_err() {
+            let _ = service.expire_approval_request(&request.id);
+        }
+        let updated =
+            response.and_then(|value| adapters::claude::user_question_response(&input, &value));
+        let frame = match updated {
+            Ok(updated) => adapters::claude::permission_response(&request_id, true, &updated),
+            Err(_) => adapters::claude::permission_response(&request_id, false, &input),
+        };
+        let current = user_question_run_is_current(&service, &task, &control, &expected_run);
+        if current {
+            if let Err(error) = control.send_control(&frame.to_string()) {
+                service.record(&task, "error", "Could not apply Claude input", error);
+            }
+        }
+    });
+}
+
 fn json_detail(value: Option<&Value>) -> String {
     value
         .map(|value| match value {
@@ -4967,7 +5052,7 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
         let (mut task, host) = match service.task_and_host(&task_id) {
             Ok(value) => value,
             Err(error) => {
-                service.finish(&task_id, "error", Some(error));
+                service.finish_provider_run(&task_id, &control, "error", Some(error));
                 return;
             }
         };
@@ -4987,18 +5072,18 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
         let mut extensions = match service.runtime_extensions_for_task(&task_id) {
             Ok(extensions) => extensions,
             Err(error) => {
-                service.finish(&task_id, "error", Some(error));
+                service.finish_provider_run(&task_id, &control, "error", Some(error));
                 return;
             }
         };
         if let Err(error) = extensions.validate_for(&task.provider, &host.kind) {
-            service.finish(&task_id, "error", Some(error));
+            service.finish_provider_run(&task_id, &control, "error", Some(error));
             return;
         }
         let jev_decisions_grant = match service.jev_decisions_grant(&task_id) {
             Ok(grant) => grant,
             Err(error) => {
-                service.finish(&task_id, "error", Some(error));
+                service.finish_provider_run(&task_id, &control, "error", Some(error));
                 return;
             }
         };
@@ -5008,7 +5093,7 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
             } else {
                 "Jev Decisions MCP is not supported by this provider. Select local Codex, Claude, or ACP."
             };
-            service.finish(&task_id, "error", Some(reason.into()));
+            service.finish_provider_run(&task_id, &control, "error", Some(reason.into()));
             return;
         }
         control.set_mcp_fingerprint(extensions.mcp_fingerprint());
@@ -5019,8 +5104,8 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
             prompt
         };
         if task.provider == "claude" && host.kind != "local" {
-            service.finish(
-                &task_id,
+            service.finish_provider_run(
+                &task_id, &control,
                 "error",
                 Some(
                     "Claude interactive sessions currently require a local desktop host. The SSH supervisor is not yet a full-duplex JSON transport, so Monitter will not fall back to a one-shot Claude run.".into(),
@@ -5035,9 +5120,9 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
                     Ok(directory) => directory,
                     Err(error) => {
                         if control.cancelled.load(Ordering::SeqCst) {
-                            service.finish(&task_id, "interrupted", None);
+                            service.finish_provider_run(&task_id, &control, "interrupted", None);
                         } else {
-                            service.finish(&task_id, "error", Some(error));
+                            service.finish_provider_run(&task_id, &control, "error", Some(error));
                         }
                         return;
                     }
@@ -5045,7 +5130,7 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
                 match service.restore_opencode_task_directory(&task_id, &session_id, &directory) {
                     Ok(updated) => task = updated,
                     Err(error) => {
-                        service.finish(&task_id, "error", Some(error));
+                        service.finish_provider_run(&task_id, &control, "error", Some(error));
                         return;
                     }
                 }
@@ -5055,7 +5140,7 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
             match service.collaboration_grant(&task_id) {
                 Ok(grant) => grant,
                 Err(error) => {
-                    service.finish(&task_id, "error", Some(error));
+                    service.finish_provider_run(&task_id, &control, "error", Some(error));
                     return;
                 }
             }
@@ -5068,9 +5153,9 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
                     Ok(remote) => Some(remote),
                     Err(error) => {
                         if control.cancelled.load(Ordering::SeqCst) {
-                            service.finish(&task_id, "interrupted", None);
+                            service.finish_provider_run(&task_id, &control, "interrupted", None);
                         } else {
-                            service.finish(&task_id, "error", Some(error));
+                            service.finish_provider_run(&task_id, &control, "error", Some(error));
                         }
                         return;
                     }
@@ -5082,7 +5167,7 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
             if let Some(remote) = remote_collaboration.take() {
                 abort_remote_collaboration(remote);
             }
-            service.finish(&task_id, "interrupted", None);
+            service.finish_provider_run(&task_id, &control, "interrupted", None);
             return;
         }
         let command_grant = grant.as_ref().map(|grant| SessionGrant {
@@ -5127,7 +5212,7 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
             match crate::extensions_runtime::write_private_claude_config(&claude_config_value) {
                 Ok(file) => Some(file),
                 Err(error) => {
-                    service.finish(&task_id, "error", Some(error));
+                    service.finish_provider_run(&task_id, &control, "error", Some(error));
                     return;
                 }
             }
@@ -5147,7 +5232,7 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
                 if let Some(remote) = remote_collaboration.take() {
                     abort_remote_collaboration(remote);
                 }
-                service.finish(&task_id, "error", Some(error));
+                service.finish_provider_run(&task_id, &control, "error", Some(error));
                 return;
             }
         };
@@ -5157,7 +5242,7 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
             if let Some(remote) = remote_collaboration.take() {
                 abort_remote_collaboration(remote);
             }
-            service.finish(&task_id, "error", Some(error));
+            service.finish_provider_run(&task_id, &control, "error", Some(error));
             return;
         }
         let mut child = match command.spawn() {
@@ -5166,8 +5251,8 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
                 if let Some(remote) = remote_collaboration.take() {
                     abort_remote_collaboration(remote);
                 }
-                service.finish(
-                    &task_id,
+                service.finish_provider_run(
+                    &task_id, &control,
                     "error",
                     Some(format!("Could not start {}: {error}", task.provider)),
                 );
@@ -5240,8 +5325,8 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
                 if let Some(remote) = remote_collaboration.take() {
                     abort_remote_collaboration(remote);
                 }
-                service.finish(
-                    &task_id,
+                service.finish_provider_run(
+                    &task_id, &control,
                     "error",
                     Some(format!("Could not send prompt to provider: {error}")),
                 );
@@ -5257,8 +5342,8 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
             if let Some(remote) = remote_collaboration.take() {
                 abort_remote_collaboration(remote);
             }
-            service.finish(
-                &task_id,
+            service.finish_provider_run(
+                &task_id, &control,
                 "error",
                 Some("Could not open provider stdin.".into()),
             );
@@ -5271,7 +5356,7 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
 
         if let Err(error) = control.install(child, control_stdin) {
             control.cleanup_auxiliary();
-            service.finish(&task_id, "error", Some(error));
+            service.finish_provider_run(&task_id, &control, "error", Some(error));
             return;
         }
         if task.provider == "claude" {
@@ -5294,6 +5379,7 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
             let failed_event = failed_event.clone();
             let assistant_seen = assistant_seen.clone();
             thread::spawn(move || {
+                let mut seen_claude_inputs = HashSet::new();
                 for line in BufReader::new(stdout).lines() {
                     // `retire_owned` can reap the process before this reader
                     // has drained its final pipe buffer. Those late records
@@ -5314,6 +5400,19 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
                                     if let Some((request_id, tool, input, summary, detail, risk)) =
                                         claude_approval(&value)
                                     {
+                                        if tool == "AskUserQuestion" {
+                                            if !seen_claude_inputs.contains(&request_id) {
+                                                if seen_claude_inputs.len() < 256 {
+                                                    seen_claude_inputs.insert(request_id.clone());
+                                                    handle_claude_user_question(service.clone(), task.clone(), control.clone(),
+                                                        request_id, input, summary, detail);
+                                                } else {
+                                                    let frame = adapters::claude::permission_response(&request_id, false, &input);
+                                                    let _ = control.send_control(&frame.to_string());
+                                                }
+                                            }
+                                            continue;
+                                        }
                                         control.mark_tool_work_observed();
                                         let request = service.create_approval_request(
                                             CreateApprovalRequest {
@@ -5458,7 +5557,18 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
                                     if parsed.assistant.is_some() {
                                         assistant_seen.store(true, Ordering::SeqCst);
                                     }
-                                    if let Err(error) = service.apply_event(&task, parsed) {
+                                    let applied = if service.is_internal_admin_task(&task) {
+                                        let text = parsed.assistant.clone();
+                                        service.app_server_event(&task, &control, None, parsed).map(|()| {
+                                            if let Some(text) = text.filter(|text| !text.trim().is_empty()) {
+                                                service.admin_turn_broker.capture_assistant_text_owned(&task, &control, &text);
+                                            }
+                                        })
+                                    } else {
+                                        service.apply_event(&task, parsed)
+                                    };
+                                    if let Err(error) = applied {
+                                        if control.is_cancelled() || control.is_planned_retirement() { continue; }
                                         failed_event.store(true, Ordering::SeqCst);
                                         service.record(
                                             &task,
@@ -5546,11 +5656,11 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
         }
         match result {
             Ok(_status) if control.cancelled.load(Ordering::SeqCst) => {
-                service.finish(&task_id, "interrupted", None)
+                service.finish_provider_run(&task_id, &control, "interrupted", None)
             }
             Ok(status) if status.success() && failed_event.load(Ordering::SeqCst) => service
-                .finish(
-                    &task_id,
+                .finish_provider_run(
+                    &task_id, &control,
                     "error",
                     Some(format!(
                         "{} reported an error in its event stream.",
@@ -5558,21 +5668,21 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
                     )),
                 ),
             Ok(status) if status.success() && !assistant_seen.load(Ordering::SeqCst) => service
-                .finish(
-                    &task_id,
+                .finish_provider_run(
+                    &task_id, &control,
                     "error",
                     Some(format!(
                         "{} completed without an assistant response.",
                         task.provider
                     )),
                 ),
-            Ok(status) if status.success() => service.finish(&task_id, "completed", None),
-            Ok(status) => service.finish(
-                &task_id,
+            Ok(status) if status.success() => service.finish_provider_run(&task_id, &control, "completed", None),
+            Ok(status) => service.finish_provider_run(
+                &task_id, &control,
                 "error",
                 Some(format!("{} exited with {status}.", task.provider)),
             ),
-            Err(error) => service.finish(&task_id, "error", Some(error)),
+            Err(error) => service.finish_provider_run(&task_id, &control, "error", Some(error)),
         }
     });
 }
@@ -5748,6 +5858,177 @@ for line in sys.stdin.buffer:
             acp: None,
             archived_agent_name: None, agent_worktree: None,
             codex_home: None,
+        }
+    }
+
+    #[test]
+    fn input_request_claude_native_answer_and_cancel_release_control_waiter() {
+        for mode in ["answer", "cancel", "result", "error", "process_loss"] {
+            let cancel = mode == "cancel";
+            let directory =
+                std::env::temp_dir().join(format!("monitter-claude-input-{}", crate::id()));
+            let service = Service::open(None, directory.clone()).unwrap();
+            service
+                .mutate(None, |snapshot| {
+                    snapshot.agents[0].provider = "claude".into();
+                    snapshot.agents[0].sandbox = "harness-configured".into();
+                    Ok(())
+                })
+                .unwrap();
+            let agent = service.snapshot().unwrap().agents[0].id.clone();
+            let task = service
+                .create_task(crate::model::CreateTaskInput {
+                    agent_id: agent,
+                    title: "Claude input fixture".into(),
+                    native_session_id: None,
+                    parent_task_id: None,
+                    channel_id: None,
+                    project_id: None,
+                    cwd: None,
+                    model_settings: None,
+                    sandbox: None,
+                })
+                .unwrap();
+            service
+                .mutate(None, |snapshot| {
+                    snapshot
+                        .tasks
+                        .iter_mut()
+                        .find(|t| t.id == task.id)
+                        .unwrap()
+                        .status = "running".into();
+                    Ok(())
+                })
+                .unwrap();
+            let mut command = Command::new("/bin/cat");
+            command
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null());
+            isolate_child(&mut command);
+            let mut child = command.spawn().unwrap();
+            let stdin = child.stdin.take();
+            let stdout = child.stdout.take().unwrap();
+            let control = RunControl::new(false);
+            control.begin_run().unwrap();
+            control.install(child, stdin).unwrap();
+            service
+                .runs
+                .lock()
+                .unwrap()
+                .tasks
+                .insert(task.id.clone(), control.clone());
+            let (sent_tx, sent_rx) = mpsc::channel();
+            let reader = thread::spawn(move || {
+                let mut line = String::new();
+                let _ = BufReader::new(stdout).read_line(&mut line);
+                let _ = sent_tx.send(line);
+            });
+            let input = serde_json::json!({"questions":[{"question":"Choose route","options":[{"label":"Alpha"},{"label":"Beta"}]}],"opaque":"unchanged"});
+            handle_claude_user_question(
+                service.clone(),
+                task.id.clone(),
+                control.clone(),
+                "native-question".into(),
+                input,
+                "Claude needs your input".into(),
+                "fixture".into(),
+            );
+            let request = service
+                .snapshot()
+                .unwrap()
+                .approval_requests
+                .into_iter()
+                .find(|r| r.task_id == task.id)
+                .unwrap();
+            assert_eq!(request.provider, "claude");
+            assert!(!request.rememberable && request.session_scope.is_none());
+            if mode == "result" {
+                service.complete_resident_turn(&task.id, &control);
+            } else if mode == "error" {
+                service.finish(&task.id, "error", Some(mode.into()));
+            } else if mode == "process_loss" {
+                // Losing the exact registry owner must release the waiter even
+                // before a process-exit callback finalizes durable task state.
+                service.release_run(&task.id);
+            } else if cancel {
+                service
+                    .resolve_approval_request(&request.id, ApprovalDecision::Deny)
+                    .unwrap();
+            } else {
+                service
+                    .resolve_input_request(
+                        &request.id,
+                        serde_json::json!({"answers":{"question_1":{"answers":["Alpha"]}}}),
+                    )
+                    .unwrap();
+            }
+            if matches!(mode, "result" | "error" | "process_loss") {
+                let deadline = Instant::now() + Duration::from_secs(3);
+                loop {
+                    let snapshot = service.snapshot().unwrap();
+                    let expired = snapshot
+                        .approval_requests
+                        .iter()
+                        .find(|r| r.id == request.id)
+                        .unwrap()
+                        .status
+                        == "expired";
+                    let released = !service
+                        .input_waiters
+                        .lock()
+                        .unwrap()
+                        .contains_key(&request.id);
+                    if expired && released {
+                        break;
+                    }
+                    assert!(
+                        Instant::now() < deadline,
+                        "{mode} did not release native input waiter"
+                    );
+                    thread::sleep(Duration::from_millis(10));
+                }
+                assert!(
+                    service
+                        .resolve_input_request(
+                            &request.id,
+                            serde_json::json!({"answers":{"question_1":{"answers":["Alpha"]}}})
+                        )
+                        .is_err()
+                );
+                assert!(
+                    sent_rx.try_recv().is_err(),
+                    "no answer may be sent after terminal result"
+                );
+                control.cancel();
+                let _ = control.wait();
+                reader.join().unwrap();
+                service.cleanup();
+                let _ = std::fs::remove_dir_all(directory);
+                continue;
+            }
+            let result = sent_rx.recv_timeout(Duration::from_secs(5));
+            control.cancel();
+            let _ = control.wait();
+            reader.join().unwrap();
+            service.cleanup();
+            let _ = std::fs::remove_dir_all(directory);
+            let frame: Value = serde_json::from_str(&result.unwrap()).unwrap();
+            assert_eq!(frame["response"]["request_id"], "native-question");
+            assert_eq!(
+                frame["response"]["response"]["behavior"],
+                if cancel { "deny" } else { "allow" }
+            );
+            if !cancel {
+                assert_eq!(
+                    frame["response"]["response"]["updatedInput"]["answers"]["Choose route"],
+                    "Alpha"
+                );
+                assert_eq!(
+                    frame["response"]["response"]["updatedInput"]["opaque"],
+                    "unchanged"
+                );
+            }
         }
     }
 

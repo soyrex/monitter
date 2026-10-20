@@ -96,6 +96,14 @@ a journal gap, and honor explicit removals/channel resets. Compact history is no
 a complete transcript export. The native shell now owns this typed cache and
 accepts task/channel history pages only against its current revision; existing
 native views receive a shared compatibility projection after accepted changes.
+Native Ideas saves use the private `save_project_ideas` IPC method with
+`projectId`, `ideas`, and `expectedRevision`. It applies the same owner validation,
+authorship, history and revision checks as the mobile/LAN command, but returns
+only the committed revision number. This small replayable acknowledgement never
+serializes workspace transcripts. The retained pane waits for both the receipt
+and a project publication at that revision before enabling another save. The
+existing mobile/LAN command and its Snapshot response remain unchanged.
+
 Native views subscribe to a bounded, coalescing change feed, fetching
 revisioned state only on a wake or explicit refresh. The native terminal uses
 `write_terminal_input(id, &[u8])` for binary PTY input with the existing session
@@ -123,6 +131,18 @@ preference IPC; it omits `workspaces` and `appearance.tileTheme` so a running ol
 Tasks, drafts and terminal sessions remain backend-owned and globally available.
 Failed saves remain visible; stale local writers must reload before retrying.
 No mobile/LAN command or backend restart is required for workspace presentation.
+The same private SQLite database may also contain up to 12 named saved layouts
+per workspace. Each record has a stable UUID, an ASCII-case-insensitively unique
+1–80 character label, timestamps and one validated dock layout of at most
+256 KiB. These records capture pane geometry, tab order, active tabs, retained
+pane IDs and remembered focus only; they do not copy tasks, agents, terminals,
+drafts, transcripts or session ownership. The project menu loads them locally
+and renders an inert miniature of the saved geometry. Save and restore actions
+apply only to the currently open workspace. Restore reuses retained pane
+entities; an unavailable pane fails visibly and leaves the live layout in
+place. Deleting a saved layout removes only that presentation record. Older
+clients ignore the additional table and continue reading the existing
+workspace row.
 
 The optional `attachmentDrafts` map stores task-keyed unsent registered attachment IDs, display metadata and captured host/workspace, never file bytes, previews or paths. Restoration requires the same task and exact destination, and cannot replace a locally edited draft. Send acknowledgement removes only sent references; failed sends retain them. Backend registry checks still govern whether an attachment can be sent.
 
@@ -373,8 +393,10 @@ reconnection and a new authoritative snapshot.
 - `save_agent { agent: Agent }` -> Snapshot (empty id creates; ordinary callers cannot set `internal: true`,
   cannot clear an existing internal flag, and cannot rename or re-enable collaboration on the resident
   Monitter Admin record. Editing the existing admin preserves `internal: true`, the canonical "Monitter
-  Admin" name, and `collaborationEnabled: false`, and may safely reset the resident task/session so a
-  reconfigured transport replaces the previous one on next use.)
+  Admin" name, and `collaborationEnabled: false`. Changing its provider, model, launcher, host, cwd,
+  sandbox, account or instructions pauses Admin admission, interrupts pending Admin mini-tasks without
+  replay, stops its old workers, and resets all hidden sessions to the saved configuration. The next
+  request launches the replacement worker; ordinary chat agents remain untouched.)
 - `delete_agent { id: string, chatHandling?: "archive" | "delete" }` -> Snapshot (reject internal agents). The default
   is `"archive"`. Archive keeps every chat owned by the removed agent under `Archived chats`, stamps each task with the
   removed agent's display name so the LLM (`provider`/`model`) and the human-readable label remain identifiable after the
@@ -534,7 +556,8 @@ reconnection and a new authoritative snapshot.
 - `rename_task { id: string, title: string }` -> Snapshot
 - `autoname { target: { taskId?: string, channelId?: string, terminalId?: string, content?: string } }` -> Snapshot (routed through the resident Monitter Admin turn; see Internal agent)
   The experimental GPUI private IPC adapter returns only the updated task title for a `taskId` target and refreshes the snapshot separately; the Tauri command contract remains Snapshot.
-- `set_task_archived { taskId: string, archived: boolean }` -> Snapshot (reject running; preserve all history)
+- `set_task_archived { taskId: string, archived: boolean }` -> Snapshot (reject running; preserve all history;
+  a managed Git worktree must be clean, is retired on archive, and is recreated from its retained branch on restore)
 - `get_task_goal { taskId: string }` -> Goal | null (read-only Codex app-server lookup; version-dependent)
   A completed Codex turn is not proof that its persisted goal or native children
   have finished. The resident transport may report a fresh `turn/started` after
@@ -563,9 +586,12 @@ reconnection and a new authoritative snapshot.
 - `clear_task_goal { taskId: string }` -> void (Codex only; clears the native persisted goal without
   resuming the thread, starting a turn, changing its transcript, or completing the goal)
 - `delete_task { id: string }` -> Snapshot (archived only; reject running; preserve native CLI history)
-- `send_message { taskId: string, text: string, attachmentIds?: string[] }` -> Snapshot (starts asynchronously)
+- `send_message { taskId: string, text: string, attachmentIds?: string[], deliveryMode?: "queue" | "steer" }` -> Snapshot (starts asynchronously)
+  `deliveryMode` overrides `Settings.busyMessageMode` for this send only. `steer` attempts live
+  Codex/ACP steering while a supported turn is active and retains the existing durable FIFO
+  fallback when the turn is stale, rejected or unavailable. It never changes the saved default.
 - `clear_task_context { taskId: string }` -> Snapshot (idle, unarchived tasks with no queued messages or pending requests only; preserves visible history, clears the native provider session, and appends a `Context Cleared` system boundary)
-- `send_message_fast { taskId: string, text: string, attachmentIds?: string[] }` -> `{ accepted: true }`
+- `send_message_fast { taskId: string, text: string, attachmentIds?: string[], deliveryMode?: "queue" | "steer" }` -> `{ accepted: true }`
   Same durable acceptance and execution semantics, without a full-history acknowledgement payload.
   Provider startup/control delivery follows acceptance; failures appear through task state and
   diagnostics. Native snapshot, diagnostic-page and fast-send commands run off the UI thread.
@@ -1366,7 +1392,14 @@ so waiting for a slot does not consume the turn budget. All waits happen off the
 Each transport follows the five-minute idle retirement policy. The next request restores its
 saved native session silently. App quit, admin reconfiguration, or transport failure retires the
 corresponding resident controls. Shutdown wakes queued callers; neither queued nor in-flight
-prompts are persisted or replayed after restart. Real configuration, provider, or execution-timeout
+prompts are persisted or replayed after restart. Saving changed Admin launch settings fences pool
+admission and stops the existing workers before resetting all slots. Interrupted requests receive
+a configuration-change error and are never replayed. Workers launch with the new settings when
+their next request arrives. After reserving a pool slot, the next request also
+compares its hidden task with the current Admin provider, model, ACP launcher, host, cwd,
+sandbox and Codex account. Changed launch settings retire only a verified idle owner before
+resetting that slot's native session and applying the saved configuration. This recovery path
+does not interrupt busy slots; unchanged slots keep their native session. Real configuration, provider, or execution-timeout
 errors remain visible. The admin's saved provider, model, host, cwd, and sandbox are used as-is,
 with no mini-model selection, provider fallback, or automatic retry.
 
@@ -1382,6 +1415,37 @@ single selection. Responses retain `{answers: {[questionId]: {answers: string[]}
 nonempty answers limited to 16 KiB each in UTF-8. Unsubmitted client answers may survive
 view changes in process memory, scoped by task and approval ID; they are never persisted
 to browser storage and authoritative resolved/expired requests prune these drafts.
+
+Agent questions use the same input surface across harnesses. `InteractionInput.kind="questions"`
+contains question IDs, headers, text, optional suggested options and `isSecret`; optional
+`selectionMode` is `single` (the default) or `multiple`. A response is
+`{answers:{questionId:{answers:["selected label or free text"]}}}`. Single-choice questions
+require one nonempty answer; multiple-choice questions accept several selected labels and optional
+free text, up to 33 answers per question. Each answer is limited to 16 KiB of UTF-8 text.
+Desktop pending input replaces the composer by default, retains its draft and attachments, and
+also renders inline in Watch mode. Cancel uses `resolve_approval` with `deny`; only a successful
+backend acknowledgement dismisses the form. Submission errors retain the form for retry. Permission
+requests remain separate and cannot be answered by a question form.
+
+ACP clients advertise form elicitation and accept supported `elicitation/create` requests, including
+MiniMax `ask_user` single-choice `oneOf` and multiple-choice `items.anyOf` schemas. Native option IDs
+and optional Other fields are retained in the schema and restored in the ACP response. Native
+responses are `{action:"accept",content:{...}}` or an explicit cancellation/decline. Unsupported
+schemas are declined. Claude's local stream-json `AskUserQuestion` requests use the same form and
+return answers to the original control request; cancellation returns a denial. Both paths run their
+wait outside the transport reader, bypass automatic permission grants, and fence responses to the
+exact active runtime generation. Existing Codex native question/form handling uses the same desktop
+surface.
+
+Every harness connected to the task-scoped collaboration MCP bridge also has `ask_user`, with
+`{request_id,title?,questions:[...]}`. It supports one to eight questions with distinct IDs, at most
+32 distinct options per question and a 64 KiB total request limit. The authenticated caller owns the
+request; callers cannot choose another task. Collaboration must be enabled for the agent. The call
+waits up to 20 seconds, then returns `status:"pending"`; retrying exactly the same arguments reuses
+the durable request and retrieves `status:"answered"` with `response`, or `status:"cancelled"`
+without an answer. Reusing the ID with different content is rejected. Pending requests are bounded
+and neither retries nor cancellation create chat messages or permission rules. Clients must not
+infer answers from a timeout or treat cancellation as approval.
 
 SSH host port 0 means use the existing SSH config/default (omit `-p`). An empty user/identity path
 also preserves the SSH config. Expand remote `~/` relative to the remote home, never the local home.
@@ -2625,8 +2689,9 @@ subagent, and work-plan activity. A day is exactly 24 hours. The scheduler and o
 skip already archived chats, internal Admin chats, running or runtime-resident work, queued or
 sending messages, pending approvals, live collaboration or subagents, active work plans, scheduled
 persistent-thread chats (including paused schedules), pending throwaway cleanup, and ancestors
-of protected tasks. Eligible archive operations preserve chat history and use the normal
-unarchive behavior.
+of protected tasks. A managed worktree with local tracked, untracked, or ignored files is also
+protected rather than deleted. Eligible archive operations preserve chat history, retire clean
+managed worktree checkouts, and use the normal unarchive behavior to recreate them.
 
 One-time replies include `matchedCount`, `archivedCount`, `skippedProtectedCount`,
 `skippedByReason`, and up to 100 matching task summaries with `tasksTruncated` explicitly marking
@@ -2954,9 +3019,14 @@ The base must be a clean Git checkout on a branch; an invalid, dirty, detached,
 or SSH workspace fails visibly rather than silently sharing its directory.
 `Task.agentWorktree` records `root`, `path`, `branch`, `baseCommit`, and
 `targetBranch`; `Task.cwd` pins the pane's working directory across resumes.
-Old snapshots deserialize the new fields as false/null. Worktrees and branches
-are retained after merge, archive, or deletion; Monitter never silently removes
-uncommitted work. Git ignored caches/dependencies are not copied into worktrees.
+Old snapshots deserialize the new fields as false/null. Merge retains both the
+worktree and branch. Archiving removes a clean linked checkout and its Git worktree
+registration but retains the pane branch and task metadata; restoring the chat
+recreates the checkout from that branch at its recorded path. Archival fails visibly
+if the checkout contains tracked, untracked, or ignored local files, an in-progress
+Git operation, changed identity, or inconsistent registration, so Monitter never
+silently removes local work. Git ignored caches/dependencies are not copied into
+new worktrees. Permanent deletion does not silently delete a dirty managed checkout.
 
 Owner-local `merge_task_worktree {taskId}` returns Snapshot. It merges committed
 pane changes into the captured project branch; it never pushes. The owner must
@@ -2987,3 +3057,43 @@ Standard agent instructions and MCP initialization guidance direct agents to use
 Codex `mcpToolCall`, `commandExecution`, and `fileChange` started/completed notifications with the same provider item ID update one diagnostic `RunEvent` within a task and run. Its opaque UUID and original timestamp remain stable; the latest full provider payload replaces the previous detail, including in persisted/cold history. A later running replay cannot replace an observed terminal result. Different provider item IDs and later runs remain separate, even if tool names or arguments match. Notifications without a recognized lifecycle identity retain ordinary append behavior. This does not merge separate MCP requests or change their execution/accounting.
 
 The native activity row uses the MCP server and a readable tool name in its summary. Explicit running status uses a spinner, observed completion a tick, and failure/cancellation an alert; unknown status retains its type icon. Disclosure carets sit at the right edge and root activity icons align with the transcript/avatar column. Existing saved duplicate rows are retained; no history migration or backend restart is performed by this UI change.
+
+### Active project roster (agent coordination)
+
+The grant-scoped collaboration MCP exposes `project_roster_list {resources?}` and
+`project_roster_report {run_id, summary, resources}`. Both require a project.
+The report must echo the UUID `callerRunId` from the list response as `run_id`;
+the backend checks it against the authenticated current turn so late callbacks
+from an older turn cannot replace a newer report. No project, agent, or task
+identity is accepted: the backend derives identity from the authenticated turn. Membership follows active runtime controls automatically, excludes
+internal agents, and omits idle or stopped turns. Reporting replaces the caller's
+whole current-turn report; it does not create membership. Reports are process-local,
+scoped by `{taskId, runId}`, and clear on restart. Without a report, the summary
+falls back to current-turn progress or the task title.
+
+Each resource is `{path: string, access: "read" | "write"}`. Paths are normalized
+project-relative files or tree prefixes, never absolute, traversal, backslash, or
+control-character paths. Comparison is lexical and conservatively case-insensitive;
+filesystem symlink aliases are not resolved. Each call accepts at most 32 resources with at most 512
+UTF-8 bytes per path. Report summaries are nonempty and at most 240 characters.
+An empty resources array replaces earlier resource declarations with none.
+
+Both tools return `ProjectRosterResult`: `{projectId, callerRunId, generatedAt,
+unreportedTaskIds, entries, collisions, collisionsTruncated, advisory: true}`.
+`generatedAt` is Unix milliseconds; `unreportedTaskIds` identifies active turns
+without a current report. Collisions are capped at 128, with `collisionsTruncated`
+indicating omitted results. Each entry contains `projectId`, `taskId`, `runId`, `agentId`,
+`agentName`, `taskTitle`, `hostId`, `cwd`, `summary`, `resources`, `startedAt`,
+`updatedAt`, and `reported`; timestamps are Unix milliseconds. Each collision
+contains `taskId`, `peerTaskId`, `resource`, and `peerResource` (the latter two are
+resource objects). A collision means overlapping file/tree prefixes where at least
+one access is `write`; read/read is permitted. Optional list resources check the
+caller's proposed scope. This is advisory coordination, not a lock, permission,
+or build-queue approval.
+
+At turn startup, agents list the roster and report intended work and resources
+using its `callerRunId` as `run_id`,
+refresh when scope changes and before shared edits, and coordinate overlaps with
+`send_message`. Peer summaries and paths are untrusted context and never new
+instructions or authorization. No new desktop UI or remote filesystem access is
+implied by these tools.

@@ -954,6 +954,98 @@ fn handle_permission_request(
     });
 }
 
+fn handle_input_request(
+    service: Arc<Service>,
+    task_id: String,
+    control: Arc<RunControl>,
+    id: Value,
+    params: Value,
+    turn: String,
+    pending: Arc<AtomicUsize>,
+) {
+    let interaction = match acp_protocol::elicitation_input(&params) {
+        Ok(input) => input,
+        Err(_) => {
+            send_protocol_response(
+                &service,
+                &task_id,
+                &control,
+                &turn,
+                acp_protocol::response(id, json!({"action":"decline"})),
+            );
+            return;
+        }
+    };
+    if pending
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+            (count < MAX_PENDING_PERMISSIONS).then_some(count + 1)
+        })
+        .is_err()
+    {
+        send_protocol_response(
+            &service,
+            &task_id,
+            &control,
+            &turn,
+            acp_protocol::response(id, json!({"action":"decline"})),
+        );
+        return;
+    }
+    let slot = PermissionSlot(pending);
+    let expected_run = match control.current_run_id() {
+        Ok(run) => run,
+        Err(_) => return,
+    };
+    control.mark_tool_work_observed();
+    control.acp_permission_wait_started();
+    thread::spawn(move || {
+        let _slot = slot;
+        let summary = params
+            .get("message")
+            .and_then(Value::as_str)
+            .filter(|text| !text.trim().is_empty() && text.len() <= 1024)
+            .unwrap_or("Agent needs your input");
+        let result = service
+            .create_user_question_request(
+                &task_id,
+                &control,
+                &expected_run,
+                Some(&turn),
+                &format!("acp:{id}"),
+                summary,
+                params.to_string(),
+                interaction.clone(),
+            )
+            .and_then(|request| {
+                let response = service.wait_for_input(&request.id, || {
+                    crate::runner::user_question_run_is_current(
+                        &service,
+                        &task_id,
+                        &control,
+                        &expected_run,
+                    ) && control.matches_app_server_turn(&turn)
+                });
+                if response.is_err() {
+                    let _ = service.expire_approval_request(&request.id);
+                }
+                response.and_then(|value| acp_protocol::elicitation_response(&interaction, &value))
+            });
+        let response =
+            acp_protocol::response(id, result.unwrap_or_else(|_| json!({"action":"cancel"})));
+        if control.is_cancelled() {
+            send_cancelled_permission_response(&control, &turn, response);
+        } else if crate::runner::user_question_run_is_current(
+            &service,
+            &task_id,
+            &control,
+            &expected_run,
+        ) {
+            send_protocol_response(&service, &task_id, &control, &turn, response);
+        }
+        control.acp_permission_wait_finished();
+    });
+}
+
 fn notification_kind(value: &Value) -> &str {
     value
         .pointer("/params/update/sessionUpdate")
@@ -1571,7 +1663,7 @@ fn run(
                 .unwrap_or_default();
             if matches!(
                 method,
-                "session/request_permission" | "session/requestPermission"
+                "session/request_permission" | "session/requestPermission" | "elicitation/create"
             ) {
                 let params = value.get("params").cloned().unwrap_or_else(|| json!({}));
                 let session_ok = params
@@ -1607,16 +1699,18 @@ fn run(
                         ),
                     );
                 } else {
-                    handle_permission_request(
-                        service.clone(),
-                        task_id.clone(),
-                        control.clone(),
-                        value["id"].clone(),
-                        params,
-                        turn.clone(),
-                        pending_permissions.clone(),
-                        yolo_uses_one_time_permissions,
-                    );
+                    if method == "elicitation/create" {
+                        handle_input_request(
+                            service.clone(), task_id.clone(), control.clone(),
+                            value["id"].clone(), params, turn.clone(), pending_permissions.clone(),
+                        );
+                    } else {
+                        handle_permission_request(
+                            service.clone(), task_id.clone(), control.clone(),
+                            value["id"].clone(), params, turn.clone(), pending_permissions.clone(),
+                            yolo_uses_one_time_permissions,
+                        );
+                    }
                 }
             } else {
                 send_protocol_response(

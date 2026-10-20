@@ -58,6 +58,71 @@ fn clean(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn retirement_clean(path: &Path) -> Result<(), String> {
+    if !git_at(
+        path,
+        &[
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--ignored=matching",
+        ],
+    )?
+    .is_empty()
+    {
+        return Err(format!(
+            "Archive cleanup stopped because {} contains uncommitted, untracked, or ignored files. Commit or move them first; nothing was deleted.",
+            path.display()
+        ));
+    }
+    clean(path)
+}
+
+fn expected_path(task_id: &str, w: &AgentWorktree) -> Result<(PathBuf, PathBuf), String> {
+    uuid::Uuid::parse_str(task_id).map_err(|_| "Worktree task ID is invalid.".to_string())?;
+    let root = Path::new(&w.root)
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
+    let name = root
+        .file_name()
+        .ok_or("Invalid project worktree root.")?
+        .to_string_lossy();
+    let expected = root
+        .parent()
+        .ok_or("Invalid project parent.")?
+        .join(format!("{name}-monitter-worktrees"))
+        .join(task_id);
+    if w.branch != format!("monitter/pane-{task_id}") || Path::new(&w.path) != expected.as_path() {
+        return Err(
+            "This pane's worktree metadata changed; inspect it before changing its archive state."
+                .into(),
+        );
+    }
+    Ok((root, expected))
+}
+
+fn is_registered(root: &Path, path: &Path) -> Result<bool, String> {
+    Ok(git_at(root, &["worktree", "list", "--porcelain"])?
+        .lines()
+        .filter_map(|line| line.strip_prefix("worktree "))
+        .any(|listed| Path::new(listed) == path))
+}
+
+fn validate_active(root: &Path, path: &Path, w: &AgentWorktree) -> Result<(), String> {
+    if !same_repository(
+        path.to_str().ok_or("Worktree path is not UTF-8.")?,
+        root.to_str().ok_or("Project path is not UTF-8.")?,
+    ) {
+        return Err("The pane no longer belongs to its recorded project repository.".into());
+    }
+    if git_at(path, &["symbolic-ref", "--quiet", "--short", "HEAD"])? != w.branch {
+        return Err(
+            "The pane worktree branch changed; inspect it manually before archiving.".into(),
+        );
+    }
+    Ok(())
+}
+
 pub fn create(cwd: &str, task_id: &str) -> Result<AgentWorktree, String> {
     // IDs form paths and branch names; never accept arbitrary path components.
     uuid::Uuid::parse_str(task_id).map_err(|_| "Worktree task ID is invalid.".to_string())?;
@@ -106,28 +171,109 @@ pub fn create(cwd: &str, task_id: &str) -> Result<AgentWorktree, String> {
 }
 
 pub fn validate(task_id: &str, cwd: &str, w: &AgentWorktree) -> Result<(), String> {
-    uuid::Uuid::parse_str(task_id).map_err(|_| "Worktree task ID is invalid.".to_string())?;
-    let root = Path::new(&w.root)
-        .canonicalize()
-        .map_err(|e| e.to_string())?;
-    let name = root
-        .file_name()
-        .ok_or("Invalid project worktree root.")?
-        .to_string_lossy();
-    let expected = root
-        .parent()
-        .ok_or("Invalid project parent.")?
-        .join(format!("{name}-monitter-worktrees"))
-        .join(task_id);
-    if w.branch != format!("monitter/pane-{task_id}")
-        || Path::new(&w.path) != expected.as_path()
-        || Path::new(cwd) != Path::new(&w.path)
-    {
+    let (_, expected) = expected_path(task_id, w)?;
+    if Path::new(cwd) != expected.as_path() {
         return Err(
             "This pane's worktree metadata changed; inspect it before merging manually.".into(),
         );
     }
     Ok(())
+}
+
+/// Validate that archival can remove the checkout without losing any local
+/// file. The branch and worktree metadata are deliberately retained so a
+/// later restore can recreate the checkout at the same path.
+pub fn can_retire(task_id: &str, cwd: &str, w: &AgentWorktree) -> Result<(), String> {
+    validate(task_id, cwd, w)?;
+    let (root, path) = expected_path(task_id, w)?;
+    let exists = path.exists();
+    let registered = is_registered(&root, &path)?;
+    match (exists, registered) {
+        (false, false) => return Ok(()), // already retired
+        (true, true) => {}
+        _ => {
+            return Err(
+                "The pane worktree checkout and Git registration disagree; inspect it manually before archiving."
+                    .into(),
+            )
+        }
+    }
+    validate_active(&root, &path, w)?;
+    retirement_clean(&path)
+}
+
+pub fn retire(task_id: &str, cwd: &str, w: &AgentWorktree) -> Result<(), String> {
+    can_retire(task_id, cwd, w)?;
+    let (root, path) = expected_path(task_id, w)?;
+    if !is_registered(&root, &path)? {
+        return Ok(());
+    }
+    git_at(
+        &root,
+        &[
+            "-c",
+            "core.hooksPath=/dev/null",
+            "worktree",
+            "remove",
+            path.to_str().ok_or("Worktree path is not UTF-8.")?,
+        ],
+    )?;
+    if path.exists() || is_registered(&root, &path)? {
+        return Err("Git did not fully retire the pane worktree checkout.".into());
+    }
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::remove_dir(parent);
+    }
+    Ok(())
+}
+
+pub fn restore(task_id: &str, cwd: &str, w: &AgentWorktree) -> Result<(), String> {
+    validate(task_id, cwd, w)?;
+    let (root, path) = expected_path(task_id, w)?;
+    let exists = path.exists();
+    let registered = is_registered(&root, &path)?;
+    match (exists, registered) {
+        (true, true) => return validate_active(&root, &path, w),
+        (false, false) => {}
+        _ => {
+            return Err(
+                "The pane worktree checkout and Git registration disagree; inspect it manually before restoring."
+                    .into(),
+            )
+        }
+    }
+    git_at(
+        &root,
+        &["show-ref", "--verify", &format!("refs/heads/{}", w.branch)],
+    )
+    .map_err(|_| {
+        "The pane's retained worktree branch is missing; restore it manually before reopening the chat."
+            .to_string()
+    })?;
+    git_at(
+        &root,
+        &["merge-base", "--is-ancestor", &w.base_commit, &w.branch],
+    )
+    .map_err(|_| {
+        "The pane worktree history was rewritten past its recorded base; inspect it manually before restoring."
+            .to_string()
+    })?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Could not recreate worktree folder: {e}"))?;
+    }
+    git_at(
+        &root,
+        &[
+            "-c",
+            "core.hooksPath=/dev/null",
+            "worktree",
+            "add",
+            path.to_str().ok_or("Worktree path is not UTF-8.")?,
+            &w.branch,
+        ],
+    )?;
+    validate_active(&root, &path, w)
 }
 
 pub fn project_root_matches(cwd: &str, root: &str) -> bool {
@@ -354,6 +500,48 @@ mod tests {
     }
 
     #[test]
+    fn archived_worktree_retires_checkout_and_restores_retained_branch() {
+        let p = repo();
+        commit(&p, ".gitignore", "cache/\n");
+        let id = uuid::Uuid::new_v4().to_string();
+        let a = create(p.to_str().unwrap(), &id).unwrap();
+        commit(Path::new(&a.path), "pane.txt", "retained commit");
+        let retained_head = git_at(Path::new(&a.path), &["rev-parse", "HEAD"]).unwrap();
+
+        std::fs::create_dir(Path::new(&a.path).join("cache")).unwrap();
+        std::fs::write(Path::new(&a.path).join("cache/generated.bin"), "preserve").unwrap();
+        assert!(retire(&id, &a.path, &a)
+            .unwrap_err()
+            .contains("nothing was deleted"));
+        assert!(Path::new(&a.path).join("cache/generated.bin").exists());
+        std::fs::remove_dir_all(Path::new(&a.path).join("cache")).unwrap();
+
+        std::fs::write(Path::new(&a.path).join("draft.txt"), "do not delete").unwrap();
+        let error = retire(&id, &a.path, &a).unwrap_err();
+        assert!(error.contains("nothing was deleted"));
+        assert!(Path::new(&a.path).join("draft.txt").exists());
+        std::fs::remove_file(Path::new(&a.path).join("draft.txt")).unwrap();
+
+        retire(&id, &a.path, &a).unwrap();
+        assert!(!Path::new(&a.path).exists());
+        assert_eq!(
+            git_at(&p, &["rev-parse", &a.branch]).unwrap(),
+            retained_head
+        );
+        retire(&id, &a.path, &a).unwrap(); // exact repeat is harmless
+
+        restore(&id, &a.path, &a).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(Path::new(&a.path).join("pane.txt")).unwrap(),
+            "retained commit"
+        );
+        restore(&id, &a.path, &a).unwrap(); // exact repeat is harmless
+        retire(&id, &a.path, &a).unwrap();
+        git_at(&p, &["branch", "-D", &a.branch]).unwrap();
+        std::fs::remove_dir_all(&p).unwrap();
+    }
+
+    #[test]
     fn agent_worktree_project_preference_is_durable_and_nonretroactive() {
         use crate::model::{CreateTaskInput, Project, ProjectWorkspace};
         let p = repo();
@@ -364,7 +552,7 @@ mod tests {
         let service = crate::Service::open(None, profile.clone()).unwrap();
         let snapshot = service.snapshot().unwrap();
         let agent = snapshot.agents[0].clone();
-        let project = Project {
+        let project = Project { ideas: vec![], ideas_revision: 0,
             id: "fixture".into(),
             name: "Worktrees".into(),
             description: String::new(),
@@ -375,7 +563,6 @@ mod tests {
                 cwd: p.to_string_lossy().into_owned(),
             }],
             board_guidance_text: None,
-            ideas: vec![], ideas_revision: 0,
             build_management_enabled: false,
             agent_worktrees_enabled: false,
         };
@@ -492,6 +679,38 @@ mod tests {
         service.save_project(project.clone()).unwrap();
         let shared = service.create_task(input()).unwrap();
         assert!(shared.agent_worktree.is_none());
+        let b_worktree = b.agent_worktree.as_ref().unwrap();
+        std::fs::write(Path::new(&b.cwd).join("draft.txt"), "preserve").unwrap();
+        assert!(service
+            .set_task_archived(&b.id, true)
+            .unwrap_err()
+            .contains("nothing was deleted"));
+        assert!(Path::new(&b.cwd).join("draft.txt").exists());
+        assert!(!service
+            .snapshot()
+            .unwrap()
+            .tasks
+            .iter()
+            .find(|task| task.id == b.id)
+            .unwrap()
+            .archived);
+        std::fs::remove_file(Path::new(&b.cwd).join("draft.txt")).unwrap();
+        service.set_task_archived(&b.id, true).unwrap();
+        assert!(!Path::new(&b.cwd).exists());
+        assert!(service
+            .snapshot()
+            .unwrap()
+            .tasks
+            .iter()
+            .find(|task| task.id == b.id)
+            .unwrap()
+            .archived);
+        service.set_task_archived(&b.id, false).unwrap();
+        assert!(Path::new(&b.cwd).exists());
+        assert_eq!(
+            git_at(Path::new(&b.cwd), &["symbolic-ref", "--short", "HEAD"]).unwrap(),
+            b_worktree.branch
+        );
         drop(service);
         let reopened = crate::Service::open(None, profile.clone()).unwrap();
         assert_eq!(

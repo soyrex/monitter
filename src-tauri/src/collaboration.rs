@@ -83,6 +83,8 @@ impl Service {
         self.require_collaboration_caller(caller_task)?;
         validate_tool_args(tool, args)?;
         match tool {
+            "project_roster_list" | "project_roster_report" => self.project_roster_protocol(caller_task, tool, args),
+            "ask_user" => self.ask_user_protocol(caller_task, Value::Object(args.clone())),
             "list_agents" => self.list_agents_protocol(
                 caller_task,
                 string_arg(args, "query")?,
@@ -1328,6 +1330,9 @@ fn fail_queued_delivery(snapshot: &mut Snapshot, index: usize, error: &str) {
     }));
 }
 fn validate_tool_args(tool: &str, args: &serde_json::Map<String, Value>) -> Result<(), String> {
+    if matches!(tool, "project_roster_list" | "project_roster_report") {
+        return crate::project_roster::validate_args(tool, &Value::Object(args.clone()));
+    }
     let allowed: &[&str] = match tool {
         "list_agents" => &["query", "active_only"],
         "list_agent_models" => &["to_agent_id", "refresh"],
@@ -1348,6 +1353,7 @@ fn validate_tool_args(tool: &str, args: &serde_json::Map<String, Value>) -> Resu
         "work_plan_close" => &["plan_id", "summary"],
         "install_shared_skill" => &["url", "name"],
         "browser_open" => &["request_id", "url", "title"],
+        "ask_user" => &["request_id", "title", "questions"],
         "terminal_run" => &["command", "cwd"],
         "list_schedules" => &[],
         "save_schedule" => &[
@@ -1968,7 +1974,7 @@ mod tests {
         let host = service.snapshot().unwrap().hosts[0].clone();
         service
             .mutate(None, |snapshot| {
-                snapshot.projects.push(Project { build_management_enabled: false, agent_worktrees_enabled: false,
+                snapshot.projects.push(Project { ideas: vec![], ideas_revision: 0, build_management_enabled: false, agent_worktrees_enabled: false,
                     id: "p".into(),
                     name: "Project".into(),
                     description: String::new(),
@@ -1979,7 +1985,6 @@ mod tests {
                         cwd: "/project-folder".into(),
                     }],
                     board_guidance_text: None,
-                    ideas: vec![], ideas_revision: 0,
                 });
                 Ok(())
             })
@@ -2514,10 +2519,10 @@ mod tests {
     }
 
     fn budget_project(service: &Service) {
-        service.save_project(crate::model::Project {
+        service.save_project(crate::model::Project { ideas: vec![], ideas_revision: 0,
             id: "project".into(), name: "Budget tests".into(), description: String::new(),
             icon: "folder".into(), color: "#3f9d6a".into(), workspaces: vec![],
-            board_guidance_text: None, ideas: vec![], ideas_revision: 0, build_management_enabled: false, agent_worktrees_enabled: false,
+            board_guidance_text: None, build_management_enabled: false, agent_worktrees_enabled: false,
         }).unwrap();
     }
 

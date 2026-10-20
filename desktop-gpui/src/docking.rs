@@ -51,6 +51,9 @@ mod pane_movement_tests;
 mod auto_size_panes_tests;
 const PANEL_NAME: &str = "MonitterNativePane";
 const VERSION: usize = 1;
+#[cfg(all(test, feature = "visual-export", feature = "performance-profiling"))]
+#[path = "pane_mode_restore_tests.rs"]
+mod pane_mode_restore_tests;
 #[cfg(all(test, feature = "visual-export"))]
 #[path = "pane_cache_tests.rs"]
 mod pane_cache_tests;
@@ -263,11 +266,15 @@ impl BasePanel for NativePanel {
             browser.update(cx, |browser, cx| browser.set_dock_group(Some(group), cx));
         }
     }
-    fn dump(&self, _: &App) -> PanelState {
+    fn dump(&self, cx: &App) -> PanelState {
+        let mut info = json!({"id": self.spec.id});
+        if let Ok(chat) = self.spec.content.clone().downcast::<crate::chat::ChatPane>() {
+            info["watchMode"] = json!(chat.read(cx).persisted_watch_mode());
+        }
         PanelState {
             panel_name: PANEL_NAME.into(),
             children: vec![],
-            info: PanelInfo::panel(json!({"id":self.spec.id})),
+            info: PanelInfo::panel(info),
         }
     }
 }
@@ -435,10 +442,12 @@ impl Render for NativePanel {
         // notifications must never invalidate the transcript or composer.
         let mut decorations = Vec::new();
         let mut working_bubble = None;
+        let mut chat_header_hover = None;
         if let Some(task) = self.spec.id.strip_prefix("chat:") {
             if let Ok(chat) = self.spec.content.clone().downcast::<crate::chat::ChatPane>() {
                 let geometry = chat.read(cx).decoration_bounds.clone();
                 working_bubble = Some(chat.read(cx).working_bubble.clone());
+                chat_header_hover = Some((chat.clone(), chat.read(cx).pane_header_height()));
                 for (surface, layout, mirror, bounds) in [
                     ("pane", crate::activity_sparkles::SparkleLayout::Pane, false, geometry.pane),
                     ("header", crate::activity_sparkles::SparkleLayout::Header, true, geometry.header),
@@ -453,11 +462,29 @@ impl Render for NativePanel {
                 }
             }
         }
+        let content_opacity = appearance
+            .filter(|appearance| !active && appearance.dim_inactive)
+            .map_or(1., |appearance| appearance.inactive_opacity);
         let content = self.spec.content.clone().cached(StyleRefinement::default().size_full()).into_any_element();
         let content = if let Some(header) = self.git_header() {
             div().size_full().min_h_0().flex().flex_col().child(header)
                 .child(div().flex_1().min_h_0().w_full().relative().child(content)).into_any_element()
         } else { content };
+        let chat_header_sensor = chat_header_hover.map(|(chat, height)| {
+            div()
+                .id("chat-header-hover-sensor")
+                .debug_selector(|| "chat-header-hover-sensor".into())
+                .absolute()
+                .top_0()
+                .left_0()
+                .right_0()
+                .h(height)
+                .on_hover(move |hovered, _, cx| {
+                    chat.update(cx, |chat, cx| {
+                        chat.set_header_controls_hovered(*hovered, cx)
+                    });
+                })
+        });
         // Only paint proves effective visibility. Active slots can be hidden,
         // collapsed, displaced by zoom, or outside the host's current route.
         div()
@@ -491,17 +518,24 @@ impl Render for NativePanel {
             )
             .on_hover(move |hovered, _, cx| hover_background.update(cx, |background, cx| background.set_hovered(*hovered, cx)))
             .child(div().absolute().inset_0().child(background))
-            .child(div().size_full().relative()
-                .when_some(appearance, |this, appearance| this.when(!active && appearance.dim_inactive, |this| this.opacity(appearance.inactive_opacity)))
-                .child(
-                // Cached prepaint/paint now replay AccessKit nodes and actions.
-                // Keep the visibility canvas outside the cached content.
-                content
-            )
-            .children(decorations)
-            .when_some(working_bubble, |this, bubble| this.child(bubble)))
+            .child(pane_content_layers(content, decorations, content_opacity)
+                .when_some(working_bubble, |this, bubble| this.child(
+                    div().absolute().inset_0().opacity(content_opacity).child(bubble))))
+            .when_some(chat_header_sensor, |this, sensor| this.child(sensor))
     }
 }
+// Activity fields retain their own focus/lifecycle opacity independently of the
+// user's inactive-content setting, while remaining outside the content cache.
+fn pane_content_layers(
+    content: AnyElement,
+    decorations: impl IntoIterator<Item = Entity<crate::activity_sparkles::SparkleField>>,
+    content_opacity: f32,
+) -> Div {
+    div().size_full().relative()
+        .child(div().size_full().opacity(content_opacity).child(content))
+        .children(decorations)
+}
+
 #[derive(Clone)]
 struct RegistryEntry {
     panels: Rc<RefCell<HashMap<String, Entity<NativePanel>>>>,
@@ -570,6 +604,16 @@ impl DockWorkspace {
                 .get(&key)
                 .and_then(|entry| entry.panels.borrow().get(id).cloned())
                 .expect("native restore preflight registered pane");
+            // Apply every saved leaf even when its content entity was retained.
+            // Older layouts have no mode and restore the original Chat default.
+            let watch_mode = match context.info() {
+                PanelInfo::Panel(value) => value["watchMode"].as_bool().unwrap_or(false),
+                _ => false,
+            };
+            let content = panel.read(cx).spec.content.clone();
+            if let Ok(chat) = content.downcast::<crate::chat::ChatPane>() {
+                chat.update(cx, |chat, cx| chat.restore_watch_mode(watch_mode, cx));
+            }
             panel_handle(panel)
         });
         let changed = cx.subscribe_in(&area, window, |workspace, _, event, window, cx| {

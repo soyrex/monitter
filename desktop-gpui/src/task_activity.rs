@@ -80,7 +80,8 @@ fn active_tools<'a>(
         if event["kind"] != "computer" {
             continue;
         }
-        let Ok(data) = serde_json::from_str::<Value>(event["detail"].as_str().unwrap_or_default()) else {
+        let Ok(data) = serde_json::from_str::<Value>(event["detail"].as_str().unwrap_or_default())
+        else {
             continue;
         };
         let Some(id) = data["id"].as_str() else {
@@ -119,7 +120,8 @@ fn snapshot_active_tools(task: &Value, task_id: &str, snapshot: &Value) -> Vec<S
         .flatten()
         .filter(|event| event["taskId"] == task_id);
     if let Some(context) = snapshot.get("nativeMessageContext") {
-        let user = context[task_id]["latestUserAt"].as_i64()
+        let user = context[task_id]["latestUserAt"]
+            .as_i64()
             .map(|at| json!({"role":"user", "createdAt":at}));
         active_tools(task, user.iter(), events)
     } else {
@@ -190,6 +192,15 @@ impl TaskActivityPane {
             self.margin_inline = margin_inline;
             cx.notify();
         }
+    }
+    pub(crate) fn watch_goal(&self) -> Option<&Value> { self.goal.as_ref() }
+    pub(crate) fn render_watch_goal(&self, palette: design::Palette, ratio: f32) -> AnyElement {
+        watch_goal::render(self, palette, ratio)
+    }
+    #[cfg(test)]
+    pub(crate) fn set_watch_goal_fixture(&mut self, goal: Option<Value>, cx: &mut Context<Self>) {
+        self.goal = goal;
+        cx.notify();
     }
     pub fn set_watch_mode(&mut self, enabled: bool, cx: &mut Context<Self>) {
         if self.watch_mode == enabled {
@@ -448,30 +459,32 @@ impl TaskActivityPane {
                 );
             }
             return div()
-                    .flex()
-                    .items_center()
-                    .gap(px(10.))
-                    .px(px(12.))
-                    .py(px(10.))
-                    .border_1()
-                    .border_color(rgb(palette.line))
-                    .border_blend_mode(crate::surface_blend::separator_mode())
-                    .rounded(px(8.))
-                    .bg(crate::design::surface_color(palette.card))
-                    .child(body)
-                    .child(
-                        Button::new("computer-stop")
-                            .compact()
-                            .label("Stop")
-                            .accessibility_label("Stop computer use")
-                            .disabled(self.mutating)
-                            .on_click(cx.listener(|view, _, _, cx| view.mutate("cancel_task", cx))),
-                    );
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .px(px(12.))
+                .py(px(10.))
+                .border_1()
+                .border_color(rgb(palette.line))
+                .border_blend_mode(crate::surface_blend::separator_mode())
+                .rounded(px(8.))
+                .bg(crate::design::surface_color(palette.card))
+                .child(body)
+                .child(
+                    Button::new("computer-stop")
+                        .compact()
+                        .label("Stop")
+                        .accessibility_label("Stop computer use")
+                        .disabled(self.mutating)
+                        .on_click(cx.listener(|view, _, _, cx| view.mutate("cancel_task", cx))),
+                );
         }
         div()
     }
 }
-pub struct ComputerUseBubble { activity: Entity<TaskActivityPane> }
+pub struct ComputerUseBubble {
+    activity: Entity<TaskActivityPane>,
+}
 impl ComputerUseBubble {
     pub fn new(activity: Entity<TaskActivityPane>, cx: &mut Context<Self>) -> Self {
         cx.observe(&activity, |_, _, cx| cx.notify()).detach();
@@ -481,11 +494,26 @@ impl ComputerUseBubble {
 impl Render for ComputerUseBubble {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let visible = !self.activity.read(cx).tools.is_empty();
-        if !visible { return div(); }
-        let bubble = self.activity.update(cx, |activity, cx| activity.render_computer(cx));
-        div().absolute().top(px(8.)).left(px(12.)).right(px(12.))
-            .flex().justify_center()
-            .child(div().w_full().max_w(px(480.)).text_size(px(12.)).child(bubble))
+        if !visible {
+            return div();
+        }
+        let bubble = self
+            .activity
+            .update(cx, |activity, cx| activity.render_computer(cx));
+        div()
+            .absolute()
+            .top(px(8.))
+            .left(px(12.))
+            .right(px(12.))
+            .flex()
+            .justify_center()
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(480.))
+                    .text_size(px(12.))
+                    .child(bubble),
+            )
     }
 }
 impl Render for TaskActivityPane {
@@ -785,8 +813,10 @@ mod tests {
             Some(Duration::from_secs(900))
         );
         assert_eq!(next_goal_read(None, true, 0), None);
-        assert_eq!(next_goal_read(Some(&json!({"status":"active"})), true, u32::MAX),
-            Some(Duration::from_secs(60)));
+        assert_eq!(
+            next_goal_read(Some(&json!({"status":"active"})), true, u32::MAX),
+            Some(Duration::from_secs(60))
+        );
     }
     #[::core::prelude::v1::test]
     fn computer_activity_requires_current_running_turn_and_matching_lifecycle() {
@@ -845,9 +875,12 @@ mod tests {
     }
     #[::core::prelude::v1::test]
     fn borrowed_activity_uses_latest_user_cutoff_and_preserves_event_order() {
-        let task = json!({"id":"own","status":"running","provider":"codex","nativeSessionId":"session"});
-        let event = |id: &str, phase: &str, at: i64| json!({"taskId":"own","kind":"computer","createdAt":at,
-            "detail":json!({"id":id,"phase":phase,"summary":id}).to_string()});
+        let task =
+            json!({"id":"own","status":"running","provider":"codex","nativeSessionId":"session"});
+        let event = |id: &str, phase: &str, at: i64| {
+            json!({"taskId":"own","kind":"computer","createdAt":at,
+            "detail":json!({"id":id,"phase":phase,"summary":id}).to_string()})
+        };
         let mut snapshot = json!({
             "messages":[
                 {"taskId":"own","role":"user","createdAt":30},
@@ -865,7 +898,8 @@ mod tests {
         assert_eq!(snapshot_active_tools(&task, "own", &snapshot), ["current"]);
         let mut compact = snapshot.clone();
         compact["messages"] = json!([]);
-        compact["nativeMessageContext"] = json!({"own":{"latestUserAt":30}, "other":{"latestUserAt":300}});
+        compact["nativeMessageContext"] =
+            json!({"own":{"latestUserAt":30}, "other":{"latestUserAt":300}});
         assert_eq!(snapshot_active_tools(&task, "own", &compact), ["current"]);
         compact["nativeMessageContext"]["own"]["latestUserAt"] = Value::Null;
         assert!(snapshot_active_tools(&task, "own", &compact).is_empty());
@@ -875,16 +909,32 @@ mod tests {
         assert!(snapshot_active_tools(&task, "own", &snapshot).is_empty());
         // Preserve chronological input processing: a later observed start is
         // still visible after the turn-failed marker, just as before this repair.
-        snapshot["events"].as_array_mut().unwrap().push(event("restarted", "started", 37));
-        assert_eq!(snapshot_active_tools(&task, "own", &snapshot), ["restarted"]);
+        snapshot["events"]
+            .as_array_mut()
+            .unwrap()
+            .push(event("restarted", "started", 37));
+        assert_eq!(
+            snapshot_active_tools(&task, "own", &snapshot),
+            ["restarted"]
+        );
     }
     #[::core::prelude::v1::test]
     fn inactive_or_userless_activity_does_not_traverse_unused_borrowed_inputs() {
-        let never_read = std::iter::once_with(|| -> &Value { panic!("unused history was traversed") });
-        let never_read_events = std::iter::once_with(|| -> &Value { panic!("unused events were traversed") });
+        let never_read =
+            std::iter::once_with(|| -> &Value { panic!("unused history was traversed") });
+        let never_read_events =
+            std::iter::once_with(|| -> &Value { panic!("unused events were traversed") });
         assert!(active_tools(&json!({"status":"idle"}), never_read, never_read_events).is_empty());
         let assistant_only = [json!({"role":"assistant","createdAt":100})];
-        let never_read_events = std::iter::once_with(|| -> &Value { panic!("no user cutoff must skip events") });
-        assert!(active_tools(&json!({"status":"running"}), &assistant_only, never_read_events).is_empty());
+        let never_read_events =
+            std::iter::once_with(|| -> &Value { panic!("no user cutoff must skip events") });
+        assert!(
+            active_tools(
+                &json!({"status":"running"}),
+                &assistant_only,
+                never_read_events
+            )
+            .is_empty()
+        );
     }
 }

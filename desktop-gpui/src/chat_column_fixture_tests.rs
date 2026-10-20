@@ -2,8 +2,9 @@
 use super::transcript_column;
 use crate::design;
 use gpui::{
-    AppContext as _, InteractiveElement as _, StatefulInteractiveElement as _, Context, IntoElement, ParentElement as _, Render, Styled as _, TestAppContext,
-    VisualTestContext, Window, ListState, canvas, div, px, size,
+    AppContext as _, Context, InteractiveElement as _, IntoElement, ListState, ParentElement as _,
+    Render, StatefulInteractiveElement as _, Styled as _, TestAppContext, VisualTestContext,
+    Window, canvas, div, px, size,
 };
 use gpui_kit::component::Root;
 use std::{cell::RefCell, rc::Rc};
@@ -121,20 +122,47 @@ fn virtual_transcript_rows_use_a_centered_shared_width(cx: &mut TestAppContext) 
 #[::core::prelude::v1::test]
 fn transcript_block_spacing_follows_density_and_doubles_normal() {
     use serde_json::json;
-    assert_eq!(super::transcript_block_gap(&json!({"interfaceDensity":"tight"})), 10.);
-    assert_eq!(super::transcript_block_gap(&json!({"interfaceDensity":"normal"})), 20.);
-    assert_eq!(super::transcript_block_gap(&json!({"interfaceDensity":"spacious"})), 40.);
+    assert_eq!(
+        super::transcript_block_gap(&json!({"interfaceDensity":"tight"})),
+        10.
+    );
+    assert_eq!(
+        super::transcript_block_gap(&json!({"interfaceDensity":"normal"})),
+        20.
+    );
+    assert_eq!(
+        super::transcript_block_gap(&json!({"interfaceDensity":"spacious"})),
+        40.
+    );
     assert_eq!(super::transcript_block_gap(&json!({})), 20.);
 }
 
-struct ComposerControlsFixture { hidden: gpui::Pixels }
+struct ComposerControlsFixture {
+    hidden: gpui::Pixels,
+}
 impl Render for ComposerControlsFixture {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div().size_full().overflow_hidden().flex().flex_col()
+        div()
+            .size_full()
+            .overflow_hidden()
+            .flex()
+            .flex_col()
             .child(div().flex_1().min_h_0())
-            .child(super::composer_scroll_stack(self.hidden)
-                .child(div().debug_selector(|| "scroll-fixture-composer".into()).h(px(80.)).w_full())
-                .child(div().debug_selector(|| "scroll-fixture-companion-controls".into()).h(px(30.)).w_full()))
+            .child(
+                super::composer_scroll_stack(self.hidden)
+                    .child(
+                        div()
+                            .debug_selector(|| "scroll-fixture-composer".into())
+                            .h(px(80.))
+                            .w_full(),
+                    )
+                    .child(
+                        div()
+                            .debug_selector(|| "scroll-fixture-companion-controls".into())
+                            .h(px(30.))
+                            .w_full(),
+                    ),
+            )
     }
 }
 
@@ -151,19 +179,40 @@ fn companion_controls_share_composer_scroll_offset_and_leave_viewport(cx: &mut T
     visual.simulate_resize(size(px(600.), px(500.)));
     draw(visual);
     let composer = visual.debug_bounds("scroll-fixture-composer").unwrap();
-    let controls = visual.debug_bounds("scroll-fixture-companion-controls").unwrap();
+    let controls = visual
+        .debug_bounds("scroll-fixture-companion-controls")
+        .unwrap();
     assert!((composer.bottom() - controls.top()).abs() <= px(1.));
-    visual.update(|_, cx| fixture.update(cx, |fixture, cx| { fixture.hidden = px(45.); cx.notify(); }));
+    visual.update(|_, cx| {
+        fixture.update(cx, |fixture, cx| {
+            fixture.hidden = px(45.);
+            cx.notify();
+        })
+    });
     draw(visual);
     let shifted_composer = visual.debug_bounds("scroll-fixture-composer").unwrap();
-    let shifted_controls = visual.debug_bounds("scroll-fixture-companion-controls").unwrap();
+    let shifted_controls = visual
+        .debug_bounds("scroll-fixture-companion-controls")
+        .unwrap();
     assert!((shifted_composer.top() - composer.top() - px(45.)).abs() <= px(1.));
     assert!((shifted_controls.top() - controls.top() - px(45.)).abs() <= px(1.));
-    visual.update(|_, cx| fixture.update(cx, |fixture, cx| { fixture.hidden = px(110.); cx.notify(); }));
+    visual.update(|_, cx| {
+        fixture.update(cx, |fixture, cx| {
+            fixture.hidden = px(110.);
+            cx.notify();
+        })
+    });
     draw(visual);
-    for selector in ["scroll-fixture-composer", "scroll-fixture-companion-controls"] {
-        assert!(visual.debug_bounds(selector).is_none_or(|bounds| bounds.top() >= px(500.)),
-            "{selector} must leave the visible pane");
+    for selector in [
+        "scroll-fixture-composer",
+        "scroll-fixture-companion-controls",
+    ] {
+        assert!(
+            visual
+                .debug_bounds(selector)
+                .is_none_or(|bounds| bounds.top() >= px(500.)),
+            "{selector} must leave the visible pane"
+        );
     }
 }
 use gpui_kit::{InteractiveElement as _, StatefulInteractiveElement as _};
@@ -179,35 +228,60 @@ struct BackToBottomClickFixture {
 }
 impl Render for BackToBottomClickFixture {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        use gpui_kit::component::{Disableable as _, Sizable as _, button::Button};
         use gpui::InteractiveElement as _;
+        use gpui_kit::component::{Disableable as _, Sizable as _, button::Button};
         let arrow = self.arrow_clicks.clone();
         let underlay = self.underlay_clicks.clone();
         let ancestor = self.ancestor_clicks.clone();
         let presses = self.ancestor_presses.clone();
         let releases = self.ancestor_presses.clone();
-        let jump = super::back_to_bottom_surface().size(px(36.)).rounded_full()
-            .child(Button::new("click-fixture-back-to-bottom").compact().size_full().p_0()
-                .disabled(self.disabled).label("↓")
-                .on_click(move |_, _, cx| {
-                    cx.stop_propagation();
-                    arrow.set(arrow.get() + 1);
-                })).into_any_element();
-        div().id("click-fixture-ancestor").size_full().relative()
+        let jump = super::back_to_bottom_surface()
+            .size(px(36.))
+            .rounded_full()
+            .child(
+                Button::new("click-fixture-back-to-bottom")
+                    .compact()
+                    .size_full()
+                    .p_0()
+                    .disabled(self.disabled)
+                    .label("↓")
+                    .on_click(move |_, _, cx| {
+                        cx.stop_propagation();
+                        arrow.set(arrow.get() + 1);
+                    }),
+            )
+            .into_any_element();
+        div()
+            .id("click-fixture-ancestor")
+            .size_full()
+            .relative()
             .on_click(move |_, _, _| ancestor.set(ancestor.get() + 1))
-            .on_mouse_down(gpui::MouseButton::Left, move |_, _, _| presses.set(presses.get() + 1))
-            .on_mouse_up(gpui::MouseButton::Left, move |_, _, _| releases.set(releases.get() + 1))
-            .child(Button::new("click-fixture-underlay").absolute().inset_0()
-                .label("Underlying composer control")
-                .on_click(move |_, _, _| underlay.set(underlay.get() + 1)))
+            .on_mouse_down(gpui::MouseButton::Left, move |_, _, _| {
+                presses.set(presses.get() + 1)
+            })
+            .on_mouse_up(gpui::MouseButton::Left, move |_, _, _| {
+                releases.set(releases.get() + 1)
+            })
+            .child(
+                Button::new("click-fixture-underlay")
+                    .absolute()
+                    .inset_0()
+                    .label("Underlying composer control")
+                    .on_click(move |_, _, _| underlay.set(underlay.get() + 1)),
+            )
             .child(super::task_activity::working_bubble::ComposerAnchor::new(
-                self.composer.clone(), self.column.clone(), jump, px(14.),
+                self.composer.clone(),
+                self.column.clone(),
+                jump,
+                px(14.),
             ))
     }
 }
 
 #[gpui_kit::test]
-fn back_to_bottom_anchor_swallows_native_clicks_even_when_exit_disables_button(cx: &mut TestAppContext) {
+fn back_to_bottom_anchor_swallows_native_clicks_even_when_exit_disables_button(
+    cx: &mut TestAppContext,
+) {
     cx.update(gpui_kit::init);
     let arrow = Rc::new(std::cell::Cell::new(0));
     let underlay = Rc::new(std::cell::Cell::new(0));
@@ -216,12 +290,19 @@ fn back_to_bottom_anchor_swallows_native_clicks_even_when_exit_disables_button(c
     let mut retained = None;
     let (_, visual) = cx.add_window_view(|window, cx| {
         let fixture = cx.new(|_| BackToBottomClickFixture {
-            disabled: false, arrow_clicks: arrow.clone(), underlay_clicks: underlay.clone(),
-            ancestor_clicks: ancestor.clone(), ancestor_presses: presses.clone(),
+            disabled: false,
+            arrow_clicks: arrow.clone(),
+            underlay_clicks: underlay.clone(),
+            ancestor_clicks: ancestor.clone(),
+            ancestor_presses: presses.clone(),
             composer: Rc::new(std::cell::Cell::new(Some(gpui::Bounds::new(
-                gpui::point(px(0.), px(300.)), size(px(600.), px(100.)))))),
+                gpui::point(px(0.), px(300.)),
+                size(px(600.), px(100.)),
+            )))),
             column: Rc::new(std::cell::Cell::new(Some(gpui::Bounds::new(
-                gpui::point(px(0.), px(0.)), size(px(600.), px(500.)))))),
+                gpui::point(px(0.), px(0.)),
+                size(px(600.), px(500.)),
+            )))),
         });
         retained = Some(fixture.clone());
         Root::new(fixture, window, cx)
@@ -229,17 +310,31 @@ fn back_to_bottom_anchor_swallows_native_clicks_even_when_exit_disables_button(c
     let fixture = retained.unwrap();
     visual.simulate_resize(size(px(600.), px(500.)));
     draw(visual);
-    let target = visual.debug_bounds("chat-back-to-bottom-hit-surface").unwrap().center();
+    let target = visual
+        .debug_bounds("chat-back-to-bottom-hit-surface")
+        .unwrap()
+        .center();
     visual.simulate_mouse_down(target, gpui::MouseButton::Left, Default::default());
     visual.simulate_mouse_up(target, gpui::MouseButton::Left, Default::default());
     visual.run_until_parked();
     assert_eq!(arrow.get(), 1);
     assert_eq!((underlay.get(), ancestor.get(), presses.get()), (0, 0, 0));
-    fixture.update(visual, |fixture, cx| { fixture.disabled = true; cx.notify(); });
+    fixture.update(visual, |fixture, cx| {
+        fixture.disabled = true;
+        cx.notify();
+    });
     draw(visual);
     visual.simulate_mouse_down(target, gpui::MouseButton::Left, Default::default());
     visual.simulate_mouse_up(target, gpui::MouseButton::Left, Default::default());
     visual.run_until_parked();
-    assert_eq!(arrow.get(), 1, "disabled exiting arrow must not invoke its action");
-    assert_eq!((underlay.get(), ancestor.get(), presses.get()), (0, 0, 0), "paint-anchored surface must occlude and stop both pointer events during exit");
+    assert_eq!(
+        arrow.get(),
+        1,
+        "disabled exiting arrow must not invoke its action"
+    );
+    assert_eq!(
+        (underlay.get(), ancestor.get(), presses.get()),
+        (0, 0, 0),
+        "paint-anchored surface must occlude and stop both pointer events during exit"
+    );
 }

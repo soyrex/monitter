@@ -14,7 +14,7 @@ pub(crate) const IDLE_RUNTIME_TIMEOUT: Duration = Duration::from_secs(45);
 const COLLECT_INTERVAL: Duration = Duration::from_secs(10);
 pub(crate) const RUNTIME_RELEASE_TIMEOUT: Duration = Duration::from_secs(15);
 
-fn task_allows_retirement(data: &ServiceData, task_id: &str) -> bool {
+pub(super) fn task_allows_retirement(data: &ServiceData, task_id: &str) -> bool {
     let Some(task) = data.snapshot.tasks.iter().find(|task| task.id == task_id) else {
         return false;
     };

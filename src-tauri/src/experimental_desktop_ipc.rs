@@ -1326,8 +1326,11 @@ fn decode_response<T: DeserializeOwned>(response: Response, id: &str) -> Result<
         Some(_) => Err("Invalid private IPC response.".into()),
     }
 }
-fn dispatch(backend: &BackendService, method: &str, args: Value) -> Result<Value, String> {
+pub(super) fn dispatch(backend: &BackendService, method: &str, args: Value) -> Result<Value, String> {
     match method {
+        "save_project_ideas" => encode(backend.save_project_ideas(
+            &arg::<String>(&args, "projectId")?, arg(&args, "ideas")?, arg(&args, "expectedRevision")?,
+        )?),
         "invoke" => {
             let command = arg::<String>(&args, "command")?;
             let command_args = arg::<Value>(&args, "args")?;

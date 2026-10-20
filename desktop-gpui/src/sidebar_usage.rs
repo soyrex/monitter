@@ -1859,6 +1859,19 @@ impl SidebarUsageWidget {
         ));
         body = body.child(
             div()
+                .id("sidebar-clock-usage-separator")
+                .debug_selector(|| "sidebar-clock-usage-separator".into())
+                .flex_shrink_0()
+                .bg(rgb(palette.line))
+                .when(self.compact_tern(), |separator| {
+                    separator.w_full().h(px(1.))
+                })
+                .when(!self.compact_tern(), |separator| {
+                    separator.w(px(1.)).h(px(clock_size))
+                }),
+        );
+        body = body.child(
+            div()
                 .flex_1()
                 .min_w_0()
                 .flex()

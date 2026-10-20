@@ -1125,6 +1125,13 @@ impl BackendService {
         self.0.service.ui_delta(revision)
     }
 
+    /// Private native save acknowledgement. Authoritative records arrive on the
+    /// retained UI change feed; never return the complete workspace history.
+    pub fn save_project_ideas(&self, project_id: &str, ideas: Vec<crate::model::ProjectIdea>, expected_revision: u64) -> Result<u64, String> {
+        self.ensure_running()?;
+        self.0.service.save_project_ideas_ack(project_id, ideas, expected_revision)
+    }
+
     /// Private native projection; scope controls reset tails and delta previews,
     /// while journal revisions and authoritative history remain shared.
     pub fn read_native_ui_changes(
@@ -1484,6 +1491,9 @@ impl DesktopService {
         self.0
             .call("invoke", serde_json::json!({"command":command,"args":args}))
     }
+    pub fn save_project_ideas(&self, project_id: &str, ideas: Vec<crate::model::ProjectIdea>, expected_revision: u64) -> Result<u64, String> {
+        self.0.call("save_project_ideas", serde_json::json!({"projectId":project_id,"ideas":ideas,"expectedRevision":expected_revision}))
+    }
     pub fn read_ui_changes(&self, revision: Option<&str>) -> Result<UiDeltaResponse, String> {
         self.0
             .call("read_ui_changes", serde_json::json!({"revision":revision}))
@@ -1747,6 +1757,39 @@ mod tests {
         .unwrap();
         assert!(lan_asset_roots(&profile, &root.join("binary")).is_err());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_ideas_save_ack_does_not_serialize_workspace_history() {
+        let dir = std::env::temp_dir().join(format!("gpui-ideas-ack-{}", uuid::Uuid::new_v4()));
+        let service = Service::open(None, dir.clone()).unwrap();
+        service.mutate(None, |snapshot| {
+            let mut project = snapshot.projects.first().cloned().unwrap_or_else(|| serde_json::from_value(json!({
+                "id":"native-ideas", "name":"Ideas", "description":"", "icon":"folder", "color":"#123456", "workspaces":[]
+            })).unwrap());
+            project.id = "native-ideas".into(); project.ideas.clear(); project.ideas_revision = 0;
+            snapshot.projects.push(project);
+            snapshot.messages.push(serde_json::from_value(json!({"id":"large-history", "taskId":"history", "role":"assistant", "text":"x".repeat(33 * 1024 * 1024), "createdAt":1})).unwrap());
+            Ok(())
+        }).unwrap();
+        let desktop = BackendService(Arc::new(Session {
+            lan_control: std::sync::Mutex::new(()), service,
+            preferences: NativePreferenceStore::new(dir.clone()),
+        }));
+        let args = json!({"projectId":"native-ideas", "ideas":[{"id":"one", "title":"Manual capture", "markdown":"", "createdAt":0, "updatedAt":0}], "expectedRevision":0});
+        // Exercise the exact private dispatcher used by the retained Ideas pane.
+        let ack = ipc::dispatch(&desktop, "save_project_ideas", args.clone()).unwrap();
+        assert_eq!(ack, json!(1));
+        assert!(serde_json::to_vec(&ack).unwrap().len() < 32);
+        assert!(ipc::dispatch(&desktop, "save_project_ideas", args).unwrap_err().contains("changed elsewhere"));
+        let saved = desktop.0.service.snapshot().unwrap();
+        let project = saved.projects.iter().find(|p| p.id == "native-ideas").unwrap();
+        assert_eq!(project.ideas.len(), 1);
+        assert_eq!(project.ideas[0].author_kind, "person");
+        assert_eq!(project.ideas_revision, 1);
+        assert!(saved.messages.iter().any(|m| m.id == "large-history" && m.text.len() > 32 * 1024 * 1024));
+        drop(saved); desktop.shutdown(); drop(desktop);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

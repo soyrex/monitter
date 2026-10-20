@@ -807,6 +807,7 @@ pub struct ChatPane {
     companion_visible: bool,
     companion_saved_visible: bool,
     companion_programmatic_resizes: usize,
+    header_controls_hovered: bool,
     pane_width_design: f32,
     pane_height_design: f32,
     compact_detail: bool,
@@ -1320,6 +1321,7 @@ impl ChatPane {
             companion_visible: true,
             companion_saved_visible: true,
             companion_programmatic_resizes: 0,
+            header_controls_hovered: false,
             pane_width_design: 0.0,
             pane_height_design: 0.0,
             compact_detail: false,
@@ -6282,6 +6284,9 @@ impl Render for ChatPane {
             .flex()
             .flex_col()
             .overflow_hidden()
+            .when(self.watcher.enabled, |this| {
+                this.bg(watcher::watcher_surface(palette))
+            })
             .child({
                 let geometry = self.decoration_bounds.pane.clone();
                 canvas(
@@ -6511,6 +6516,9 @@ impl Render for ChatPane {
             .text_color(rgb(palette.ink))
             .child(measurement)
             .child(upper_workspace)
+            .when(!self.watcher.enabled, |pane| {
+                pane.child(self.render_watcher_toggle(palette, cx))
+            })
             .children(approval_overlay)
             .into_any_element()
     }
@@ -6585,6 +6593,42 @@ impl ChatPane {
         self.dock_group = group;
         cx.notify();
     }
+
+    pub(crate) fn set_header_controls_hovered(
+        &mut self,
+        hovered: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.header_controls_hovered != hovered {
+            self.header_controls_hovered = hovered;
+            cx.notify();
+        }
+    }
+
+    fn header_metrics(&self) -> (bool, f32, f32) {
+        let tern_tiles =
+            design::tile_theme() == monitter_lib::experimental_desktop::NativeTileTheme::Tern;
+        let density = field(&self.snapshot["settings"], "interfaceDensity");
+        let header_padding_y = match (tern_tiles, density.as_str()) {
+            (true, "spacious") => 8.,
+            (true, _) => 6.,
+            (false, "tight") => space::TIGHT,
+            (false, "spacious") => space::GROUP,
+            _ => space::INSET,
+        };
+        let avatar_size = match (tern_tiles, density.as_str()) {
+            (true, _) => 24.,
+            (false, "tight") => 26.,
+            (false, "spacious") => 34.,
+            _ => 30.,
+        };
+        (tern_tiles, header_padding_y, avatar_size)
+    }
+
+    pub(crate) fn pane_header_height(&self) -> Pixels {
+        let (_, header_padding_y, avatar_size) = self.header_metrics();
+        px(avatar_size + 2. * header_padding_y)
+    }
     pub(super) fn render_chat_header(
         &self,
         task: Option<&Value>,
@@ -6622,31 +6666,7 @@ impl ChatPane {
         let provider_icon = task.and_then(|task| {
             branding::provider_for_ink(&field(task, "provider"), &field(task, "model"), palette.ink)
         });
-        let tern_tiles =
-            design::tile_theme() == monitter_lib::experimental_desktop::NativeTileTheme::Tern;
-        let pane_appearance = crate::pane_appearance::PaneAppearance::from_settings(
-            &self.snapshot["settings"],
-            palette,
-        );
-        let active_border_visible = pane_appearance.show_active_border
-            && crate::docking::pane_visual_active(&self.focus, window, cx)
-            && !crate::preferences_modal::workspace_blocked(cx);
-        let watcher_header_group =
-            SharedString::from(format!("watch-pane-header-hover-{}", self.task_id()));
-        let density = field(&self.snapshot["settings"], "interfaceDensity");
-        let header_padding_y = match (tern_tiles, density.as_str()) {
-            (true, "spacious") => 8.,
-            (true, _) => 6.,
-            (false, "tight") => space::TIGHT,
-            (false, "spacious") => space::GROUP,
-            _ => space::INSET,
-        };
-        let avatar_size = match (tern_tiles, density.as_str()) {
-            (true, _) => 24.,
-            (false, "tight") => 26.,
-            (false, "spacious") => 34.,
-            _ => 30.,
-        };
+        let (tern_tiles, header_padding_y, avatar_size) = self.header_metrics();
         // Working motion belongs to the header in both layouts, never the dock tab.
         let animate_identity =
             self.is_working() && !cx.reduce_motion() && crate::native_motion::motion_allowed();
@@ -6803,25 +6823,8 @@ impl ChatPane {
             } else {
                 space::GROUP
             }))
-            .border_b_1()
-            .border_color(rgb(palette.line))
-            .border_blend_mode(crate::surface_blend::separator_mode())
-            .when(tern_tiles, |this| {
-                this.border_color(design::tile_border_color(palette))
-                    .border_blend_mode(0)
-            })
-            .when(active_border_visible, |this| {
-                let mut color = rgb(pane_appearance.resolved_active_border_color());
-                if tern_tiles {
-                    color.a = pane_appearance.resolved_active_border_opacity();
-                }
-                this.border_color(color).border_blend_mode(0)
-            })
             .when(self.watcher.enabled, |this| {
-                this.group(watcher_header_group.clone())
-                    .border_b_0()
-                    .pl(px(12.))
-                    .pr(px(12.))
+                this.pl(px(12.)).pr(px(12.))
             })
             .child({
                 let geometry = self.decoration_bounds.header.clone();
@@ -6832,7 +6835,7 @@ impl ChatPane {
                 .absolute()
                 .size_full()
             })
-            .when(!self.approval_popup_open, |header| {
+            .when(!self.approval_popup_open && !self.watcher.enabled, |header| {
                 header.children(crate::activity_effects::for_task_in_window(
                     &self.task_id(),
                     "header-wash",
@@ -6844,8 +6847,7 @@ impl ChatPane {
             })
             .when(!self.watcher.enabled, |header| {
                 header.child(identity_mark).child(identity)
-            })
-            .child(self.render_watcher_toggle(palette, cx));
+            });
 
         if self.watcher.enabled {
             if let Some(group) = self.dock_group.as_ref().and_then(|group| group.upgrade()) {
@@ -6860,8 +6862,15 @@ impl ChatPane {
                     )
                     .child(
                         div()
-                            .invisible()
-                            .group_hover(watcher_header_group, |style| style.visible())
+                            .id("watch-header-controls")
+                            .debug_selector(|| "watch-header-controls".into())
+                            .w(px(0.))
+                            .max_w(px(0.))
+                            .opacity(0.)
+                            .overflow_hidden()
+                            .when(self.header_controls_hovered, |style| {
+                                style.w(px(24.)).max_w(px(24.)).opacity(1.)
+                            })
                             .child(
                                 gpui_kit::component::dock::pane_close_control(&context, cx)
                                     .w(px(24.))
@@ -6874,6 +6883,7 @@ impl ChatPane {
             return header.into_any_element();
         }
         let sidebar_toggle = Button::new("toggle-pane-secondary-sidebar")
+            .debug_selector(|| "toggle-pane-secondary-sidebar".into())
             .compact()
             .text()
             .when(tern_tiles, |button| button.w(px(24.)).h(px(24.)).p_0())
@@ -6897,11 +6907,28 @@ impl ChatPane {
             let context = group.read(cx).context(cx);
             // Equal insets around the close control, mirrored across the divider.
             let inset = px((avatar_size + 2. * header_padding_y - 24.) / 2.);
+            let expanded_width = if self.pane_width_design >= 420. {
+                91.
+            } else {
+                61.
+            };
             header = header.child(
                 div()
+                    .id("chat-header-controls")
+                    .debug_selector(|| "chat-header-controls".into())
                     .flex()
                     .items_center()
                     .gap(inset)
+                    .w(px(0.))
+                    .max_w(px(0.))
+                    .opacity(0.)
+                    .overflow_hidden()
+                    .when(self.header_controls_hovered, move |style| {
+                        style
+                            .w(px(expanded_width))
+                            .max_w(px(expanded_width))
+                            .opacity(1.)
+                    })
                     .when(self.pane_width_design >= 420., |controls| {
                         controls.children(
                             gpui_kit::component::dock::pane_zoom_control(&context, cx).map(
@@ -6932,7 +6959,19 @@ impl ChatPane {
                     ),
             );
         } else {
-            header = header.child(sidebar_toggle);
+            header = header.child(
+                div()
+                    .id("chat-header-controls")
+                    .debug_selector(|| "chat-header-controls".into())
+                    .w(px(0.))
+                    .max_w(px(0.))
+                    .opacity(0.)
+                    .overflow_hidden()
+                    .when(self.header_controls_hovered, |style| {
+                        style.w(px(40.)).max_w(px(40.)).opacity(1.)
+                    })
+                    .child(sidebar_toggle),
+            );
         }
         header.into_any_element()
     }

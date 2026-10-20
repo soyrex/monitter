@@ -22,6 +22,8 @@ mod settings_general;
 mod settings_services;
 #[path = "settings_navigation.rs"]
 mod settings_navigation;
+#[path = "settings_work_history.rs"]
+mod settings_work_history;
 #[path = "settings_search.rs"]
 mod settings_search;
 
@@ -187,6 +189,7 @@ pub(super) struct NativeSettings {
     appearance_advanced: bool,
     lan: Option<Entity<lan_settings::LanSettingsPane>>,
     services: Option<Entity<settings_services::ServicePreferencesPane>>,
+    work_history: Option<Entity<settings_work_history::WorkHistoryPane>>,
     service_revision: Option<String>,
     user_name: Entity<InputState>,
     accent: Entity<InputState>,
@@ -218,6 +221,7 @@ impl NativeSettings {
         for font in &self.fonts { ids.extend([font.family.entity_id(), font.weight.entity_id()]); }
         ids.extend(self.lan.iter().map(Entity::entity_id));
         ids.extend(self.services.iter().map(Entity::entity_id));
+        ids.extend(self.work_history.iter().map(Entity::entity_id));
         if let Some(appearance) = &self.appearance {
             ids.extend([
                 appearance.light.entity_id(), appearance.dark.entity_id(), appearance.accent_picker.entity_id(),
@@ -230,6 +234,9 @@ impl NativeSettings {
             input.update(cx, |input, cx| input.rehost_to_window(window, cx))?;
         }
         self.board_guidance.update(cx, |input, cx| input.rehost_to_window(window, cx))?;
+        if let Some(pane) = &self.work_history {
+            pane.update(cx, |pane, cx| pane.rehost_to_window(window, cx))?;
+        }
         if let Some(appearance) = &self.appearance {
             appearance.accent.update(cx, |input, cx| input.rehost_to_window(window, cx))?;
         }
@@ -291,6 +298,7 @@ impl NativeSettings {
             appearance_advanced: false,
             lan: None,
             services: None,
+            work_history: None,
             service_revision: None,
             fonts,
             chat_line_height: cx.new(|_| {
@@ -1127,9 +1135,24 @@ impl Desktop {
         let category = self.window.native_settings.as_ref().unwrap().category.clone();
         let destination = settings_navigation::category(&category);
         let title = destination.label;
+        // Owner-private history is loaded only when this dedicated category is opened.
+        if category == "work-history" && self.window.native_settings.as_ref().is_some_and(|state| state.work_history.is_none()) {
+            if let Some(service) = self.service.clone() {
+                let pane = cx.new(|cx| settings_work_history::WorkHistoryPane::new(service, window, cx));
+                self.window.native_settings.as_mut().unwrap().work_history = Some(pane);
+            }
+        }
         let mut body = match category.as_str() {
             "general" | "profile" => settings_general::render_profile(self, window, cx, palette),
             "security" => settings_general::render_security(self, window, cx, palette),
+            "work-history" => {
+                if let Some(pane) = self.window.native_settings.as_ref().and_then(|state| state.work_history.clone()) {
+                    let presentation = SearchCardPresentation::new(self);
+                    pane.update(cx, |pane, cx| pane.render(palette, window, cx, &presentation))
+                } else {
+                    div().child("Local Work History service is unavailable.").into_any_element()
+                }
+            }
             "behaviour" => settings_general::render_behavior(self, cx, palette),
             "conversation" => settings_general::render_conversation(self, cx, palette),
             "appearance" | "interface" | "typography" | "terminal" => {
@@ -1514,6 +1537,50 @@ mod modal_layout_tests {
         visual.read(|cx| assert_eq!(desktop.read(cx).native_settings.as_ref().unwrap().category, "typography"));
         visual.simulate_keystrokes("escape");
         visual.read(|cx| assert!(!desktop.read(cx).preferences_open));
+    }
+
+    #[gpui_kit::test]
+    fn work_history_preferences_renders_private_owner_controls(cx: &mut TestAppContext) {
+        cx.update(|cx| gpui_kit::init(cx));
+        let mut desktop_entity = None;
+        let (_, mut visual) = cx.add_window_view(|window, cx| {
+            let desktop = cx.new(|cx| {
+                let mut desktop = Desktop::new(window, cx);
+                desktop.snapshot = Rc::new(json!({
+                    "settings":{"theme":"dark","userName":"Preview"},
+                    "agents":[],"projects":[],"tasks":[]
+                }));
+                desktop.preferences = Some(NativePreferences::default());
+                desktop.preferences_open = true;
+                desktop.service = Some(DesktopService::disconnected_for_ui_fixture());
+                desktop
+            });
+            desktop_entity = Some(desktop.clone());
+            let harness = cx.new(|_| SettingsHarness { desktop });
+            gpui_kit::component::Root::new(harness, window, cx)
+        });
+        let desktop = desktop_entity.unwrap();
+        visual.simulate_resize(size(gpui_kit::px(1200.), gpui_kit::px(800.)));
+        visual.update(|_, cx| {
+            desktop.update(cx, |desktop, _| {
+                desktop
+                    .window
+                    .native_settings
+                    .as_mut()
+                    .unwrap()
+                    .select_category("work-history");
+            });
+        });
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(visual.debug_bounds("settings-card-Work History collection").is_some());
+        assert!(visual.debug_bounds("settings-card-Recorded work").is_some());
+        assert!(visual.debug_bounds("settings-card-Export & delete").is_some());
+        visual.read(|cx| {
+            let desktop = desktop.read(cx);
+            let settings = desktop.window.native_settings.as_ref().unwrap();
+            assert_eq!(settings.category, "work-history");
+            assert!(settings.work_history.is_some());
+        });
     }
 
     #[gpui_kit::test]
