@@ -206,11 +206,34 @@ mod mounted {
         })
     }
 
-    /// Run this filter alone, with --test-threads=1 --nocapture. NSH's process
-    /// queue belongs to its first GPUI test app, whereas its JS engine and the
-    /// host presentation-state reader run on independent real threads.
+    /// NSH's process queue belongs to its first GPUI test app. Run this fixture
+    /// in a fresh process even when the parent runs every OpenUI test together.
     #[::gpui::test]
     fn native_openui_form_mounts_in_real_transcript(cx: &mut TestAppContext) {
+        const CHILD_GUARD: &str = "MONITTER_OPENUI_MOUNTED_TEST_CHILD";
+        match std::env::var_os(CHILD_GUARD) {
+            None => {
+                let output = std::process::Command::new(
+                    std::env::current_exe().expect("locate mounted-test executable"),
+                )
+                .args([
+                    "--exact",
+                    "openui_runtime_tests::mounted::native_openui_form_mounts_in_real_transcript",
+                    "--test-threads=1",
+                    "--nocapture",
+                ])
+                .env(CHILD_GUARD, "1")
+                .output()
+                .expect("start isolated mounted OpenUI test");
+                if !output.status.success() {
+                    println!("mounted OpenUI child stdout:\n{}", String::from_utf8_lossy(&output.stdout));
+                    println!("mounted OpenUI child stderr:\n{}", String::from_utf8_lossy(&output.stderr));
+                }
+                assert!(output.status.success(), "mounted OpenUI child failed: {}", output.status);
+                return;
+            }
+            Some(value) => assert_eq!(value, "1", "invalid mounted-test child guard"),
+        }
         // Selection group markers catch/rethrow descendant panics. Preserve the
         // ORIGINAL panic site/backtrace in stdout before that unwind loses it.
         let previous: Arc<dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync> =
