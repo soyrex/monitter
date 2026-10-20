@@ -128,7 +128,11 @@ mod pane_approvals;
 mod approval_prompt;
 mod pane_details;
 mod pointer_guard;
-#[cfg(test)]
+// Use the same core crate that Kit reexports so test macro paths and Kit glob
+// imports resolve `gpui` to one identity.
+#[cfg(all(test, target_os = "macos"))]
+extern crate gpui;
+#[cfg(all(test, not(target_os = "macos")))]
 extern crate gpui_kit as gpui;
 #[cfg(test)]
 mod cached_modal_replay_tests;

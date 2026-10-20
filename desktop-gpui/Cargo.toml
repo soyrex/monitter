@@ -38,11 +38,13 @@ vt100 = "=0.16.2"
 uuid = { version = "1", features = ["v4"] }
 
 [patch.crates-io]
-gpui-pre = { path = "vendor/gpui-pre" }
-gpui-pre-macos = { path = "vendor/gpui-pre-macos" }
-gpui-pre-apple = { path = "vendor/gpui-pre-apple" }
-gpui-pre-wgpu = { path = "vendor/gpui-pre-wgpu" }
-gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
+gpui-pre-platform = { path = "vendor/gpui-fast/compat/gpui-pre-platform" }
+gpui-pre-macros = { path = "vendor/gpui-fast/compat/gpui-pre-macros" }
+gpui-pre-sum-tree = { path = "vendor/gpui-fast/compat/gpui-pre-sum-tree" }
+gpui-pre-web = { path = "vendor/gpui-fast/compat/gpui-pre-web" }
+gpui-pre = { path = "vendor/gpui-fast/compat/gpui-pre" }
+gpui-pre-macos = { path = "vendor/gpui-fast/compat/gpui-pre-macos" }
+gpui-pre-apple = { path = "vendor/gpui-fast/compat/gpui-pre-apple" }
 gpui-base = { path = "vendor/gpui-base" }
 gpui-component = { path = "vendor/gpui-component" }
 
@@ -64,7 +66,7 @@ objc2-avf-audio = { version = "=0.3.2", default-features = false, features = ["A
 
 # Keep the native layout/render engine fast in experimental debug previews.
 # Application code retains normal debug checks and diagnostics.
-[profile.dev.package.gpui-pre]
+[profile.dev.package.gpui]
 opt-level = 2
 
 [profile.dev.package.taffy]
