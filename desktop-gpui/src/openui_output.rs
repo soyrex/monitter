@@ -496,16 +496,25 @@ impl OutputBlock {
             self.pending = None;
             self.revision = self.revision.wrapping_add(1);
             self.push_update();
-            self.invalidate();
+            self.invalidate(cx);
             cx.notify();
         }
     }
-    fn invalidate(&self) {
-        if let Some((list, index)) = &self.list_item {
-            if *index < list.item_count() {
-                list.remeasure_items(*index..*index + 1);
-            }
-        }
+    fn invalidate(&self, cx: &mut Context<Self>) {
+        // Documents are reconciled while the virtual list renders a row. Its
+        // ListState is borrowed for layout then, so even reading item_count
+        // synchronously would panic. Recheck the current row after layout.
+        let owner = cx.weak_entity();
+        cx.defer(move |cx| {
+            let _ = owner.update(cx, |block, cx| {
+                if let Some((list, index)) = &block.list_item {
+                    if *index < list.item_count() {
+                        list.remeasure_items(*index..*index + 1);
+                        cx.notify();
+                    }
+                }
+            });
+        });
     }
     fn push_update(&self) {
         if let Some(bridge) = &self.bridge {
@@ -590,7 +599,7 @@ impl OutputBlock {
                     block.pending = None;
                     block.render_notice =
                         Some("Interactive output could not start; source is shown below.".into());
-                    block.invalidate();
+                    block.invalidate(cx);
                     cx.notify();
                 });
             }
@@ -662,12 +671,7 @@ impl OutputBlock {
         }
         self.apply_property(name, value, cx);
     }
-    fn apply_property(
-        &mut self,
-        name: &str,
-        value: Option<&Value>,
-        cx: &mut Context<Self>,
-    ) {
+    fn apply_property(&mut self, name: &str, value: Option<&Value>, cx: &mut Context<Self>) {
         match (name, value) {
             ("status", Some(Value::String(status)))
                 if matches!(
@@ -682,7 +686,7 @@ impl OutputBlock {
                 }
                 if self.status != *status {
                     self.status = status.clone();
-                    self.invalidate();
+                    self.invalidate(cx);
                     cx.notify();
                 }
             }
@@ -694,7 +698,7 @@ impl OutputBlock {
                     let height = (height as f32).clamp(80., 1600.);
                     if (self.height - height).abs() >= 1. {
                         self.height = height;
-                        self.invalidate();
+                        self.invalidate(cx);
                         cx.notify();
                     }
                 }
@@ -755,7 +759,7 @@ impl OutputBlock {
                 );
                 self.status = "error".into();
                 self.pending = None;
-                self.invalidate();
+                self.invalidate(cx);
                 cx.notify();
             }
             _ => {}
@@ -962,17 +966,25 @@ mod openui_output_tests {
             block.complete = true;
             block.status = "rendered".into();
 
-            let prepared = json!({"type":"draft","id":"1","text":"Form response\n{\"colour\":\"blue\"}"});
+            let prepared =
+                json!({"type":"draft","id":"1","text":"Form response\n{\"colour\":\"blue\"}"});
             block.apply_property("action", Some(&prepared), cx);
             assert!(block.pending.as_ref().unwrap().text.contains("blue"));
 
             block.apply_property("state", Some(&initial), cx);
-            assert!(block.pending.is_some(), "an unchanged state echo keeps the prepared response");
+            assert!(
+                block.pending.is_some(),
+                "an unchanged state echo keeps the prepared response"
+            );
             block.apply_property("state", Some(&edited), cx);
             assert_eq!(block.state, edited);
-            assert!(block.pending.is_none(), "editing must remove the stale review action");
+            assert!(
+                block.pending.is_none(),
+                "editing must remove the stale review action"
+            );
 
-            let prepared = json!({"type":"draft","id":"2","text":"Form response\n{\"colour\":\"red\"}"});
+            let prepared =
+                json!({"type":"draft","id":"2","text":"Form response\n{\"colour\":\"red\"}"});
             block.apply_property("action", Some(&prepared), cx);
             let pending = block.pending.as_ref().unwrap();
             assert_eq!(pending.id.as_deref(), Some("2"));
