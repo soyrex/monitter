@@ -48,6 +48,7 @@ pub fn schedule(window: AnyWindowHandle, cx: &mut App) {
     cx.spawn(async move |cx| {
         cx.background_executor().timer(Duration::from_secs(warmup)).await;
         let Ok((start_input, start_frames)) = cx.update_window(window, |_, window, _| {
+            crate::performance_scenario::begin_window_observation(window);
             (window.input_latency_snapshot(), window.frame_duration_snapshot())
         }) else { return; };
         let start_transcript = crate::chat::transcript_preparation_counts();
@@ -60,8 +61,9 @@ pub fn schedule(window: AnyWindowHandle, cx: &mut App) {
         let started = Instant::now();
         let started_at = SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|time| time.as_millis() as u64);
         cx.background_executor().timer(Duration::from_secs(duration)).await;
-        let Ok((mut input, mut frames)) = cx.update_window(window, |_, window, _| {
-            (window.input_latency_snapshot(), window.frame_duration_snapshot())
+        let Ok((mut input, mut frames, window_conditions)) = cx.update_window(window, |_, window, _| {
+            (window.input_latency_snapshot(), window.frame_duration_snapshot(),
+             crate::performance_scenario::finish_window_observation(window))
         }) else { return; };
         let subtraction = [
             input.latency_histogram.subtract(&start_input.latency_histogram),
@@ -89,6 +91,7 @@ pub fn schedule(window: AnyWindowHandle, cx: &mut App) {
         let output = json!({
             "schemaVersion": 1,
             "pid": std::process::id(),
+            "windowConditions": window_conditions,
             "debugAssertions": cfg!(debug_assertions),
             "visualExport": cfg!(feature = "visual-export"),
             "profilerEnabled": true,
