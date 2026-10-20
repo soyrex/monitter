@@ -19,7 +19,7 @@ These identities describe the earlier packages, which lack the new window diagno
 
 The focused 33/33 cohort is not the full native suite. Candidate-only assertions were adapted for valid clean-descendant reuse while preserving checks of painted text, color, bounds and clicks. A substantive retained-pane visibility regression required a frame/range-scoped paint observation fix. Collapse/remount/unmount replay checks pass in that historical cohort; the actual `NativePanel::on_removed` lifecycle hook was not invoked. Native preview observations and remaining browser, accessibility, drag and GPU limits are recorded in [verification-matrix.md](verification-matrix.md).
 
-## Diagnostic verification pending
+## Diagnostic verification completed; paired measurements pending
 
 Identical fixture-only activation/visibility observers and measurement-boundary hooks are implemented in both worktrees. New `windowConditions` reports initial state, transitions, active/visible durations and workload callback/publication counts. Selection now rejects old or missing diagnostics, inactive/hidden intervals, incomplete diagnostic duration, zero draw samples, and autonomous runs without recorded update callbacks. This establishes a stronger eligibility rule; it does not establish a performance result.
 
@@ -38,8 +38,8 @@ Compatibility is not yet demonstrated: this POC exposes vendored package `gpui` 
 
 The migration changes retained-subtree replay and rendering beneath the application. That can reduce repeated work without reducing the number of application chrome renders: render invocation, invalidation, retained paint reuse and platform presentation are separate boundaries. The source investigation in [render-invalidation-analysis.md](render-invalidation-analysis.md) records the invalidation mechanisms; it is an explanation to test, not evidence of measured benefit. Low chrome/draw counts in an occluded window cannot distinguish a Fast improvement from suppressed presentation.
 
-Fast is not a manifest-only upgrade. Local compatibility wrappers keep Kit/Base/Component 0.7.0 and Wry 0.55.1 on one actual core, while a vendored fork reconciles custom masks/fades, transforms, blur/backdrop rendering, inert input, native drag, capture, accessibility, profiling and replay-aware visibility. [patch-ledger.md](patch-ledger.md) records that continuing maintenance burden. Adoption requires repeatable useful benefit plus adequate correctness coverage to justify it.
+Fast is not a manifest-only upgrade. Local compatibility wrappers keep Kit/Base/Component 0.7.0 and Wry 0.55.1 on one actual core, while a vendored fork reconciles custom masks/fades, transforms, blur/backdrop rendering, inert input, native drag, capture, accessibility, profiling and replay-aware visibility. [patch-ledger.md](patch-ledger.md) records that continuing maintenance burden. Adoption requires adequate correctness coverage and a justified benefit: repeatable performance improvement, demonstrated NSH compatibility, or both. Neither performance benefit nor NSH embedding is established yet.
 
 Ideas `15c5a987` and `20b17186` are parked follow-ups. They are not current optimizations or part of the measured migration treatment.
 
-The canonical checkout, installed applications, production profiles and live backend remain protected. No production merge, installation or backend restart is established or requested by this report. Preserve the isolated migration and baseline while the diagnostic build, focused verification and eligible matched measurements remain unfinished.
+The canonical checkout, installed applications, production profiles and live backend remain protected. No production merge, installation or backend restart is established or requested by this report. Preserve the isolated migration and baseline while eligible matched measurements and the final adoption review remain unfinished.
