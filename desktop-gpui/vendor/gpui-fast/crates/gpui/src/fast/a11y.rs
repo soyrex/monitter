@@ -34,11 +34,51 @@
 
 use crate::{
     Bounds, FocusId, PaintIndex, Pixels, Point, PrepaintStateIndex, Window,
-    window::a11y::{A11y, A11yActionListener},
+    window::a11y::{A11y, A11yActionListener, A11yNodeBuilder},
 };
 use accesskit::{Action, NodeId};
-use collections::FxHashMap;
+use collections::{FxHashMap, FxHashSet};
 use std::{mem, ops::Range, rc::Rc};
+
+impl A11yNodeBuilder {
+    /// NSH's real focused-input proxy may belong to a synthetic parent. Keep
+    /// the normal stack and replay log without also attaching it to the open node.
+    pub(crate) fn push_with_parent(
+        &mut self,
+        id: NodeId,
+        node: accesskit::Node,
+        attach_to_open: bool,
+    ) -> bool {
+        if attach_to_open {
+            return self.push(id, node);
+        }
+        if !self.can_push(id) {
+            return false;
+        }
+        A11yLog::push(&mut self.fast, id);
+        self.ids_stack.push(id);
+        self.nodes_stack.push(node);
+        true
+    }
+
+    /// Retain synthetic descendants without flattening their completed hierarchy.
+    pub(crate) fn push_leaf_with_parent(
+        &mut self,
+        id: NodeId,
+        node: accesskit::Node,
+        attach_to_open: bool,
+    ) -> bool {
+        if attach_to_open {
+            return self.push_leaf(id, node);
+        }
+        if !self.can_push(id) {
+            return false;
+        }
+        A11yLog::leaf(&mut self.fast, self.all_nodes.len());
+        self.all_nodes.push((id, node));
+        true
+    }
+}
 
 /// One thing building a frame's accessibility tree did.
 #[derive(Clone, Copy, Debug)]
@@ -271,11 +311,26 @@ fn replay(window: &mut Window, source: &Source, delta: Point<Pixels>) {
         }
         node
     };
+    // Synthetic-child callbacks may add every node through push_child, then
+    // replace the open element's children with only the subtree roots. The
+    // completed source tree records that hierarchy; Leaf ops alone do not.
+    let mut synthetic_descendants = FxHashSet::default();
+    for op in source.ops {
+        if let Op::Leaf(at) = *op {
+            if let Some((_, node)) = source.nodes.get(at) {
+                synthetic_descendants.extend(node.children().iter().copied());
+            }
+        }
+    }
     let logged = window.a11y.nodes.fast.ops.len();
     for op in source.ops {
         match *op {
             Op::Push(id) => {
-                let pushed = window.a11y.nodes.push(id, accesskit::Node::default());
+                let pushed = window.a11y.nodes.push_with_parent(
+                    id,
+                    accesskit::Node::default(),
+                    !synthetic_descendants.contains(&id),
+                );
                 window.a11y.nodes.fast.replay_open.push(pushed);
                 if pushed {
                     if let Some(bounds) = source.bounds.get(&id) {
@@ -293,7 +348,12 @@ fn replay(window: &mut Window, source: &Source, delta: Point<Pixels>) {
                     debug_assert!(false, "a leaf missing from last frame's tree");
                     continue;
                 };
-                let _pushed = window.a11y.nodes.push_leaf(*id, moved(node));
+                let attach_to_open = !synthetic_descendants.contains(id);
+                let _pushed =
+                    window
+                        .a11y
+                        .nodes
+                        .push_leaf_with_parent(*id, moved(node), attach_to_open);
                 #[cfg(debug_assertions)]
                 if _pushed && let Some(info) = source.info.get(id) {
                     window.a11y.nodes.record_node_info(*id, info.clone());

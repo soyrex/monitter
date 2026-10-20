@@ -373,7 +373,7 @@ impl<'a> A11ySubtreeBuilder<'a> {
 }
 
 pub(crate) struct A11yNodeBuilder {
-    ids_stack: SmallVec<[NodeId; 16]>,
+    pub(crate) ids_stack: SmallVec<[NodeId; 16]>,
     pub(crate) nodes_stack: SmallVec<[accesskit::Node; 16]>,
     /// This is the exact type required by accesskit, so we can't just make it a
     /// `HashMap<NodeId, Node>` to remove the need for `seen_ids`
@@ -414,7 +414,7 @@ impl A11yNodeBuilder {
     }
 
     #[must_use]
-    fn can_push(&mut self, id: NodeId) -> bool {
+    pub(crate) fn can_push(&mut self, id: NodeId) -> bool {
         debug_assert!(!self.ids_stack.is_empty(), "node pushed before push_root");
 
         if !self.seen_ids.insert(id) {

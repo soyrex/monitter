@@ -451,3 +451,104 @@ fn scroll_page_frames(cx: &mut TestAppContext, placed: bool) -> u64 {
     }
     composited
 }
+
+/// NSH pushes synthetic descendants before their parents, then replaces the
+/// real element's children with only the synthetic roots. Replaying the leaf
+/// log must not also attach those descendants to the real element.
+#[crate::test]
+fn retained_nested_synthetic_children_keep_one_parent(cx: &mut TestAppContext) {
+    struct Synthetic;
+    impl Render for Synthetic {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .id("synthetic-surface")
+                .role(Role::Group)
+                .child(
+                    div()
+                        .id("ordinary-child")
+                        .role(Role::Button)
+                        .aria_label("ordinary"),
+                )
+                .child(
+                    div()
+                        .id("focus-proxy")
+                        .role(Role::TextInput)
+                        .aria_label("focused input"),
+                )
+                .a11y_synthetic_children(|builder| {
+                    let mut ordinary = builder.parent_node().children().to_vec();
+                    // The real proxy is prepainted normally, then moved below a
+                    // synthetic parent just as NSH does for a focused field.
+                    let proxy = ordinary.pop().expect("real focus proxy");
+                    let parent = builder.synthetic_node_id("parent");
+                    let child = builder.synthetic_node_id("child");
+                    let mut child_node = accesskit::Node::new(Role::Label);
+                    child_node.set_value("nested synthetic");
+                    builder.push_child(child, child_node);
+                    let mut parent_node = accesskit::Node::new(Role::Group);
+                    parent_node.set_children(vec![child, proxy]);
+                    builder.push_child(parent, parent_node);
+                    builder
+                        .parent_node()
+                        .set_children(ordinary.into_iter().chain([parent]).collect::<Vec<_>>());
+                })
+        }
+    }
+    struct Host(Entity<Synthetic>);
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().id("host").role(Role::Group).child(self.0.clone())
+        }
+    }
+    let open = |cx: &mut TestAppContext| cx.add_window(|_, cx| Host(cx.new(|_| Synthetic)));
+    let retained = open(cx);
+    let scratch = open(cx);
+    for handle in [retained, scratch] {
+        cx.update_window(handle.into(), |_, window, _| {
+            window.set_a11y_active_for_tests(true)
+        })
+        .unwrap();
+    }
+    for frame in 0..4 {
+        let mut trees = Vec::new();
+        for handle in [retained, scratch] {
+            handle.update(cx, |_, _, cx| cx.notify()).unwrap();
+            let tree = cx
+                .update_window(handle.into(), |_, window, cx| {
+                    if handle == scratch {
+                        window.refresh();
+                    }
+                    window.draw(cx).clear(cx);
+                    let update = crate::fast::a11y::last_tree(window).unwrap();
+                    let mut parents = collections::FxHashMap::default();
+                    for (parent, node) in &update.nodes {
+                        for child in node.children() {
+                            assert!(
+                                parents.insert(*child, *parent).is_none(),
+                                "synthetic child has multiple parents"
+                            );
+                        }
+                    }
+                    assert_eq!(
+                        parents.len() + 1,
+                        update.nodes.len(),
+                        "accessibility tree has unreachable nodes"
+                    );
+                    if frame > 0 && handle == retained {
+                        assert!(
+                            window.rendered_frame.retained.reused_any(),
+                            "test must exercise retained replay"
+                        );
+                    }
+                    let (focus, entries) = a11y_snapshot(window);
+                    format!("{focus}\n{entries:?}")
+                })
+                .unwrap();
+            trees.push(tree);
+        }
+        assert_eq!(
+            trees[0], trees[1],
+            "retained hierarchy differs from fresh tree"
+        );
+    }
+}

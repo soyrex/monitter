@@ -192,6 +192,67 @@ mod mounted {
             window.simulate_next_frame(cx);
             window.draw(cx).clear(cx);
         });
+        assert_a11y_tree(visual, false);
+    }
+
+    // Inspect the full tree emitted by the real NSH surface, including its
+    // synthetic descendants and focused-input proxy. Duplicate children also
+    // fail when repeated under the SAME parent (AccessKit rejects both cases).
+    fn assert_a11y_tree(visual: &mut VisualTestContext, expect_form: bool) {
+        let tree: Value = visual.update(|window, _| {
+            assert!(window.is_a11y_active(), "fixture must build accessibility");
+            serde_json::from_str(
+                &window
+                    .debug_a11y_tree_json()
+                    .expect("draw emitted an accessibility tree"),
+            )
+            .expect("valid accessibility debug JSON")
+        });
+        let nodes = tree["nodes"].as_object().expect("accessibility nodes");
+        assert_eq!(
+            tree["frame"]["node_count"].as_u64(),
+            Some(nodes.len() as u64),
+            "duplicate node IDs must not disappear during debug serialization"
+        );
+        let root = tree["root"].as_str().expect("accessibility root");
+        let mut parents = HashMap::new();
+        let mut ids = std::collections::HashSet::new();
+        for (parent, node) in nodes {
+            assert!(ids.insert(node["accesskit_id"].as_str().expect("node ID")));
+            if let Some(children) = node["children"].as_array() {
+                for child in children {
+                    let child = child.as_str().expect("child ID");
+                    assert!(nodes.contains_key(child), "missing child {child}");
+                    assert!(
+                        parents.insert(child, parent.as_str()).is_none(),
+                        "accessibility child {child} appears more than once; parent {parent}; tree {tree}"
+                    );
+                }
+            }
+        }
+        assert!(!parents.contains_key(root), "root cannot have a parent");
+        let mut seen = std::collections::HashSet::new();
+        let mut pending = vec![root];
+        while let Some(id) = pending.pop() {
+            assert!(seen.insert(id), "accessibility cycle at {id}");
+            if let Some(children) = nodes[id]["children"].as_array() {
+                pending.extend(children.iter().map(|child| child.as_str().unwrap()));
+            }
+        }
+        assert_eq!(seen.len(), nodes.len(), "unreachable accessibility nodes");
+        if expect_form {
+            for (role, label) in [
+                ("TextInput", "Mounted colour"),
+                ("Button", "Prepare response"),
+            ] {
+                assert!(
+                    nodes
+                        .values()
+                        .any(|node| node["aria"]["role"] == role && node["aria"]["label"] == label),
+                    "actual native form accessibility control missing: {role} {label}"
+                );
+            }
+        }
     }
 
     // The trusted renderer's actual Input has height 38, radius 6, border 1.
@@ -326,6 +387,8 @@ mod mounted {
                     "--nocapture",
                 ])
                 .env(CHILD_GUARD, "1")
+                // Test-support activation occurs before the child creates any window.
+                .env("GPUI_A11Y_ACTIVE", "1")
                 .env("MONITTER_GPUI_PROFILE_DIR", &profile)
                 .output();
                 let _ = std::fs::remove_dir_all(&profile);
@@ -421,6 +484,7 @@ mod mounted {
                     .is_some(),
                 "test must mount the real transcript viewport"
             );
+            assert_a11y_tree(visual, true);
             let input = native_input_bounds(visual).unwrap();
             visual.simulate_click(input.center(), Default::default());
             visual.simulate_keystrokes("cmd-a");
@@ -457,6 +521,7 @@ mod mounted {
             );
             for _ in 0..4 {
                 draw(visual);
+                assert_a11y_tree(visual, true);
                 assert!(
                     native_input_bounds(visual).is_some(),
                     "streamed native form must survive cached transcript replay"
