@@ -45,13 +45,16 @@ impl Service {
                         .and_then(|service| service.board_guidance_for_task(caller).ok())
                         .unwrap_or_else(|| crate::collaboration_mcp::BOARD_INSTRUCTIONS.to_string())
                 });
-                *broker = Some(Broker::start_with_guidance(Arc::new(move |caller, tool, arguments| {
-                    let service = service.upgrade().ok_or("Monitter has closed.")?;
-                    if service.stopping.load(Ordering::Acquire) {
-                        return Err("Monitter is shutting down.".into());
-                    }
-                    service.protocol(caller, tool, arguments)
-                }), guidance)?);
+                *broker = Some(Broker::start_with_guidance(
+                    Arc::new(move |caller, tool, arguments| {
+                        let service = service.upgrade().ok_or("Monitter has closed.")?;
+                        if service.stopping.load(Ordering::Acquire) {
+                            return Err("Monitter is shutting down.".into());
+                        }
+                        service.protocol(caller, tool, arguments)
+                    }),
+                    guidance,
+                )?);
             }
         }
         if !self.collaboration_started.swap(true, Ordering::AcqRel) {
@@ -170,8 +173,14 @@ impl Service {
                             "Jev Decisions is not enabled for this running agent task.".into()
                         );
                     }
-                    let (result, receipt, card) =
-                        crate::jev_decisions::evaluate(caller, tool, arguments)?;
+                    let backend_kind = service.jev_decisions_backend_for_running(caller)?;
+                    let backend = crate::model_router::decision_backend(backend_kind);
+                    let (result, receipt, card) = crate::jev_decisions::evaluate_with_backend(
+                        caller,
+                        backend.as_ref(),
+                        tool,
+                        arguments,
+                    )?;
                     service.record_jev_decisions_receipt(&receipt, &card);
                     Ok(result)
                 },
@@ -342,5 +351,38 @@ mod jev_decisions_grant_tests {
         assert!(status(&jev.endpoint, &jev.token).contains("401 Unauthorized"));
         enabled.cleanup();
         let _ = fs::remove_dir_all(enabled_root);
+    }
+
+    #[test]
+    fn decision_backend_is_read_from_the_running_agents_saved_configuration() {
+        let (service, root, task_id) = fixture(true);
+        assert_eq!(
+            service.jev_decisions_backend_for_running(&task_id).unwrap(),
+            model::DecisionBackendKind::TypeSafe
+        );
+        service
+            .mutate(None, |snapshot| {
+                let agent_id = snapshot
+                    .tasks
+                    .iter()
+                    .find(|task| task.id == task_id)
+                    .ok_or("Jev backend fixture task is missing.")?
+                    .agent_id
+                    .clone();
+                snapshot
+                    .agents
+                    .iter_mut()
+                    .find(|agent| agent.id == agent_id)
+                    .ok_or("Jev backend fixture agent is missing.")?
+                    .decision_backend = model::DecisionBackendKind::Laya;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            service.jev_decisions_backend_for_running(&task_id).unwrap(),
+            model::DecisionBackendKind::Laya
+        );
+        service.cleanup();
+        let _ = fs::remove_dir_all(root);
     }
 }

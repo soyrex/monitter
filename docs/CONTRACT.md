@@ -460,13 +460,16 @@ reconnection and a new authoritative snapshot.
   and bounded reason. The command records a fingerprinted audit trace without raw query/catalogue text and never
   executes a control. The UI must revalidate the candidate against its current enabled catalogue and require a
   second explicit selection before dispatch. LAN, mobile, and shared callers cannot invoke this command.
-- `Agent.jevDecisionsEnabled?: boolean` opts a non-internal agent into Jev Decisions. Missing and false are
+- `Agent.jevDecisionsEnabled?: boolean` opts a non-internal agent into the bounded decision MCP tools. Missing and false are
   disabled. This is separate from `jevRouting` and does not alter task routing. For an opted-in agent, the
-  supported local harness adapter exposes a dedicated Jev MCP endpoint to that harness with the separate
+  supported local harness adapter exposes a dedicated MCP endpoint to that harness with the separate
   `jev_choose` and `jev_assess` tools and their decision guidance. The endpoint is local to the desktop runtime;
-  its transport address is runtime-managed and is not a stable public URL. The add-on requires the native
-  Keychain-backed `TYPESAFE_API_KEY` (`JEV_API_KEY` remains a legacy alias). It is delivered at the next
-  newly launched session; saving the setting does not restart or reconfigure an existing session. It is available only to
+  its transport address is runtime-managed and is not a stable public URL. `Agent.decisionBackend?: 'type_safe' | 'laya'`
+  selects the inference provider; missing values default to `type_safe`. TypeSafe requires the native
+  Keychain-backed `TYPESAFE_API_KEY` (`JEV_API_KEY` remains a legacy alias). Laya uses only
+  `http://127.0.0.1:8080/v1/systemone` and Monitter does not start the local server or acquire its model. If the local server requires a bearer token, it is read from `LAYA_API_KEY` in Environment & Secrets or the Monitter process environment and passed only through the native HTTP client's private input. The selected backend is used for
+  bounded decision inference only and does not affect Jev routing. The current saved backend is
+  consulted for each decision call, so changing it does not restart or reconfigure an existing session. It is available only to
   local Codex, Claude, and ACP harnesses. SSH and unsupported harness adapters do not receive it. The internal
   Monitter Admin agent is excluded. Jev tools may return bounded typed decisions and assessments only: they do
   not execute tools, create tasks, inspect files, modify data, change model routing, grant permissions, approve

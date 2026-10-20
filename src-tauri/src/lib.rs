@@ -754,6 +754,7 @@ fn ensure_internal_admin(snapshot: &mut Snapshot) -> InternalAdminState {
             jev_routing: model::JevRoutingMode::Off,
             jev_model_tiers: model::JevModelTiers::default(),
             jev_decisions_enabled: false,
+            decision_backend: model::DecisionBackendKind::default(),
             acp: None,
             internal: true,
             codex_home: None,
@@ -3257,6 +3258,28 @@ impl Service {
             ));
         }
         Ok(true)
+    }
+
+    pub(crate) fn jev_decisions_backend_for_running(
+        &self,
+        task_id: &str,
+    ) -> Result<model::DecisionBackendKind, String> {
+        let data = self
+            .data
+            .lock()
+            .map_err(|_| "Monitter state lock failed.")?;
+        let task = data
+            .snapshot
+            .tasks
+            .iter()
+            .find(|task| task.id == task_id && task.status == "running")
+            .ok_or("Jev Decisions are available only while this task is running.")?;
+        data.snapshot
+            .agents
+            .iter()
+            .find(|agent| agent.id == task.agent_id && !agent.internal)
+            .map(|agent| agent.decision_backend)
+            .ok_or_else(|| "Jev Decisions caller agent was not found.".into())
     }
 
     pub(crate) fn record_jev_decisions_receipt(

@@ -6600,7 +6600,14 @@
         {@const jevDecisionsSupported = jevDecisionsHost?.kind === 'local' && ['codex', 'claude', 'acp'].includes(draft.provider) && !isAgyHeadlessLaunch(draft.acp)}
         <details class="agent-jev-decisions" open={draft.jevDecisionsEnabled === true}>
           <summary>Jev Decisions add-on <span class="optional">Optional</span></summary>
-          <p>Provides separate <code>jev_choose</code> and <code>jev_assess</code> MCP tools for bounded choices and assessments, with guidance to treat their results as recommendations rather than authority. It requires <code>TYPESAFE_API_KEY</code> saved in Settings → Environment &amp; Secrets and applies to new sessions after saving. It does not grant or change agent permissions.</p>
+          <p>Provides separate <code>jev_choose</code> and <code>jev_assess</code> MCP tools for bounded choices and assessments, with guidance to treat their results as recommendations rather than authority. The tools use the selected backend and never grant or change agent permissions.</p>
+          <label>Decision backend
+            <select value={draft.decisionBackend ?? 'type_safe'} disabled={busy} onchange={(event) => { draft.decisionBackend = event.currentTarget.value as 'type_safe' | 'laya'; markAgentDirty(draft.id); }}>
+              <option value="type_safe">TypeSafe Jev</option>
+              <option value="laya">Local Laya (127.0.0.1:8080)</option>
+            </select>
+          </label>
+          {#if (draft.decisionBackend ?? 'type_safe') === 'type_safe'}<p class="hint">TypeSafe requires <code>TYPESAFE_API_KEY</code> saved in Settings → Environment &amp; Secrets.</p>{:else}<p class="hint">Laya requires the local server at <code>http://127.0.0.1:8080/v1/systemone</code>. If it requires authentication, save <code>LAYA_API_KEY</code> in Environment &amp; Secrets. Monitter does not start or download the model.</p>{/if}
           <p class="hint">Supported for local Codex, Claude, and ACP agents. Existing sessions keep their current tool configuration.</p>
           <label class="check-row">
             <input type="checkbox" role="switch" checked={draft.jevDecisionsEnabled === true} disabled={!jevDecisionsSupported || busy} onchange={(event) => { draft.jevDecisionsEnabled = event.currentTarget.checked; markAgentDirty(draft.id); }} />
