@@ -463,7 +463,14 @@ impl Desktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(key) = self.window.dock.read(cx).focused_pane_id(window, cx) else {
+        let dock = self.window.dock.read(cx);
+        let Some(key) = dock.focused_pane_id(window, cx).or_else(|| {
+            self.window
+                .dock_current
+                .as_ref()
+                .filter(|key| dock.group_for_pane(key, cx).is_some())
+                .cloned()
+        }) else {
             return false;
         };
         let Some((id, win)) = parse_id(&key) else {

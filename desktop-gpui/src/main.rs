@@ -5229,9 +5229,41 @@ impl Desktop {
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
         if self.closing { return Err("Desktop is closing.".into()); }
-        self.window.dock.update(cx, |dock, cx| {
-            dock.add_focused_empty_split(vertical, window, cx).map(|_| ())
-        })
+        // Clicking a title-bar control can move keyboard focus off the pane
+        // before its click handler runs. Retain the last active pane as the
+        // split origin so repeated horizontal/vertical clicks keep creating
+        // panes beside the workspace the user was operating.
+        let last_active = self.window.dock_current.clone();
+        let id = self.window.dock.update(cx, |dock, cx| {
+            let group = dock.focused_group_node(window, cx).or_else(|| {
+                last_active
+                    .as_deref()
+                    .and_then(|pane_id| dock.group_for_pane(pane_id, cx))
+            });
+            if let Some(group) = group {
+                dock.add_empty_split(group, vertical, window, cx)
+            } else {
+                dock.add_focused_empty_split(vertical, window, cx)
+            }
+        })?;
+        self.window.dock_current = Some(id);
+        Ok(())
+    }
+
+    /// Split the active workspace surface while preserving native editor
+    /// ownership. Title-bar mouse controls call this on pointer-down because
+    /// the native drag surface can consume the later mouse-up/click.
+    fn split_focused_workspace(
+        &mut self,
+        vertical: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        if self.neovim_split_focused(vertical, window, cx) {
+            Ok(())
+        } else {
+            self.open_focused_empty_split(vertical, window, cx)
+        }
     }
 
     /// Close the focused tab through the dock's normal Removed lifecycle.

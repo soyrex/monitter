@@ -149,11 +149,19 @@ fn mounted(cx: &mut TestAppContext, light: bool) {
         window.draw(cx).clear(cx);
     });
     let vertical = visual.debug_bounds("split-workspace-vertical").unwrap();
+    visual.simulate_mouse_move(vertical.center(), None, Modifiers::none());
     visual.simulate_click(vertical.center(), Modifiers::none());
     visual.run_until_parked();
     visual.update(|window, cx| window.draw(cx).clear(cx));
     visual.read(|cx| {
-        let dock = desktop.read(cx).window.dock.read(cx);
+        let view = desktop.read(cx);
+        let dock = view.window.dock.read(cx);
+        assert!(
+            view.window.error.is_none(),
+            "vertical split error: {:?}; current pane: {:?}",
+            view.window.error,
+            view.window.dock_current
+        );
         let layout = dock.serialize(cx).unwrap();
         let mut axes = Vec::new();
         stack_axes(&layout["center"], &mut axes);
@@ -167,11 +175,22 @@ fn mounted(cx: &mut TestAppContext, light: bool) {
             "vertical split button creates side-by-side panes");
     });
     let horizontal = visual.debug_bounds("split-workspace-horizontal").unwrap();
+    // A real pointer necessarily moves between the two controls. Model that
+    // transition so the first control's retained hover/tooltip surface leaves
+    // the dispatch path before the second press.
+    visual.simulate_mouse_move(horizontal.center(), None, Modifiers::none());
     visual.simulate_click(horizontal.center(), Modifiers::none());
     visual.run_until_parked();
     visual.update(|window, cx| window.draw(cx).clear(cx));
     visual.read(|cx| {
-        let dock = desktop.read(cx).window.dock.read(cx);
+        let view = desktop.read(cx);
+        let dock = view.window.dock.read(cx);
+        assert!(
+            view.window.error.is_none(),
+            "horizontal split error: {:?}; current pane: {:?}",
+            view.window.error,
+            view.window.dock_current
+        );
         let layout = dock.serialize(cx).unwrap();
         let mut axes = Vec::new();
         stack_axes(&layout["center"], &mut axes);
@@ -180,7 +199,9 @@ fn mounted(cx: &mut TestAppContext, light: bool) {
                 .unwrap()
                 .len(),
             3,
-            "horizontal split button inserts a pane");
+            "horizontal split button inserts a pane; current={:?}; vertical={vertical:?}; horizontal={horizontal:?}; layout={layout}",
+            view.window.dock_current
+        );
         assert!(axes.contains(&1), "horizontal split button creates stacked panes");
     });
 }

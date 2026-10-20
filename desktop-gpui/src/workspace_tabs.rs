@@ -1375,10 +1375,10 @@ impl Desktop {
             .id("named-workspace-tabs")
             .debug_selector(|| "named-workspace-tabs".into())
             .flex()
+            .flex_none()
             .items_center()
             .justify_center()
             .gap(px(5.))
-            .flex_shrink_1()
             .min_w_0()
             .overflow_x_scroll()
             .on_drop(cx.workspace_listener(|desktop,drag:&WorkspaceTabDrag,_,cx| {
@@ -1626,35 +1626,49 @@ impl Desktop {
             .child(div().flex_shrink_0().w(px(1.)).h(px(18.)).mx(px(5.)).bg(rgb(palette.ink).opacity(0.24)))
             .children(self.window.workspace_clock.clone())
             .child(div().flex_shrink_0().w(px(1.)).h(px(18.)).mx(px(5.)).bg(rgb(palette.ink).opacity(0.24)))
-            .child(div().flex().flex_shrink_0()
-                // The surrounding title bar is the native window-drag target.
-                // Keep a real pointer press on this control from bubbling into
-                // that drag surface before Button receives its click.
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .child(Button::new("split-workspace-vertical")
+            .child(Button::new("split-workspace-vertical")
                     .debug_selector(|| "split-workspace-vertical".into())
                     .ghost().compact().flex_shrink_0()
                     .icon(Icon::new(IconName::SquareSplitVertical).with_size(px(18.)).text_color(rgb(palette.muted)))
                     .accessibility_label("Split pane vertically").tooltip("Split pane vertically")
                     .disabled(!controls_available)
+                    // This row is also the native titlebar drag surface. Keep
+                    // the press on the button, then wait for the ordinary
+                    // click below before mutating the dock.
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    // Mutating the dock on mouse-down invalidates the
+                    // captured hitbox before mouse-up. Let Button complete
+                    // its normal click lifecycle, then defer the split until
+                    // GPUI has finished releasing the captured hitbox.
                     .on_click(cx.workspace_listener(|view, _, window, cx| {
-                        let result = if view.neovim_split_focused(true, window, cx) { Ok(()) }
-                            else { view.open_focused_empty_split(true, window, cx) };
-                        if let Err(error) = result { view.window.error = Some(error); cx.notify(); }
-                    }))))
-            .child(div().flex().flex_shrink_0()
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .child(Button::new("split-workspace-horizontal")
+                        let weak = cx.weak_entity();
+                        window.defer(cx, move |window, cx| {
+                            let _ = weak.update(cx, |view, cx| {
+                                if let Err(error) = view.split_focused_workspace(true, window, cx) {
+                                    view.window.error = Some(error);
+                                    cx.notify();
+                                }
+                            });
+                        });
+                    })))
+            .child(Button::new("split-workspace-horizontal")
                     .debug_selector(|| "split-workspace-horizontal".into())
                     .ghost().compact().flex_shrink_0()
                     .icon(Icon::new(IconName::SquareSplitHorizontal).with_size(px(18.)).text_color(rgb(palette.muted)))
                     .accessibility_label("Split pane horizontally").tooltip("Split pane horizontally")
                     .disabled(!controls_available)
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(cx.workspace_listener(|view, _, window, cx| {
-                        let result = if view.neovim_split_focused(false, window, cx) { Ok(()) }
-                            else { view.open_focused_empty_split(false, window, cx) };
-                        if let Err(error) = result { view.window.error = Some(error); cx.notify(); }
-                    }))));
+                        let weak = cx.weak_entity();
+                        window.defer(cx, move |window, cx| {
+                            let _ = weak.update(cx, |view, cx| {
+                                if let Err(error) = view.split_focused_workspace(false, window, cx) {
+                                    view.window.error = Some(error);
+                                    cx.notify();
+                                }
+                            });
+                        });
+                    })));
         let right_controls = div()
             .id("workspace-bar-right-controls")
             .debug_selector(|| "workspace-bar-right-controls".into())
@@ -1699,12 +1713,15 @@ impl Desktop {
             })
             .child(left_controls)
             .child(right_controls)
-            // The control groups are intentionally asymmetric. Centre the tab
-            // strip against the title bar itself instead of the space between
-            // those groups so adding clock/split controls cannot move it.
+            // The control groups are intentionally asymmetric. Anchor a
+            // zero-width flex container at the bar's midpoint so the tab strip
+            // is centred on the full title bar while only the tabs themselves
+            // participate in hit testing. A full-width absolute wrapper would
+            // sit above otherwise unrelated split controls.
             .child(div().id("workspace-bar-centered-tabs")
                 .debug_selector(|| "workspace-bar-centered-tabs".into())
-                .absolute().inset_0().flex().items_center().justify_center()
+                .absolute().left_1_2().top_0().bottom_0().w_0()
+                .flex().items_center().justify_center()
                 .child(tabs));
 
         div()
