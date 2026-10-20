@@ -131,6 +131,8 @@ export interface Agent {
   jevModelTiers?: JevModelTiers;
   /** Adds Jev's separate decision MCP tools to supported local harness launches. */
   jevDecisionsEnabled?: boolean;
+  /** Provider used for bounded advisory decision calls; missing values default to TypeSafe. */
+  decisionBackend?: 'type_safe' | 'laya';
   /** Internal agents are configurable in Settings but hidden from conversation surfaces. */
   internal?: boolean;
 }
