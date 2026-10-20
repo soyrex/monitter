@@ -57,6 +57,15 @@ readline.createInterface({input:process.stdin}).on('line', line=>{
  else if(frame.method==='session/new') { if(['mcp','mcp-hold-second'].includes(process.argv[2]) && process.argv[3]) { const servers=frame.params.mcpServers ?? []; const headers=(servers[0]?.headers ?? []).map(item=>item.name).join(','); fs.appendFileSync(process.argv[3],`mcp-${servers.length}-${servers[0]?.type ?? ''}-${headers}-${servers[0]?.url ?? ''}\n`); } if(process.argv[2]==='managed' && process.argv[3]) fs.appendFileSync(process.argv[3],`session:${JSON.stringify(frame.params.mcpServers ?? [])}\n`); const mcode=process.argv[2]==='mcode-steer'?{sessionId:'fixture-session',configOptions:[{id:'permissionMode',name:'Permission mode',category:'_permission',type:'select',currentValue:'auto',options:[{value:'default',name:'Ask'},{value:'auto',name:'Auto'},{value:'bypassPermissions',name:'Full access'}]}]}:null; const thought=process.argv[2]==='thought-delayed'||process.argv[2]==='thought-reject'?{sessionId:'fixture-session',configOptions:[{id:'effort',name:'Effort',category:'thought_level',type:'select',currentValue:'default',options:[{value:'default',name:'Default'},{value:'low',name:'Low'}]}]}:null; const stale=process.argv[2]==='model-thought-stale'?{sessionId:'fixture-session',configOptions:[{id:'opaque-model',name:'Model',category:'model',type:'select',currentValue:'default',options:[{value:'default',name:'Default'},{value:'other/model',name:'Other'}]},{id:'effort',name:'Effort',category:'thought_level',type:'select',currentValue:'default',options:[{value:'default',name:'Default'},{value:'low',name:'Low'}]}]}:null; reply(frame.id,stale??thought??mcode??(['model','model-delayed','model-reject'].includes(process.argv[2])?{sessionId:'fixture-session',configOptions:[{id:'opaque-model',name:'Model',category:'model',type:'select',currentValue:'default',options:[{value:'default',name:'Default'},{value:'other/model',name:'Other'}]}]}:{sessionId:'fixture-session'})); if(process.argv[2]==='commands') commandUpdate(); }
  else if(frame.method==='session/load'||frame.method==='session/resume'){ session=frame.params.sessionId; reply(frame.id,{}); }
  else if(frame.method==='session/set_config_option'){ if(process.argv[3]) fs.appendFileSync(process.argv[3],`model-${frame.params.configId}-${frame.params.value}\n`); if(process.argv[2]==='model-delayed'||process.argv[2]==='thought-delayed'){ configAcknowledged=false; setTimeout(()=>{ configAcknowledged=true; if(process.argv[3]) fs.appendFileSync(process.argv[3],'config-ack\n'); reply(frame.id,{}); },180); } else if(['thought-reject','model-reject'].includes(process.argv[2])){ reject(frame.id,-32602,'unsupported choice'); } else reply(frame.id,{}); }
+ else if(frame.method==='session/prompt' && ['input-request','input-request-unsupported'].includes(process.argv[2])){
+   globalThis.activePromptId=frame.id;
+   const schema=process.argv[2]==='input-request-unsupported'?{type:'object',properties:{nested:{type:'object'}}}:{type:'object',properties:{route:{type:'string',title:'Which route?',oneOf:[{const:'route-a',title:'Alpha'},{const:'route-b',title:'Beta'}]},features:{type:'array',title:'Which features?',items:{anyOf:[{const:'feature-a',title:'First'},{const:'feature-b',title:'Second'}]}}}};
+   console.log(JSON.stringify({jsonrpc:'2.0',id:'native-input',method:'elicitation/create',params:{sessionId:session,mode:'form',message:'MiniMax needs your input',requestedSchema:schema}}));
+ }
+ else if(frame.id==='native-input'){
+   if(process.argv[3]) fs.appendFileSync(process.argv[3],JSON.stringify(frame.result)+'\n');
+   update('input-'+frame.result?.action); reply(globalThis.activePromptId,{stopReason:'end_turn'});
+ }
  else if(frame.method==='session/prompt' && process.argv[2]==='mona-metadata'){ usageUpdate(); updateItem('first item','metadata-first'); updateItem('final item','metadata-final'); messageDone(); reply(frame.id,{stopReason:'end_turn',model:'MiniMax-M2.7',usage:{inputTokens:321,outputTokens:123},routing:{rationale:'fixture route rationale',requestedModel:'gpt-6-astra',requestedEffort:'xhigh',confidence:0.87,applied:true}}); }
  else if(frame.method==='session/prompt' && process.argv[2]==='text-done-fails'){ updateAnonymous('finished progress'); messageDone(); updateAnonymous('unfinished progress'); reject(frame.id,-32603,'transient provider connection failure'); }
  else if(frame.method==='session/prompt'){ if(!configAcknowledged && process.argv[3]) fs.appendFileSync(process.argv[3],'prompt-before-config-ack\n'); if(['thought-delayed','thought-reject','model-thought-stale'].includes(process.argv[2]) && process.argv[3]) fs.appendFileSync(process.argv[3],'prompt-received\n'); if(['managed','commands'].includes(process.argv[2]) && process.argv[3]) fs.appendFileSync(process.argv[3],`prompt:${frame.params.prompt?.[0]?.text ?? ''}\n`); turns++; if(['mcode-steer','mona-steer','mona-steer-retry'].includes(process.argv[2])){ globalThis.activePromptId=frame.id; if(process.argv[3]) fs.appendFileSync(process.argv[3],`prompt-active:${frame.id}\n`); } else if(['permission','permission-no-allow'].includes(process.argv[2])){ const options=process.argv[2]==='permission-no-allow'?[{kind:'reject_once',optionId:'opaque-reject'}]:[{kind:'allow_once',optionId:'opaque-allow'},{kind:'reject_once',optionId:'opaque-reject'},{kind:'allow_always',optionId:'never-select'}]; console.log(JSON.stringify({jsonrpc:'2.0',id:'opaque-permission',method:'session/request_permission',params:{sessionId:'fixture-session',toolCall:{title:'Write fixture file',rawInput:{path:'fixture.txt'}},options}})); } else { if(process.argv[2]==='router-trace') routerTrace(); if(process.argv[2]==='mona-metadata'){ usageUpdate(); updateItem('first item','metadata-first'); updateItem('final item','metadata-final'); reply(frame.id,{stopReason:'end_turn',model:'MiniMax-M2.7',usage:{inputTokens:321,outputTokens:123},routing:{rationale:'fixture route rationale',requestedModel:'gpt-6-astra',requestedEffort:'xhigh',confidence:0.87,applied:true}}); } else { update(`reply-${turns}`); if(!(process.argv[2]==='mcp-hold-second' && turns===2)) reply(frame.id,{stopReason:'end_turn'}); } } }
@@ -107,6 +116,126 @@ fn wait_for(service: &Service, task_id: &str, predicate: impl Fn(&crate::Snapsho
     panic!(
         "timed out waiting for ACP fixture {task_id}: {:?}",
         service.snapshot().unwrap()
+    );
+}
+
+#[test]
+fn input_request_acp_native_minimax_accept_and_cancel_reach_exact_provider_waiter() {
+    for cancel in [false, true] {
+        let capture =
+            std::env::temp_dir().join(format!("monitter-acp-input-{}.jsonl", crate::id()));
+        let fixture = fixture_with_args(
+            "input-request",
+            vec![
+                "input-request".into(),
+                capture.to_string_lossy().into_owned(),
+            ],
+        );
+        let agent = fixture.snapshot().unwrap().agents[0].id.clone();
+        let task = fixture
+            .create_task(CreateTaskInput {
+                agent_id: agent,
+                title: "Native question".into(),
+                native_session_id: None,
+                parent_task_id: None,
+                channel_id: None,
+                project_id: None,
+                cwd: None,
+                model_settings: None,
+                sandbox: Some("yolo".into()),
+            })
+            .unwrap();
+        let receipt = fixture
+            .accept_send(task.id.clone(), "Ask a native question".into(), vec![])
+            .unwrap()
+            .unwrap();
+        fixture.launch_accepted(task.id.clone(), Some(receipt));
+        wait_for(&fixture, &task.id, |snapshot| {
+            snapshot
+                .approval_requests
+                .iter()
+                .any(|r| r.task_id == task.id && r.status == "pending" && r.input.is_some())
+        });
+        let request = fixture
+            .snapshot()
+            .unwrap()
+            .approval_requests
+            .into_iter()
+            .find(|r| r.task_id == task.id && r.status == "pending")
+            .unwrap();
+        assert_eq!(request.provider, "acp");
+        assert!(!request.rememberable && request.session_scope.is_none());
+        assert_eq!(request.input.as_ref().unwrap().questions.len(), 2);
+        if cancel {
+            fixture
+                .resolve_approval_request(&request.id, crate::ApprovalDecision::Deny)
+                .unwrap();
+        } else {
+            assert!(fixture.resolve_input_request(&request.id,serde_json::json!({"answers":{"route":{"answers":["Invalid"]},"features":{"answers":["First"]}}})).is_err());
+            fixture.resolve_input_request(&request.id,serde_json::json!({"answers":{"route":{"answers":["Alpha"]},"features":{"answers":["First","Second"]}}})).unwrap();
+        }
+        wait_for(&fixture, &task.id, |snapshot| {
+            snapshot
+                .tasks
+                .iter()
+                .any(|t| t.id == task.id && t.status == "completed")
+        });
+        let native: serde_json::Value =
+            serde_json::from_str(fs::read_to_string(&capture).unwrap().trim()).unwrap();
+        assert_eq!(native["action"], if cancel { "cancel" } else { "accept" });
+        if !cancel {
+            assert_eq!(
+                native["content"],
+                serde_json::json!({"route":"route-a","features":["feature-a","feature-b"]})
+            );
+        }
+        let _ = fs::remove_file(capture);
+    }
+}
+
+#[test]
+fn input_request_acp_unsupported_native_schema_declines_without_enabled_form() {
+    let fixture = fixture_with_args(
+        "input-request-unsupported",
+        vec!["input-request-unsupported".into()],
+    );
+    let agent = fixture.snapshot().unwrap().agents[0].id.clone();
+    let task = fixture
+        .create_task(CreateTaskInput {
+            agent_id: agent,
+            title: "Unsupported question".into(),
+            native_session_id: None,
+            parent_task_id: None,
+            channel_id: None,
+            project_id: None,
+            cwd: None,
+            model_settings: None,
+            sandbox: None,
+        })
+        .unwrap();
+    let receipt = fixture
+        .accept_send(task.id.clone(), "Unsupported native form".into(), vec![])
+        .unwrap()
+        .unwrap();
+    fixture.launch_accepted(task.id.clone(), Some(receipt));
+    wait_for(&fixture, &task.id, |snapshot| {
+        snapshot
+            .tasks
+            .iter()
+            .any(|t| t.id == task.id && t.status == "completed")
+    });
+    let snapshot = fixture.snapshot().unwrap();
+    assert!(
+        !snapshot
+            .approval_requests
+            .iter()
+            .any(|r| r.task_id == task.id)
+    );
+    assert!(
+        snapshot
+            .messages
+            .iter()
+            .any(|m| m.task_id == task.id && m.text.contains("input-decline"))
     );
 }
 

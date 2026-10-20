@@ -763,3 +763,40 @@ export type WorkLogOwnerOperation =
   | {operation: 'deleteHistory'; args: {runIds: string[]}}
   | {operation: 'export'; args: {query: WorkLogQuery; path: string; format: 'json' | 'csv'}}
   | {operation: 'exportStatus' | 'cancelExport'; args: {exportId: string}};
+
+/** Advisory coordination for active runtime turns; never a lock or build approval. */
+export interface ProjectRosterResource {
+  path: string;
+  access: 'read' | 'write';
+}
+export interface ProjectRosterEntry {
+  projectId: string;
+  taskId: string;
+  runId: string;
+  agentId: string;
+  agentName: string;
+  taskTitle: string;
+  hostId: string;
+  cwd: string;
+  summary: string;
+  resources: ProjectRosterResource[];
+  startedAt: number;
+  updatedAt: number;
+  reported: boolean;
+}
+export interface ProjectRosterCollision {
+  taskId: string;
+  peerTaskId: string;
+  resource: ProjectRosterResource;
+  peerResource: ProjectRosterResource;
+}
+export interface ProjectRosterResult {
+  projectId: string;
+  callerRunId: string;
+  generatedAt: number;
+  unreportedTaskIds: string[];
+  collisionsTruncated: boolean;
+  entries: ProjectRosterEntry[];
+  collisions: ProjectRosterCollision[];
+  advisory: true;
+}

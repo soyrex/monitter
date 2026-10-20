@@ -355,8 +355,14 @@ mod tests {
     fn wide_text_strip_keeps_source_resolution() {
         let image = image::DynamicImage::new_rgba8(900, 100);
         let mut output = std::io::Cursor::new(Vec::new());
-        image.write_to(&mut output, image::ImageFormat::Png).unwrap();
-        let decoded = decode_image(json!({"mimeType":"image/png","dataBase64":STANDARD.encode(output.into_inner())}), true).unwrap();
+        image
+            .write_to(&mut output, image::ImageFormat::Png)
+            .unwrap();
+        let decoded = decode_image(
+            json!({"mimeType":"image/png","dataBase64":STANDARD.encode(output.into_inner())}),
+            true,
+        )
+        .unwrap();
         assert_eq!((decoded.width, decoded.height), (900, 100));
     }
     #[::core::prelude::v1::test]

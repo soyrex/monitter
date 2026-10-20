@@ -1,6 +1,7 @@
 //! Deterministic, reversible chat retention. Selection and writes share the
 //! state writer lock, so activity arriving after a preview is checked again.
 use crate::{
+    agent_worktree,
     model::{id, now, RunEvent, ScheduleMode, Snapshot},
     Service,
 };
@@ -169,7 +170,7 @@ impl Service {
                     let residents = runs.tasks.keys().map(String::as_str).collect();
                     let selection = select(snapshot, &residents, Some((project_id, days)), time);
                     let result = selection.report(dry_run, time);
-                    if !dry_run { apply(snapshot, &selection, time, Some(caller)); }
+                    if !dry_run { apply(snapshot, &selection, time, Some(caller))?; }
                     Ok(result)
                 },
                 _ => unreachable!(),
@@ -203,7 +204,7 @@ impl Service {
                 .map_err(|_| "Monitter run registry lock failed.")?;
             let residents = runs.tasks.keys().map(String::as_str).collect();
             let selection = select(snapshot, &residents, None, time);
-            apply(snapshot, &selection, time, None);
+            apply(snapshot, &selection, time, None)?;
             Ok(selection.matches.len())
         })
     }
@@ -391,6 +392,15 @@ fn select(
             *result.skipped.entry(reason).or_default() += 1;
             continue;
         }
+        if task.agent_worktree.as_ref().is_some_and(|worktree| {
+            agent_worktree::can_retire(&task.id, &task.cwd, worktree).is_err()
+        }) {
+            *result
+                .skipped
+                .entry("managed_worktree_changes")
+                .or_default() += 1;
+            continue;
+        }
         result.matches.push(Match {
             id: task.id.clone(),
             title: task.title.chars().take(240).collect(),
@@ -402,12 +412,33 @@ fn select(
     result
 }
 
-fn apply(snapshot: &mut Snapshot, selection: &Selection, time: i64, caller: Option<&str>) {
+fn apply(
+    snapshot: &mut Snapshot,
+    selection: &Selection,
+    time: i64,
+    caller: Option<&str>,
+) -> Result<(), String> {
     let ids: HashSet<&str> = selection
         .matches
         .iter()
         .map(|task| task.id.as_str())
         .collect();
+    let managed = snapshot
+        .tasks
+        .iter()
+        .filter(|task| ids.contains(task.id.as_str()))
+        .filter_map(|task| {
+            task.agent_worktree
+                .as_ref()
+                .map(|worktree| (&task.id, &task.cwd, worktree))
+        })
+        .collect::<Vec<_>>();
+    for (task_id, cwd, worktree) in &managed {
+        agent_worktree::can_retire(task_id, cwd, worktree)?;
+    }
+    for (task_id, cwd, worktree) in managed {
+        agent_worktree::retire(task_id, cwd, worktree)?;
+    }
     for task in &mut snapshot.tasks {
         if ids.contains(task.id.as_str()) {
             task.archived = true;
@@ -417,6 +448,7 @@ fn apply(snapshot: &mut Snapshot, selection: &Selection, time: i64, caller: Opti
     for task in &selection.matches {
         audit(snapshot, &task.id, "Chat auto-archived", format!("Inactive for more than {} days. Last activity: {}. Trigger: {}. History preserved; chat can be restored.", task.days, task.last_activity_at, caller.unwrap_or("recurring rule")), time);
     }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -1,8 +1,8 @@
 //! Composer command dispatch through existing backend authorities.
 use super::{ChatEvent, ChatPane};
 use crate::slash_palette::{SlashPaletteItem, typed_suffix};
-use gpui_kit::{AppContext as _, Context, EntityInputHandler, Focusable, Window};
 use gpui_kit::component::WindowExt as _;
+use gpui_kit::{AppContext as _, Context, EntityInputHandler, Focusable, Window};
 use serde_json::{Value, json};
 
 /// // escapes only the leading slash token, preserving all other whitespace.
@@ -36,7 +36,8 @@ impl ChatPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        !self.approval_popup_open
+        (!self.watcher.enabled || self.watcher.interject_open)
+            && !self.approval_popup_open
             && !crate::preferences_modal::workspace_blocked(cx)
             && self.composer.read(cx).focus_handle(cx).is_focused(window)
             && !self.composer.update(cx, |input, cx| {
@@ -89,9 +90,15 @@ impl ChatPane {
             "terminal" if !submitted => {
                 self.composer
                     .update(cx, |input, cx| input.set_value("/terminal ", window, cx));
-                self.voice.update(cx, |voice, cx| voice.set_context(task_id.clone(), "/terminal ", cx));
-                self.slash.update(cx, |slash, cx| slash.set_input("/terminal ", cx));
-                cx.emit(ChatEvent::DraftChanged { task_id: task_id.clone(), text: "/terminal ".into() });
+                self.voice.update(cx, |voice, cx| {
+                    voice.set_context(task_id.clone(), "/terminal ", cx)
+                });
+                self.slash
+                    .update(cx, |slash, cx| slash.set_input("/terminal ", cx));
+                cx.emit(ChatEvent::DraftChanged {
+                    task_id: task_id.clone(),
+                    text: "/terminal ".into(),
+                });
                 self.slash.update(cx, |slash, cx| slash.dismiss(cx));
                 self.composer.read(cx).focus_handle(cx).focus(window, cx);
             }
@@ -127,12 +134,19 @@ impl ChatPane {
                 self.auto_name_chat(&input, window, cx);
             }
             "rename" if crate::activity_effects::is_naming(&task_id, cx) => {
-                window.push_notification(gpui_kit::component::notification::Notification::info(
-                    "A title is already being generated."), cx);
+                window.push_notification(
+                    gpui_kit::component::notification::Notification::info(
+                        "A title is already being generated.",
+                    ),
+                    cx,
+                );
             }
             "rename" => self.slash_rpc(
-                vec![rename_request(&task_id, &suffix)], input,
-                Some("Chat title updated.".into()), window, cx,
+                vec![rename_request(&task_id, &suffix)],
+                input,
+                Some("Chat title updated.".into()),
+                window,
+                cx,
             ),
             "stop" => self.slash_rpc(
                 vec![("cancel_task", json!({"taskId":task_id}))],
@@ -160,14 +174,20 @@ impl ChatPane {
         let task_id = self.task_id();
         if !crate::activity_effects::begin_naming(&task_id, cx) {
             self.clear_slash_draft(original, window, cx);
-            window.push_notification(gpui_kit::component::notification::Notification::info(
-                "A title is already being generated."), cx);
+            window.push_notification(
+                gpui_kit::component::notification::Notification::info(
+                    "A title is already being generated.",
+                ),
+                cx,
+            );
             return;
         }
         let (command, args) = rename_request(&task_id, "");
         let (tx, rx) = futures::channel::oneshot::channel();
-        let started = std::thread::Builder::new().name("monitter-admin-rename".into())
-            .stack_size(8 * 1024 * 1024).spawn(move || {
+        let started = std::thread::Builder::new()
+            .name("monitter-admin-rename".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || {
                 let _ = tx.send(service.invoke(command, args));
             });
         if let Err(error) = started {
@@ -179,11 +199,15 @@ impl ChatPane {
         self.clear_slash_draft(original, window, cx);
         let window_handle = window.window_handle();
         cx.spawn(async move |pane, cx| {
-            let result = rx.await.unwrap_or_else(|_| Err("Naming worker closed before returning.".into()));
+            let result = rx
+                .await
+                .unwrap_or_else(|_| Err("Naming worker closed before returning.".into()));
             cx.update(|cx| {
                 let generated = result.as_ref().ok().and_then(|result| {
                     result.as_str().or_else(|| {
-                        result["tasks"].as_array()?.iter()
+                        result["tasks"]
+                            .as_array()?
+                            .iter()
                             .find(|task| task["id"].as_str() == Some(task_id.as_str()))
                             .and_then(|task| task["title"].as_str())
                     })
@@ -195,7 +219,9 @@ impl ChatPane {
                 }
             });
             let _ = pane.update(cx, |pane, cx| {
-                if pane.task_id() != task_id { return; }
+                if pane.task_id() != task_id {
+                    return;
+                }
                 match &result {
                     Ok(_) => {
                         pane.refresh(cx);
@@ -206,12 +232,15 @@ impl ChatPane {
             });
             let _ = cx.update_window(window_handle, |_, window, cx| {
                 let notice = match result {
-                    Ok(_) => gpui_kit::component::notification::Notification::success("Chat title updated."),
+                    Ok(_) => gpui_kit::component::notification::Notification::success(
+                        "Chat title updated.",
+                    ),
                     Err(error) => gpui_kit::component::notification::Notification::error(error),
                 };
                 window.push_notification(notice, cx);
             });
-        }).detach();
+        })
+        .detach();
         cx.notify();
     }
 
@@ -220,9 +249,13 @@ impl ChatPane {
             self.composer
                 .update(cx, |input, cx| input.set_value("", window, cx));
             let task_id = self.task_id();
-            self.voice.update(cx, |voice, cx| voice.set_context(task_id.clone(), "", cx));
+            self.voice
+                .update(cx, |voice, cx| voice.set_context(task_id.clone(), "", cx));
             self.slash.update(cx, |slash, cx| slash.set_input("", cx));
-            cx.emit(ChatEvent::DraftChanged { task_id, text: String::new() });
+            cx.emit(ChatEvent::DraftChanged {
+                task_id,
+                text: String::new(),
+            });
         }
         self.slash.update(cx, |slash, cx| slash.dismiss(cx));
     }
@@ -241,7 +274,9 @@ impl ChatPane {
             cx.notify();
             return;
         };
-        let stopping = commands.iter().any(|(command, _)| *command == "cancel_task");
+        let stopping = commands
+            .iter()
+            .any(|(command, _)| *command == "cancel_task");
         let (tx, rx) = futures::channel::oneshot::channel();
         let started = std::thread::Builder::new()
             .name("monitter-composer-command".into())
@@ -302,13 +337,22 @@ impl ChatPane {
                             .map(str::to_owned)
                             .or(notice);
                         if let Some(message) = message {
-                            let goal_confirmation = pane.slash_effect.as_deref() == Some("refreshGoal")
-                                && matches!(message.as_str(), "Goal updated." | "Goal cleared." | "Goal paused." | "Goal resumed.");
+                            let goal_confirmation = pane.slash_effect.as_deref()
+                                == Some("refreshGoal")
+                                && matches!(
+                                    message.as_str(),
+                                    "Goal updated."
+                                        | "Goal cleared."
+                                        | "Goal paused."
+                                        | "Goal resumed."
+                                );
                             if local_confirmation || goal_confirmation {
                                 let toast = if stopping {
                                     gpui_kit::component::notification::Notification::info(message)
                                 } else {
-                                    gpui_kit::component::notification::Notification::success(message)
+                                    gpui_kit::component::notification::Notification::success(
+                                        message,
+                                    )
                                 };
                                 window.push_notification(toast, cx);
                                 pane.slash_notice = None;
@@ -337,7 +381,7 @@ impl ChatPane {
 
 #[cfg(test)]
 mod tests {
-    use super::{literal_prompt, typed_submit_before_menu, rename_request};
+    use super::{literal_prompt, rename_request, typed_submit_before_menu};
     fn delayed_slash_result(
         cx: &mut gpui_kit::TestAppContext,
         sent: &str,
@@ -346,27 +390,52 @@ mod tests {
     ) {
         let (pane, visual) = super::super::composer_ack_tests::mount(cx, sent);
         let (tx, rx) = futures::channel::oneshot::channel();
-        visual.update(|window, cx| pane.update(cx, |pane, cx| {
-            pane.await_slash_result(rx, sent.into(), Some("Context cleared.".into()), false, window, cx);
-            assert!(pane.composer.read(cx).value().is_empty(), "clear happens synchronously without ChatPane render or RPC completion");
-            assert_eq!(pane.draft(cx), "");
-            assert!(pane.busy);
-            assert!(pane.clear_sent.is_none(), "no deferred composer clearing is queued");
-        }));
+        visual.update(|window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.await_slash_result(
+                    rx,
+                    sent.into(),
+                    Some("Context cleared.".into()),
+                    false,
+                    window,
+                    cx,
+                );
+                assert!(
+                    pane.composer.read(cx).value().is_empty(),
+                    "clear happens synchronously without ChatPane render or RPC completion"
+                );
+                assert_eq!(pane.draft(cx), "");
+                assert!(pane.busy);
+                assert!(
+                    pane.clear_sent.is_none(),
+                    "no deferred composer clearing is queued"
+                );
+            })
+        });
         visual.run_until_parked();
         if let Some(replacement) = replacement {
-            visual.update(|window, cx| pane.update(cx, |pane, cx| {
-                pane.composer.update(cx, |input, cx| input.set_value(replacement.to_owned(), window, cx));
-            }));
+            visual.update(|window, cx| {
+                pane.update(cx, |pane, cx| {
+                    pane.composer.update(cx, |input, cx| {
+                        input.set_value(replacement.to_owned(), window, cx)
+                    });
+                })
+            });
         }
         let failed = result.is_err();
         tx.send(result).expect("pending slash result receiver");
         visual.run_until_parked();
         pane.read_with(visual, |pane, cx| {
             assert!(!pane.busy);
-            assert_eq!(pane.composer.read(cx).value().as_ref(), replacement.unwrap_or(""));
+            assert_eq!(
+                pane.composer.read(cx).value().as_ref(),
+                replacement.unwrap_or("")
+            );
             assert_eq!(pane.draft(cx), replacement.unwrap_or(""));
-            assert!(pane.clear_sent.is_none(), "completion cannot clear a later identical command");
+            assert!(
+                pane.clear_sent.is_none(),
+                "completion cannot clear a later identical command"
+            );
             assert_eq!(pane.error.is_some(), failed, "RPC errors remain visible");
         });
     }
@@ -383,18 +452,34 @@ mod tests {
 
     #[gpui_kit::test]
     fn slash_failure_preserves_new_draft_and_visible_error(cx: &mut gpui_kit::TestAppContext) {
-        delayed_slash_result(cx, "/clear", Err("Synthetic command failure".into()), Some("A new draft"));
+        delayed_slash_result(
+            cx,
+            "/clear",
+            Err("Synthetic command failure".into()),
+            Some("A new draft"),
+        );
     }
 
     #[gpui_kit::test]
     fn slash_without_backend_retains_submitted_draft(cx: &mut gpui_kit::TestAppContext) {
         let (pane, visual) = super::super::composer_ack_tests::mount(cx, "/clear");
-        visual.update(|window, cx| pane.update(cx, |pane, cx| {
-            pane.slash_rpc(vec![("clear_task_context", serde_json::json!({"taskId":"ack-task"}))], "/clear".into(), None, window, cx);
-            assert_eq!(pane.composer.read(cx).value().as_ref(), "/clear");
-            assert!(!pane.busy);
-            assert!(pane.error.is_some());
-        }));
+        visual.update(|window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.slash_rpc(
+                    vec![(
+                        "clear_task_context",
+                        serde_json::json!({"taskId":"ack-task"}),
+                    )],
+                    "/clear".into(),
+                    None,
+                    window,
+                    cx,
+                );
+                assert_eq!(pane.composer.read(cx).value().as_ref(), "/clear");
+                assert!(!pane.busy);
+                assert!(pane.error.is_some());
+            })
+        });
     }
 
     #[::core::prelude::v1::test]
@@ -404,7 +489,10 @@ mod tests {
         assert_eq!(args, serde_json::json!({"target":{"taskId":"task-123"}}));
         let (command, args) = rename_request("task-123", "A manual title");
         assert_eq!(command, "rename_task");
-        assert_eq!(args, serde_json::json!({"id":"task-123","title":"A manual title"}));
+        assert_eq!(
+            args,
+            serde_json::json!({"id":"task-123","title":"A manual title"})
+        );
     }
     #[::core::prelude::v1::test]
     fn terminal_and_context_enter_preserve_typed_action_semantics() {

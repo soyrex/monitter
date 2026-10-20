@@ -52,6 +52,7 @@ pub mod browser_links;
 mod browser_open;
 pub mod report_styles;
 mod collaboration;
+mod user_questions;
 mod delegation_models;
 mod delegation_catalog;
 #[cfg(test)]
@@ -115,6 +116,7 @@ mod work_log_integration_tests;
 mod work_log_pause_tests;
 mod project_board;
 mod project_ideas;
+mod project_roster;
 mod build_queue;
 pub mod profile_init;
 mod runner;
@@ -429,6 +431,7 @@ pub(crate) struct Service {
     restart_intent_path: PathBuf,
     data: Mutex<Arc<ServiceData>>,
     runs: Mutex<RunRegistry>,
+    project_roster: Mutex<project_roster::RosterState>,
     // Serializes only the admin accept/reserve/register/dispatch window.
     // The caller drops this before waiting for its reply.
     // A real CUA image result is held only until the same run emits its next
@@ -900,6 +903,7 @@ impl Service {
                 revision: 0,
             })),
             runs: Mutex::new(RunRegistry::default()),
+            project_roster: Mutex::new(project_roster::RosterState::default()),
             pending_codex_images: Mutex::new(HashMap::new()),
             app_server_message_ids: Mutex::new(HashMap::new()),
             mail_details: Mutex::new(HashMap::new()),
@@ -1075,6 +1079,97 @@ impl Service {
         Ok(task_id)
     }
 
+    /// Reconcile only the reserved slot, before a turn owns its transport.
+    /// Pool creation also visits busy slots, so it must never reset them.
+    fn prepare_internal_admin_task(
+        &self,
+        permit: &admin_turn_broker::AdminTurnPermit,
+    ) -> Result<(), String> {
+        let task_id = permit.task_id();
+        let pending = "Monitter Admin settings are saved. Its previous session must become safely idle before the next request can use them.";
+        loop {
+            let stale_control = self.mutate_data(None, |data| {
+                if self.stopping.load(std::sync::atomic::Ordering::Acquire) {
+                    return Err("Monitter is shutting down.".into());
+                }
+                if self.replacement_preparing.load(std::sync::atomic::Ordering::Acquire)
+                    || self.restart_mode.lock().map_err(|_| "Restart lock failed.")?.is_some()
+                    || self.admin_turn_broker.is_active_task(task_id)
+                {
+                    return Err(pending.into());
+                }
+                let admin = data.snapshot.agents.iter().find(|agent| agent.internal)
+                    .ok_or("Monitter Admin agent was lost.")?.clone();
+                let host = data.snapshot.hosts.iter().find(|host| host.id == admin.host_id)
+                    .ok_or("Monitter Admin host was not found.")?.clone();
+                let task = data.snapshot.tasks.iter_mut()
+                    .find(|task| task.id == task_id && task.agent_id == admin.id)
+                    .ok_or("Monitter Admin task was not found.")?;
+                let cwd = if admin.cwd.trim().is_empty() { &host.default_cwd } else { &admin.cwd };
+                let acp = (admin.provider == "acp").then(|| admin.acp.clone()).flatten();
+                let codex_home = if admin.provider == "codex" && host.kind == "local" {
+                    Some(codex_accounts::effective_home(admin.codex_home.as_deref())?)
+                } else { admin.codex_home.clone() };
+                let unchanged = task.provider == admin.provider
+                    && task.model == admin.model && task.model_settings.is_none()
+                    && task.host_id == admin.host_id && task.cwd == *cwd
+                    && task.sandbox == admin.sandbox && task.acp == acp
+                    && task.codex_home == codex_home
+                    && data.task_hosts.get(task_id) == Some(&host);
+                if unchanged { return Ok(None); }
+                // Keep the old task/session intact until its exact runtime
+                // has been reaped; late callbacks retain their old owner.
+                let runs = self.runs.lock().map_err(|_| "Monitter run registry lock failed.")?;
+                if let Some(control) = runs.tasks.get(task_id) {
+                    return Ok(Some(Arc::clone(control)));
+                }
+                drop(runs);
+                task.provider = admin.provider;
+                task.model = admin.model;
+                task.model_settings = None;
+                task.cwd = cwd.clone();
+                task.host_id = admin.host_id;
+                task.sandbox = admin.sandbox;
+                task.acp = acp;
+                task.codex_home = codex_home;
+                task.native_session_id = None;
+                task.status = "idle".into();
+                task.updated_at = now();
+                data.task_hosts.insert(task_id.into(), host);
+                Ok(None)
+            })?;
+            let Some(control) = stale_control else { return Ok(()); };
+            if control.is_retiring() || control.is_cancelled() {
+                self.available_runtime(task_id)?;
+                continue;
+            }
+            // Process inspection and teardown must stay outside state locks.
+            let _ = control.refresh_runtime_process_baseline_while_idle();
+            let _ = control.refresh_configured_runtime_infrastructure();
+            if !control.retirement_process_tree_is_safe() { return Err(pending.into()); }
+            {
+                let _writer = self.state_writes.lock().map_err(|_| "State writer lock failed.")?;
+                let data = self.data.lock().map_err(|_| "Monitter state lock failed.")?;
+                let runs = self.runs.lock().map_err(|_| "Monitter run registry lock failed.")?;
+                if !runs.tasks.get(task_id).is_some_and(|current| Arc::ptr_eq(current, &control)) {
+                    continue;
+                }
+                if self.stopping.load(std::sync::atomic::Ordering::Acquire)
+                    || self.replacement_preparing.load(std::sync::atomic::Ordering::Acquire)
+                    || self.restart_mode.lock().map_err(|_| "Restart lock failed.")?.is_some()
+                    || self.admin_turn_broker.is_active_task(task_id)
+                    || !runtime_gc::task_allows_retirement(&data, task_id)
+                    || !control.try_retire_idle(Instant::now(), Duration::ZERO)
+                {
+                    return Err(pending.into());
+                }
+            }
+            control.retire_owned().map_err(|error| format!("Monitter Admin's previous session could not finish stopping: {error}"))?;
+            self.release_retired_run(task_id, &control);
+            // Re-read the saved settings: they may have changed during reap.
+        }
+    }
+
     /// Returns true when `task_id` identifies the lazy internal admin task.
     /// This is the single gate the resident-worker lane uses to keep admin
     /// prompts/replies out of the durable snapshot.
@@ -1176,6 +1271,52 @@ impl Service {
     /// edit that targets the existing admin preserves `internal: true` plus
     /// the canonical "Monitter Admin" name. Collaboration discovery,
     /// channels, and extensions read the resulting snapshot unchanged.
+    /// Called with pool admission fenced, after saving an Admin edit. Pending
+    /// mini-tasks fail explicitly; they are never replayed on the new provider.
+    fn restart_internal_admin_workers(
+        &self,
+        gate: &admin_turn_broker::AdminReconfigurationPermit,
+    ) -> Result<(), String> {
+        gate.cancel_pending();
+        gate.wait_for_slots(runtime_gc::RUNTIME_RELEASE_TIMEOUT)?;
+        let admin = self.internal_admin()?;
+        let task_ids: Vec<_> = self.committed_data()?.snapshot.tasks.iter()
+            .filter(|task| task.agent_id == admin.id).map(|task| task.id.clone()).collect();
+        for task_id in &task_ids {
+            let control = self.runs.lock().map_err(|_| "Monitter run registry lock failed.")?
+                .tasks.get(task_id).cloned();
+            if let Some(control) = control {
+                if control.is_retiring() {
+                    control.wait_for_teardown(runtime_gc::RUNTIME_RELEASE_TIMEOUT)?;
+                }
+                control.terminate_owned();
+                if control.root_pid().is_some() {
+                    return Err("The previous Monitter Admin worker has not finished stopping.".into());
+                }
+                self.release_app_server_run(task_id, &control);
+            }
+        }
+        self.mutate_data(None, |data| {
+            let host = data.snapshot.hosts.iter().find(|host| host.id == admin.host_id)
+                .ok_or("Monitter Admin host was not found.")?.clone();
+            for task in data.snapshot.tasks.iter_mut().filter(|task| task.agent_id == admin.id) {
+                task.provider = admin.provider.clone();
+                task.model = admin.model.clone();
+                task.model_settings = None;
+                task.cwd = if admin.cwd.trim().is_empty() { host.default_cwd.clone() } else { admin.cwd.clone() };
+                task.host_id = admin.host_id.clone();
+                task.sandbox = admin.sandbox.clone();
+                task.acp = (admin.provider == "acp").then(|| admin.acp.clone()).flatten();
+                task.codex_home = admin.codex_home.clone();
+                task.native_session_id = None;
+                task.status = "idle".into();
+                task.updated_at = now();
+                data.task_hosts.insert(task.id.clone(), host.clone());
+            }
+            Ok(())
+        })
+    }
+
     fn save_agent(&self, mut agent: Agent) -> Result<Snapshot, String> {
         validate_agent_avatar(agent.avatar.as_deref())?;
         validate_collaboration_profile(&agent)?;
@@ -1201,7 +1342,12 @@ impl Service {
                 "This provider must use the harness-configured sandbox policy.".into()
             });
         }
-        self.mutate(None, |snapshot| {
+        let internal = self.committed_data()?.snapshot.agents.iter()
+            .any(|current| current.id == agent.id && current.internal);
+        let gate = internal.then(|| self.admin_turn_broker.pause_admission()).transpose()?;
+        let previous_admin = internal.then(|| self.internal_admin()).transpose()?;
+        let mut restart_admin = false;
+        let saved = self.mutate(None, |snapshot| {
             if agent.id.trim().is_empty() {
                 agent.id = id();
             }
@@ -1243,12 +1389,46 @@ impl Service {
                 .iter_mut()
                 .find(|current| current.id == agent.id)
             {
+                restart_admin = current.internal && (
+                    current.provider != agent.provider || current.model != agent.model
+                    || current.host_id != agent.host_id || current.cwd != agent.cwd
+                    || current.sandbox != agent.sandbox || current.acp != agent.acp
+                    || current.codex_home != agent.codex_home || current.instructions != agent.instructions
+                );
+                if current.internal {
+                    let cwd = if agent.cwd.trim().is_empty() { &host.default_cwd } else { &agent.cwd };
+                    let codex_home = if agent.provider == "codex" && host.kind == "local" {
+                        Some(codex_accounts::effective_home(agent.codex_home.as_deref())?)
+                    } else { agent.codex_home.clone() };
+                    restart_admin |= snapshot.tasks.iter().filter(|task| task.agent_id == agent.id).any(|task| {
+                        task.provider != agent.provider || task.model != agent.model || task.model_settings.is_some()
+                            || task.host_id != agent.host_id || task.cwd != *cwd || task.sandbox != agent.sandbox
+                            || task.acp != agent.acp || task.codex_home.as_ref().is_some_and(|home| Some(home) != codex_home.as_ref())
+                    });
+                }
                 *current = agent;
             } else {
                 snapshot.agents.push(agent);
             }
             Ok(snapshot.clone())
-        })
+        })?;
+        if restart_admin {
+            if let Err(error) = self.restart_internal_admin_workers(gate.as_ref().ok_or("Monitter Admin configuration fence was lost.")?) {
+                // A failed reset must remain retryable, including edits to
+                // instructions which are not copied into the hidden Task.
+                // Other Admin saves are still fenced while restoring this.
+                let previous = previous_admin.ok_or("Monitter Admin configuration was lost.")?;
+                self.mutate(None, |snapshot| {
+                    let current = snapshot.agents.iter_mut().find(|agent| agent.id == previous.id)
+                        .ok_or("Monitter Admin agent was lost.")?;
+                    *current = previous;
+                    Ok(())
+                }).map_err(|rollback| format!("Monitter Admin worker restart failed: {error}. Restoring its previous settings also failed: {rollback}"))?;
+                return Err(format!("Monitter Admin workers could not finish restarting; previous settings were restored: {error}"));
+            }
+            return self.snapshot();
+        }
+        Ok(saved)
     }
 
     /// Centralized agent deletion. Refuses to remove the resident Monitter
@@ -1324,6 +1504,40 @@ impl Service {
             }
             let archived_agent_name = snapshot.agents[agent_index].name.clone();
             let archived_at = now();
+            if chat_handling == DeleteAgentChatHandling::Archive {
+                let managed = snapshot
+                    .tasks
+                    .iter()
+                    .filter(|task| task.agent_id == id)
+                    .filter_map(|task| {
+                        task.agent_worktree
+                            .as_ref()
+                            .map(|worktree| (&task.id, &task.cwd, worktree))
+                    })
+                    .collect::<Vec<_>>();
+                // Check every checkout first so a dirty sibling cannot leave a
+                // multi-chat agent removal only partly cleaned up.
+                let runs = self
+                    .runs
+                    .lock()
+                    .map_err(|_| "Monitter run registry lock failed.".to_string())?;
+                if managed
+                    .iter()
+                    .any(|(task_id, _, _)| runs.tasks.contains_key(task_id.as_str()))
+                {
+                    return Err(
+                        "Wait for the agent's managed-worktree chats to finish stopping before archiving them."
+                            .into(),
+                    );
+                }
+                drop(runs);
+                for (task_id, cwd, worktree) in &managed {
+                    agent_worktree::can_retire(task_id, cwd, worktree)?;
+                }
+                for (task_id, cwd, worktree) in managed {
+                    agent_worktree::retire(task_id, cwd, worktree)?;
+                }
+            }
             let affected: Vec<String> = snapshot
                 .tasks
                 .iter()
@@ -3843,16 +4057,60 @@ impl Service {
 
     fn set_task_archived(&self, task_id: &str, archived: bool) -> Result<Snapshot, String> {
         let stop_resident = archived && self.has_resident_run(task_id);
+        if stop_resident {
+            let task = self
+                .committed_data()?
+                .snapshot
+                .tasks
+                .iter()
+                .find(|task| task.id == task_id)
+                .cloned()
+                .ok_or_else(|| "Task was not found.".to_string())?;
+            if task.status != "running" {
+                if let Some(worktree) = task.agent_worktree.as_ref() {
+                    // Validate before stopping a reusable resident, then reap
+                    // it before removing the directory it owns as its cwd.
+                    agent_worktree::can_retire(task_id, &task.cwd, worktree)?;
+                    if let Some(control) = self.resident_control(task_id)? {
+                        control.terminate_owned();
+                        self.release_app_server_run(task_id, &control);
+                    }
+                }
+            }
+        }
         let snapshot = self.mutate(Some(task_id.into()), |snapshot| {
             {
-                let task = snapshot
+                let task_index = snapshot
                     .tasks
-                    .iter_mut()
-                    .find(|task| task.id == task_id)
+                    .iter()
+                    .position(|task| task.id == task_id)
                     .ok_or_else(|| "Task was not found.".to_string())?;
+                let task = &snapshot.tasks[task_index];
                 if task.status == "running" {
                     return Err("Cancel a running task before changing its archive state.".into());
                 }
+                if task.archived != archived {
+                    if let Some(worktree) = task.agent_worktree.as_ref() {
+                        if archived {
+                            if self
+                                .runs
+                                .lock()
+                                .map_err(|_| "Monitter run registry lock failed.".to_string())?
+                                .tasks
+                                .contains_key(task_id)
+                            {
+                                return Err(
+                                    "Wait for this chat's agent runtime to finish stopping before archiving its worktree."
+                                        .into(),
+                                );
+                            }
+                            agent_worktree::retire(task_id, &task.cwd, worktree)?;
+                        } else {
+                            agent_worktree::restore(task_id, &task.cwd, worktree)?;
+                        }
+                    }
+                }
+                let task = &mut snapshot.tasks[task_index];
                 task.archived = archived;
                 if stop_resident {
                     task.status = "interrupted".into();
@@ -4104,6 +4362,7 @@ impl Service {
             .collect::<Result<Vec<_>, _>>()?;
         let permit = self.admin_turn_broker.acquire_slot(&task_ids)?;
         let task_id = permit.task_id().to_string();
+        self.prepare_internal_admin_task(&permit)?;
         let admin = self.internal_admin()?;
         // Claim an idle owner while holding the established data -> runs lock
         // order. `available_runtime` is only a read, so retirement can win
@@ -4782,6 +5041,18 @@ impl Service {
         })
     }
 
+    pub(crate) fn finish_provider_run(
+        self: &Arc<Self>, task_id: &str, control: &Arc<runner::RunControl>,
+        status: &str, error: Option<String>,
+    ) {
+        if self.is_internal_admin_task(task_id) {
+            self.complete_app_server_turn(task_id, control, None, status, error);
+            self.release_app_server_run(task_id, control);
+        } else {
+            self.finish(task_id, status, error);
+        }
+    }
+
     pub(crate) fn finish(self: &Arc<Self>, task_id: &str, status: &str, error: Option<String>) {
         self.mark_usage_final(task_id);
         if let Ok(mut pending) = self.pending_codex_images.lock() {
@@ -4840,6 +5111,7 @@ impl Service {
             })
             .unwrap_or((false, vec![]));
         for approval_id in expired_approvals {
+            self.notify_input_waiter(&approval_id, Err("Input request expired because its task ended.".into()));
             self.notify_approval_waiters(
                 &approval_id,
                 Err("Approval request expired because its task ended.".into()),
@@ -4879,11 +5151,24 @@ impl Service {
         // already routed through `apply_event`; complete only the broker and
         // durable task state, retaining this resident owner for idle GC.
         if self.is_internal_admin_task(task_id) {
-            if self
-                .finalise_internal_admin_turn(task_id, "completed", None)
-                .is_ok()
-            {
-                self.admin_turn_broker.complete(task_id);
+            let completion = self.mutate_data(None, |data| {
+                let runs = self.runs.lock().map_err(|_| "Monitter run registry lock failed.")?;
+                if control.is_cancelled() || control.is_planned_retirement()
+                    || !runs.tasks.get(task_id).is_some_and(|current| Arc::ptr_eq(current, control)) {
+                    return Err("Monitter Admin worker no longer owns this request.".into());
+                }
+                let task = data.snapshot.tasks.iter_mut().find(|task| task.id == task_id)
+                    .ok_or("Monitter Admin task was not found.")?;
+                task.status = "completed".into();
+                task.updated_at = now();
+                Ok(crate::app_server_service::expire_inputs(&mut data.snapshot, task_id))
+            });
+            if let Ok(expired) = completion {
+                for request_id in expired {
+                    self.notify_input_waiter(&request_id, Err("Resident turn ended.".into()));
+                    self.notify_approval_waiters(&request_id, Err("Resident turn ended.".into()));
+                }
+                self.admin_turn_broker.complete_owned(task_id, control);
                 self.mark_runtime_idle_if_current(task_id, control);
             }
             return;
@@ -4914,13 +5199,19 @@ impl Service {
                 task.status = "completed".into();
             }
             task.updated_at = now();
-            Ok(was_running && task.status == "completed")
+            let should_route = was_running && task.status == "completed";
+            let expired = crate::app_server_service::expire_inputs(state, task_id);
+            Ok((should_route, expired))
         });
-        let Ok(should_route) = completion else {
+        let Ok((should_route, expired)) = completion else {
             // A failed persistence step must not make an active runtime
             // collectible or dispatch another message into the same turn.
             return;
         };
+        for request_id in expired {
+            self.notify_input_waiter(&request_id, Err("Resident turn ended.".into()));
+            self.notify_approval_waiters(&request_id, Err("Resident turn ended.".into()));
+        }
         self.mark_runtime_idle_if_current(task_id, control);
         let routes = if should_route {
             match self.mutate_data(Some(task_id.into()), |data| {
@@ -7303,6 +7594,7 @@ fn initial_task_instructions(snapshot: &Snapshot, task_id: &str) -> Option<Strin
 }
 
 fn with_project_board_context(snapshot: &Snapshot, task_id: &str, prompt: String) -> String {
+    let prompt = match project_roster::turn_context(snapshot, task_id) { Some(context) => format!("{context}\n\n{prompt}"), None => prompt };
     let prompt = match build_queue::turn_context(snapshot, task_id) { Some(context) => format!("{context}\n\n{prompt}"), None => prompt };
     let prompt = match project_board::turn_context(snapshot, task_id) {
         Some(context) => format!("{context}\n\n{prompt}"),
@@ -12140,7 +12432,7 @@ readline.createInterface({input: process.stdin}).on('line', line => {
     }
 
     fn project(id: &str, host_id: &str, cwd: &str) -> Project {
-        Project { build_management_enabled: false, agent_worktrees_enabled: false,
+        Project { ideas: vec![], ideas_revision: 0, build_management_enabled: false, agent_worktrees_enabled: false,
             id: id.into(),
             name: "  Product work  ".into(),
             description: "Shared work area".into(),
@@ -12151,7 +12443,6 @@ readline.createInterface({input: process.stdin}).on('line', line => {
                 cwd: cwd.into(),
             }],
             board_guidance_text: None,
-            ideas: vec![], ideas_revision: 0,
         }
     }
 
@@ -13640,7 +13931,7 @@ readline.createInterface({input: process.stdin}).on('line', line => {
                     acp: None,
                     archived_agent_name: None, agent_worktree: None,
                 });
-                data.snapshot.projects.push(Project { build_management_enabled: false, agent_worktrees_enabled: false,
+                data.snapshot.projects.push(Project { ideas: vec![], ideas_revision: 0, build_management_enabled: false, agent_worktrees_enabled: false,
                     id: "project".into(),
                     name: "project".into(),
                     description: String::new(),
@@ -13651,7 +13942,6 @@ readline.createInterface({input: process.stdin}).on('line', line => {
                         cwd: "/project-workspace".into(),
                     }],
                     board_guidance_text: None,
-                    ideas: vec![], ideas_revision: 0,
                 });
                 Ok(())
             })

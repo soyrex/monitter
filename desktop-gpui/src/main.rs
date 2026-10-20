@@ -27,6 +27,8 @@ use std::{
 mod agents;
 mod archives;
 mod backend_launcher;
+#[cfg(target_os = "macos")]
+mod restart_close;
 mod branding;
 mod browser;
 mod browser_workspace;
@@ -103,6 +105,7 @@ mod terminal_theme;
 mod timestamps;
 mod workspace_visibility;
 mod workspace_tabs;
+mod saved_layout_preview;
 mod workspace_favicon;
 mod report_theme;
 mod usage;
@@ -338,6 +341,8 @@ struct Desktop {
     preferences_error: Option<String>,
     preferences_save_timer: Option<Task<()>>,
     close_pending: bool,
+    #[cfg(target_os = "macos")]
+    restart_close_request: Option<restart_close::CloseRequest>,
     chat_panes: Rc<RefCell<HashMap<String, Entity<chat::ChatPane>>>>,
     chat_subscriptions: HashMap<String, Subscription>,
     service: Option<DesktopService>,
@@ -369,6 +374,7 @@ struct Desktop {
     browser_requests_seen: HashSet<String>,
     refreshing: bool,
     refresh_requested: bool,
+    reload_after_backend_restart: bool,
     _changes: Option<Task<()>>,
     browser: Option<Entity<BrowserPane>>,
     closing: bool,
@@ -517,6 +523,8 @@ impl Desktop {
             preferences_error: None,
             preferences_save_timer: None,
             close_pending: false,
+            #[cfg(target_os = "macos")]
+            restart_close_request: None,
             chat_panes: chat_panes,
             chat_subscriptions: HashMap::new(),
             service: None,
@@ -548,6 +556,7 @@ impl Desktop {
             browser_requests_seen: HashSet::new(),
             refreshing: false,
             refresh_requested: false,
+            reload_after_backend_restart: false,
             _changes: None,
             browser: None,
             closing: false,
@@ -1538,11 +1547,34 @@ impl Desktop {
             cx.notify();
             return;
         }
+        #[cfg(target_os = "macos")]
+        if self.restart_close_request.is_some() && (self.startup_pending || self.preferences_busy
+            || self.preferences_dirty || self.preferences_blocked || self.preferences.is_none()) {
+            self.preferences_error.get_or_insert_with(|| "Restart is waiting for workspace preferences to be saved.".into());
+            self.close_pending = true;
+            cx.notify();
+            return;
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(request) = self.restart_close_request.take() {
+            // request_close reached this point only after its real preference
+            // writer completed successfully. Platform quit's 200ms grace period
+            // cannot establish that guarantee for newly captured drafts.
+            if let Err(error) = monitter_lib::experimental_desktop::profile_dir()
+                .and_then(|profile| restart_close::acknowledge(&profile, &request))
+            {
+                self.preferences_error = Some(format!("Restart paused: {error}"));
+                self.close_pending = false;
+                cx.notify();
+                return;
+            }
+        }
         self.close_pending = false;
         self.prepare_close(cx);
         self.close_all_workspace_native_views(Some(window), cx);
         let handles = self.workspace_window_handles();
         let current = window.window_handle();
+        let reload_after_backend_restart = self.reload_after_backend_restart;
         // First leave this native window and Desktop lease. Then flush every
         // host's closing frame before GPUI destroys any native WebView frames.
         window.on_next_frame(move |window, cx| {
@@ -1555,9 +1587,41 @@ impl Desktop {
                         window.draw(cx).clear(cx);
                     });
                 }
-                cx.quit();
+                if reload_after_backend_restart {
+                    cx.restart();
+                } else {
+                    cx.quit();
+                }
             });
         });
+    }
+    fn reload_after_backend_restart(&mut self, cx: &mut Context<Self>) {
+        if self.reload_after_backend_restart || self.closing {
+            return;
+        }
+        self.reload_after_backend_restart = true;
+        self.window.error = Some("Backend restarted. Reloading Monitter…".into());
+        let handle = self
+            .active_workspace_window(cx)
+            .or_else(|| self.primary_workspace_window());
+        let weak = cx.weak_entity();
+        if let Some(handle) = handle {
+            cx.defer(move |cx| {
+                let _ = handle.update(cx, |_, window, cx| {
+                    let _ = weak.update(cx, |desktop, cx| {
+                        desktop.with_workspace_window(window, cx, |desktop, window, cx| {
+                            desktop.request_close(window, cx)
+                        });
+                    });
+                });
+            });
+        } else {
+            self.window.error = Some(
+                "Backend restarted, but Monitter could not find a workspace window to reload."
+                    .into(),
+            );
+        }
+        cx.notify();
     }
     fn refresh(&mut self, cx: &mut Context<Self>) {
         // Backpressure is one read/apply followed by one publication. Continuous
@@ -1636,8 +1700,14 @@ impl Desktop {
                             }
                         },
                         Err(error) => {
-                            if !chat::connection_recovery::transient(&error) { view.window.error = Some(error); }
-                            cx.notify();
+                            if chat::connection_recovery::backend_restarted(&error) {
+                                view.reload_after_backend_restart(cx);
+                            } else {
+                                if !chat::connection_recovery::transient(&error) {
+                                    view.window.error = Some(error);
+                                }
+                                cx.notify();
+                            }
                         }
                     }
                 }
@@ -2602,6 +2672,14 @@ impl Desktop {
                     Err(error) => return (None, Err(error)),
                 }
             } else { workspace_revision };
+            // Presentation and local workspace saves above retain client metadata.
+            // Older resident backends accept only the original native dock schema.
+            if let Some(layout) = data.layout.as_ref() {
+                match monitter_gpui_desktop::workspace_store::backend_layout_projection(layout) {
+                    Ok(layout) => data.layout = Some(layout),
+                    Err(error) => return (Some(revision), Err(error)),
+                }
+            }
             let result = service.save_native_preferences(&preferences.revision, data);
             if result.is_ok() {
                 if let Err(error) = monitter_gpui_desktop::startup_cache::save(&presentation) {
@@ -3265,9 +3343,14 @@ impl Desktop {
                         ));
                     }
                 }
-            } else if neovim_workspace::parse_id(id).is_some() || neovim_workspace::parse_files_id(id).is_some() {
+            } else if neovim_workspace::parse_id(id).is_some() {
                 // The retained session reconnects through the private backend.
                 // Missing/exited sessions were pruned from the authoritative listing.
+            } else if neovim_workspace::parse_files_id(id).is_some()
+                && self.window.dock.read(cx).contains(id)
+            {
+                // This local child view has no standalone constructor. It can
+                // only be retained while its owning Neovim pane is resident.
             } else if id.starts_with("draft:") && self.draft_panes.borrow().contains_key(id) {
                 // Retained unsent form, including inactive named workspaces.
             } else if id.starts_with("empty:") {
@@ -5581,6 +5664,34 @@ fn main() {
                     });
                 });
             });
+            #[cfg(target_os = "macos")]
+            {
+                let weak = desktop.downgrade();
+                cx.spawn(async move |cx| {
+                    loop {
+                        cx.background_executor().timer(std::time::Duration::from_millis(200)).await;
+                        let pending = cx.background_executor().spawn(async {
+                            monitter_lib::experimental_desktop::profile_dir()
+                                .and_then(|profile| restart_close::pending(&profile, std::process::id()))
+                        }).await;
+                        let Ok(Some(request)) = pending else { continue; };
+                        let handle = weak.read_with(cx, |desktop, cx| {
+                            desktop.active_workspace_window(cx).or_else(|| desktop.primary_workspace_window())
+                        }).ok().flatten();
+                        let Some(handle) = handle else { continue; };
+                        let _ = handle.update(cx, |_, window, cx| {
+                            let _ = weak.update(cx, |desktop, cx| {
+                                if desktop.closing || desktop.restart_close_request.as_ref()
+                                    .is_some_and(|current| current.token == request.token) { return; }
+                                desktop.restart_close_request = Some(request);
+                                desktop.with_workspace_window(window, cx, |desktop, window, cx| {
+                                    desktop.request_close(window, cx)
+                                });
+                            });
+                        });
+                    }
+                }).detach();
+            }
             let weak = desktop.downgrade();
             cx.on_app_quit(move |cx| {
                 let locked = session_lock::locked(cx);

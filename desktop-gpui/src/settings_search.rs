@@ -54,6 +54,10 @@ entries![
     ("extensions", "MCP servers", "Tools and servers available to agents.", "plugins extensions command url"),
     ("extensions", "Skills & plugins", "Instructions and extensions available to agents.", "mcp"),
     ("mail", "Mail accounts", "Connect mail accounts and assign them to agents.", "gmail oauth email"),
+    ("work-history", "Work History collection", "Collect new agent work privately on this desktop.", "local private recording collector pause resume status health"),
+    ("work-history", "Recorded work", "Filter and browse local work history.", "history project agent outcome date refresh"),
+    ("work-history", "Retention & storage", "Set local history retention and storage limits.", "history days raw summary database quota"),
+    ("work-history", "Export & delete", "Export JSON or CSV and delete selected local run history.", "history export json csv delete privacy"),
     ("security", "Session lock", "Protect the desktop with a PIN.", "password security idle unlock"),
     ("approvals", "Approval rules", "Review and revoke saved always-approve rules.", "permissions security"),
     ("secrets", "Environment & secrets", "Shared environment variables for local agents.", "env credentials keys"),
@@ -61,6 +65,7 @@ entries![
 ];
 pub(super) fn card_title(label: &'static str) -> &'static str {
     match label {
+        "Retention & storage" => "Work History collection",
         "Window transparency" => "Primary window surface",
         "Wallpaper accent" => "Advanced · Wallpaper accent",
         "Surface blending" => "Advanced · Surface blending",
@@ -138,6 +143,12 @@ mod tests {
         assert_eq!(search("layout panes")[0].category, "interface");
         assert_eq!(search("fonts text")[0].category, "typography");
         assert!(search(&"x".repeat(10000)).is_empty());
+    }
+    #[test] fn work_history_search_resolves_private_preferences_cards() {
+        for query in ["work history", "retention", "export csv", "collector health"] {
+            assert_eq!(search(query)[0].category, "work-history", "{query}");
+        }
+        assert_eq!(card_title("Retention & storage"), "Work History collection");
     }
     #[test] fn index_covers_every_category() {
         for category in super::super::settings_navigation::CATEGORIES {

@@ -158,9 +158,22 @@ impl Service {
     pub(crate) fn save_project_ideas(
         &self,
         project_id: &str,
-        mut ideas: Vec<ProjectIdea>,
+        ideas: Vec<ProjectIdea>,
         expected_revision: u64,
     ) -> Result<Snapshot, String> {
+        self.save_project_ideas_with_reply(project_id, ideas, expected_revision, |snapshot, _| snapshot.clone())
+    }
+
+    pub(crate) fn save_project_ideas_ack(
+        &self, project_id: &str, ideas: Vec<ProjectIdea>, expected_revision: u64,
+    ) -> Result<u64, String> {
+        self.save_project_ideas_with_reply(project_id, ideas, expected_revision, |_, revision| revision)
+    }
+
+    fn save_project_ideas_with_reply<T>(
+        &self, project_id: &str, mut ideas: Vec<ProjectIdea>, expected_revision: u64,
+        reply: impl FnOnce(&Snapshot, u64) -> T,
+    ) -> Result<T, String> {
         validate_ideas(&ideas)?;
         self.mutate(None, |snapshot| {
             let project = snapshot
@@ -184,7 +197,8 @@ impl Service {
                 .ideas_revision
                 .checked_add(1)
                 .ok_or("Idea List revision limit reached.")?;
-            Ok(snapshot.clone())
+            let revision = project.ideas_revision;
+            Ok(reply(snapshot, revision))
         })
     }
 

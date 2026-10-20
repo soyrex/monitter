@@ -320,3 +320,71 @@ fn pane_background_hover_keeps_focus_cache_and_settles_without_callbacks(cx: &mu
         assert_eq!(window.simulate_next_frame(cx), 0, "settled background has no remaining frame demand");
     });
 }
+
+/// Paint the production content/decorations hierarchy, so a second inherited
+/// content opacity cannot quietly attenuate the working gradient again.
+struct WorkingHighlightHarness {
+    field: Entity<crate::activity_sparkles::SparkleField>,
+    content_opacity: f32,
+}
+impl Render for WorkingHighlightHarness {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        super::pane_content_layers(
+            div().size_full().bg(gpui::rgb(0xff0000)).into_any_element(),
+            [self.field.clone()], self.content_opacity,
+        )
+    }
+}
+
+#[gpui::test]
+fn working_highlight_fades_only_ten_percent_independent_of_content_dimming(cx: &mut TestAppContext) {
+    cx.update(|cx| gpui_kit::init(cx));
+    for dark in [false, true] {
+        let palette = crate::design::palette(&serde_json::json!({}), if dark {
+            gpui::WindowAppearance::Dark
+        } else { gpui::WindowAppearance::Light });
+        let (harness, visual) = cx.add_window_view(|_, cx| {
+            let field = cx.new(|_| {
+                let mut field = crate::activity_sparkles::SparkleField::new(
+                    "focus-highlight-test".into(), crate::activity_sparkles::SparkleLayout::Pane,
+                    false, palette, false,
+                );
+                field.set_visible(true);
+                field
+            });
+            WorkingHighlightHarness { field, content_opacity: 1. }
+        });
+        visual.run_until_parked();
+        let field = harness.read_with(visual, |harness, _| harness.field.clone());
+        let mut focused_alpha = 0.;
+        for (active, content_opacity) in [(true, 1.), (false, 0.1), (false, 0.6), (false, 0.9), (true, 1.)] {
+            field.update(visual, |field, cx| { field.set_active_pane(active); cx.notify(); });
+            harness.update(visual, |harness, cx| { harness.content_opacity = content_opacity; cx.notify(); });
+            visual.run_until_parked();
+            let (gradient_alpha, content_alpha) = visual.update(|window, cx| {
+                window.draw(cx).clear(cx);
+                let quads = window.painted_quads();
+                let gradient = quads.iter().find_map(|quad| {
+                    let background = serde_json::to_value(quad.background).unwrap();
+                    (background["tag"] == "LinearGradient").then(|| {
+                        serde_json::from_value::<gpui::Rgba>(background["colors"][1]["color"].clone()).unwrap().a
+                    })
+                }).expect("working pane gradient painted");
+                let content = quads.iter().find_map(|quad| {
+                    let color = quad.background.as_solid()?;
+                    let rgba = gpui::Rgba::from(color);
+                    (rgba.r > 0.99 && rgba.g < 0.01 && rgba.b < 0.01).then_some(rgba.a)
+                }).expect("content probe painted");
+                (gradient, content)
+            });
+            assert!((content_alpha - content_opacity).abs() < 0.005, "content keeps configured dimming");
+            if active {
+                if focused_alpha == 0. { focused_alpha = gradient_alpha; }
+                assert!((gradient_alpha - focused_alpha).abs() < 0.005, "focus restores full highlight");
+            } else {
+                assert!((gradient_alpha / focused_alpha - 0.9).abs() < 0.025,
+                    "unfocused highlight stays at90 percent in both themes regardless of content opacity: {gradient_alpha}/{focused_alpha}");
+            }
+        }
+    }
+}

@@ -80,8 +80,8 @@ mod macos {
             fn restart_server(&self, _sender: &AnyObject) {
                 let alert: Retained<AnyObject> = unsafe { msg_send![class!(NSAlert), new] };
                 unsafe {
-                    let _: () = msg_send![&*alert, setMessageText: &*NSString::from_str("Restart Monitter Server?")];
-                    let _: () = msg_send![&*alert, setInformativeText: &*NSString::from_str("Wait lets active agents finish and pauses new turns until the restart. Force interrupts the running agents and asks them to resume after the server reloads. Unconfirmed actions may need review.")];
+                    let _: () = msg_send![&*alert, setMessageText: &*NSString::from_str("Restart Monitter and Backend?")];
+                    let _: () = msg_send![&*alert, setInformativeText: &*NSString::from_str("Monitter will save and close its windows, restart the backend, then reopen when it is ready. Wait lets active agents finish and pauses new turns. Force interrupts agents and asks them to resume after restart. Unconfirmed actions may need review. If a window cannot close safely, restart pauses with an error.")];
                     for title in ["Wait for Agents", "Force Restart Now", "Cancel"] {
                         let _: *mut AnyObject = msg_send![&*alert, addButtonWithTitle: &*NSString::from_str(title)];
                     }
@@ -243,7 +243,7 @@ mod macos {
             let restart_item = unsafe {
                 NSMenuItem::initWithTitle_action_keyEquivalent(
                     NSMenuItem::alloc(mtm),
-                    &NSString::from_str("Restart Server…"),
+                    &NSString::from_str("Restart Monitter and Backend…"),
                     Some(sel!(restartServer:)),
                     &empty_key,
                 )

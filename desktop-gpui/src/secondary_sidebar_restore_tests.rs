@@ -1,8 +1,8 @@
 //! Exercise production restore/reveal and native measurement without provider IO.
 use super::ChatPane;
 use gpui_kit::{
-    AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render,
-    Styled as _, TestAppContext, VisualTestContext, Window, div,
+    AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _,
+    TestAppContext, VisualTestContext, Window, div,
 };
 use monitter_lib::experimental_desktop::{
     DesktopService, NativeChatPanePreferences, NativeDetailTab,
@@ -26,7 +26,9 @@ fn mount(cx: &mut TestAppContext) -> (Entity<ChatPane>, &mut VisualTestContext) 
                 "sidebar-restore-task".into(),
                 DesktopService::disconnected_for_ui_fixture(),
                 Rc::new(json!({"settings":{}, "tasks":[], "messages":[], "events":[]})),
-                Some("sidebar-restore-fixture".into()), window, cx,
+                Some("sidebar-restore-fixture".into()),
+                window,
+                cx,
             );
             pane.service = None;
             pane
@@ -38,14 +40,14 @@ fn mount(cx: &mut TestAppContext) -> (Entity<ChatPane>, &mut VisualTestContext) 
 }
 
 #[gpui_kit::test]
-fn secondary_sidebar_restore_is_settled_before_first_native_measurement(
-    cx: &mut TestAppContext,
-) {
+fn secondary_sidebar_restore_is_settled_before_first_native_measurement(cx: &mut TestAppContext) {
     let (pane, visual) = mount(cx);
     visual.update(|window, cx| {
         pane.update(cx, |pane, cx| {
             let saved = NativeChatPanePreferences {
-                visible: true, width: 280., tab: NativeDetailTab::Timeline,
+                visible: true,
+                width: 280.,
+                tab: NativeDetailTab::Timeline,
             };
             pane.restore_secondary_sidebar(&saved, window, cx);
             assert!(pane.detail_motion_settle_pending);
@@ -56,7 +58,9 @@ fn secondary_sidebar_restore_is_settled_before_first_native_measurement(
             pane.toggle_companion(cx);
             assert_eq!(pane.detail_motion.sample(false, false), (1., true));
             let hidden = NativeChatPanePreferences {
-                visible: false, width: 300., tab: NativeDetailTab::Subagents,
+                visible: false,
+                width: 300.,
+                tab: NativeDetailTab::Subagents,
             };
             pane.restore_secondary_sidebar(&hidden, window, cx);
             assert_eq!(pane.secondary_sidebar_state(), hidden);

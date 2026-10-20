@@ -206,6 +206,7 @@ fn icon_key(icon: IconName) -> String {
 }
 pub struct WorkspaceEditor {
     id: String,
+    instance_id: String,
     name: Entity<InputState>,
     color: Entity<InputState>,
     url: Entity<InputState>,
@@ -215,6 +216,12 @@ pub struct WorkspaceEditor {
     icon: String,
     error: Option<String>,
     confirm_remove: bool,
+    layout_name: Entity<InputState>,
+    saved_layouts: Vec<monitter_gpui_desktop::workspace_store::SavedWorkspaceLayout>,
+    saved_layouts_loading: bool,
+    saved_layout_action_busy: bool,
+    saved_layout_restore_generation: u64,
+    capture_layout_open: bool,
     _subscriptions: Vec<Subscription>,
 }
 fn relative_workspace_id(set: &NativeWorkspaceSet, direction: i8) -> Option<String> {
@@ -356,14 +363,14 @@ impl Desktop {
             let pane = pane.clone();
             let previous_focus = previous_focus.clone();
             dialog.title("Watch")
-                .width((window.viewport_size().width - px(48.)).min(px(1040.)))
+                .width((window.viewport_size().width - px(48.)).min(px(880.)))
                 .keyboard(true).close_button(true).overlay_closable(true)
                 .on_close(move |_, window, cx| {
                     pane.update(cx, |pane, cx| pane.release_activity_watch_modal(generation, cx));
                     if let Some(focus) = &previous_focus { window.focus(focus, cx); }
                 })
                 .child(div().id("activity-watch-modal").debug_selector(|| "activity-watch-modal".into())
-                    .w_full().h((window.viewport_size().height - px(180.)).min(px(760.)).max(px(180.)))
+                    .w_full().h((window.viewport_size().height - px(180.)).min(px(440.)).max(px(180.)))
                     .child(watch.clone()))
         });
     }
@@ -710,6 +717,8 @@ impl Desktop {
         let color = cx.new(|cx| InputState::new(window, cx).default_value(item.color.clone()));
         let url = cx.new(|cx| InputState::new(window, cx).default_value(item.url.clone().unwrap_or_default()));
         let icon_query = cx.new(|cx| InputState::new(window, cx).placeholder("Search all icons"));
+        let layout_name = cx.new(|cx| InputState::new(window, cx).placeholder("Layout name"));
+        let editor_instance_id = uuid::Uuid::new_v4().to_string();
         let color_picker = cx.new(|cx| ColorPickerState::new(window, cx).default_value(rgb(design::parse_color(&item.color, 0x38bfd2))));
         let mut subscriptions: Vec<Subscription> = [&name, &color, &url]
             .into_iter()
@@ -723,6 +732,11 @@ impl Desktop {
             .collect();
         subscriptions.push(cx.observe(&color_picker, |_, _, cx| cx.notify()));
         subscriptions.push(cx.subscribe(&icon_query, |_, _, _: &InputEvent, cx| cx.notify()));
+        subscriptions.push(cx.subscribe_workspace(&layout_name, window, |view, _, event: &InputEvent, window, cx| {
+            if matches!(event, InputEvent::PressEnter { .. }) {
+                view.capture_named_workspace_layout(window, cx);
+            }
+        }));
         subscriptions.push(cx.subscribe_workspace(&color, window, |view, input, _: &InputEvent, window, cx| {
             let value = input.read(cx).value().trim().to_owned();
             if value.len() == 7 && value.starts_with('#') && value[1..].bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -751,6 +765,7 @@ impl Desktop {
         }));
         self.window.workspace_editor = Some(WorkspaceEditor {
             id: id.into(),
+            instance_id: editor_instance_id.clone(),
             name,
             color,
             url,
@@ -760,15 +775,434 @@ impl Desktop {
             icon: item.icon.clone(),
             error: None,
             confirm_remove: false,
+            layout_name,
+            saved_layouts: Vec::new(),
+            saved_layouts_loading: true,
+            saved_layout_action_busy: false,
+            saved_layout_restore_generation: 0,
+            capture_layout_open: false,
             _subscriptions: subscriptions,
         });
+        self.load_named_workspace_layouts(id.to_owned(), editor_instance_id, window, cx);
         cx.notify();
     }
+    fn load_named_workspace_layouts(
+        &mut self,
+        workspace_id: String,
+        editor_instance_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let requested_id = workspace_id.clone();
+        let worker = cx.background_executor().spawn(async move {
+            monitter_gpui_desktop::workspace_store::load_saved_layouts_with_warnings(
+                &requested_id,
+            )
+        });
+        self.spawn_workspace(window, cx, async move |view, cx| {
+            let result = worker.await;
+            let _ = view.update_in(cx, |view, _, cx| {
+                let Some(editor) = &mut view.window.workspace_editor else { return; };
+                if editor.id != workspace_id || editor.instance_id != editor_instance_id { return; }
+                editor.saved_layouts_loading = false;
+                match result {
+                    Ok(load) => {
+                        editor.saved_layouts = load.layouts;
+                        if !load.warnings.is_empty() {
+                            editor.error = Some(load.warnings.join(" "));
+                        }
+                    }
+                    Err(error) => editor.error = Some(format!("Saved layouts could not be loaded: {error}")),
+                }
+                cx.notify();
+            });
+        }).detach();
+    }
+    fn capture_named_workspace_layout(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(editor) = &self.window.workspace_editor else { return; };
+        let workspace_id = editor.id.clone();
+        let editor_instance_id = editor.instance_id.clone();
+        let label = editor.layout_name.read(cx).value().trim().to_owned();
+        if self.window.active_workspace_id.as_deref() != Some(workspace_id.as_str()) {
+            if let Some(editor) = &mut self.window.workspace_editor {
+                editor.error = Some("Open this workspace before saving its current layout.".into());
+            }
+            cx.notify();
+            return;
+        }
+        if !self.workspace_ready()
+            || editor.saved_layouts_loading
+            || editor.saved_layout_action_busy
+        {
+            return;
+        }
+        if label.is_empty() {
+            if let Some(editor) = &mut self.window.workspace_editor {
+                editor.error = Some("Enter a name for this layout.".into());
+            }
+            cx.notify();
+            return;
+        }
+        let mut layout = match self.window.dock.read(cx).serialize(cx) {
+            Ok(layout) => layout,
+            Err(error) => {
+                if let Some(editor) = &mut self.window.workspace_editor { editor.error = Some(error); }
+                cx.notify();
+                return;
+            }
+        };
+        let focused = self.window.dock.read(cx).focused_pane_id(window, cx)
+            .or_else(|| self.window.dock_current.clone());
+        crate::workspace_visibility::remember_focus(&mut layout, focused.as_deref());
+        if let Some(editor) = &mut self.window.workspace_editor {
+            editor.saved_layout_action_busy = true;
+            editor.error = None;
+        }
+        let completed_workspace_id = workspace_id.clone();
+        let worker = cx.background_executor().spawn(async move {
+            monitter_gpui_desktop::workspace_store::capture_saved_layout(
+                &workspace_id,
+                &label,
+                &layout,
+            )
+        });
+        self.spawn_workspace(window, cx, async move |view, cx| {
+            let result = worker.await;
+            let _ = view.update_in(cx, |view, window, cx| {
+                let Some(editor) = &mut view.window.workspace_editor else { return; };
+                if editor.id != completed_workspace_id || editor.instance_id != editor_instance_id { return; }
+                editor.saved_layout_action_busy = false;
+                match result {
+                    Ok(layout) if layout.workspace_id == editor.id => {
+                        editor.saved_layouts.insert(0, layout);
+                        editor.capture_layout_open = false;
+                        editor.layout_name.update(cx, |input, cx| input.set_value("", window, cx));
+                        editor.error = None;
+                    }
+                    Ok(_) => {}
+                    Err(error) => editor.error = Some(error),
+                }
+                cx.notify();
+            });
+        }).detach();
+        cx.notify();
+    }
+    fn restore_named_workspace_layout(
+        &mut self,
+        layout_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(editor) = &self.window.workspace_editor else { return; };
+        if self.window.active_workspace_id.as_deref() != Some(editor.id.as_str()) {
+            if let Some(editor) = &mut self.window.workspace_editor {
+                editor.error = Some("Open this workspace before restoring one of its layouts.".into());
+            }
+            cx.notify();
+            return;
+        }
+        if !self.workspace_ready()
+            || editor.saved_layouts_loading
+            || editor.saved_layout_action_busy
+        {
+            return;
+        }
+        let Some(saved) = editor.saved_layouts.iter().find(|saved| saved.id == layout_id).cloned() else { return; };
+        let workspace_id = editor.id.clone();
+        let editor_instance_id = editor.instance_id.clone();
+        let mut layout = saved.layout;
+        let saved_ids = match crate::docking::DockWorkspace::saved_ids(&layout) {
+            Ok(ids) => ids,
+            Err(error) => {
+                if let Some(editor) = &mut self.window.workspace_editor {
+                    editor.error = Some(format!("Layout could not be restored: {error}"));
+                }
+                cx.notify();
+                return;
+            }
+        };
+        let has_browser = saved_ids
+            .iter()
+            .any(|id| id == "route:browser" || id.starts_with("browser:"));
+        if has_browser {
+            self.ensure_browser(window, cx);
+            if let Some(manager) = &self.browser {
+                layout = match crate::browser_workspace::migrate_browser_layout(
+                    &layout,
+                    &manager.read(cx).ordered_tab_ids(),
+                    manager.read(cx).selected_tab_id(),
+                ) {
+                    Ok(layout) => layout,
+                    Err(error) => {
+                        if let Some(editor) = &mut self.window.workspace_editor {
+                            editor.error = Some(format!("Layout could not be restored: {error}"));
+                        }
+                        cx.notify();
+                        return;
+                    }
+                };
+            }
+        }
+        let saved_ids = crate::docking::DockWorkspace::saved_ids(&layout).unwrap_or_default();
+        let needs_terminal_lookup = saved_ids.iter().any(|id| id.starts_with("terminal:"));
+        let needs_neovim_lookup = saved_ids
+            .iter()
+            .any(|id| crate::neovim_workspace::parse_id(id).is_some());
+        let generation = {
+            let editor = self.window.workspace_editor.as_mut().unwrap();
+            editor.saved_layout_action_busy = true;
+            editor.error = None;
+            editor.saved_layout_restore_generation =
+                editor.saved_layout_restore_generation.wrapping_add(1);
+            editor.saved_layout_restore_generation
+        };
+        if !needs_terminal_lookup && !needs_neovim_lookup {
+            self.finish_saved_workspace_layout_restore(
+                workspace_id,
+                editor_instance_id,
+                layout,
+                Vec::new(),
+                Vec::new(),
+                generation,
+                window,
+                cx,
+            );
+            return;
+        }
+        let Some(service) = self.service.clone() else {
+            self.fail_saved_workspace_layout_restore(
+                &workspace_id,
+                &editor_instance_id,
+                generation,
+                "Native service has not loaded.".into(),
+                cx,
+            );
+            return;
+        };
+        let (sender, receiver) = futures::channel::oneshot::channel();
+        if let Err(error) = std::thread::Builder::new()
+            .name("monitter-saved-layout-restore".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || {
+                let result = (|| {
+                    let terminals = if needs_terminal_lookup {
+                        service
+                            .invoke("list_terminals", json!({}))?
+                            .as_array()
+                            .cloned()
+                            .ok_or("Terminal list response is invalid.".to_owned())?
+                    } else {
+                        Vec::new()
+                    };
+                    let neovim = if needs_neovim_lookup {
+                        let descriptors = service
+                            .invoke("list_neovim", json!({}))?
+                            .as_array()
+                            .cloned()
+                            .ok_or("Neovim list response is invalid.".to_owned())?;
+                        if descriptors.iter().any(|session| {
+                            session["id"].as_str().is_none()
+                                || session["exited"].as_bool().is_none()
+                        }) {
+                            return Err("Neovim list response is invalid.".to_owned());
+                        }
+                        descriptors
+                    } else {
+                        Vec::new()
+                    };
+                    Ok((terminals, neovim))
+                })();
+                let _ = sender.send(result);
+            })
+        {
+            self.fail_saved_workspace_layout_restore(
+                &workspace_id,
+                &editor_instance_id,
+                generation,
+                error.to_string(),
+                cx,
+            );
+            return;
+        }
+        self.spawn_workspace(window, cx, async move |view, cx| {
+            let result = receiver
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|result| result);
+            let _ = view.update_in(cx, |view, window, cx| match result {
+                Ok((sessions, neovim_sessions)) => view.finish_saved_workspace_layout_restore(
+                    workspace_id,
+                    editor_instance_id,
+                    layout,
+                    sessions,
+                    neovim_sessions,
+                    generation,
+                    window,
+                    cx,
+                ),
+                Err(error) => view.fail_saved_workspace_layout_restore(
+                    &workspace_id,
+                    &editor_instance_id,
+                    generation,
+                    format!("Workspace session restore failed: {error}"),
+                    cx,
+                ),
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn fail_saved_workspace_layout_restore(
+        &mut self,
+        workspace_id: &str,
+        editor_instance_id: &str,
+        generation: u64,
+        error: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(editor) = &mut self.window.workspace_editor else { return; };
+        if editor.id != workspace_id
+            || editor.instance_id != editor_instance_id
+            || editor.saved_layout_restore_generation != generation
+        {
+            return;
+        }
+        editor.saved_layout_action_busy = false;
+        editor.error = Some(format!("Layout could not be restored: {error}"));
+        cx.notify();
+    }
+
+    fn finish_saved_workspace_layout_restore(
+        &mut self,
+        workspace_id: String,
+        editor_instance_id: String,
+        layout: Value,
+        sessions: Vec<Value>,
+        neovim_sessions: Vec<Value>,
+        generation: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let current = self.window.workspace_editor.as_ref().is_some_and(|editor| {
+            editor.id == workspace_id
+                && editor.instance_id == editor_instance_id
+                && editor.saved_layout_restore_generation == generation
+                && editor.saved_layout_action_busy
+        });
+        if !current || self.window.active_workspace_id.as_deref() != Some(workspace_id.as_str()) {
+            return;
+        }
+        let availability = crate::docking::DockWorkspace::saved_ids(&layout).and_then(|ids| {
+            for id in ids {
+                if let Some((session_id, _)) = crate::neovim_workspace::parse_id(&id) {
+                    let available = neovim_sessions.iter().any(|session| {
+                        session["id"].as_str() == Some(session_id)
+                            && session["exited"].as_bool() == Some(false)
+                    });
+                    if !available {
+                        return Err(format!(
+                            "Saved Neovim pane {id} is unavailable. Current layout retained."
+                        ));
+                    }
+                } else if crate::neovim_workspace::parse_files_id(&id).is_some()
+                    && !self.window.dock.read(cx).contains(&id)
+                {
+                    return Err(format!(
+                        "Saved Neovim files pane {id} is unavailable. Current layout retained."
+                    ));
+                }
+            }
+            Ok(())
+        });
+        let result = availability
+            .and_then(|()| self.prepare_saved_panes(&layout, &sessions, window, cx))
+            .and_then(|()| {
+                self.window
+                    .dock
+                    .update(cx, |dock, cx| dock.restore_retaining(layout.clone(), window, cx))
+            });
+        if let Err(error) = result {
+            self.fail_saved_workspace_layout_restore(
+                &workspace_id,
+                &editor_instance_id,
+                generation,
+                error,
+                cx,
+            );
+            return;
+        }
+        for id in crate::workspace_visibility::focus_candidates(&layout, None) {
+            if self.window.dock.update(cx, |dock, cx| dock.focus(&id, window, cx)) {
+                break;
+            }
+        }
+        self.window.dock_current = self.window.dock.read(cx).focused_pane_id(window, cx);
+        self.capture_workspace_layout(layout.clone());
+        self.workspaces_dirty = true;
+        self.preferences_dirty = true;
+        self.window.workspace_editor = None;
+        self.queue_preferences_save(cx);
+        let neovim_session_ids = crate::docking::DockWorkspace::saved_ids(&layout)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|pane_id| {
+                crate::neovim_workspace::parse_id(&pane_id)
+                    .map(|(session_id, _)| session_id.to_owned())
+            })
+            .collect::<std::collections::HashSet<_>>();
+        for session_id in neovim_session_ids {
+            if let Err(error) = self.reconcile_neovim(&session_id, window, cx) {
+                self.window.error = Some(error);
+            }
+        }
+        cx.notify();
+    }
+    fn delete_named_workspace_layout(
+        &mut self,
+        layout_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(editor) = &self.window.workspace_editor else { return; };
+        if editor.saved_layouts_loading || editor.saved_layout_action_busy { return; }
+        let workspace_id = editor.id.clone();
+        let editor_instance_id = editor.instance_id.clone();
+        if let Some(editor) = &mut self.window.workspace_editor {
+            editor.saved_layout_action_busy = true;
+            editor.error = None;
+        }
+        let deleted_id = layout_id.clone();
+        let completed_workspace_id = workspace_id.clone();
+        let worker = cx.background_executor().spawn(async move {
+            monitter_gpui_desktop::workspace_store::delete_saved_layout(&workspace_id, &deleted_id)
+        });
+        self.spawn_workspace(window, cx, async move |view, cx| {
+            let result = worker.await;
+            let _ = view.update_in(cx, |view, _, cx| {
+                let Some(editor) = &mut view.window.workspace_editor else { return; };
+                if editor.id != completed_workspace_id || editor.instance_id != editor_instance_id { return; }
+                editor.saved_layout_action_busy = false;
+                match result {
+                    Ok(true) => editor.saved_layouts.retain(|saved| saved.id != layout_id),
+                    Ok(false) => editor.error = Some("That saved layout no longer exists.".into()),
+                    Err(error) => editor.error = Some(error),
+                }
+                cx.notify();
+            });
+        }).detach();
+        cx.notify();
+    }
+
     fn save_workspace_editor(&mut self, cx: &mut Context<Self>) {
         let Some(editor) = &mut self.window.workspace_editor else {
             return;
         };
-        if editor.confirm_remove { return; }
+        if editor.confirm_remove || editor.saved_layout_action_busy { return; }
         let name = editor.name.read(cx).value().trim().to_owned();
         let color = editor.color.read(cx).value().trim().to_owned();
         if name.is_empty() || name.chars().count() > 80 || name.chars().any(char::is_control) {
@@ -848,6 +1282,14 @@ impl Desktop {
             return;
         }
         if self
+            .window
+            .workspace_editor
+            .as_ref()
+            .is_some_and(|editor| editor.saved_layout_action_busy)
+        {
+            return;
+        }
+        if self
             .named_workspaces
             .as_ref()
             .is_none_or(|set| set.items.len() <= 1)
@@ -862,8 +1304,9 @@ impl Desktop {
         };
         if visible.active_id == id {
             if visible.items.len() == 1 {
-                if let Err(error) = self.remove_last_host_workspace(id, window, cx) {
-                    self.preferences_error = Some(error);
+                match self.remove_last_host_workspace(id, window, cx) {
+                    Ok(()) => {}
+                    Err(error) => self.preferences_error = Some(error),
                 }
             } else {
                 let neighbor = visible.items[if index + 1 < visible.items.len() {
@@ -946,6 +1389,7 @@ impl Desktop {
                     .read(cx)
                     .clone();
                 let click_focus = focus.clone();
+                let key_focus = focus.clone();
                 let color = rgb(design::parse_color(&item.color, palette.accent));
                 let selection_chrome = crate::chrome_motion::selection_chrome(
                     SharedString::from(format!("workspace-selection-motion-{id}")), active,
@@ -1012,7 +1456,9 @@ impl Desktop {
                                 }
                             } else if view.window.workspace_editor
                                 .as_ref()
-                                .is_some_and(|editor| editor.id == menu_id)
+                                .is_some_and(|editor| {
+                                    editor.id == menu_id && !editor.saved_layout_action_busy
+                                })
                             {
                                 view.window.workspace_editor = None;
                                 cx.notify();
@@ -1077,6 +1523,9 @@ impl Desktop {
                             cx.stop_propagation();
                         })
                         .on_key_down(cx.workspace_listener(move |view, event: &KeyDownEvent, window, cx| {
+                            // Popover inputs share this tab's event ancestry. Only
+                            // handle tab shortcuts when the tab itself has focus.
+                            if !key_focus.is_focused(window) { return; }
                             if event.keystroke.key == "f2" {
                                 view.edit_named_workspace(&key_id, window, cx);
                                 cx.stop_propagation();
@@ -1157,7 +1606,7 @@ impl Desktop {
                     window.start_window_move();
                 }
             })
-            .when(tern, |bar| {
+            .map(|bar| {
                 let label = if self.sidebar_is_hidden() { "Show sidebar" } else { "Hide sidebar" };
                 bar.child(
                     Button::new("cycle-main-sidebar")
@@ -1255,14 +1704,195 @@ impl Desktop {
             .when(count == 0, |picker| picker.child("No matching icons"))
             .child(grid).into_any_element()
     }
+    fn render_saved_workspace_layouts(
+        &mut self,
+        palette: design::Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(editor) = &self.window.workspace_editor else { return div().into_any_element(); };
+        let workspace_is_active = self.window.active_workspace_id.as_deref() == Some(editor.id.as_str());
+        let busy = editor.saved_layout_action_busy;
+        let loading = editor.saved_layouts_loading;
+        let at_limit = editor.saved_layouts.len()
+            >= monitter_gpui_desktop::workspace_store::MAX_SAVED_LAYOUTS_PER_WORKSPACE;
+        let mut layouts = div()
+            .id("saved-workspace-layout-list")
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(px(5.));
+        if editor.saved_layouts_loading {
+            layouts = layouts.child(
+                div().py(px(8.)).text_color(rgb(palette.muted)).child("Loading saved layouts…"),
+            );
+        } else if editor.saved_layouts.is_empty() {
+            layouts = layouts.child(
+                div().py(px(8.)).text_color(rgb(palette.muted))
+                    .child("No saved layouts yet."),
+            );
+        } else {
+            for saved in editor.saved_layouts.clone() {
+                let restore_id = saved.id.clone();
+                let delete_id = saved.id.clone();
+                let preview_id = saved.id.clone();
+                let row_id = saved.id.clone();
+                let label = saved.label.clone();
+                let preview = crate::saved_layout_preview::saved_layout_preview(
+                    &saved.layout,
+                    crate::saved_layout_preview::SavedLayoutPreviewColors::from(palette),
+                    px(54.),
+                    px(36.),
+                );
+                layouts = layouts.child(
+                    div()
+                        .id(SharedString::from(format!("saved-layout-row-{}", saved.id)))
+                        .debug_selector(move || format!("saved-layout-row-{row_id}"))
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .gap(px(5.))
+                        .child(
+                            div().flex_1().min_w_0().child(
+                                Button::new(SharedString::from(format!("restore-saved-layout-{}", saved.id)))
+                                    .ghost()
+                                    .compact()
+                                    .w_full()
+                                    .justify_start()
+                                    .disabled(!workspace_is_active || loading || busy)
+                                    .accessibility_label(format!("Restore saved layout {label}"))
+                                    .tooltip(if workspace_is_active {
+                                        format!("Restore {label}")
+                                    } else {
+                                        "Open this workspace to restore its layouts".into()
+                                    })
+                                    .child(
+                                        div().w_full().min_w_0().flex().items_center().gap(px(9.))
+                                            .child(
+                                                div()
+                                                    .debug_selector(move || format!(
+                                                        "saved-layout-preview-{preview_id}"
+                                                    ))
+                                                    .child(preview),
+                                            )
+                                            .child(div().flex_1().min_w_0().truncate().child(label)),
+                                    )
+                                    .on_click(cx.workspace_listener(move |view, _, window, cx| {
+                                        view.restore_named_workspace_layout(&restore_id, window, cx);
+                                    })),
+                            ),
+                        )
+                        .child(
+                            Button::new(SharedString::from(format!("delete-saved-layout-{}", saved.id)))
+                                .ghost()
+                                .compact()
+                                .icon(IconName::Trash)
+                                .disabled(loading || busy)
+                                .accessibility_label(format!("Delete saved layout {}", saved.label))
+                                .tooltip("Delete saved layout")
+                                .on_click(cx.workspace_listener(move |view, _, window, cx| {
+                                    view.delete_named_workspace_layout(delete_id.clone(), window, cx);
+                                })),
+                        ),
+                );
+            }
+        }
+        let capture = if editor.capture_layout_open {
+            div()
+                .id("save-workspace-layout-form")
+                .debug_selector(|| "save-workspace-layout-form".into())
+                .w_full()
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .on_key_down(|event, _, cx| {
+                    if event.keystroke.key == "enter" { cx.stop_propagation(); }
+                })
+                .child(Input::new(&editor.layout_name).aria_label("Saved layout name"))
+                .child(
+                    div().w_full().flex().items_center().justify_end().gap(px(6.))
+                        .child(
+                            Button::new("cancel-save-workspace-layout").ghost().compact().label("Cancel")
+                                .disabled(loading || busy)
+                                .on_click(cx.workspace_listener(|view, _, _, cx| {
+                                    if let Some(editor) = &mut view.window.workspace_editor {
+                                        editor.capture_layout_open = false;
+                                        editor.error = None;
+                                    }
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            Button::new("confirm-save-workspace-layout").compact().primary().outline()
+                                .label("Save layout")
+                                .disabled(loading || busy)
+                                .on_click(cx.workspace_listener(|view, _, window, cx| {
+                                    view.capture_named_workspace_layout(window, cx);
+                                })),
+                        ),
+                )
+                .into_any_element()
+        } else {
+            div()
+                .debug_selector(|| "save-this-workspace-layout".into())
+                .child(
+                    Button::new("save-this-workspace-layout")
+                        .compact()
+                        .outline()
+                        .label("Save this layout")
+                        .disabled(!workspace_is_active || loading || busy || at_limit)
+                        .tooltip(if !workspace_is_active {
+                            "Open this workspace before saving its current layout"
+                        } else if at_limit {
+                            "Delete a saved layout before adding another"
+                        } else {
+                            "Save the current pane arrangement"
+                        })
+                        .on_click(cx.workspace_listener(|view, _, window, cx| {
+                            if let Some(editor) = &mut view.window.workspace_editor {
+                                editor.capture_layout_open = true;
+                                editor.error = None;
+                                editor.layout_name.read(cx).focus_handle(cx).focus(window, cx);
+                            }
+                            cx.notify();
+                        })),
+                )
+                .into_any_element()
+        };
+        div()
+            .id("saved-workspace-layouts")
+            .debug_selector(|| "saved-workspace-layouts".into())
+            .w_full()
+            .flex_shrink_0()
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .pt(px(10.))
+            .mt(px(2.))
+            .border_t_1()
+            .border_color(rgb(palette.line))
+            .child(div().font_weight(FontWeight::SEMIBOLD).child("Saved layouts"))
+            .when(!workspace_is_active, |section| section.child(
+                div().text_color(rgb(palette.muted))
+                    .child("Open this workspace to save or restore layouts."),
+            ))
+            .child(capture)
+            .child(layouts)
+            .into_any_element()
+    }
     fn render_workspace_editor(
         &mut self,
         palette: design::Palette,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let saved_layouts = if self.window.workspace_editor.is_some() {
+            Some(self.render_saved_workspace_layouts(palette, cx))
+        } else {
+            None
+        };
         if let Some(editor) = &self.window.workspace_editor {
             let can_remove = self.workspace_ready()
+                && !editor.saved_layout_action_busy
                 && self.named_workspaces.as_ref().is_some_and(|set| set.items.len() > 1);
             if editor.confirm_remove {
                 let id = editor.id.clone();
@@ -1327,7 +1957,11 @@ impl Desktop {
                 .text_color(rgb(palette.ink))
                 .on_key_down(cx.workspace_listener(|view, event: &KeyDownEvent, _, cx| {
                     if event.keystroke.key == "escape" {
-                        view.window.workspace_editor = None;
+                        if !view.window.workspace_editor.as_ref().is_some_and(|editor| {
+                            editor.saved_layout_action_busy
+                        }) {
+                            view.window.workspace_editor = None;
+                        }
                         cx.stop_propagation();
                         cx.notify();
                     } else if event.keystroke.key == "enter" {
@@ -1363,7 +1997,8 @@ impl Desktop {
                                 .child(div().flex().items_center().gap(px(8.))
                                     .child(colors)
                                     .child(div().flex_1().min_w_0()
-                                        .child(Input::new(&editor.color).aria_label("Workspace colour")))))),
+                                        .child(Input::new(&editor.color).aria_label("Workspace colour"))))))
+                        .children(saved_layouts),
                 )
                 .children(
                     editor.error.as_ref().map(|error|
@@ -1384,8 +2019,13 @@ impl Desktop {
                         .when(stacked_footer,|actions|actions.w_full())
                         .child(div().flex_shrink_0().debug_selector(||"workspace-editor-cancel".into())
                             .child(Button::new("cancel-workspace-edit").compact().label("Cancel")
+                            .disabled(editor.saved_layout_action_busy)
                             .on_click(cx.workspace_listener(|view, _, _, cx| {
-                                view.window.workspace_editor = None;
+                                if !view.window.workspace_editor.as_ref().is_some_and(|editor| {
+                                    editor.saved_layout_action_busy
+                                }) {
+                                    view.window.workspace_editor = None;
+                                }
                                 cx.notify();
                             }))))
                         .child(div().flex_shrink_0().debug_selector(||"workspace-editor-save".into())
@@ -1673,6 +2313,7 @@ mod workspace_editor_click_tests {
     use crate::{Desktop, design};
     use gpui_kit::{prelude::*, *};
     use monitter_lib::experimental_desktop::{NativePreferences, NativeWorkspace, NativeWorkspaceSet};
+    use serde_json::json;
     struct Harness(Entity<Desktop>);
     impl Render for Harness {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1682,6 +2323,162 @@ mod workspace_editor_click_tests {
             })
         }
     }
+    struct KeyboardPopoverHarness(FocusHandle);
+    impl Render for KeyboardPopoverHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            gpui_kit::base::Popover::new("workspace-keyboard-popover")
+                .trigger(gpui_kit::base::Button::new("workspace-keyboard-trigger")
+                    .track_focus(&self.0).child("Open"))
+                .content(|_, _, _| div().debug_selector(|| "workspace-keyboard-content".into()).size(px(40.)))
+        }
+    }
+    #[gpui_kit::test]
+    fn workspace_popover_trigger_keys_and_escape_remain_available(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (view, visual) = cx.add_window_view(|_, cx| KeyboardPopoverHarness(cx.focus_handle()));
+        for key in ["enter", "space"] {
+            visual.update(|window, cx| {
+                window.draw(cx).clear(cx);
+                let focus = view.read(cx).0.clone();
+                focus.focus(window, cx);
+            });
+            visual.simulate_keystrokes(key);
+            visual.run_until_parked();
+            visual.update(|window, cx| { window.draw(cx).clear(cx); });
+            assert!(visual.debug_bounds("workspace-keyboard-content").is_some(), "{key} opens the trigger");
+            visual.simulate_keystrokes("escape");
+            visual.run_until_parked();
+            visual.update(|window, cx| { window.draw(cx).clear(cx); });
+            assert!(visual.debug_bounds("workspace-keyboard-content").is_none(), "Escape closes the surface");
+        }
+    }
+
+    #[gpui_kit::test]
+    fn saved_layout_project_menu_draws_miniature_and_opens_capture_form(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let workspace_id = "11111111-1111-4111-8111-111111111111".to_owned();
+        let saved_id = "22222222-2222-4222-8222-222222222222".to_owned();
+        let mut desktop = None;
+        let (_, visual) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| {
+                let mut view = Desktop::new(window, cx);
+                view.preferences = Some(NativePreferences::default());
+                view.preferences_busy = true;
+                view.active_workspace_id = Some(workspace_id.clone());
+                view.named_workspaces = Some(NativeWorkspaceSet {
+                    active_id: workspace_id.clone(),
+                    items: vec![NativeWorkspace {
+                        id: workspace_id.clone(),
+                        name: "Project".into(),
+                        icon: "folder".into(),
+                        color: "#38BFD2".into(),
+                        url: None,
+                        layout: None,
+                    }],
+                });
+                view
+            });
+            desktop = Some(view.clone());
+            component::Root::new(cx.new(|_| Harness(view)), window, cx)
+        });
+        let desktop = desktop.unwrap();
+        visual.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        let edit = visual
+            .debug_bounds("workspace-edit-icon-11111111-1111-4111-8111-111111111111")
+            .expect("workspace project-menu trigger");
+        visual.simulate_click(edit.center(), Default::default());
+        visual.run_until_parked();
+        assert!(
+            visual.debug_bounds("workspace-editor-surface").is_some(),
+            "project menu is visible"
+        );
+        visual.update(|window, cx| {
+            desktop.update(cx, |view, cx| {
+                let editor = view.window.workspace_editor.as_mut().unwrap();
+                editor.saved_layouts_loading = false;
+                editor.saved_layouts = vec![
+                    monitter_gpui_desktop::workspace_store::SavedWorkspaceLayout {
+                        id: saved_id.clone(),
+                        workspace_id: workspace_id.clone(),
+                        label: "Review".into(),
+                        layout: json!({
+                            "version": 1,
+                            "center": {
+                                "panel_name": "StackPanel",
+                                "children": [
+                                    {"panel_name":"TabPanel","children":[{"panel_name":"Pane","children":[],"info":{"panel":{"id":"chat:first"}}}],"info":{"tabs":{"active_index":0}}},
+                                    {"panel_name":"TabPanel","children":[{"panel_name":"Pane","children":[],"info":{"panel":{"id":"route:terminal"}}}],"info":{"tabs":{"active_index":0}}}
+                                ],
+                                "info": {"stack": {"sizes": [1, 2], "axis": 0}}
+                            }
+                        }),
+                        created_at_ms: 1,
+                        updated_at_ms: 1,
+                    },
+                ];
+                cx.notify();
+            });
+            window.draw(cx).clear(cx);
+        });
+        visual.run_until_parked();
+        visual.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        let fields = visual
+            .debug_bounds("workspace-editor-fields")
+            .expect("scrollable project menu fields");
+        for _ in 0..8 {
+            visual.simulate_event(ScrollWheelEvent {
+                position: fields.center(),
+                delta: ScrollDelta::Pixels(point(px(0.), px(-400.))),
+                modifiers: Default::default(),
+                touch_phase: TouchPhase::Moved,
+            });
+            visual.run_until_parked();
+            visual.update(|window, cx| {
+                window.draw(cx).clear(cx);
+            });
+        }
+        assert!(visual.debug_bounds("saved-workspace-layouts").is_some());
+        let row_selector: &'static str =
+            Box::leak(format!("saved-layout-row-{saved_id}").into_boxed_str());
+        let preview_selector: &'static str =
+            Box::leak(format!("saved-layout-preview-{saved_id}").into_boxed_str());
+        assert!(visual.debug_bounds(row_selector).is_some());
+        let preview = visual
+            .debug_bounds(preview_selector)
+            .expect("saved layout miniature");
+        assert!(preview.size.width >= px(54.) && preview.size.height >= px(36.));
+        let mut save = visual.debug_bounds("save-this-workspace-layout");
+        for _ in 0..8 {
+            if save.is_some() {
+                break;
+            }
+            visual.simulate_event(ScrollWheelEvent {
+                position: fields.center(),
+                delta: ScrollDelta::Pixels(point(px(0.), px(200.))),
+                modifiers: Default::default(),
+                touch_phase: TouchPhase::Moved,
+            });
+            visual.run_until_parked();
+            visual.update(|window, cx| {
+                window.draw(cx).clear(cx);
+            });
+            save = visual.debug_bounds("save-this-workspace-layout");
+        }
+        let save = save.expect("Save this layout action");
+        visual.simulate_click(save.center(), Default::default());
+        visual.run_until_parked();
+        visual.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        assert!(visual.debug_bounds("save-workspace-layout-form").is_some());
+    }
+
     #[gpui_kit::test]
     fn design_system_workspace_editor_preserves_identity_and_picker_drafts(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
@@ -1715,6 +2512,20 @@ mod workspace_editor_click_tests {
         let footer = visual.debug_bounds("workspace-editor-footer").expect("one shared action footer");
         let editor_bounds = visual.debug_bounds("workspace-editor-surface").unwrap();
         assert!(footer.left() >= editor_bounds.left() && footer.right() <= editor_bounds.right());
+        // Send real key events through the nested popover/tab tree: setting the
+        // value directly would miss an ancestor consuming Space before insertion.
+        visual.update(|window, cx| desktop.update(cx, |view, cx| {
+            let name = view.workspace_editor.as_ref().unwrap().name.clone();
+            name.update(cx, |input, cx| input.set_value("", window, cx));
+            name.read(cx).focus_handle(cx).focus(window, cx);
+        }));
+        visual.simulate_keystrokes("a space b space space c");
+        visual.run_until_parked();
+        visual.read(|cx| {
+            let view = desktop.read(cx);
+            assert_eq!(view.workspace_editor.as_ref().unwrap().name.read(cx).value().as_str(), "a b  c");
+            assert_eq!(view.named_workspaces.as_ref().unwrap().active_id, "one", "typing cannot activate the edited tab");
+        });
         visual.update(|window, cx| desktop.update(cx, |view, cx| {
             view.workspace_editor.as_ref().unwrap().icon_query.update(cx, |input, cx|
                 input.set_value("rocket", window, cx));
@@ -1781,6 +2592,7 @@ mod workspace_editor_click_tests {
         visual.read(|cx|assert!(desktop.read(cx).workspace_editor.is_none(),"Save pointer commits and closes the actual editor"));
         visual.update(|window, cx| desktop.update(cx, |view, cx| {
             let saved = &view.named_workspaces.as_ref().unwrap().items[1];
+            assert_eq!(saved.name, "a b  c", "Save preserves internal spaces");
             assert_eq!(saved.url.as_deref(), Some("https://example.com/project"));
             assert_eq!(saved.icon, "lucide:rocket");
             view.edit_named_workspace("two", window, cx);
@@ -1794,6 +2606,16 @@ mod workspace_editor_click_tests {
             view.save_workspace_editor(cx);
             assert_eq!(view.named_workspaces.as_ref().unwrap().items[1].url, None);
         }));
+        visual.update(|window, cx| { window.draw(cx).clear(cx); });
+        let tab = visual.debug_bounds("workspace-tab-one").unwrap();
+        visual.simulate_click(point(tab.right() - gpui_kit::px(8.), tab.center().y), Default::default());
+        visual.simulate_keystrokes("f2");
+        visual.run_until_parked();
+        visual.read(|cx| assert_eq!(desktop.read(cx).workspace_editor.as_ref().unwrap().id, "one",
+            "F2 still edits a focused tab"));
+        visual.simulate_keystrokes("enter");
+        visual.run_until_parked();
+        visual.read(|cx| assert!(desktop.read(cx).workspace_editor.is_none(), "Enter still saves the editor"));
     }
     #[gpui_kit::test]
     fn design_system_workspace_editor_save_stays_visible_and_clickable_in_short_narrow_popovers(cx:&mut TestAppContext) {

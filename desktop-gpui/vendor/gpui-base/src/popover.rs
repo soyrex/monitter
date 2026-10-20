@@ -18,9 +18,9 @@ const CONTENT_CONTEXT: &str = "PopoverContent";
 pub(crate) fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("escape", Cancel, Some(CONTEXT)),
+        KeyBinding::new("escape", Cancel, Some(CONTENT_CONTEXT)),
         KeyBinding::new("enter", Confirm { secondary: false }, Some(CONTEXT)),
         KeyBinding::new("space", Confirm { secondary: false }, Some(CONTEXT)),
-        KeyBinding::new("escape", Cancel, Some(CONTENT_CONTEXT)),
     ]);
 }
 
@@ -343,7 +343,9 @@ impl RenderOnce for Popover {
             .when_some(self.on_position, |this, callback| {
                 this.on_position(callback)
             })
-            .key_context(CONTEXT)
+            // Activation belongs to the closed trigger. An open surface can
+            // contain inputs whose spaces must reach text insertion.
+            .key_context(if open { CONTENT_CONTEXT } else { CONTEXT })
             .on_action({
                 let state = state.clone();
                 move |_: &Confirm, window, cx| {
@@ -385,9 +387,6 @@ impl RenderOnce for Popover {
             .occlude()
             .tab_group()
             .track_focus(&focus_handle)
-            // Trigger activation keys must not leak into editable popup content.
-            // Space and Enter remain available on the trigger while text inputs
-            // inside the surface receive their native keystrokes.
             .key_context(CONTENT_CONTEXT)
             .on_action(window.listener_for(&state, PopoverState::on_action_cancel))
             .when_some(self.content, |this, content| {

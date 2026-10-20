@@ -83,7 +83,10 @@ fn inline_preview(mime: &str, encoded: &str) -> Option<(String, Arc<Image>)> {
     limits.max_image_height = Some(8192);
     limits.max_alloc = Some(64 * 1024 * 1024);
     reader.limits(limits);
-    let thumbnail = reader.decode().ok()?.thumbnail(dimensions.0.min(128), dimensions.1.min(96));
+    let thumbnail = reader
+        .decode()
+        .ok()?
+        .thumbnail(dimensions.0.min(128), dimensions.1.min(96));
     let mut output = std::io::Cursor::new(Vec::new());
     thumbnail
         .write_to(&mut output, image::ImageFormat::Png)
@@ -248,15 +251,23 @@ impl ChatAttachments {
         }
     }
     pub(super) fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
-        if self.visible == visible { return; }
+        if self.visible == visible {
+            return;
+        }
         self.visible = visible;
-        for clock in self.entrances.values() { clock.borrow_mut().set_visible(visible); }
+        for clock in self.entrances.values() {
+            clock.borrow_mut().set_visible(visible);
+        }
         cx.notify();
     }
     fn push_ready(&mut self, draft: AttachmentDraft) {
         let clock = super::feedback::FeedbackClock::new();
         clock.borrow_mut().set_visible(self.visible);
-        if self.visible { clock.borrow_mut().start(std::time::Duration::from_millis(120)); }
+        if self.visible {
+            clock
+                .borrow_mut()
+                .start(std::time::Duration::from_millis(120));
+        }
         self.entrances.insert(draft.id.clone(), clock);
         self.drafts.push(draft);
         self.touched = true;
@@ -531,18 +542,30 @@ impl ChatAttachments {
         self.paste_wait_timer = Some(cx.spawn(async move |view, cx| {
             loop {
                 let elapsed = started.elapsed().as_millis() as u64;
-                let delay = if elapsed < 180 { 16 }
-                    else if elapsed < 3180 { 3180 - elapsed }
-                    else { 16 };
-                executor.timer(std::time::Duration::from_millis(delay)).await;
+                let delay = if elapsed < 180 {
+                    16
+                } else if elapsed < 3180 {
+                    3180 - elapsed
+                } else {
+                    16
+                };
+                executor
+                    .timer(std::time::Duration::from_millis(delay))
+                    .await;
                 let finished = started.elapsed() >= std::time::Duration::from_millis(3360);
                 let updated = view.update(cx, |view, cx| {
-                    if view.paste_wait_notice != Some(started) { return false; }
-                    if finished { view.paste_wait_notice = None; }
+                    if view.paste_wait_notice != Some(started) {
+                        return false;
+                    }
+                    if finished {
+                        view.paste_wait_notice = None;
+                    }
                     cx.notify();
                     true
                 });
-                if finished || !matches!(updated, Ok(true)) { break; }
+                if finished || !matches!(updated, Ok(true)) {
+                    break;
+                }
             }
         }));
         self.changed(cx);
@@ -862,10 +885,16 @@ impl Render for ChatAttachments {
                         })),
                 );
             if let Some(clock) = self.entrances.get(&draft.id) {
-                let progress = clock.borrow_mut().progress(cx.reduce_motion() || !crate::native_motion::motion_allowed());
+                let progress = clock
+                    .borrow_mut()
+                    .progress(cx.reduce_motion() || !crate::native_motion::motion_allowed());
                 // Relative positioning preserves the final allocation and input caret.
                 strip = strip.child(super::feedback::painted(
-                    chip.relative().top(px(3. * (1. - progress))).opacity(progress), clock.clone()));
+                    chip.relative()
+                        .top(px(3. * (1. - progress)))
+                        .opacity(progress),
+                    clock.clone(),
+                ));
             } else {
                 strip = strip.child(chip);
             }
@@ -888,16 +917,29 @@ impl Render for ChatAttachments {
         }
         if let Some(started) = self.paste_wait_notice {
             let elapsed = started.elapsed().as_secs_f32();
-            let opacity = if cx.reduce_motion() || !crate::native_motion::motion_allowed() { 1. }
-                else if elapsed < 0.18 { (elapsed / 0.18).clamp(0., 1.) }
-                else { ((3.36 - elapsed) / 0.18).clamp(0., 1.) };
-            panel = panel.child(div().id("attachment-paste-wait-notice")
-                .px(px(8.)).py(px(5.)).rounded(px(6.))
-                .border_1().border_color(crate::design::surface_color(palette.line))
-                .bg(crate::design::surface_color(palette.soft))
-                .text_size(px(11. * font_ratio)).text_color(rgb(palette.muted))
-                .opacity(opacity)
-                .child("Wait for the current attachment to finish before pasting another image."));
+            let opacity = if cx.reduce_motion() || !crate::native_motion::motion_allowed() {
+                1.
+            } else if elapsed < 0.18 {
+                (elapsed / 0.18).clamp(0., 1.)
+            } else {
+                ((3.36 - elapsed) / 0.18).clamp(0., 1.)
+            };
+            panel = panel.child(
+                div()
+                    .id("attachment-paste-wait-notice")
+                    .px(px(8.))
+                    .py(px(5.))
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_color(crate::design::surface_color(palette.line))
+                    .bg(crate::design::surface_color(palette.soft))
+                    .text_size(px(11. * font_ratio))
+                    .text_color(rgb(palette.muted))
+                    .opacity(opacity)
+                    .child(
+                        "Wait for the current attachment to finish before pasting another image.",
+                    ),
+            );
         }
         panel
     }

@@ -3,7 +3,12 @@ use crate::design::{self, Palette};
 use serde_json::Value;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Origin { User, Assistant, Peer, System }
+pub(super) enum Origin {
+    User,
+    Assistant,
+    Peer,
+    System,
+}
 
 pub(super) fn origin(message: &Value) -> Origin {
     let nonempty = |key: &str| message[key].as_str().is_some_and(|s| !s.is_empty());
@@ -16,7 +21,9 @@ pub(super) fn origin(message: &Value) -> Origin {
 }
 
 pub(super) fn peer_label(_message: &Value, name: Option<&str>) -> String {
-    let name = name.filter(|s| !s.trim().is_empty()).unwrap_or("Peer agent");
+    let name = name
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("Peer agent");
     // These stored messages are delivered into this chat, including replies
     // represented as system messages on the calling task.
     format!("← {name}")
@@ -28,13 +35,17 @@ pub(super) fn grey(rgb: u32) -> u32 {
 }
 
 pub(super) struct NeutralColours {
-    pub background: u32, pub border: u32, pub ink: u32, pub muted: u32,
+    pub background: u32,
+    pub border: u32,
+    pub ink: u32,
+    pub muted: u32,
 }
 pub(super) fn neutral_colours(palette: Palette) -> NeutralColours {
     NeutralColours {
         background: super::mix_rgb(grey(palette.panel), grey(palette.ink), 0.04),
         border: super::mix_rgb(grey(palette.line), grey(palette.ink), 0.12),
-        ink: grey(palette.ink), muted: grey(palette.muted),
+        ink: grey(palette.ink),
+        muted: grey(palette.muted),
     }
 }
 
@@ -48,7 +59,10 @@ mod tests {
         let message = json!({"role":"user","senderAgentId":"codex","collaborationId":"delivery","text":"Hello"});
         assert_eq!(origin(&message), Origin::Peer);
         assert_eq!(peer_label(&message, Some("Codex")), "← Codex");
-        assert_eq!(origin(&json!({"role":"user","collaborationId":"delivery"})), Origin::Peer);
+        assert_eq!(
+            origin(&json!({"role":"user","collaborationId":"delivery"})),
+            Origin::Peer
+        );
         assert_eq!(peer_label(&message, None), "← Peer agent");
     }
     #[::core::prelude::v1::test]
@@ -56,20 +70,40 @@ mod tests {
         let copied = json!({"role":"user","senderAgentId":"original","collaborationId":null});
         assert_eq!(origin(&copied), Origin::Peer);
         assert_eq!(peer_label(&copied, Some("Codex")), "← Codex");
-        assert_eq!(origin(&json!({"role":"user","text":"Peer context from Codex:\nI typed this"})), Origin::User);
-        assert_eq!(origin(&json!({"role":"user","text":"@(Alex): Hello"})), Origin::User);
+        assert_eq!(
+            origin(&json!({"role":"user","text":"Peer context from Codex:\nI typed this"})),
+            Origin::User
+        );
+        assert_eq!(
+            origin(&json!({"role":"user","text":"@(Alex): Hello"})),
+            Origin::User
+        );
     }
     #[::core::prelude::v1::test]
     fn message_presentation_system_results_remain_system_cards() {
-        assert_eq!(origin(&json!({"role":"system","senderAgentId":"a","collaborationId":"c"})), Origin::System);
-        assert_eq!(origin(&json!({"role":"assistant","senderAgentId":"a"})), Origin::Assistant);
+        assert_eq!(
+            origin(&json!({"role":"system","senderAgentId":"a","collaborationId":"c"})),
+            Origin::System
+        );
+        assert_eq!(
+            origin(&json!({"role":"assistant","senderAgentId":"a"})),
+            Origin::Assistant
+        );
     }
     #[::core::prelude::v1::test]
     fn message_presentation_colours_are_achromatic_in_light_and_dark_themes() {
-        for appearance in [gpui_kit::WindowAppearance::Light, gpui_kit::WindowAppearance::Dark] {
+        for appearance in [
+            gpui_kit::WindowAppearance::Light,
+            gpui_kit::WindowAppearance::Dark,
+        ] {
             let palette = design::palette(&json!({"accent":"#ff0000"}), appearance);
             let colours = neutral_colours(palette);
-            for colour in [colours.background, colours.border, colours.ink, colours.muted] {
+            for colour in [
+                colours.background,
+                colours.border,
+                colours.ink,
+                colours.muted,
+            ] {
                 assert_eq!((colour >> 16) & 255, colour & 255);
                 assert_eq!((colour >> 8) & 255, colour & 255);
             }

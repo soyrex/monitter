@@ -22,6 +22,7 @@ pub(super) const CATEGORIES: &[Category] = &[
     Category { id: "collaboration", label: "Collaboration", description: "Agent delegation, project boards and shared guidance.", group: "Agents & integrations", icon: IconName::Users },
     Category { id: "extensions", label: "MCP & plugins", description: "Tools, servers, skills and plugins available to agents.", group: "Agents & integrations", icon: IconName::Blocks },
     Category { id: "mail", label: "Mail", description: "Connect mail accounts and assign them to agents.", group: "Agents & integrations", icon: IconName::Mail },
+    Category { id: "work-history", label: "Work History", description: "Private local collection, history, retention and exports.", group: "Security & access", icon: IconName::Archive },
     Category { id: "security", label: "Session lock", description: "Protect this desktop with a PIN while agents keep running.", group: "Security & access", icon: IconName::ShieldCheck },
     Category { id: "approvals", label: "Approval rules", description: "Review and revoke saved always-approve rules.", group: "Security & access", icon: IconName::BadgeCheck },
     Category { id: "secrets", label: "Environment & secrets", description: "Manage shared environment variables for local agents.", group: "Security & access", icon: IconName::KeyRound },

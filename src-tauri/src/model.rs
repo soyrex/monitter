@@ -748,6 +748,9 @@ pub fn agent_instructions(agent: &Agent, user_name: &str) -> String {
         ));
     }
     let mut parts = vec![crate::collaboration_mcp::PROGRESS_INSTRUCTIONS.to_string()];
+    if agent.collaboration_enabled {
+        parts.push(crate::collaboration_mcp::QUESTION_INSTRUCTIONS.to_string());
+    }
     if !agent.description.trim().is_empty() {
         parts.push(format!("Purpose: {}", agent.description.trim()));
     }
@@ -1101,6 +1104,8 @@ pub struct InteractionInput {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct InputQuestion {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection_mode: Option<String>,
     pub id: String,
     pub header: String,
     pub question: String,
@@ -2372,7 +2377,7 @@ mod task_migration_tests {
     fn projects_and_task_links_round_trip_in_camel_case() {
         let mut snapshot = default_snapshot();
         let project_id = "project-1".to_string();
-        snapshot.projects.push(Project { build_management_enabled: false, agent_worktrees_enabled: false,
+        snapshot.projects.push(Project { ideas: vec![], ideas_revision: 0, build_management_enabled: false, agent_worktrees_enabled: false,
             id: project_id.clone(),
             name: "Project".into(),
             description: "Description".into(),
@@ -2383,7 +2388,6 @@ mod task_migration_tests {
                 cwd: "/workspace".into(),
             }],
             board_guidance_text: Some("Coordinate through the board.".into()),
-            ideas: vec![], ideas_revision: 0,
         });
         snapshot.tasks.push(task_from_agent(
             &snapshot.agents[0],

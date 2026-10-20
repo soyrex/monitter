@@ -477,10 +477,10 @@ mod tests {
         let service = Service::open(None, dir.clone()).unwrap();
         let agent_id = service.snapshot().unwrap().agents[0].id.clone();
         service.mutate(None, |s| {
-            s.projects.push(Project {
+            s.projects.push(Project { ideas: vec![], ideas_revision: 0,
                 id: "build-project".into(), name: "Build project".into(),
                 description: String::new(), icon: "folder".into(), color: "#123456".into(),
-                workspaces: vec![], board_guidance_text: None, ideas: vec![], ideas_revision: 0, build_management_enabled: true, agent_worktrees_enabled: false,
+                workspaces: vec![], board_guidance_text: None, build_management_enabled: true, agent_worktrees_enabled: false,
             });
             Ok(())
         }).unwrap();
@@ -595,7 +595,7 @@ mod tests {
 
         service
             .mutate(None, |s| {
-                s.projects.push(Project {
+                s.projects.push(Project { ideas: vec![], ideas_revision: 0,
                     build_management_enabled: true, agent_worktrees_enabled: false,
                     id: "p".into(),
                     name: "P".into(),
@@ -604,7 +604,6 @@ mod tests {
                     color: "#123456".into(),
                     workspaces: vec![],
                     board_guidance_text: None,
-                    ideas: vec![], ideas_revision: 0,
                 });
 
                 Ok(())

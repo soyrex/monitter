@@ -179,7 +179,7 @@ impl Service {
             // but has the same ownership/turn fence as ordinary messages.
             self.app_server_mutate(task_id, control, Some(turn_id), |_, _| Ok(()))?;
             self.admin_turn_broker
-                .capture_app_server_item(task_id, item_id, text);
+                .capture_app_server_item_owned(task_id, control, item_id, text);
             return Ok(());
         }
         self.app_server_mutate(task_id, control, Some(turn_id), |data, _| {
@@ -839,10 +839,11 @@ impl Service {
                 .map(|mut ids| ids.retain(|(task, _, _), _| task != task_id))
                 .ok();
             if normalized == "completed" {
-                self.admin_turn_broker.complete(task_id);
+                self.admin_turn_broker.complete_owned(task_id, control);
             } else {
-                self.admin_turn_broker.cancel_with_error(
+                self.admin_turn_broker.cancel_with_error_owned(
                     task_id,
+                    control,
                     error.unwrap_or_else(|| "Monitter Admin turn ended before replying.".into()),
                 );
             }
@@ -1035,6 +1036,7 @@ impl Service {
         request: &ApprovalRequest,
         snapshot: &Snapshot,
     ) -> Result<(), String> {
+        self.validate_user_question_owner(request, snapshot)?;
         if !matches!(request.provider.as_str(), "codex" | "acp") {
             return Ok(());
         }
@@ -1183,7 +1185,7 @@ impl Service {
     }
 }
 
-fn expire_inputs(snapshot: &mut Snapshot, task_id: &str) -> Vec<String> {
+pub(crate) fn expire_inputs(snapshot: &mut Snapshot, task_id: &str) -> Vec<String> {
     snapshot
         .approval_requests
         .iter_mut()
@@ -1239,6 +1241,8 @@ fn validate_response(input: &InteractionInput, response: &Value) -> Result<(), S
                     .and_then(Value::as_array)
                     .ok_or("Missing question answer")?;
                 if values.is_empty()
+                    || values.len() > question.options.len() + 1
+                    || (question.selection_mode.as_deref() != Some("multiple") && values.len() != 1)
                     || values.iter().any(|value| {
                         value
                             .as_str()
@@ -1247,6 +1251,23 @@ fn validate_response(input: &InteractionInput, response: &Value) -> Result<(), S
                 {
                     return Err("Each answer must contain text.".into());
                 }
+                let mut seen = std::collections::HashSet::new();
+                let mut other_count = 0;
+                for value in values {
+                    let text = value.as_str().ok_or("Each answer must contain text.")?;
+                    if !seen.insert(text) {
+                        return Err("Duplicate question answer selection.".into());
+                    }
+                    if !question.options.iter().any(|option| option.label == text) {
+                        other_count += 1;
+                    }
+                }
+                if other_count > 1 {
+                    return Err("Provide at most one Other answer per question.".into());
+                }
+            }
+            if input.schema.is_some() {
+                crate::acp_protocol::elicitation_response(input, response)?;
             }
             Ok(())
         }
@@ -1316,6 +1337,45 @@ mod mcp_approval_tests {
             "runId":"run","tool":"MCP elicitation","summary":"Allow tool?","detail":params.to_string(),
             "risk":"unknown","status":"pending","createdAt":0,
             "input":{"kind":"form","questions":[],"schema":schema,"url":null}})).unwrap()
+    }
+
+    #[test]
+    fn input_request_multiple_accepts_all_options_plus_one_other_before_commit() {
+        let input = InteractionInput {
+            kind: "questions".into(),
+            schema: None,
+            url: None,
+            questions: vec![crate::model::InputQuestion {
+                id: "q".into(),
+                header: String::new(),
+                question: "Choose".into(),
+                is_secret: false,
+                selection_mode: Some("multiple".into()),
+                options: (0..16)
+                    .map(|n| crate::model::InputOption {
+                        label: format!("Option {n}"),
+                        description: String::new(),
+                    })
+                    .collect(),
+            }],
+        };
+        let mut answers = (0..16).map(|n| format!("Option {n}")).collect::<Vec<_>>();
+        answers.push("Custom".into());
+        assert!(validate_response(&input, &json!({"answers":{"q":{"answers":answers}}})).is_ok());
+        assert!(
+            validate_response(
+                &input,
+                &json!({"answers":{"q":{"answers":["Custom one","Custom two"]}}})
+            )
+            .is_err()
+        );
+        assert!(
+            validate_response(
+                &input,
+                &json!({"answers":{"q":{"answers":["Option 0","Option 0"]}}})
+            )
+            .is_err()
+        );
     }
 
     #[test]

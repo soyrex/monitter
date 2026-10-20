@@ -109,6 +109,7 @@ pub struct IdeasPane {
     error: Option<String>,
     edit_revision: u64,
     clear_capture: Option<String>,
+    pending_save: Option<(String, u64)>,
     _subscriptions: Vec<Subscription>,
 }
 impl IdeasPane {
@@ -163,6 +164,7 @@ impl IdeasPane {
             error: None,
             edit_revision: 0,
             clear_capture: None,
+            pending_save: None,
             _subscriptions: vec![subscription, search_subscription],
         }
     }
@@ -207,6 +209,7 @@ impl IdeasPane {
             || self.snapshot["agents"] != snapshot["agents"]
             || self.snapshot["settings"] != snapshot["settings"];
         self.snapshot = snapshot;
+        self.finish_published_save(cx);
         if changed {
             cx.notify();
         }
@@ -216,6 +219,24 @@ impl IdeasPane {
             .into_iter()
             .find(|p| Some(text(p, "id")) == self.project)
             .unwrap_or(Value::Null)
+    }
+    fn finish_published_save(&mut self, cx: &mut Context<Self>) {
+        let Some((project_id, revision)) = self.pending_save.as_ref() else { return; };
+        let published = rows(&self.snapshot, "projects").into_iter()
+            .find(|p| p["id"].as_str() == Some(project_id.as_str()));
+        if !published.as_ref().is_some_and(|p| p["ideasRevision"].as_u64().unwrap_or(0) >= *revision) { return; }
+        if self.project.as_ref() == Some(project_id) {
+            // Keep the exact acknowledged revision: a later external edit must
+            // still reject this editor's stale draft rather than overwrite it.
+            self.edit_revision = *revision;
+            if let Some(idea) = published.as_ref().and_then(|p| p["ideas"].as_array())
+                .and_then(|ideas| ideas.iter().find(|i| Some(text(i, "id")) == self.selected)) {
+                self.edit_status = idea["status"].as_str().unwrap_or("open").into();
+            }
+        }
+        self.pending_save = None;
+        self.busy = false;
+        cx.notify();
     }
     fn open(&mut self, idea: Value, window: &mut Window, cx: &mut Context<Self>) {
         self.selected = Some(text(&idea, "id"));
@@ -286,30 +307,26 @@ impl IdeasPane {
         }
         self.busy = true;
         self.error = None;
-        let args = json!({"projectId":self.project,"ideas":ideas,"expectedRevision":revision});
+        let ideas = match ideas.into_iter().map(serde_json::from_value).collect::<Result<Vec<monitter_lib::model::ProjectIdea>, _>>() {
+            Ok(ideas) => ideas,
+            Err(_) => { self.busy = false; self.error = Some("The idea could not be encoded. Your text is retained.".into()); cx.notify(); return; }
+        };
         let service = self.service.clone();
-        let project = self.project.clone();
+        let project = self.project.clone().unwrap();
+        let saved_project = project.clone();
         let work = cx
             .background_executor()
-            .spawn(async move { service.invoke("save_project_ideas", args) });
+            .spawn(async move { service.save_project_ideas(&saved_project, ideas, revision) });
         cx.spawn(async move |view, cx| {
             let result = work.await;
             let _ = view.update(cx, |v, cx| {
-                v.busy = false;
                 match result {
-                    Ok(snapshot) => {
-                        v.snapshot = Rc::new(snapshot);
-                        if v.project == project {
-                            v.edit_revision = v.project()["ideasRevision"].as_u64().unwrap_or(0);
-                            if let Some(idea) = rows(&v.project(), "ideas")
-                                .into_iter()
-                                .find(|idea| Some(text(idea, "id")) == v.selected)
-                            {
-                                v.edit_status = idea["status"].as_str().unwrap_or("open").into();
-                            }
-                        }
+                    Ok(revision) => {
+                        v.pending_save = Some((project, revision));
+                        v.finish_published_save(cx);
                     }
                     Err(e) => {
+                        v.busy = false;
                         v.error = Some(e);
                         v.clear_capture = None;
                     }
@@ -1255,6 +1272,38 @@ mod tests {
         );
         assert_eq!(excerpt(&json!({"markdown":"a".repeat(400)})).len(), 160);
         assert_eq!(status(&json!({"status":"inPlan"})), "In plan");
+    }
+    #[gpui_kit::test]
+    fn native_ideas_ack_waits_for_publication_in_either_order(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (_, visual) = cx.add_window_view(|window, cx| {
+            let pane = cx.new(|cx| IdeasPane::new(DesktopService::disconnected_for_ui_fixture(),
+                Rc::new(json!({"settings":{},"projects":[{"id":"project","name":"Ideas","ideasRevision":0,"ideas":[]}]})),
+                Some("project".into()), window, cx));
+            gpui_kit::component::Root::new(pane, window, cx)
+        });
+        visual.update(|window, cx| {
+            let retained = cx.new(|cx| IdeasPane::new(DesktopService::disconnected_for_ui_fixture(),
+                Rc::new(json!({"projects":[{"id":"project","ideasRevision":0,"ideas":[]}]})),
+                Some("project".into()), window, cx));
+            retained.update(cx, |pane, cx| {
+                pane.busy = true;
+                pane.pending_save = Some(("project".into(), 1));
+                pane.finish_published_save(cx);
+                assert!(pane.busy, "ack alone must not enable a second stale capture");
+                pane.sync(Rc::new(json!({"projects":[{"id":"project","ideasRevision":1,"ideas":[{"id":"one","title":"Saved"}]}]})), cx);
+                assert!(!pane.busy);
+                assert_eq!(pane.edit_revision, 1);
+                assert!(pane.pending_save.is_none());
+                pane.busy = true;
+                pane.sync(Rc::new(json!({"projects":[{"id":"project","ideasRevision":2,"ideas":[]}]})), cx);
+                assert!(pane.busy, "publication before ack still waits for confirmation");
+                pane.pending_save = Some(("project".into(), 2));
+                pane.finish_published_save(cx);
+                assert!(!pane.busy);
+                assert_eq!(pane.edit_revision, 2);
+            });
+        });
     }
     #[gpui_kit::test]
     fn native_narrow_pane_preserves_drafts_and_rejects_stale_publications(cx: &mut TestAppContext) {

@@ -108,7 +108,6 @@ pub(super) fn render(view: &TaskActivityPane, palette: design::Palette, ratio: f
             div()
                 .id("watcher-goal-note")
                 .debug_selector(|| "watcher-goal-note".into())
-                .mt(px(20.))
                 .text_size(px(12. * ratio))
                 .text_color(rgb(palette.muted))
                 .child(format!("Last goal update · {}", view.goal_note))
@@ -125,12 +124,7 @@ pub(super) fn render(view: &TaskActivityPane, palette: design::Palette, ratio: f
         .flex()
         .flex_col()
         .gap(px(8.))
-        .mt(px(20.))
         .p(px(14.))
-        .rounded(px(10.))
-        .border_1()
-        .border_color(rgb(if active { palette.accent } else { palette.line }))
-        .bg(design::surface_color(palette.panel))
         .text_color(rgb(palette.ink))
         .child(
             div()
@@ -323,7 +317,19 @@ mod native_tests {
         });
         draw(visual);
         draw(visual);
-        assert!(visual.debug_bounds("watcher-goal").is_some());
+        assert!(
+            visual.debug_bounds("watcher-goal").is_none(),
+            "A paused goal defaults to the task card while its task/plan remains active"
+        );
+        assert!(visual.debug_bounds("watcher-plan").is_some());
+        let previous = visual.debug_bounds("watcher-card-previous").unwrap();
+        visual.simulate_click(previous.center(), Default::default());
+        draw(visual);
+        draw(visual);
+        assert!(
+            visual.debug_bounds("watcher-goal").is_some(),
+            "The paused goal remains available through the shared card arrows"
+        );
         activity.update(visual, |view, cx| view.set_context(&snapshot, "other", cx));
         draw(visual);
         draw(visual);

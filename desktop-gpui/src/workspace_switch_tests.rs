@@ -61,7 +61,7 @@ fn palette_layout_presets_keep_native_panels_focus_and_lifecycles(cx: &mut TestA
 }
 
 #[gpui_kit::test]
-fn workspace_switch_retains_pane_identity_until_explicit_close(cx: &mut TestAppContext) {
+fn saved_layout_restore_retains_pane_identity_until_explicit_close(cx: &mut TestAppContext) {
     cx.update(|cx| gpui_kit::init(cx));
     let events = Rc::new(RefCell::new(Vec::<PaneLifecycle>::new()));
     let capture = events.clone();

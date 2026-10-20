@@ -5297,6 +5297,7 @@ dependencies = [
  "serde_json",
  "unicode-segmentation",
  "url",
+ "uuid",
  "vt100",
  "wry",
 ]

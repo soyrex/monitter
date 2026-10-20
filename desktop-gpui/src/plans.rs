@@ -385,10 +385,8 @@ impl Render for PlanPopup {
             if expanded {
                 let mut history = div()
                     .debug_selector(|| "work-plan-popup-earlier".into())
-                    .p(px(10.))
                     .flex()
-                    .flex_col()
-                    .gap(px(6.));
+                    .flex_col();
                 for plan in plans.iter().skip(1) {
                     history = history.child(PlanCardView {
                         plan: plan.clone(),
@@ -810,60 +808,100 @@ impl PlanCard {
             .count();
         let summary = text(&self.plan, "summary");
         let expanded = self.summary_expanded;
+        let done = completed == items.len() && !items.is_empty();
+        let success = status_color("completed", palette);
+        let mut progress = div().flex().gap(px(2.)).w(px(32.)).flex_shrink_0();
+        for item in &items {
+            progress = progress.child(
+                div()
+                    .flex_1()
+                    .h(px(3.))
+                    .rounded_full()
+                    .bg(rgb(if text(item, "status") == "completed" {
+                        success
+                    } else {
+                        mix_rgb(palette.panel, palette.muted, 0.25)
+                    })),
+            );
+        }
         div()
             .w_full()
             .min_w_0()
             .whitespace_normal()
-            .p(px(6.))
-            .rounded(px(5.))
-            .bg(crate::design::surface_color(mix_rgb(
-                palette.panel,
-                palette.muted,
-                0.05,
-            )))
+            .border_t_1()
+            .border_color(rgb(palette.line))
+            .px(px(18.))
+            .py(px(11.))
             .flex()
             .flex_col()
-            .gap(px(2.))
+            .gap(px(6.))
             .child(
                 div()
-                    .text_size(type_size(10.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(text(&self.plan, "title")),
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .child(
+                        Icon::new(if done { IconName::Check } else { IconName::Circle })
+                            .size(px(12.))
+                            .text_color(rgb(if done { success } else { palette.muted })),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(4.))
+                            .child(
+                                div()
+                                    .text_size(type_size(12.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(text(&self.plan, "title")),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(7.))
+                                    .child(progress)
+                                    .child(
+                                        div()
+                                            .text_size(type_size(10.))
+                                            .text_color(rgb(palette.muted))
+                                            .child(format!(
+                                                "{completed} of {} done · {}",
+                                                items.len(),
+                                                status_label(&text(&self.plan, "status"))
+                                            )),
+                                    ),
+                            ),
+                    )
+                    .when(!summary.is_empty(), |row| {
+                        row.child(
+                            Button::new("work-plan-history-info")
+                                .compact()
+                                .xsmall()
+                                .ghost()
+                                .h(px(22.))
+                                .px(px(2.))
+                                .py_0()
+                                .text_size(type_size(10.))
+                                .text_color(rgb(palette.muted))
+                                .label("Outcome    Info")
+                                .accessibility_label(if expanded {
+                                    "Hide earlier work-plan outcome"
+                                } else {
+                                    "Show earlier work-plan outcome"
+                                })
+                                .toggled(expanded)
+                                .debug_selector(|| "work-plan-history-info".into())
+                                .on_click(cx.listener(|card, _, _, cx| {
+                                    card.summary_expanded = !card.summary_expanded;
+                                    cx.notify();
+                                })),
+                        )
+                    }),
             )
-            .child(
-                div()
-                    .text_size(type_size(9.))
-                    .text_color(rgb(palette.muted))
-                    .child(format!(
-                        "{completed} / {} done · {}",
-                        items.len(),
-                        status_label(&text(&self.plan, "status"))
-                    )),
-            )
-            .when(!summary.is_empty(), |row| {
-                row.child(
-                    Button::new("work-plan-history-info")
-                        .compact()
-                        .xsmall()
-                        .ghost()
-                        .h(px(18.))
-                        .px(px(4.))
-                        .py_0()
-                        .text_size(type_size(9.))
-                        .label("Outcome · Info")
-                        .accessibility_label(if expanded {
-                            "Hide earlier work-plan outcome"
-                        } else {
-                            "Show earlier work-plan outcome"
-                        })
-                        .toggled(expanded)
-                        .debug_selector(|| "work-plan-history-info".into())
-                        .on_click(cx.listener(|card, _, _, cx| {
-                            card.summary_expanded = !card.summary_expanded;
-                            cx.notify();
-                        })),
-                )
-            })
             .when(expanded && !summary.is_empty(), |row| {
                 row.child(
                     div()

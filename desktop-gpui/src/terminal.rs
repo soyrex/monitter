@@ -761,6 +761,13 @@ impl TerminalPane {
         initial_read_pending: bool,
         cx: &mut Context<Self>,
     ) -> Self {
+        // Root's Tab actions run before raw key listeners. Leave terminal Tab
+        // and Backtab to `key`, which writes the protocol bytes to the PTY.
+        // The context is on the focused grid, so other controls keep navigation.
+        cx.bind_keys([
+            KeyBinding::new("tab", NoAction {}, Some("MonitterNativeTerminal")),
+            KeyBinding::new("shift-tab", NoAction {}, Some("MonitterNativeTerminal")),
+        ]);
         let (poll_wake, mut wakes) = futures::channel::mpsc::channel(1);
         let poll = cx.spawn(async move |pane, cx| {
             loop {
@@ -2326,6 +2333,87 @@ impl Render for TerminalPane {
 mod native_terminal_tests {
     use super::*;
     use ::core::prelude::v1::test;
+
+    #[cfg(feature = "visual-export")]
+    struct TerminalTabRoot {
+        pane: Entity<TerminalPane>,
+        before: FocusHandle,
+        after: FocusHandle,
+    }
+    #[cfg(feature = "visual-export")]
+    impl Render for TerminalTabRoot {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().flex().flex_col()
+                .child(div().id("before-terminal").track_focus(&self.before).tab_index(0).child("Before"))
+                .child(div().flex_1().min_h_0().child(self.pane.clone()))
+                .child(div().id("after-terminal").track_focus(&self.after).tab_index(0).child("After"))
+        }
+    }
+
+    #[cfg(feature = "visual-export")]
+    #[gpui_kit::test]
+    fn terminal_tab_reaches_pty_once_and_keeps_focus_while_controls_still_navigate(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let mut retained = None;
+        let mut controls = None;
+        let (_, visual) = cx.add_window_view(|window, cx| {
+            let pane = cx.new(|cx| {
+                let mut pane = TerminalPane::new_inner(
+                    DesktopService::disconnected_for_ui_fixture(), &json!({}), window,
+                    PaneMode::Manager, false, false, cx,
+                );
+                pane.models.insert("offline-terminal".into(), TerminalModel::new(24, 80));
+                pane.selected = Some("offline-terminal".into());
+                pane.queue.clear();
+                // Keep writes queued for inspection; never contact a backend.
+                pane.busy = true;
+                pane
+            });
+            let before = cx.focus_handle();
+            let after = cx.focus_handle();
+            retained = Some(pane.clone());
+            controls = Some((before.clone(), after.clone()));
+            let root = cx.new(|_| TerminalTabRoot { pane, before, after });
+            gpui_kit::component::Root::new(root, window, cx)
+        });
+        let pane = retained.unwrap();
+        let (before, after) = controls.unwrap();
+        visual.update(|window, cx| {
+            let focus = pane.read(cx).focus.clone();
+            window.focus(&focus, cx);
+            window.draw(cx).clear(cx);
+            pane.update(cx, |pane, _| {
+                // A live backend acknowledges this resize before further input.
+                // Match the drawn grid in this deliberately disconnected fixture.
+                pane.models.get_mut("offline-terminal").unwrap().resize(pane.rows, pane.cols);
+                pane.queue.clear();
+            });
+        });
+        for (key, expected) in [("tab", &b"\t"[..]), ("shift-tab", &b"\x1b[Z"[..]), ("tab", &b"\t"[..])] {
+            visual.simulate_keystrokes(key);
+            visual.update(|window, cx| {
+                assert!(!pane.read(cx).queue.is_empty(), "{key}: no queued input, contexts: {:?}", window.context_stack());
+                pane.update(cx, |pane, _| {
+                    assert!(pane.focus.is_focused(window), "{key} moved focus out of the terminal");
+                    assert_write(pane.queue.pop_front(), "offline-terminal", expected);
+                    assert!(pane.queue.is_empty(), "{key} wrote duplicate input");
+                });
+            });
+        }
+        visual.update(|window, cx| window.focus(&before, cx));
+        visual.simulate_keystrokes("tab");
+        visual.update(|window, cx| {
+            assert!(!before.is_focused(window), "Tab must still navigate non-terminal controls");
+            assert!(!pane.read(cx).focus.is_focused(window));
+            assert!(pane.read(cx).queue.is_empty());
+        });
+        visual.update(|window, cx| window.focus(&after, cx));
+        visual.simulate_keystrokes("shift-tab");
+        visual.update(|window, cx| {
+            assert!(!after.is_focused(window));
+            assert!(pane.read(cx).queue.is_empty());
+        });
+    }
 
     #[cfg(feature = "visual-export")]
     struct TerminalRehostRoot;
