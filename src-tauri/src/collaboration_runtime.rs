@@ -45,13 +45,16 @@ impl Service {
                         .and_then(|service| service.board_guidance_for_task(caller).ok())
                         .unwrap_or_else(|| crate::collaboration_mcp::BOARD_INSTRUCTIONS.to_string())
                 });
-                *broker = Some(Broker::start_with_guidance(Arc::new(move |caller, tool, arguments| {
-                    let service = service.upgrade().ok_or("Monitter has closed.")?;
-                    if service.stopping.load(Ordering::Acquire) {
-                        return Err("Monitter is shutting down.".into());
-                    }
-                    service.protocol(caller, tool, arguments)
-                }), guidance)?);
+                *broker = Some(Broker::start_with_guidance(
+                    Arc::new(move |caller, tool, arguments| {
+                        let service = service.upgrade().ok_or("Monitter has closed.")?;
+                        if service.stopping.load(Ordering::Acquire) {
+                            return Err("Monitter is shutting down.".into());
+                        }
+                        service.protocol(caller, tool, arguments)
+                    }),
+                    guidance,
+                )?);
             }
         }
         if !self.collaboration_started.swap(true, Ordering::AcqRel) {
@@ -156,7 +159,7 @@ impl Service {
         let mut broker = self
             .jev_decisions_broker
             .lock()
-            .map_err(|_| "Jev Decisions broker lock failed.")?;
+            .map_err(|_| "System One Decisions broker lock failed.")?;
         if broker.is_none() {
             let service = Arc::downgrade(self);
             *broker = Some(Broker::start_jev_decisions(Arc::new(
@@ -167,11 +170,17 @@ impl Service {
                     }
                     if !service.jev_decisions_opted_in_running(caller)? {
                         return Err(
-                            "Jev Decisions is not enabled for this running agent task.".into()
+                            "System One Decisions is not enabled for this running agent task.".into()
                         );
                     }
-                    let (result, receipt, card) =
-                        crate::jev_decisions::evaluate(caller, tool, arguments)?;
+                    let backend_kind = service.jev_decisions_backend_for_running(caller)?;
+                    let backend = crate::model_router::decision_backend(backend_kind);
+                    let (result, receipt, card) = crate::jev_decisions::evaluate_with_backend(
+                        caller,
+                        backend.as_ref(),
+                        tool,
+                        arguments,
+                    )?;
                     service.record_jev_decisions_receipt(&receipt, &card);
                     Ok(result)
                 },
@@ -198,17 +207,17 @@ impl Service {
         let mut grants = self
             .jev_decisions_grants
             .lock()
-            .map_err(|_| "Jev Decisions grant lock failed.")?;
+            .map_err(|_| "System One Decisions grant lock failed.")?;
         if let Some(grant) = grants.get(task_id) {
             return Ok(Some(grant.clone()));
         }
         let broker = self
             .jev_decisions_broker
             .lock()
-            .map_err(|_| "Jev Decisions broker lock failed.")?;
+            .map_err(|_| "System One Decisions broker lock failed.")?;
         let grant = broker
             .as_ref()
-            .ok_or("Jev Decisions broker is unavailable.")?
+            .ok_or("System One Decisions broker is unavailable.")?
             .session(task_id);
         grants.insert(task_id.into(), grant.clone());
         Ok(Some(grant))
@@ -228,7 +237,7 @@ impl Service {
         }
         self.jev_decisions_grants
             .lock()
-            .map_err(|_| "Jev Decisions grant lock failed.".to_string())
+            .map_err(|_| "System One Decisions grant lock failed.".to_string())
             .map(|grants| grants.get(task_id).cloned())
     }
 
@@ -276,7 +285,7 @@ mod jev_decisions_grant_tests {
             agent,
             &CreateTaskInput {
                 agent_id: agent.id.clone(),
-                title: "Jev grant fixture".into(),
+                title: "System One grant fixture".into(),
                 native_session_id: None,
                 parent_task_id: None,
                 channel_id: None,
@@ -302,7 +311,7 @@ mod jev_decisions_grant_tests {
                     .tasks
                     .iter_mut()
                     .find(|task| task.id == task_id)
-                    .ok_or("Jev grant fixture task is missing.")?;
+                    .ok_or("System One grant fixture task is missing.")?;
                 task.status = "running".into();
                 Ok(())
             })
@@ -342,5 +351,38 @@ mod jev_decisions_grant_tests {
         assert!(status(&jev.endpoint, &jev.token).contains("401 Unauthorized"));
         enabled.cleanup();
         let _ = fs::remove_dir_all(enabled_root);
+    }
+
+    #[test]
+    fn decision_backend_is_read_from_the_running_agents_saved_configuration() {
+        let (service, root, task_id) = fixture(true);
+        assert_eq!(
+            service.jev_decisions_backend_for_running(&task_id).unwrap(),
+            model::DecisionBackendKind::TypeSafe
+        );
+        service
+            .mutate(None, |snapshot| {
+                let agent_id = snapshot
+                    .tasks
+                    .iter()
+                    .find(|task| task.id == task_id)
+                    .ok_or("System One backend fixture task is missing.")?
+                    .agent_id
+                    .clone();
+                snapshot
+                    .agents
+                    .iter_mut()
+                    .find(|agent| agent.id == agent_id)
+                    .ok_or("System One backend fixture agent is missing.")?
+                    .decision_backend = model::DecisionBackendSelection::Laya;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            service.jev_decisions_backend_for_running(&task_id).unwrap(),
+            model::DecisionBackendKind::Laya
+        );
+        service.cleanup();
+        let _ = fs::remove_dir_all(root);
     }
 }

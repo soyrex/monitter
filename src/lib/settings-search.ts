@@ -4,6 +4,7 @@ export interface SettingsSearchEntry {
   id: string; category: string; label: string; description: string; keywords?: readonly string[]; target?: string;
 }
 export const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
+  { id: 'system-one', category: 'agents', label: 'System One', description: 'Default backend and task routing, with per-agent overrides.', keywords: ['SYS-1', 'Jev', 'Laya', 'TypeSafe', 'routing', 'backend'], target: 'system-one-heading' },
   { id: 'connection', category: 'connection', label: 'Workspace connection', description: 'Switch paired workspaces or reconnect this phone.', keywords: ['pairing', 'connection'], target: 'phone-connection-heading' },
 
 {"id": "inactive-opacity", "category": "interface", "label": "Inactive pane opacity", "description": "Adjust opacity of inactive panes.", "target": "panes-heading"},

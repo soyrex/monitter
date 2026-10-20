@@ -40,6 +40,34 @@ pub struct AcpLaunch {
     pub args: Vec<String>,
 }
 
+/// Provider used by bounded System One inference. Never changes permissions.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionBackendKind {
+    #[default]
+    TypeSafe,
+    Laya,
+}
+
+/// Agent override for the global System One provider.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionBackendSelection {
+    #[default]
+    Inherit,
+    TypeSafe,
+    Laya,
+}
+impl DecisionBackendSelection {
+    pub fn resolve(self, global: DecisionBackendKind) -> DecisionBackendKind {
+        match self {
+            Self::Inherit => global,
+            Self::TypeSafe => DecisionBackendKind::TypeSafe,
+            Self::Laya => DecisionBackendKind::Laya,
+        }
+    }
+}
+
 /// A provider-advertised or Monitter-native composer command. Provider wire
 /// payloads never cross this boundary: the renderer receives only bounded
 /// display metadata and sends the selected command text back to the owner.
@@ -92,9 +120,19 @@ pub const INTERNAL_AGENT_NAME: &str = "Monitter Admin";
 #[serde(rename_all = "snake_case")]
 pub enum JevRoutingMode {
     #[default]
+    Inherit,
     Off,
     Recommend,
     SafeAuto,
+}
+
+impl JevRoutingMode {
+    pub fn resolve(self, global: Self) -> Self {
+        match self {
+            Self::Inherit => if global == Self::Inherit { Self::Off } else { global },
+            explicit => explicit,
+        }
+    }
 }
 
 /// Optional model IDs an operator has explicitly mapped to Jev's abstract
@@ -153,6 +191,10 @@ pub struct Agent {
     /// Older persisted agents remain opted out.
     #[serde(default)]
     pub jev_decisions_enabled: bool,
+    /// Provider override for routing and advisory decisions. Missing values inherit
+    /// the global System One backend; persisted explicit selections are preserved.
+    #[serde(default)]
+    pub decision_backend: DecisionBackendSelection,
     /// ACP is intentionally an explicit launcher rather than a growing list
     /// of provider-specific executable fields. It is copied into new tasks.
     #[serde(default)]
@@ -583,11 +625,13 @@ fn is_codex_parent_thread(
     thread: Option<&str>,
 ) -> bool {
     source == "codex"
-        && thread.filter(|id| !id.trim().is_empty()).is_some_and(|thread| {
-            tasks.iter().any(|task| {
-                task.id == parent_task_id && task.native_session_id.as_deref() == Some(thread)
+        && thread
+            .filter(|id| !id.trim().is_empty())
+            .is_some_and(|thread| {
+                tasks.iter().any(|task| {
+                    task.id == parent_task_id && task.native_session_id.as_deref() == Some(thread)
+                })
             })
-        })
 }
 
 /// Report a newly recorded Codex child for a post-commit sibling sweep.
@@ -606,7 +650,10 @@ pub(crate) fn upsert_task_subagent_session(
         return false;
     }
     let codex_child = update.source == "codex"
-        && update.agent_thread_id.as_deref().is_some_and(|id| !id.trim().is_empty());
+        && update
+            .agent_thread_id
+            .as_deref()
+            .is_some_and(|id| !id.trim().is_empty());
     let previous_len = snapshot.subagent_sessions.len();
     upsert_subagent_session(&mut snapshot.subagent_sessions, update, observed_at);
     codex_child && snapshot.subagent_sessions.len() > previous_len
@@ -638,7 +685,8 @@ pub fn upsert_subagent_session(
     }
     let status = update.status.unwrap_or_else(|| "queued".into());
     if let Some(existing) = sessions.iter_mut().find(|entry| entry.id == update.id) {
-        let advances_status = subagent_status_rank(&status) >= subagent_status_rank(&existing.status);
+        let advances_status =
+            subagent_status_rank(&status) >= subagent_status_rank(&existing.status);
         if advances_status {
             existing.status = status;
         }
@@ -719,7 +767,10 @@ pub fn finalize_subagent_sessions(
 const MAX_SUBAGENT_TRANSCRIPT_ENTRIES: usize = 200;
 
 pub fn append_subagent_transcript_entry(
-    transcripts: &mut std::collections::HashMap<String, crate::history::History<SubagentTranscriptEntry>>,
+    transcripts: &mut std::collections::HashMap<
+        String,
+        crate::history::History<SubagentTranscriptEntry>,
+    >,
     subagent_id: &str,
     entry: SubagentTranscriptEntry,
 ) {
@@ -727,7 +778,9 @@ pub fn append_subagent_transcript_entry(
     entries.push(entry);
     if entries.len() > MAX_SUBAGENT_TRANSCRIPT_ENTRIES {
         let excess = entries.len() - MAX_SUBAGENT_TRANSCRIPT_ENTRIES;
-        for _ in 0..excess { entries.remove(0); }
+        for _ in 0..excess {
+            entries.remove(0);
+        }
     }
 }
 
@@ -814,8 +867,12 @@ mod run_event_tests {
     fn snapshot_clone_shares_event_records_and_keeps_event_json_shape() {
         let mut snapshot = default_snapshot();
         snapshot.events.push(Arc::new(RunEvent {
-            id: "event".into(), task_id: "task".into(), kind: "log".into(),
-            title: "Diagnostic".into(), detail: Arc::from("payload"), created_at: 0,
+            id: "event".into(),
+            task_id: "task".into(),
+            kind: "log".into(),
+            title: "Diagnostic".into(),
+            detail: Arc::from("payload"),
+            created_at: 0,
         }));
         let cloned = snapshot.clone();
         assert!(Arc::ptr_eq(&snapshot.events[0], &cloned.events[0]));
@@ -1123,6 +1180,12 @@ pub struct InputOption {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
+    /// Global provider for System One routing, command advice, and decisions.
+    #[serde(default)]
+    pub system_one_backend: DecisionBackendKind,
+    /// Global routing policy; inherit is treated as off for legacy input.
+    #[serde(default = "default_system_one_routing")]
+    pub system_one_routing: JevRoutingMode,
     /// Launch policy for built-in Monitter MCP tools in supported harnesses.
     #[serde(default = "default_auto_approve_monitter_mcp")]
     pub auto_approve_monitter_mcp: bool,
@@ -1202,6 +1265,8 @@ pub struct Settings {
     #[serde(default = "default_voice_transcription_engine")]
     pub voice_transcription_engine: String,
 }
+fn default_system_one_routing() -> JevRoutingMode { JevRoutingMode::Off }
+
 impl Eq for Settings {}
 fn default_auto_approve_monitter_mcp() -> bool {
     true
@@ -1286,7 +1351,9 @@ pub struct ProjectIdeaEdit {
     pub tags: Vec<String>,
 }
 
-fn unknown_idea_author() -> String { "unknown".into() }
+fn unknown_idea_author() -> String {
+    "unknown".into()
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -1413,7 +1480,8 @@ pub struct Snapshot {
     /// `collaboration` sessions never populate this; their transcript is
     /// fetched live or read from the child task's own messages.
     #[serde(default)]
-    pub subagent_transcripts: std::collections::HashMap<String, crate::history::History<SubagentTranscriptEntry>>,
+    pub subagent_transcripts:
+        std::collections::HashMap<String, crate::history::History<SubagentTranscriptEntry>>,
     #[serde(default)]
     pub queued_messages: Vec<QueuedMessage>,
     #[serde(default)]
@@ -1650,8 +1718,17 @@ pub fn sync_collaboration_subagent_sessions(snapshot: &mut Snapshot) {
             agent_path: None,
             agent_thread_id: None,
             prompt: Some(item.text.clone()),
-            model: snapshot.tasks.iter().find(|task| task.id == item.to_task_id).and_then(|task| (!task.model.is_empty()).then(|| task.model.clone())),
-            reasoning_effort: snapshot.tasks.iter().find(|task| task.id == item.to_task_id).and_then(|task| task.model_settings.as_ref()).and_then(|settings| settings.reasoning_effort.clone()),
+            model: snapshot
+                .tasks
+                .iter()
+                .find(|task| task.id == item.to_task_id)
+                .and_then(|task| (!task.model.is_empty()).then(|| task.model.clone())),
+            reasoning_effort: snapshot
+                .tasks
+                .iter()
+                .find(|task| task.id == item.to_task_id)
+                .and_then(|task| task.model_settings.as_ref())
+                .and_then(|settings| settings.reasoning_effort.clone()),
             status: Some(item.status.clone()),
             result: item.result.clone(),
             error: item.error.clone(),
@@ -1845,9 +1922,10 @@ pub fn default_snapshot() -> Snapshot {
             skills: vec![],
             collaboration_enabled: true,
             terminal_execution_enabled: false,
-            jev_routing: JevRoutingMode::Off,
+            jev_routing: JevRoutingMode::Inherit,
             jev_model_tiers: JevModelTiers::default(),
             jev_decisions_enabled: false,
+            decision_backend: DecisionBackendSelection::default(),
             acp: None,
             internal: false,
         }],
@@ -1872,6 +1950,8 @@ pub fn default_snapshot() -> Snapshot {
         schedule_runs: vec![],
         pending_throwaway_task_ids: vec![],
         settings: Settings {
+            system_one_backend: DecisionBackendKind::default(),
+            system_one_routing: JevRoutingMode::Off,
             auto_approve_monitter_mcp: true,
             project_board_enabled: false,
             board_guidance_text: None,
@@ -1921,13 +2001,19 @@ mod tests {
     fn monitter_mcp_auto_approval_defaults_on_and_preserves_opt_out() {
         let mut settings = serde_json::to_value(super::default_snapshot().settings).unwrap();
         assert_eq!(settings["autoApproveMonitterMcp"], true);
-        settings.as_object_mut().unwrap().remove("autoApproveMonitterMcp");
+        settings
+            .as_object_mut()
+            .unwrap()
+            .remove("autoApproveMonitterMcp");
         let migrated: super::Settings = serde_json::from_value(settings.clone()).unwrap();
         assert!(migrated.auto_approve_monitter_mcp);
         settings["autoApproveMonitterMcp"] = serde_json::json!(false);
         let disabled: super::Settings = serde_json::from_value(settings).unwrap();
         assert!(!disabled.auto_approve_monitter_mcp);
-        assert_eq!(serde_json::to_value(disabled).unwrap()["autoApproveMonitterMcp"], false);
+        assert_eq!(
+            serde_json::to_value(disabled).unwrap()["autoApproveMonitterMcp"],
+            false
+        );
     }
     use super::*;
 
@@ -2018,7 +2104,9 @@ mod tests {
         let identity =
             "You are acting as Claudine. You are an agent running inside the Monitter harness.";
         assert!(agent_instructions(agent, "").starts_with(identity));
-        assert!(agent_instructions(agent, "").contains(crate::collaboration_mcp::PROGRESS_INSTRUCTIONS));
+        assert!(
+            agent_instructions(agent, "").contains(crate::collaboration_mcp::PROGRESS_INSTRUCTIONS)
+        );
         assert!(agent_instructions(agent, "  ").starts_with(identity));
         assert!(agent_instructions(agent, &snapshot.settings.user_name)
             .starts_with(&format!("{identity} Your user is \"Álex \\\"Al\\\"\".")));
@@ -2185,7 +2273,10 @@ mod task_migration_tests {
         );
         assert_eq!(sessions[0].status, "error");
         assert_eq!(sessions[0].updated_at, 9);
-        assert_eq!(sessions[0].error.as_deref(), Some("Corrected terminal error"));
+        assert_eq!(
+            sessions[0].error.as_deref(),
+            Some("Corrected terminal error")
+        );
     }
 
     #[test]
@@ -2272,7 +2363,8 @@ mod task_migration_tests {
     #[test]
     fn routed_delegation_has_the_same_durable_session_projection() {
         let mut snapshot = default_snapshot();
-        snapshot.collaborations.push(Collaboration { model_selection: None,
+        snapshot.collaborations.push(Collaboration {
+            model_selection: None,
             id: "delegation-1".into(),
             kind: "delegation".into(),
             from_agent_id: "parent-agent".into(),
@@ -2302,7 +2394,10 @@ mod task_migration_tests {
     #[test]
     fn legacy_agents_do_not_receive_host_terminal_authority() {
         let mut value = serde_json::to_value(&default_snapshot().agents[0]).unwrap();
-        value.as_object_mut().unwrap().remove("terminalExecutionEnabled");
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("terminalExecutionEnabled");
         let agent: Agent = serde_json::from_value(value).unwrap();
         assert!(!agent.terminal_execution_enabled);
         assert!(!default_snapshot().agents[0].terminal_execution_enabled);
@@ -2343,22 +2438,29 @@ mod task_migration_tests {
             "id":"a", "name":"Codex", "description":"", "instructions":"",
             "provider":"codex", "model":"", "hostId":"h", "cwd":"/tmp",
             "color":"#000", "sandbox":"read-only"
-        })).unwrap();
+        }))
+        .unwrap();
         let task: Task = serde_json::from_value(serde_json::json!({
             "id":"t", "agentId":"a", "title":"Legacy", "nativeSessionId":null,
             "status":"idle", "createdAt":1, "updatedAt":1, "parentTaskId":null,
             "channelId":null, "hostId":"h", "cwd":"/tmp", "provider":"codex",
             "model":"", "sandbox":"read-only", "projectId":null
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(agent.codex_home, None);
-        assert_eq!(agent.jev_routing, JevRoutingMode::Off);
+        assert_eq!(agent.jev_routing, JevRoutingMode::Inherit);
         assert_eq!(agent.jev_model_tiers, JevModelTiers::default());
         assert!(!agent.jev_decisions_enabled);
+        assert_eq!(agent.decision_backend, DecisionBackendSelection::Inherit);
         let mut opted_in = agent.clone();
         opted_in.jev_decisions_enabled = true;
+        opted_in.decision_backend = DecisionBackendSelection::Laya;
         let value = serde_json::to_value(&opted_in).unwrap();
         assert_eq!(value["jevDecisionsEnabled"], true);
-        assert_eq!(serde_json::from_value::<Agent>(value).unwrap().jev_decisions_enabled, true);
+        assert_eq!(value["decisionBackend"], "laya");
+        let restored = serde_json::from_value::<Agent>(value).unwrap();
+        assert!(restored.jev_decisions_enabled);
+        assert_eq!(restored.decision_backend, DecisionBackendSelection::Laya);
         assert_eq!(task.codex_home, None);
     }
 
@@ -2377,7 +2479,9 @@ mod task_migration_tests {
     fn projects_and_task_links_round_trip_in_camel_case() {
         let mut snapshot = default_snapshot();
         let project_id = "project-1".to_string();
-        snapshot.projects.push(Project { ideas: vec![], ideas_revision: 0, build_management_enabled: false, agent_worktrees_enabled: false,
+        snapshot.projects.push(Project {
+            build_management_enabled: false,
+            agent_worktrees_enabled: false,
             id: project_id.clone(),
             name: "Project".into(),
             description: "Description".into(),
@@ -2388,6 +2492,8 @@ mod task_migration_tests {
                 cwd: "/workspace".into(),
             }],
             board_guidance_text: Some("Coordinate through the board.".into()),
+            ideas: vec![],
+            ideas_revision: 0,
         });
         snapshot.tasks.push(task_from_agent(
             &snapshot.agents[0],
@@ -2408,7 +2514,10 @@ mod task_migration_tests {
             value["projects"][0]["workspaces"][0]["hostId"],
             snapshot.hosts[0].id
         );
-        assert_eq!(value["projects"][0]["boardGuidanceText"], "Coordinate through the board.");
+        assert_eq!(
+            value["projects"][0]["boardGuidanceText"],
+            "Coordinate through the board."
+        );
         assert_eq!(value["tasks"][0]["projectId"], "project-1");
         let restored: Snapshot = serde_json::from_value(value).unwrap();
         assert_eq!(restored, snapshot);
@@ -2470,29 +2579,48 @@ pub fn task_from_agent(agent: &Agent, input: &CreateTaskInput) -> Task {
         acp: (agent.provider == "acp")
             .then(|| agent.acp.clone())
             .flatten(),
-        archived_agent_name: None, agent_worktree: None,
+        archived_agent_name: None,
+        agent_worktree: None,
     }
 }
 
 impl crate::history::HistoryRecord for Message {
-    fn id(&self) -> &str { &self.id }
-    fn scope_id(&self) -> Option<&str> { Some(&self.task_id) }
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn scope_id(&self) -> Option<&str> {
+        Some(&self.task_id)
+    }
 }
 impl crate::history::HistoryRecord for RunEvent {
-    fn id(&self) -> &str { &self.id }
-    fn scope_id(&self) -> Option<&str> { Some(&self.task_id) }
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn scope_id(&self) -> Option<&str> {
+        Some(&self.task_id)
+    }
 }
 impl crate::history::HistoryRecord for RunUsageSample {
-    fn id(&self) -> &str { &self.sample_id }
-    fn scope_id(&self) -> Option<&str> { Some(&self.task_id) }
+    fn id(&self) -> &str {
+        &self.sample_id
+    }
+    fn scope_id(&self) -> Option<&str> {
+        Some(&self.task_id)
+    }
 }
 
 impl crate::history::HistoryRecord for ChannelMessage {
-    fn id(&self) -> &str { &self.id }
-    fn scope_id(&self) -> Option<&str> { self.task_id.as_deref() }
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn scope_id(&self) -> Option<&str> {
+        self.task_id.as_deref()
+    }
 }
 impl crate::history::HistoryRecord for SubagentTranscriptEntry {
-    fn id(&self) -> &str { &self.id }
+    fn id(&self) -> &str {
+        &self.id
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

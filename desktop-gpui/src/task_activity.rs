@@ -194,7 +194,7 @@ impl TaskActivityPane {
         }
     }
     pub(crate) fn watch_goal(&self) -> Option<&Value> { self.goal.as_ref() }
-    pub(crate) fn render_watch_goal(&self, palette: design::Palette, ratio: f32) -> AnyElement {
+    pub(crate) fn render_watch_goal_pill(&self, palette: design::Palette, ratio: f32) -> AnyElement {
         watch_goal::render(self, palette, ratio)
     }
     #[cfg(test)]

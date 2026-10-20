@@ -16,6 +16,7 @@ use std::{
 use uuid::Uuid;
 
 mod evaluation;
+mod laya_service;
 pub use evaluation::{
     bundled_corpus as bundled_evaluation_corpus, bundled_outcomes as bundled_evaluation_outcomes,
     load_corpus as load_evaluation_corpus, load_outcomes as load_evaluation_outcomes,
@@ -738,6 +739,7 @@ impl JevClassifier for MockJevClassifier {
 }
 
 const JEV_ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
+const LAYA_SYSTEM_ONE_ENDPOINT: &str = "http://127.0.0.1:8080/v1/systemone";
 pub(crate) const MAX_JEV_PROMPT_BYTES: usize = 64 * 1024;
 const MAX_JEV_COMMAND_QUERY_BYTES: usize = 2 * 1024;
 const MAX_JEV_COMMAND_CANDIDATES: usize = 80;
@@ -787,7 +789,7 @@ impl JevHttpClient for CurlJevHttpClient {
                 .stderr(Stdio::piped())
                 .spawn()
                 .map_err(|error| format!("Could not start the Jev HTTPS client: {error}"))?;
-            let config = curl_config(api_key, &response_path);
+            let config = curl_config(JEV_ENDPOINT, Some(api_key), &response_path);
             child
                 .stdin
                 .as_mut()
@@ -854,11 +856,19 @@ fn write_private_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
         .map_err(|error| format!("Could not write private Jev request file: {error}"))
 }
 
-fn curl_config(api_key: &str, response_path: &Path) -> String {
+fn curl_config(endpoint: &str, api_key: Option<&str>, response_path: &Path) -> String {
+    let authorization = api_key
+        .map(|key| {
+            format!(
+                "header = {}\n",
+                curl_config_value(&format!("Authorization: Bearer {key}"))
+            )
+        })
+        .unwrap_or_default();
     format!(
-        "url = {}\nrequest = \"POST\"\nheader = \"Content-Type: application/json\"\nheader = {}\noutput = {}\nwrite-out = \"%{{http_code}} %{{time_namelookup}} %{{time_connect}} %{{time_appconnect}} %{{time_starttransfer}} %{{time_total}}\"\nsilent\nshow-error\nconnect-timeout = 5\nmax-time = 10\n",
-        curl_config_value(JEV_ENDPOINT),
-        curl_config_value(&format!("Authorization: Bearer {api_key}")),
+        "url = {}\nrequest = \"POST\"\nheader = \"Content-Type: application/json\"\n{}output = {}\nwrite-out = \"%{{http_code}} %{{time_namelookup}} %{{time_connect}} %{{time_appconnect}} %{{time_starttransfer}} %{{time_total}}\"\nsilent\nshow-error\nconnect-timeout = 5\nmax-time = 10\n",
+        curl_config_value(endpoint),
+        authorization,
         curl_config_value(&response_path.display().to_string()),
     )
 }
@@ -890,6 +900,267 @@ pub struct LiveJevClassifier {
 pub(crate) struct JevSystemOneResult {
     pub body: serde_json::Value,
     pub evidence: ClassifierEvidence,
+}
+
+/// Normalized bounded decision request shared by all decision providers.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DecisionRequest {
+    pub state: String,
+    pub questions: serde_json::Value,
+}
+
+/// Providers return raw SystemOne-shaped JSON plus attribution. The decision
+/// layer remains responsible for validating every answer against its schema.
+pub(crate) trait DecisionBackend: Send + Sync {
+    fn infer(&self, request: &DecisionRequest) -> Result<JevSystemOneResult, String>;
+}
+
+pub(crate) struct TypeSafeDecisionBackend;
+
+impl DecisionBackend for TypeSafeDecisionBackend {
+    fn infer(&self, request: &DecisionRequest) -> Result<JevSystemOneResult, String> {
+        live_jev_system_one(&request.state, request.questions.clone())
+    }
+}
+
+pub(crate) struct LayaDecisionBackend;
+
+impl DecisionBackend for LayaDecisionBackend {
+    fn infer(&self, request: &DecisionRequest) -> Result<JevSystemOneResult, String> {
+        live_laya_system_one(&request.state, request.questions.clone())
+    }
+}
+
+pub(crate) fn decision_backend(
+    kind: crate::model::DecisionBackendKind,
+) -> Box<dyn DecisionBackend> {
+    match kind {
+        crate::model::DecisionBackendKind::TypeSafe => Box::new(TypeSafeDecisionBackend),
+        crate::model::DecisionBackendKind::Laya => Box::new(LayaDecisionBackend),
+    }
+}
+
+pub(crate) trait LayaHttpClient: Send + Sync {
+    fn post_system_one(
+        &self,
+        api_key: Option<&str>,
+        body: &serde_json::Value,
+    ) -> Result<JevHttpResponse, String>;
+}
+
+pub(crate) struct CurlLayaHttpClient;
+
+impl LayaHttpClient for CurlLayaHttpClient {
+    fn post_system_one(
+        &self,
+        api_key: Option<&str>,
+        body: &serde_json::Value,
+    ) -> Result<JevHttpResponse, String> {
+        let request_path = secure_temp_path("laya-request");
+        let response_path = secure_temp_path("laya-response");
+        let request = serde_json::to_vec(body)
+            .map_err(|error| format!("Could not serialize Laya decision request: {error}"))?;
+        write_private_file(&request_path, &request)?;
+        write_private_file(&response_path, b"")?;
+        let started = Instant::now();
+        let result = (|| {
+            let mut child = Command::new("curl")
+                .args(["-q", "--config", "-", "--noproxy", "*", "--proto", "=http"])
+                .arg("--data-binary")
+                .arg(format!("@{}", request_path.display()))
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|error| format!("Could not start the local Laya HTTP client: {error}"))?;
+            let config = curl_config(LAYA_SYSTEM_ONE_ENDPOINT, api_key, &response_path);
+            child
+                .stdin
+                .as_mut()
+                .ok_or("Could not open Laya HTTP client stdin.")?
+                .write_all(config.as_bytes())
+                .map_err(|error| format!("Could not prepare local Laya request: {error}"))?;
+            let output = child
+                .wait_with_output()
+                .map_err(|error| format!("Could not complete local Laya request: {error}"))?;
+            let response = fs::read(&response_path)
+                .map_err(|error| format!("Could not read local Laya response: {error}"))?;
+            if !output.status.success() {
+                return Err(format!(
+                    "Local Laya request failed: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ));
+            }
+            let timing = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let status = timing.split_whitespace().next().unwrap_or_default();
+            if !matches!(status, "200" | "201") {
+                return Err(format!(
+                    "Local Laya returned HTTP {status}: {}",
+                    bounded_error_body(&response)
+                ));
+            }
+            let body = serde_json::from_slice(&response)
+                .map_err(|error| format!("Local Laya returned invalid JSON: {error}"))?;
+            Ok(JevHttpResponse {
+                body,
+                latency_ms: started.elapsed().as_millis(),
+            })
+        })();
+        let _ = fs::remove_file(&request_path);
+        let _ = fs::remove_file(&response_path);
+        result
+    }
+}
+
+pub(crate) fn live_laya_system_one(
+    state: &str,
+    questions: serde_json::Value,
+) -> Result<JevSystemOneResult, String> {
+    if state.len() > MAX_JEV_PROMPT_BYTES {
+        return Err(format!(
+            "Decision input exceeds the {} KiB MVP limit.",
+            MAX_JEV_PROMPT_BYTES / 1024
+        ));
+    }
+    let api_key = crate::environment_secrets::laya_api_key_for_internal_service()?;
+    let served_model = laya_service::ensure_running(api_key.as_deref())?;
+    laya_system_one_with_client(
+        state,
+        questions,
+        &std::env::var("LAYA_DEFAULT_MODEL").unwrap_or(served_model),
+        api_key.as_deref(),
+        &CurlLayaHttpClient,
+    )
+}
+
+fn laya_system_one_with_client(
+    state: &str,
+    questions: serde_json::Value,
+    model: &str,
+    api_key: Option<&str>,
+    client: &dyn LayaHttpClient,
+) -> Result<JevSystemOneResult, String> {
+    if !questions.is_object() {
+        return Err("Decision questions must be an object.".into());
+    }
+    let response = client.post_system_one(
+        api_key,
+        &serde_json::json!({"model":model,"state":state,"questions":questions}),
+    )?;
+    let usage = response
+        .body
+        .get("usage")
+        .unwrap_or(&serde_json::Value::Null);
+    let evidence = ClassifierEvidence {
+        provider: response
+            .body
+            .get("provider")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("Laya")
+            .into(),
+        model: response
+            .body
+            .get("model")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(model)
+            .into(),
+        model_version: response
+            .body
+            .get("model_version")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        latency_ms: response.latency_ms,
+        input_tokens: usage
+            .get("input_tokens")
+            .and_then(serde_json::Value::as_u64),
+        output_tokens: usage
+            .get("output_tokens")
+            .and_then(serde_json::Value::as_u64),
+        cost_usd: usage.get("cost").and_then(serde_json::Value::as_f64),
+    };
+    Ok(JevSystemOneResult {
+        body: response.body,
+        evidence,
+    })
+}
+
+#[cfg(test)]
+mod laya_decision_backend_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    struct FixtureLayaClient {
+        body: serde_json::Value,
+        request: Mutex<Option<serde_json::Value>>,
+    }
+
+    impl LayaHttpClient for FixtureLayaClient {
+        fn post_system_one(
+            &self,
+            api_key: Option<&str>,
+            body: &serde_json::Value,
+        ) -> Result<JevHttpResponse, String> {
+            assert_eq!(api_key, Some("local-test-secret"));
+            *self.request.lock().unwrap() = Some(body.clone());
+            Ok(JevHttpResponse {
+                body: self.body.clone(),
+                latency_ms: 7,
+            })
+        }
+    }
+
+    #[test]
+    fn laya_adapter_sends_normalized_system_one_and_reports_local_evidence() {
+        let client = FixtureLayaClient {
+            body: serde_json::json!({
+                "provider":"Laya",
+                "model":"laya-test",
+                "model_version":"test-version",
+                "answers":{"decision":{"type":"choice","choice":"abstain"}},
+                "usage":{"input_tokens":12,"output_tokens":2}
+            }),
+            request: Mutex::new(None),
+        };
+        let result = laya_system_one_with_client(
+            "bounded state",
+            serde_json::json!({"decision":{"type":"choice"}}),
+            "laya-request-model",
+            Some("local-test-secret"),
+            &client,
+        )
+        .unwrap();
+        let request = client.request.lock().unwrap().clone().unwrap();
+        assert_eq!(request["model"], "laya-request-model");
+        assert!(!request.to_string().contains("local-test-secret"));
+        assert_eq!(request["state"], "bounded state");
+        assert_eq!(request["questions"]["decision"]["type"], "choice");
+        assert_eq!(result.evidence.provider, "Laya");
+        assert_eq!(result.evidence.model, "laya-test");
+        assert_eq!(
+            result.evidence.model_version.as_deref(),
+            Some("test-version")
+        );
+        assert_eq!(result.evidence.input_tokens, Some(12));
+        assert_eq!(result.evidence.output_tokens, Some(2));
+        assert_eq!(result.evidence.latency_ms, 7);
+    }
+
+    #[test]
+    fn laya_adapter_rejects_non_object_questions_before_transport() {
+        let client = FixtureLayaClient {
+            body: serde_json::Value::Null,
+            request: Mutex::new(None),
+        };
+        assert!(laya_system_one_with_client(
+            "state",
+            serde_json::json!([]),
+            "model",
+            None,
+            &client
+        )
+        .is_err());
+        assert!(client.request.lock().unwrap().is_none());
+    }
 }
 
 pub(crate) fn live_jev_system_one(
@@ -961,6 +1232,33 @@ pub(crate) fn system_one_with_client(
 /// Plans a Cmd-P selection using the locally cached Keychain credential. This
 /// function classifies a bounded local UI catalogue; it never executes the
 /// selected command, changes permissions, or creates a task.
+pub(crate) fn live_system_one_command_plan(
+    query: &str,
+    candidates: &[JevCommandCandidate],
+    kind: crate::model::DecisionBackendKind,
+) -> Result<JevCommandPlanningResult, String> {
+    validate_jev_command_input(query, candidates)?;
+    let eligible = candidates.iter().filter(|candidate| !jev_command_candidate_is_sensitive(candidate)).cloned().collect::<Vec<_>>();
+    if eligible.is_empty() {
+        return Err("No non-sensitive commands are eligible for System One command planning.".into());
+    }
+    let (state, questions) = jev_command_payload(query, &eligible)?;
+    let result = decision_backend(kind).infer(&DecisionRequest { state, questions })?;
+    let trace_id = Uuid::new_v4().to_string();
+    let plan = jev_command_plan_from_jev(&result.body, &eligible, trace_id.clone())?;
+    Ok(JevCommandPlanningResult {
+        plan: plan.clone(),
+        trace: JevCommandPlanTrace {
+            trace_id,
+            query_fingerprint: fingerprint(query),
+            catalogue_fingerprint: fingerprint(&catalogue_fingerprint_input(candidates)?),
+            candidate_id: plan.candidate_id.clone(),
+            confidence: plan.confidence,
+            classifier_evidence: result.evidence,
+        },
+    })
+}
+
 pub(crate) fn live_jev_command_plan(
     query: &str,
     candidates: &[JevCommandCandidate],
@@ -1894,6 +2192,36 @@ pub(crate) fn persist_jev_command_plan(
             "Could not write Jev command plan {}: {error}",
             path.display()
         )
+    })
+}
+
+pub(crate) fn live_system_one_route_plan(
+    prompt: &str,
+    kind: crate::model::DecisionBackendKind,
+) -> Result<JevRoutePlan, String> {
+    if prompt.len() > MAX_JEV_PROMPT_BYTES {
+        return Err(format!("System One routing input exceeds the {} KiB limit.", MAX_JEV_PROMPT_BYTES / 1024));
+    }
+    let result = if contains_sensitive_signal(&prompt.to_lowercase()) {
+        MockJevClassifier.classify(prompt)?
+    } else {
+        let payload = jev_request(prompt, "");
+        let result = decision_backend(kind).infer(&DecisionRequest {
+            state: prompt.into(),
+            questions: payload["questions"].clone(),
+        })?;
+        ClassifierResult { decision: decision_from_jev(&result.body)?, evidence: result.evidence }
+    };
+    let auto_route_policy = auto_route_policy(&result.decision);
+    Ok(JevRoutePlan {
+        trace_id: Uuid::new_v4().to_string(),
+        agent_id: None,
+        prompt_fingerprint: fingerprint(prompt),
+        policy_version: ROUTING_POLICY_VERSION.into(),
+        question_schema_version: ROUTING_QUESTION_SCHEMA_VERSION.into(),
+        decision: result.decision,
+        auto_route_policy,
+        classifier_evidence: result.evidence,
     })
 }
 

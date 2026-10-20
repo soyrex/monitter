@@ -2,12 +2,12 @@
 //! Field map: AppSurface Agent/Host forms, AccessPicker, AcpAgentPicker and
 //! AgentModelPicker. Native avatar selection uses bounded local reads; redacted managed-extension assignment uses typed owner-service methods.
 use crate::design::ui_scaled_px as px;
-use base64::{Engine as _, engine::general_purpose::STANDARD};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use gpui_kit::{
     component::{
-        Disableable,
         button::*,
         input::{Input, InputState, Textarea, TextareaState},
+        Disableable,
     },
     prelude::*,
     *,
@@ -16,7 +16,7 @@ use monitter_lib::{
     experimental_desktop::{DesktopService, ExtensionAssignmentKind, ExtensionAssignments},
     model::{Agent, Host},
 };
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::{
     collections::{HashMap, HashSet},
     io::Read,
@@ -87,10 +87,10 @@ const AGENT_FIELDS: &[(&str, &str)] = &[
     ("color", "Identity color (#RRGGBB)"),
     ("codexHome", "Existing local Codex home (optional)"),
     ("acpCommand", "External launcher executable"),
-    ("tierFast", "Jev fast model"),
-    ("tierBalanced", "Jev balanced model"),
-    ("tierStrong", "Jev strong model"),
-    ("tierFrontier", "Jev frontier model"),
+    ("tierFast", "System One fast model"),
+    ("tierBalanced", "System One balanced model"),
+    ("tierStrong", "System One strong model"),
+    ("tierFrontier", "System One frontier model"),
 ];
 const AGENT_TEXT: &[(&str, &str)] = &[
     ("instructions", "Instructions"),
@@ -213,7 +213,7 @@ impl AgentHostPane {
         let local = items(&snapshot, "hosts")
             .into_iter()
             .find(|host| text(host, "kind") == "local");
-        let agent = json!({"id":"","name":"","description":"","instructions":"","provider":"codex","model":"","hostId":local.as_ref().map(|host|text(host,"id")).unwrap_or_default(),"cwd":local.as_ref().map(|host|text(host,"defaultCwd")).unwrap_or_default(),"color":"#3f9d6a","avatar":null,"expertise":[],"responsibilities":[],"skills":[],"collaborationEnabled":true,"terminalExecutionEnabled":false,"sandbox":"read-only","codexHome":null,"acp":null,"jevRouting":"off","jevDecisionsEnabled":false,"jevModelTiers":{"fast":"","balanced":"","strong":"","frontier":""}});
+        let agent = json!({"id":"","name":"","description":"","instructions":"","provider":"codex","model":"","hostId":local.as_ref().map(|host|text(host,"id")).unwrap_or_default(),"cwd":local.as_ref().map(|host|text(host,"defaultCwd")).unwrap_or_default(),"color":"#3f9d6a","avatar":null,"expertise":[],"responsibilities":[],"skills":[],"collaborationEnabled":true,"terminalExecutionEnabled":false,"sandbox":"read-only","codexHome":null,"acp":null,"jevRouting":"inherit","jevDecisionsEnabled":false,"decisionBackend":"inherit","jevModelTiers":{"fast":"","balanced":"","strong":"","frontier":""}});
         let host = json!({"id":"","name":"","kind":"ssh","address":"","user":"","port":22,"identityFile":"","defaultCwd":"","codexPath":"","claudePath":"","opencodePath":"","hermesPath":""});
         let mut pane = Self {
             service,
@@ -299,14 +299,13 @@ impl AgentHostPane {
         }
         value["instructions"] = json!(self.agent_form.read("instructions", cx));
         for key in ["expertise", "responsibilities", "skills"] {
-            value[key] = json!(
-                self.agent_form
-                    .read(key, cx)
-                    .lines()
-                    .map(str::trim)
-                    .filter(|line| !line.is_empty())
-                    .collect::<Vec<_>>()
-            );
+            value[key] = json!(self
+                .agent_form
+                .read(key, cx)
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .collect::<Vec<_>>());
         }
         let home = self.agent_form.read("codexHome", cx);
         value["codexHome"] = if home.trim().is_empty() {
@@ -329,13 +328,12 @@ impl AgentHostPane {
         for (key, _) in HOST_FIELDS {
             value[*key] = json!(self.host_form.read(key, cx));
         }
-        value["port"] = json!(
-            self.host_form
-                .read("port", cx)
-                .trim()
-                .parse::<u16>()
-                .map_err(|_| "SSH port must be an integer from 0 to 65535.")?
-        );
+        value["port"] = json!(self
+            .host_form
+            .read("port", cx)
+            .trim()
+            .parse::<u16>()
+            .map_err(|_| "SSH port must be an integer from 0 to 65535.")?);
         // Reuse the shared Rust model at the command boundary; the retained
         // native widgets own editing state rather than a generic JSON editor.
         serde_json::from_value::<Host>(value.clone())
@@ -362,8 +360,14 @@ impl AgentHostPane {
         self.error = None;
         cx.notify();
     }
-    pub(super) fn show_agents(&mut self, cx: &mut Context<Self>) { self.mode=Mode::Agents; cx.notify(); }
-    pub(super) fn show_hosts(&mut self, cx: &mut Context<Self>) { self.mode=Mode::Hosts; cx.notify(); }
+    pub(super) fn show_agents(&mut self, cx: &mut Context<Self>) {
+        self.mode = Mode::Agents;
+        cx.notify();
+    }
+    pub(super) fn show_hosts(&mut self, cx: &mut Context<Self>) {
+        self.mode = Mode::Hosts;
+        cx.notify();
+    }
     fn select_host(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         if let Ok(host) = self.host_value(cx) {
             self.host_drafts.insert(text(&self.host, "id"), host);
@@ -667,7 +671,7 @@ impl Render for AgentHostPane {
                 if pane.mode==Mode::Agents {
                     pane.agent_drafts.insert(text(&pane.agent,"id"),pane.agent_value(cx));
                     let local=items(&pane.snapshot,"hosts").into_iter().find(|host|text(host,"kind")=="local");
-                    pane.agent=json!({"id":"","name":"","description":"","instructions":"","avatar":null,"provider":"codex","model":"","hostId":local.as_ref().map(|host|text(host,"id")).unwrap_or_default(),"cwd":"","color":"#3f9d6a","sandbox":"read-only","expertise":[],"responsibilities":[],"skills":[],"collaborationEnabled":true,"terminalExecutionEnabled":false,"codexHome":null,"acp":null,"jevRouting":"off","jevDecisionsEnabled":false,"jevModelTiers":{"fast":"","balanced":"","strong":"","frontier":""}});
+                    pane.agent=json!({"id":"","name":"","description":"","instructions":"","avatar":null,"provider":"codex","model":"","hostId":local.as_ref().map(|host|text(host,"id")).unwrap_or_default(),"cwd":"","color":"#3f9d6a","sandbox":"read-only","expertise":[],"responsibilities":[],"skills":[],"collaborationEnabled":true,"terminalExecutionEnabled":false,"codexHome":null,"acp":null,"jevRouting":"inherit","jevDecisionsEnabled":false,"decisionBackend":"inherit","jevModelTiers":{"fast":"","balanced":"","strong":"","frontier":""}});
                     pane.catalog=None;pane.removal=None;pane.bind_agent(window,cx);
                 } else {
                     if let Ok(host)=pane.host_value(cx){pane.host_drafts.insert(text(&pane.host,"id"),host);}
@@ -856,16 +860,18 @@ impl Render for AgentHostPane {
                 form=form.child("Hermes uses its configured permission policy; read-only and full-access modes are unavailable.");
             }
             if omp {
-                form = form.child("OMP uses its configured tool approval policy. Configure approvals in OMP.");
+                form = form.child(
+                    "OMP uses its configured tool approval policy. Configure approvals in OMP.",
+                );
             }
             if gemini {
                 form = form.child("Gemini's lowest supported permission level allows edits.");
             }
-            form=form.child("Access is validated by the saved harness and backend. Jev routing never grants permissions.");
+            form=form.child("Access is validated by the saved harness and backend. System One routing never grants permissions.");
             for (key, label) in [
                 ("collaborationEnabled", "Allow collaboration"),
                 ("terminalExecutionEnabled", "Allow native terminal requests"),
-                ("jevDecisionsEnabled", "Enable Jev decision tools"),
+                ("jevDecisionsEnabled", "Enable System One decision tools"),
             ] {
                 let enabled = draft[key] == true;
                 form = form.child(
@@ -879,14 +885,37 @@ impl Render for AgentHostPane {
                         })),
                 );
             }
-            for mode in ["off", "recommend", "safe_auto"] {
+            form = form.child("System One backend applies to routing and advisory decisions. Inherit uses the global setting. Monitter starts the configured local Laya service on demand when its model is available. If it requires authentication, save LAYA_API_KEY in Environment & Secrets.");
+            for (backend, label) in [("inherit", "Use global setting"), ("type_safe", "TypeSafe"), ("laya", "Laya local")] {
+                form = form.child(
+                    Button::new(format!("decision-backend-{backend}"))
+                        .compact()
+                        .label(format!(
+                            "System One backend: {label}{}",
+                            if (text(&draft, "decisionBackend").is_empty()
+                                && backend == "inherit")
+                                || text(&draft, "decisionBackend") == backend
+                            {
+                                " ✓"
+                            } else {
+                                ""
+                            }
+                        ))
+                        .disabled(self.busy)
+                        .on_click(cx.listener(move |pane, _, _, cx| {
+                            pane.agent["decisionBackend"] = json!(backend);
+                            cx.notify();
+                        })),
+                );
+            }
+            for (mode, label) in [("inherit", "Use global setting"), ("off", "Off"), ("recommend", "Recommend only"), ("safe_auto", "Safe auto-route")] {
                 form = form.child(
                     Button::new(mode)
                         .compact()
                         .label(format!(
-                            "Jev routing: {}{}",
-                            mode,
-                            if text(&draft, "jevRouting") == mode {
+                            "System One routing: {}{}",
+                            label,
+                            if text(&draft, "jevRouting") == mode || (text(&draft, "jevRouting").is_empty() && mode == "inherit") {
                                 " ✓"
                             } else {
                                 ""

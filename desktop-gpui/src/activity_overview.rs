@@ -10,8 +10,10 @@ use gpui_kit::{
     *,
 };
 use serde_json::Value;
+use monitter_lib::experimental_desktop::NativeActivityGrouping;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
+    path::Path,
     rc::Rc,
     cell::{Cell, RefCell},
     time::Duration,
@@ -107,6 +109,9 @@ struct Card {
     provider: String,
     project_id: String,
     project_name: String,
+    workspace_id: String,
+    workspace_name: String,
+    workspace_path: String,
     state: State,
     activity: String,
     /// Individual plan item states, never an inferred completion percentage.
@@ -114,6 +119,39 @@ struct Card {
     children: usize,
     attention: usize,
     updated_at: i64,
+}
+impl Card {
+    fn group_id(&self, grouping: NativeActivityGrouping) -> &str {
+        match grouping {
+            NativeActivityGrouping::Project => &self.project_id,
+            NativeActivityGrouping::Workspace => &self.workspace_id,
+        }
+    }
+    fn group_name(&self, grouping: NativeActivityGrouping) -> &str {
+        match grouping {
+            NativeActivityGrouping::Project => &self.project_name,
+            NativeActivityGrouping::Workspace => &self.workspace_name,
+        }
+    }
+}
+
+fn workspace_identity(task: &Value) -> (String, String, String) {
+    let path = text(task, "cwd").trim();
+    let host = text(task, "hostId").trim();
+    let host = if host.is_empty() { "local" } else { host };
+    if path.is_empty() {
+        return (
+            format!("workspace:{host}:unknown"),
+            "Unknown workspace".into(),
+            String::new(),
+        );
+    }
+    let name = Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or(path);
+    (format!("workspace:{host}:{path}"), name.into(), path.into())
 }
 #[derive(Clone, Default)]
 struct OverviewModel {
@@ -317,6 +355,7 @@ impl OverviewModel {
                     }
                 });
             let title = text(task, "title");
+            let (workspace_id, workspace_name, workspace_path) = workspace_identity(task);
             cards.push(Card {
                 task_id: id.into(),
                 title: if title.is_empty() {
@@ -329,6 +368,9 @@ impl OverviewModel {
                 provider: text(task, "provider").into(),
                 project_id: project_id.into(),
                 project_name: project_name.into(),
+                workspace_id,
+                workspace_name,
+                workspace_path,
                 state,
                 activity,
                 steps,
@@ -346,13 +388,18 @@ impl OverviewModel {
         });
         Self { cards }
     }
-    fn visible(&self, filter: Filter, query: &str) -> Vec<Card> {
+    fn visible(
+        &self,
+        filter: Filter,
+        query: &str,
+        grouping: NativeActivityGrouping,
+    ) -> Vec<Card> {
         let query = query.trim().to_lowercase();
-        // Establish project membership before search so a matching quiet card
+        // Establish group membership before search so a matching quiet card
         // remains visible even when its working sibling does not match the query.
-        let working_projects: HashSet<_> = if filter == Filter::Working {
+        let working_groups: HashSet<_> = if filter == Filter::Working {
             self.cards.iter().filter(|card| card.state == State::Working)
-                .map(|card| card.project_id.as_str()).collect()
+                .map(|card| card.group_id(grouping)).collect()
         } else {
             HashSet::new()
         };
@@ -360,14 +407,19 @@ impl OverviewModel {
             .iter()
             .filter(|card| {
                 (if filter == Filter::Working {
-                    working_projects.contains(card.project_id.as_str())
+                    working_groups.contains(card.group_id(grouping))
                 } else {
                     filter.matches(card.state)
                 })
                     && (query.is_empty()
                         || format!(
-                            "{} {} {} {}",
-                            card.title, card.agent, card.model, card.project_name
+                            "{} {} {} {} {} {}",
+                            card.title,
+                            card.agent,
+                            card.model,
+                            card.project_name,
+                            card.workspace_name,
+                            card.workspace_path,
                         )
                         .to_lowercase()
                         .contains(&query))
@@ -656,11 +708,17 @@ fn cluster_layout(count: usize) -> (Vec<MapRect>, f32, f32) {
     }
     normalized_layout(rects)
 }
-fn grouped(cards: Vec<Card>) -> Vec<(String, Vec<Card>)> {
+fn grouped(
+    cards: Vec<Card>,
+    grouping: NativeActivityGrouping,
+) -> Vec<(String, Vec<Card>)> {
     let mut groups = BTreeMap::<(String, String), Vec<Card>>::new();
     for card in cards {
         groups
-            .entry((card.project_name.clone(), card.project_id.clone()))
+            .entry((
+                card.group_name(grouping).to_owned(),
+                card.group_id(grouping).to_owned(),
+            ))
             .or_default()
             .push(card);
     }
@@ -769,9 +827,14 @@ struct RetainedLayout {
     projects: HashMap<String, RetainedProject>,
 }
 impl RetainedLayout {
-    fn sync(&mut self, cards: Vec<Card>, available_width: f32) {
-        for (_, cards) in grouped(cards) {
-            let key = cards[0].project_id.clone();
+    fn sync(
+        &mut self,
+        cards: Vec<Card>,
+        available_width: f32,
+        grouping: NativeActivityGrouping,
+    ) {
+        for (_, cards) in grouped(cards, grouping) {
+            let key = cards[0].group_id(grouping).to_owned();
             let reserved: Vec<_> = self.projects.values().filter_map(|p| p.bounds).collect();
             let project = self.projects.entry(key).or_default();
             if project.hub.is_none() {
@@ -832,6 +895,7 @@ impl RetainedLayout {
 #[derive(Clone, Debug)]
 pub enum ActivityOverviewEvent {
     OpenTask { task_id: String },
+    GroupingChanged { grouping: NativeActivityGrouping },
     Close,
 }
 impl EventEmitter<ActivityOverviewEvent> for ActivityOverview {}
@@ -842,6 +906,7 @@ pub struct ActivityOverview {
     palette: Palette,
     model: OverviewModel,
     child_counts: HashMap<String, usize>,
+    grouping: NativeActivityGrouping,
     filter: Filter,
     list: bool,
     zoom: f32,
@@ -856,6 +921,13 @@ pub struct ActivityOverview {
 }
 impl ActivityOverview {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::new_with_grouping(window, cx, NativeActivityGrouping::default())
+    }
+    pub fn new_with_grouping(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        grouping: NativeActivityGrouping,
+    ) -> Self {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Find an agent or chat…"));
         let subscription = cx.subscribe(&search, |_, _, _: &InputEvent, cx| cx.notify());
         let refresh = cx.spawn(async move |overview, cx| {
@@ -898,6 +970,7 @@ impl ActivityOverview {
             palette: design::palette(&Value::Null, window.appearance()),
             model: OverviewModel::default(),
             child_counts: HashMap::new(),
+            grouping,
             filter: Filter::All,
             list: false,
             zoom: 1.,
@@ -910,6 +983,21 @@ impl ActivityOverview {
             _subscription: subscription,
             _refresh: refresh,
         }
+    }
+    fn set_grouping(
+        &mut self,
+        grouping: NativeActivityGrouping,
+        cx: &mut Context<Self>,
+    ) {
+        if self.grouping == grouping {
+            return;
+        }
+        self.grouping = grouping;
+        self.layout = RetainedLayout::default();
+        self.dragging = None;
+        self.motion_task = None;
+        cx.emit(ActivityOverviewEvent::GroupingChanged { grouping });
+        cx.notify();
     }
     pub fn set_snapshot(&mut self, snapshot: Rc<Value>, palette: Palette, cx: &mut Context<Self>) {
         let mut changed = self.palette != palette;
@@ -1256,10 +1344,10 @@ impl ActivityOverview {
             );
         let task_id = card.task_id.clone();
         if !list {
-            let project = card.project_id.clone();
+            let group = card.group_id(self.grouping).to_owned();
             let id = card.task_id.clone();
             body = body.on_mouse_down(MouseButton::Left, cx.listener(move |overview, event: &MouseDownEvent, _, cx| {
-                overview.begin_drag(DragTarget::Card(project.clone(), id.clone()), event.position, cx);
+                overview.begin_drag(DragTarget::Card(group.clone(), id.clone()), event.position, cx);
                 cx.stop_propagation();
             }));
         }
@@ -1332,11 +1420,23 @@ impl ActivityOverview {
         let zoom = self.zoom;
         let ratio = interface_font_ratio(cx.theme().font_size);
         let scaled = move |value: f32| px(value * zoom * ratio);
-        let key = cards[0].project_id.clone();
-        let project = rows(&self.snapshot, "projects").iter()
-            .find(|project| text(project, "id") == key);
-        let project_color = design::parse_color(project.map_or("", |project| text(project, "color")), p.accent);
-        let project_icon = crate::shell::project_icon(project.map_or("", |project| text(project, "icon")));
+        let key = cards[0].group_id(self.grouping).to_owned();
+        let project = (self.grouping == NativeActivityGrouping::Project)
+            .then(|| {
+                rows(&self.snapshot, "projects")
+                    .iter()
+                    .find(|project| text(project, "id") == key)
+            })
+            .flatten();
+        let project_color = design::parse_color(
+            project.map_or("", |project| text(project, "color")),
+            p.accent,
+        );
+        let project_icon = if self.grouping == NativeActivityGrouping::Workspace {
+            gpui_kit::assets::IconName::Folder
+        } else {
+            crate::shell::project_icon(project.map_or("", |project| text(project, "icon")))
+        };
         let retained = &self.layout.projects[&key];
         let bounds = retained.bounds.unwrap();
         let (width, height) = (bounds.w, bounds.h);
@@ -1509,19 +1609,24 @@ impl Render for ActivityOverview {
             self.model.cards.clone(),
             (f32::from(window.viewport_size().width) - 64.)
                 / (self.zoom * interface_font_ratio(cx.theme().font_size)),
+            self.grouping,
         );
         let p = self.palette;
         let font = cx.theme().font_size;
         let query = self.search.read(cx).value().to_string();
-        let visible = self.model.visible(self.filter, &query);
-        let project_count = self
+        let visible = self.model.visible(self.filter, &query, self.grouping);
+        let group_count = self
             .model
             .cards
             .iter()
-            .map(|card| &card.project_id)
+            .map(|card| card.group_id(self.grouping))
             .filter(|id| !id.is_empty())
             .collect::<HashSet<_>>()
             .len();
+        let group_label = match self.grouping {
+            NativeActivityGrouping::Project => "projects",
+            NativeActivityGrouping::Workspace => "workspaces",
+        };
         let mut filters = div().flex().items_center().gap(px(5.)).flex_wrap();
         for filter in Filter::ALL {
             let selected = self.filter == filter;
@@ -1550,6 +1655,34 @@ impl Render for ActivityOverview {
             .gap(px(5.))
             .flex_wrap()
             .child(div().w(px(205.)).child(Input::new(&self.search)))
+            .child(
+                Button::new("activity-group-projects")
+                    .debug_selector(|| "activity-group-projects".into())
+                    .compact()
+                    .ghost()
+                    .label("Projects")
+                    .text_size(font - px(1.))
+                    .when(self.grouping == NativeActivityGrouping::Project, |el| {
+                        el.bg(design::surface_color(p.soft))
+                    })
+                    .on_click(cx.listener(|overview, _, _, cx| {
+                        overview.set_grouping(NativeActivityGrouping::Project, cx);
+                    })),
+            )
+            .child(
+                Button::new("activity-group-workspaces")
+                    .debug_selector(|| "activity-group-workspaces".into())
+                    .compact()
+                    .ghost()
+                    .label("Workspaces")
+                    .text_size(font - px(1.))
+                    .when(self.grouping == NativeActivityGrouping::Workspace, |el| {
+                        el.bg(design::surface_color(p.soft))
+                    })
+                    .on_click(cx.listener(|overview, _, _, cx| {
+                        overview.set_grouping(NativeActivityGrouping::Workspace, cx);
+                    })),
+            )
             .child(
                 Button::new("activity-clusters")
                     .debug_selector(|| "activity-clusters".into())
@@ -1631,8 +1764,8 @@ impl Render for ActivityOverview {
                             .text_size(font - px(2.))
                             .text_color(rgb(p.muted))
                             .child(format!(
-                                "{} chats · {project_count} projects · last 12h",
-                                self.model.cards.len()
+                                "{} chats · {group_count} {group_label} · last 12h",
+                                self.model.cards.len(),
                             )),
                     ),
             )
@@ -1656,7 +1789,7 @@ impl Render for ActivityOverview {
             ));
         } else if self.list {
             let mut list = div().flex().flex_col().gap(px(15.)).w_full();
-            for (name, cards) in grouped(visible) {
+            for (name, cards) in grouped(visible, self.grouping) {
                 let mut group = div()
                     .flex()
                     .flex_col()
@@ -1672,7 +1805,7 @@ impl Render for ActivityOverview {
         } else {
             let mut endpoints = HashMap::new();
             for card in &visible {
-                let project = &self.layout.projects[&card.project_id];
+                let project = &self.layout.projects[card.group_id(self.grouping)];
                 let bounds = project.bounds.unwrap();
                 let mut rect = project.card_rect(&card.task_id);
                 let follower = project.follower(&card.task_id);
@@ -1680,7 +1813,7 @@ impl Render for ActivityOverview {
                 rect.y += bounds.y + follower.y;
                 endpoints.insert(card.task_id.clone(), rect);
             }
-            let groups = grouped(visible);
+            let groups = grouped(visible, self.grouping);
             let scale = self.zoom * interface_font_ratio(font);
             let width = self
                 .layout
@@ -1703,7 +1836,7 @@ impl Render for ActivityOverview {
                 .flex_shrink_0()
                 .child(self.communication_layer(endpoints, scale, cx));
             for (index, (name, cards)) in groups.into_iter().enumerate() {
-                let project = &self.layout.projects[&cards[0].project_id];
+                let project = &self.layout.projects[cards[0].group_id(self.grouping)];
                 let position = project.bounds.unwrap();
                 graph = graph.child(
                     div()
@@ -1861,11 +1994,13 @@ pub(super) fn open_preview_if_requested(cx: &mut App) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        CARD_H, CARD_W, HUB_H, HUB_W, MapRect, RetainedProject, Filter, Motion, OverviewModel, Placement, RetainedLayout, State,
+        CARD_H, CARD_W, HUB_H, HUB_W, MapRect, RetainedProject, Filter, Motion,
+        NativeActivityGrouping, OverviewModel, Placement, RetainedLayout, State,
         child_inputs_changed, clamped_zoom, cluster_layout, grouped, interface_font_ratio,
         organic_positions, px, relevant_changed, updated_label,
     };
     use serde_json::json;
+    use std::collections::HashSet;
     #[gpui_kit::test]
     fn activity_overview_native_communication_paint_and_card_interaction(cx: &mut gpui_kit::TestAppContext) {
         use gpui_kit::{AppContext as _, IntoElement, Entity, Render, Window, Context, MouseButton, point};
@@ -2087,11 +2222,11 @@ mod tests {
             "tasks":[{"id":"one","agentId":"agent","projectId":"p","title":"Fix packaging","status":"running"},
                 {"id":"two","agentId":"removed","projectId":"gone","title":"Orphan","status":"idle"}]
         }));
-        assert_eq!(model.visible(Filter::Working, "SEAFOOD")[0].task_id, "one");
-        assert_eq!(model.visible(Filter::All, "terra").len(), 1);
-        assert!(model.visible(Filter::Failed, "terra").is_empty());
+        assert_eq!(model.visible(Filter::Working, "SEAFOOD", NativeActivityGrouping::Project)[0].task_id, "one");
+        assert_eq!(model.visible(Filter::All, "terra", NativeActivityGrouping::Project).len(), 1);
+        assert!(model.visible(Filter::Failed, "terra", NativeActivityGrouping::Project).is_empty());
         assert_eq!(
-            model.visible(Filter::Idle, "orphan")[0].project_name,
+            model.visible(Filter::Idle, "orphan", NativeActivityGrouping::Project)[0].project_name,
             "Unavailable project"
         );
     }
@@ -2110,17 +2245,122 @@ mod tests {
                 {"id":"queued-sibling","projectId":"r","status":"idle"}]
         });
         let model = OverviewModel::from_snapshot(&snapshot);
-        let ids: std::collections::HashSet<_> = model.visible(Filter::Working, "")
+        let ids: std::collections::HashSet<_> = model.visible(Filter::Working, "", NativeActivityGrouping::Project)
             .into_iter().map(|card| card.task_id).collect();
         assert_eq!(ids, ["run", "idle", "done", "failed", "queued", "queued-sibling"].map(String::from).into());
         assert_eq!(model.count(Filter::Working), 2, "badge still counts working agents");
-        assert_eq!(model.visible(Filter::Working, "find this")[0].task_id, "idle");
-        assert!(model.visible(Filter::Working, "Quiet").is_empty());
+        assert_eq!(model.visible(Filter::Working, "find this", NativeActivityGrouping::Project)[0].task_id, "idle");
+        assert!(model.visible(Filter::Working, "Quiet", NativeActivityGrouping::Project).is_empty());
         snapshot["tasks"][0]["status"] = json!("idle");
-        assert!(OverviewModel::from_snapshot(&snapshot).visible(Filter::Working, "Active").is_empty(),
+        assert!(OverviewModel::from_snapshot(&snapshot).visible(Filter::Working, "Active", NativeActivityGrouping::Project).is_empty(),
             "a project disappears when its last working agent stops");
-        assert_eq!(model.visible(Filter::All, "").len(), 7);
-        assert_eq!(model.visible(Filter::Idle, "").len(), 3);
+        assert_eq!(model.visible(Filter::All, "", NativeActivityGrouping::Project).len(), 7);
+        assert_eq!(model.visible(Filter::Idle, "", NativeActivityGrouping::Project).len(), 3);
+    }
+    #[test]
+    fn workspace_grouping_uses_authoritative_checkout_identity_and_unknown_fallback() {
+        let snapshot = json!({
+            "projects":[{"id":"p","name":"One"},{"id":"q","name":"Two"}],
+            "tasks":[
+                {"id":"run","projectId":"p","cwd":"/code/shared","hostId":"local-host","status":"running"},
+                {"id":"quiet-sibling","projectId":"q","cwd":"/code/shared","hostId":"local-host","status":"idle"},
+                {"id":"remote","projectId":"q","cwd":"/code/shared","hostId":"remote-host","status":"idle"},
+                {"id":"unknown","projectId":"q","hostId":"local-host","status":"idle"}
+            ]
+        });
+        let model = OverviewModel::from_snapshot(&snapshot);
+        assert_eq!(
+            grouped(model.cards.clone(), NativeActivityGrouping::Project).len(),
+            2
+        );
+        let workspace_groups = grouped(model.cards.clone(), NativeActivityGrouping::Workspace);
+        assert_eq!(workspace_groups.len(), 3, "host plus cwd forms workspace identity");
+        assert!(workspace_groups.iter().any(|(name, cards)| {
+            name == "shared" && cards.len() == 2
+        }));
+        assert!(workspace_groups.iter().any(|(name, cards)| {
+            name == "Unknown workspace" && cards[0].task_id == "unknown"
+        }));
+        let working = model.visible(Filter::Working, "", NativeActivityGrouping::Workspace);
+        assert_eq!(
+            working.iter().map(|card| card.task_id.as_str()).collect::<HashSet<_>>(),
+            HashSet::from(["run", "quiet-sibling"]),
+            "Working includes quiet siblings from the selected workspace group"
+        );
+        assert_eq!(
+            model.visible(Filter::All, "/code/shared", NativeActivityGrouping::Workspace).len(),
+            3,
+            "workspace paths participate in Activity search"
+        );
+    }
+    #[gpui_kit::test]
+    fn activity_grouping_toggle_rebuilds_clusters_and_emits_persistable_choice(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use gpui_kit::{AppContext as _, Context, Entity, IntoElement, Render, Window};
+        use std::{cell::Cell, rc::Rc};
+        struct Harness(Entity<super::ActivityOverview>);
+        impl Render for Harness {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                self.0.clone()
+            }
+        }
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            crate::native_motion::initialize_for_ui_fixture(cx);
+        });
+        let selected = Rc::new(Cell::new(None));
+        let selected_event = selected.clone();
+        let mut retained = None;
+        let (_, visual) = cx.add_window_view(|window, cx| {
+            let overview = cx.new(|cx| {
+                let mut view = super::ActivityOverview::new_with_grouping(
+                    window,
+                    cx,
+                    NativeActivityGrouping::Project,
+                );
+                let now = chrono::Utc::now().timestamp_millis();
+                view.set_snapshot(std::rc::Rc::new(json!({
+                    "projects":[{"id":"p","name":"Monitter"}],
+                    "tasks":[
+                        {"id":"a","projectId":"p","cwd":"/code/main","status":"running","updatedAt":now},
+                        {"id":"b","projectId":"p","cwd":"/code/feature","status":"idle","updatedAt":now}
+                    ]
+                })), view.palette, cx);
+                view
+            });
+            retained = Some(overview.clone());
+            gpui_kit::component::Root::new(cx.new(|_| Harness(overview)), window, cx)
+        });
+        let overview = retained.unwrap();
+        visual.update(|_, cx| {
+            cx.subscribe(
+                &overview,
+                move |_, event: &super::ActivityOverviewEvent, _| {
+                    if let super::ActivityOverviewEvent::GroupingChanged { grouping } = event {
+                        selected_event.set(Some(*grouping));
+                    }
+                },
+            )
+            .detach();
+        });
+        visual.simulate_resize(gpui_kit::size(px(1400.), px(900.)));
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        overview.read_with(visual, |view, _| {
+            assert_eq!(view.grouping, NativeActivityGrouping::Project);
+            assert_eq!(view.layout.projects.len(), 1);
+        });
+        let toggle = visual.debug_bounds("activity-group-workspaces").unwrap();
+        visual.simulate_click(toggle.center(), Default::default());
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        overview.read_with(visual, |view, _| {
+            assert_eq!(view.grouping, NativeActivityGrouping::Workspace);
+            assert_eq!(view.layout.projects.len(), 2);
+            assert_eq!(view.model.cards.len(), 2, "presentation toggle preserves chat population");
+        });
+        assert_eq!(selected.get(), Some(NativeActivityGrouping::Workspace));
     }
     #[gpui_kit::test]
     fn activity_overview_working_filter_click_keeps_and_dims_quiet_cards(cx: &mut gpui_kit::TestAppContext) {
@@ -2266,7 +2506,7 @@ mod tests {
             {"id":"b","projectId":"p","status":"idle","updatedAt":now},
             {"id":"c","projectId":"q","status":"idle","updatedAt":now}]});
         let mut layout = RetainedLayout::default();
-        layout.sync(OverviewModel::from_snapshot_at(&snapshot, now).cards, 1200.);
+        layout.sync(OverviewModel::from_snapshot_at(&snapshot, now).cards, 1200., NativeActivityGrouping::Project);
         let coordinates = |layout: &RetainedLayout, project: &str, task: &str| {
             let p = &layout.projects[project];
             let r = p.cards[task];
@@ -2285,14 +2525,14 @@ mod tests {
         snapshot["tasks"][1]["status"] = json!("running");
         for filter in [Filter::Working, Filter::Idle, Filter::All] {
             let model = OverviewModel::from_snapshot_at(&snapshot, now);
-            let visible = model.visible(filter, "");
+            let visible = model.visible(filter, "", NativeActivityGrouping::Project);
             if filter == Filter::Working {
                 assert_eq!(visible.iter().map(|card| card.task_id.as_str()).collect::<Vec<_>>(), ["b", "a"]);
             } else {
                 assert!(visible.iter().all(|card| filter.matches(card.state)));
             }
             // Render allocates from the complete population before applying visibility.
-            layout.sync(model.cards, 1200.);
+            layout.sync(model.cards, 1200., NativeActivityGrouping::Project);
             assert_eq!(a, coordinates(&layout, "p", "a"));
             assert_eq!(b, coordinates(&layout, "p", "b"));
             assert_eq!(c, coordinates(&layout, "q", "c"));
@@ -2301,7 +2541,7 @@ mod tests {
             .as_array_mut()
             .unwrap()
             .push(json!({"id":"d","projectId":"p","status":"running","updatedAt":now}));
-        layout.sync(OverviewModel::from_snapshot_at(&snapshot, now).cards, 1200.);
+        layout.sync(OverviewModel::from_snapshot_at(&snapshot, now).cards, 1200., NativeActivityGrouping::Project);
         let d = coordinates(&layout, "p", "d");
         assert_eq!(a, coordinates(&layout, "p", "a"));
         assert_eq!(b, coordinates(&layout, "p", "b"));
@@ -2317,7 +2557,7 @@ mod tests {
             2,
             "removed and expired cards leave the live population"
         );
-        layout.sync(model.cards, 1200.);
+        layout.sync(model.cards, 1200., NativeActivityGrouping::Project);
         assert_eq!(c, coordinates(&layout, "q", "c"));
         assert_eq!(d, coordinates(&layout, "p", "d"));
         assert_eq!(
@@ -2399,12 +2639,12 @@ mod tests {
         let model = OverviewModel::from_snapshot_at(&snapshot, now);
         assert_eq!(model.cards.len(), 2);
         assert!(
-            grouped(model.visible(Filter::All, ""))
+            grouped(model.visible(Filter::All, "", NativeActivityGrouping::Project), NativeActivityGrouping::Project)
                 .iter()
                 .all(|(_, cards)| cards.iter().all(|card| card.project_id != "old-project")),
             "stale-only projects must not produce empty hubs"
         );
-        assert_eq!(model.visible(Filter::All, "stale").len(), 0);
+        assert_eq!(model.visible(Filter::All, "stale", NativeActivityGrouping::Project).len(), 0);
         assert_eq!(model.count(Filter::Working), 1);
         assert_eq!(
             OverviewModel::from_snapshot_at(&snapshot, now + 1)

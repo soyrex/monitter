@@ -35,13 +35,13 @@ fn grouped_integer(value: u64) -> String {
 
 fn route_summary(metadata: &Value) -> &'static str {
     if metadata["routeApplied"] == true {
-        "Jev applied this route."
+        "System One applied this route."
     } else if text(metadata, "applicationError").is_some() {
-        "Jev proposed a route, but Mona kept the working runtime."
+        "System One proposed a route, but Mona kept the working runtime."
     } else if metadata["routeApplied"] == false {
-        "Jev kept the current runtime."
+        "System One kept the current runtime."
     } else {
-        "Jev routing details"
+        "System One routing details"
     }
 }
 
@@ -114,7 +114,7 @@ pub fn render(
             Some(effort) => format!("{requested} · {effort}"),
             None => requested.to_owned(),
         };
-        details = details.child(detail_line("Jev requested", value, palette));
+        details = details.child(detail_line("System One requested", value, palette));
     }
     if let Some(confidence) = metadata
         .get("confidence")
@@ -196,22 +196,22 @@ mod tests {
 
     #[::core::prelude::v1::test]
     fn route_summary_uses_only_explicit_route_outcome() {
-        assert_eq!(route_summary(&json!({})), "Jev routing details");
+        assert_eq!(route_summary(&json!({})), "System One routing details");
         assert_eq!(
             route_summary(&json!({"routeApplied":true})),
-            "Jev applied this route."
+            "System One applied this route."
         );
         assert_eq!(
             route_summary(&json!({"routeApplied":false})),
-            "Jev kept the current runtime."
+            "System One kept the current runtime."
         );
         assert_eq!(
             route_summary(&json!({"applicationError":"rejected"})),
-            "Jev proposed a route, but Mona kept the working runtime."
+            "System One proposed a route, but Mona kept the working runtime."
         );
         assert_eq!(
             route_summary(&json!({"applicationError":""})),
-            "Jev routing details"
+            "System One routing details"
         );
     }
 }

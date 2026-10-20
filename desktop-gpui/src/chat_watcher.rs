@@ -67,19 +67,6 @@ fn watcher_pending_build<'a>(snapshot: &'a Value, task_id: &str) -> Option<&'a V
     }).max_by_key(|request| (request["status"] == "ready", request["createdAt"].as_i64().unwrap_or(0)))
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum WatchCard { Goal, Task }
-
-fn watcher_default_card(goal: Option<&Value>, task: &Value, plan: Option<&Value>) -> WatchCard {
-    let Some(goal) = goal else { return WatchCard::Task; };
-    if goal["status"] == "active" { return WatchCard::Goal; }
-    if active(&field(task, "status")) || plan.is_some_and(|plan| plan["status"] == "active") {
-        return WatchCard::Task;
-    }
-    let recent = |value: &Value| value["updatedAt"].as_i64().or_else(|| value["createdAt"].as_i64()).unwrap_or(0);
-    if recent(goal) > recent(task).max(plan.map(recent).unwrap_or(0)) { WatchCard::Goal } else { WatchCard::Task }
-}
-
 #[derive(Default)]
 pub(super) struct WatcherState {
     pub enabled: bool,
@@ -92,8 +79,6 @@ pub(super) struct WatcherState {
     scroll: ScrollHandle,
     content_width: Pixels,
     finished_expanded: bool,
-    card_selection: Option<WatchCard>,
-    card_context: String,
     activity_observer: Option<Subscription>,
     finished_plan_expanded: bool,
     pub(super) transitioning: bool,
@@ -248,6 +233,293 @@ fn event_time(event: &Value) -> String {
         .map(|time| time.format("%H:%M:%S").to_string())
         .unwrap_or_default()
 }
+
+fn watcher_activity_icon(kind: &str) -> IconName {
+    match kind.to_ascii_lowercase().as_str() {
+        "tool" => IconName::Wrench,
+        "computer" | "computer_image" => IconName::Monitor,
+        "usage" => IconName::Activity,
+        "reasoning" | "jevdecision" => IconName::Brain,
+        "subagent" => IconName::Bot,
+        "output" => IconName::FileText,
+        "agent_progress" | "message" | "collaboration" => IconName::MessageSquare,
+        "mail" => IconName::Mail,
+        "goal" => IconName::Goal,
+        "error" | "warning" => IconName::TriangleAlert,
+        "status" => IconName::CircleDot,
+        "schedule" => IconName::Clock,
+        _ => IconName::Activity,
+    }
+}
+
+fn compact_activity_text(text: &str) -> String {
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.chars().count() > 180 {
+        format!("{}…", text.chars().take(179).collect::<String>())
+    } else {
+        text
+    }
+}
+
+fn detail_text(value: &Value, keys: &[&str], depth: usize) -> Option<String> {
+    if depth > 6 {
+        return None;
+    }
+    match value {
+        Value::String(text) => {
+            let text = text.trim();
+            if text.is_empty() {
+                return None;
+            }
+            if text.len() <= 256 * 1024
+                && (text.starts_with('{') || text.starts_with('['))
+                && let Ok(nested) = serde_json::from_str::<Value>(text)
+            {
+                return detail_text(&nested, keys, depth + 1);
+            }
+            Some(compact_activity_text(text))
+        }
+        Value::Array(values) => values
+            .iter()
+            .find_map(|value| detail_text(value, keys, depth + 1)),
+        Value::Object(object) => keys
+            .iter()
+            .filter_map(|key| object.get(*key))
+            .find_map(|value| detail_text(value, keys, depth + 1))
+            .or_else(|| {
+                [
+                    "detail",
+                    "payload",
+                    "activity",
+                    "update",
+                    "input",
+                    "arguments",
+                    "search_query",
+                    "image_query",
+                    "open",
+                    "find",
+                    "questions",
+                    "result",
+                    "output",
+                    "data",
+                    "item",
+                ]
+                .iter()
+                .filter_map(|key| object.get(*key))
+                .find_map(|value| detail_text(value, keys, depth + 1))
+            }),
+        _ => None,
+    }
+}
+
+fn watcher_event_detail(event: &Value) -> Value {
+    let parsed = super::run_activity::parsed_event_detail(event);
+    if parsed.is_null() {
+        let raw = field(event, "detail");
+        if raw.trim().is_empty() { Value::Null } else { Value::String(raw) }
+    } else {
+        parsed
+    }
+}
+
+fn number_at(value: &Value, pointers: &[&str]) -> Option<f64> {
+    pointers
+        .iter()
+        .filter_map(|pointer| value.pointer(pointer))
+        .find_map(Value::as_f64)
+        .filter(|value| value.is_finite() && *value >= 0.)
+}
+
+fn grouped_integer(value: f64) -> String {
+    let digits = format!("{:.0}", value);
+    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, character) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(character);
+    }
+    grouped
+}
+
+fn watcher_usage_text(event: &Value) -> Option<String> {
+    let detail = watcher_event_detail(event);
+    let context_used = number_at(&detail, &["/usage/used", "/used"]);
+    let context_size = number_at(&detail, &["/usage/size", "/size"]);
+    if let Some(used) = context_used {
+        if let Some(size) = context_size.filter(|size| *size > 0.) {
+            return Some(format!(
+                "{} / {} context ({:.0}%)",
+                grouped_integer(used),
+                grouped_integer(size),
+                (used / size * 100.).clamp(0., 999.)
+            ));
+        }
+        return Some(format!("{} context used", grouped_integer(used)));
+    }
+    let input = number_at(&detail, &[
+        "/input_tokens", "/inputTokens", "/input", "/tokens/input",
+        "/tokens/input_tokens", "/usage/input_tokens", "/usage/inputTokens",
+    ]);
+    let output = number_at(&detail, &[
+        "/output_tokens", "/outputTokens", "/output", "/tokens/output",
+        "/tokens/output_tokens", "/usage/output_tokens", "/usage/outputTokens",
+    ]);
+    let reasoning = number_at(&detail, &[
+        "/reasoning_tokens", "/reasoningTokens", "/tokens/reasoning",
+        "/tokens/reasoning_tokens", "/usage/reasoning_tokens",
+    ]);
+    let total = number_at(&detail, &[
+        "/total_tokens", "/totalTokens", "/total", "/tokens/total",
+        "/tokens/total_tokens", "/usage/total_tokens", "/usage/totalTokens",
+    ]);
+    let cost = number_at(&detail, &["/cost", "/cost_usd", "/total_cost_usd", "/usage/cost"]);
+    let mut parts = Vec::new();
+    if let Some(value) = input {
+        parts.push(format!("{} input", grouped_integer(value)));
+    }
+    if let Some(value) = output {
+        parts.push(format!("{} output", grouped_integer(value)));
+    }
+    if let Some(value) = reasoning.filter(|value| *value > 0.) {
+        parts.push(format!("{} reasoning", grouped_integer(value)));
+    }
+    if parts.is_empty() && let Some(value) = total {
+        parts.push(format!("{} tokens", grouped_integer(value)));
+    }
+    if let Some(value) = cost {
+        let precision = if value >= 0.01 { 2 } else { 4 };
+        parts.push(format!("${value:.precision$}"));
+    }
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
+fn watcher_decision_text(event: &Value) -> Option<String> {
+    let detail = watcher_event_detail(event);
+    let response = detail.get("response")?;
+    let candidate = response.get("candidateId").and_then(Value::as_str);
+    let outcome = response.get("outcome").and_then(Value::as_str);
+    let reason = response.get("reason").and_then(Value::as_str);
+    let confidence = response.get("confidence").and_then(Value::as_f64);
+    let selection = outcome.map(str::to_owned).or_else(|| {
+        candidate.map(|candidate| {
+            detail
+                .get("labels")
+                .and_then(|labels| labels.get(candidate))
+                .and_then(Value::as_str)
+                .unwrap_or(candidate)
+                .to_owned()
+        })
+    });
+    let mut parts = vec!["System One".to_owned()];
+    if candidate == Some("abstain") {
+        parts.push("abstained".to_owned());
+        if let Some(reason) = reason {
+            parts.push(reason.to_owned());
+        }
+    } else if let Some(selection) = selection {
+        parts.push(selection);
+        if let Some(confidence) = confidence {
+            parts.push(format!("{:.0}% confidence", confidence * 100.));
+        }
+    } else if let Some(reason) = reason {
+        parts.push(reason.to_owned());
+    } else {
+        return None;
+    }
+    Some(compact_activity_text(&parts.join(" · ")))
+}
+
+fn friendly_tool_name(value: &str) -> String {
+    let value = value.rsplit("__").next().unwrap_or(value);
+    let words = value
+        .replace(['_', '-'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut characters = words.chars();
+    characters
+        .next()
+        .map(|first| first.to_uppercase().collect::<String>() + characters.as_str())
+        .unwrap_or_default()
+}
+
+fn watcher_tool_text(event: &Value) -> String {
+    let title = compact_activity_text(&field(event, "title"));
+    let intent = super::run_activity::tool_intent(event);
+    let mut preview = super::run_activity::process_tool_preview(std::slice::from_ref(event))
+        .unwrap_or_else(|| intent.clone());
+    if preview == intent || preview == "Used a tool" {
+        let detail = watcher_event_detail(event);
+        if let Some(argument) = detail_text(
+            &detail,
+            &[
+                "cmd", "command", "path", "file_path", "query", "q", "pattern", "url",
+                "title", "question", "objective", "message", "prompt",
+            ],
+            0,
+        ) {
+            preview = argument;
+        }
+    }
+    if preview != intent && preview != "Used a tool" {
+        let text = match intent.as_str() {
+            "Ran a command" => format!("Ran {preview}"),
+            "Read a file" => format!("Read {preview}"),
+            "Edited a file" => format!("Edited {preview}"),
+            "Searched the web" | "Searched files" => format!("Searched for {preview}"),
+            "Fetched a web page" => format!("Fetched {preview}"),
+            "Listed files" => format!("Listed {preview}"),
+            "Started an agent" => format!("Started agent: {preview}"),
+            "Used a tool" => {
+                let name = friendly_tool_name(&title);
+                if name.is_empty() || name.eq_ignore_ascii_case("tool activity") {
+                    preview
+                } else {
+                    format!("{name} · {preview}")
+                }
+            }
+            _ => format!("{intent} · {preview}"),
+        };
+        return compact_activity_text(&text);
+    }
+    if intent != "Used a tool" {
+        intent
+    } else if !title.is_empty()
+        && !matches!(title.to_ascii_lowercase().as_str(), "tool activity" | "sub-agent activity")
+    {
+        title
+    } else {
+        intent
+    }
+}
+
+fn watcher_activity_text(event: &Value) -> String {
+    let kind = field(event, "kind");
+    let title = compact_activity_text(&field(event, "title"));
+    let detail = watcher_event_detail(event);
+    let projected = match kind.to_ascii_lowercase().as_str() {
+        "tool" | "subagent" => Some(watcher_tool_text(event)),
+        "usage" => watcher_usage_text(event),
+        "jevdecision" => watcher_decision_text(event),
+        "reasoning" => detail_text(&detail, &["summary", "text", "thinking", "reasoning"], 0),
+        "computer" | "computer_image" => detail_text(&detail, &["summary", "context", "action", "url"], 0),
+        "output" => detail_text(&detail, &["text", "content", "summary"], 0),
+        "error" | "warning" => detail_text(&detail, &["message", "error", "detail", "summary"], 0)
+            .map(|detail| if title.is_empty() || title.eq_ignore_ascii_case(&detail) {
+                detail
+            } else {
+                format!("{title} · {detail}")
+            }),
+        "goal" => detail_text(&detail, &["objective", "goal", "summary", "text"], 0),
+        _ => None,
+    };
+    projected
+        .filter(|text| !text.is_empty())
+        .or_else(|| (!title.is_empty()).then_some(title))
+        .unwrap_or_else(|| "Activity update".to_owned())
+}
+
 fn agent_duration(record: &Value) -> String {
     let started = at(record, "createdAt");
     let ended = if active(&field(record, "status")) {
@@ -1391,27 +1663,11 @@ impl ChatPane {
                     })),
             )
             .child(live_line);
-        let task_id = self.task_id();
-        let task = values(&self.snapshot, "tasks").find(|task| task["id"] == task_id).cloned().unwrap_or(Value::Null);
         let goal = self.activity.read(cx).watch_goal().cloned();
-        // Reset the automatic default for a new task/request or lifecycle change,
-        // while routine usage updates preserve an explicit arrow selection.
-        let context = format!("{}|{}|{}|{}|{}|{}|{}", task_id, task["status"],
-            self.snapshot["nativeMessageContext"][&task_id]["latestUserAt"],
-            goal.as_ref().map(|goal| &goal["createdAt"]).unwrap_or(&Value::Null),
-            goal.as_ref().map(|goal| &goal["status"]).unwrap_or(&Value::Null),
-            goal.as_ref().map(|goal| &goal["objective"]).unwrap_or(&Value::Null),
-            state.plan.as_ref().map(|plan| &plan["status"]).unwrap_or(&Value::Null));
-        if self.watcher.card_context != context {
-            self.watcher.card_context = context;
-            self.watcher.card_selection = None;
-        }
-        let selected = self.watcher.card_selection.filter(|card| *card != WatchCard::Goal || goal.is_some())
-            .unwrap_or_else(|| watcher_default_card(goal.as_ref(), &task, state.plan.as_ref()));
-        let show_goal = selected == WatchCard::Goal;
-        let plan_region: AnyElement = if show_goal {
-            self.activity.read(cx).render_watch_goal(palette, ratio)
-        } else if state.plan_active {
+        let goal_pill = goal.as_ref().map(|_| {
+            self.activity.read(cx).render_watch_goal_pill(palette, ratio)
+        });
+        let plan_region: AnyElement = if state.plan_active {
             crate::plans::render_plan_popup_filling(&self.snapshot, &self.task_id(), palette, ratio)
         } else {
             self.render_watcher_task_summary(&state, palette, ratio, cx)
@@ -1429,7 +1685,7 @@ impl ChatPane {
                 .flex_shrink_0()
                 .rounded(px(12.))
                 .border_1()
-                .border_color(rgb(if if show_goal { goal.as_ref().is_some_and(|goal| goal["status"] == "active") } else { state.plan_active } {
+                .border_color(rgb(if state.plan_active {
                     mix_rgb(palette.panel, palette.accent, 0.45)
                 } else { palette.line }))
                 .bg(design::surface_color(palette.panel))
@@ -1475,24 +1731,11 @@ impl ChatPane {
             card_slot = card_slot.child(div().absolute().top(px(-13. * ratio))
                 .left(px(8.)).right(px(8.)).flex().justify_center().child(build_pill));
         }
-        if goal.is_some() {
-            for (id, icon, left) in [
-                ("watcher-card-previous", IconName::ChevronLeft, true),
-                ("watcher-card-next", IconName::ChevronRight, false),
-            ] {
-                let target = if show_goal { WatchCard::Task } else { WatchCard::Goal };
-                card_slot = card_slot.child(div().absolute().top(relative(0.5))
-                    .when(left, |arrow| arrow.left(px(-28.)))
-                    .when(!left, |arrow| arrow.right(px(-28.)))
-                    .child(Button::new(id).debug_selector(move || id.into())
-                        .ghost().compact().xsmall().size(px(24.)).p_0().icon(icon)
-                        .accessibility_label(if target == WatchCard::Goal { "Show goal" } else { "Show current task" })
-                        .tooltip(if target == WatchCard::Goal { "Show goal" } else { "Show current task" })
-                        .on_click(cx.listener(move |pane, _, _, cx| {
-                            pane.watcher.card_selection = Some(target);
-                            cx.notify();
-                        }))));
-            }
+        if let Some(goal_pill) = goal_pill {
+            // Match the build indicator's border-straddling treatment without
+            // replacing the Work Plan card with a second goal interface.
+            card_slot = card_slot.child(div().absolute().bottom(px(-13. * ratio))
+                .left(px(8.)).right(px(8.)).flex().justify_center().child(goal_pill));
         }
         let finished_agents = state
             .agents
@@ -1605,24 +1848,31 @@ impl ChatPane {
         let terminal_font = if terminal_font.trim().is_empty() { "Menlo".to_owned() } else { terminal_font };
         for (index, event) in state.activity.iter().enumerate() {
             let kind = field(event, "kind");
-            let title = field(event, "title");
+            let description = watcher_activity_text(event);
+            let icon_color = if matches!(kind.as_str(), "tool" | "computer" | "computer_image") {
+                palette.accent
+            } else {
+                palette.muted
+            };
             activity_feed = activity_feed.child(
                 div().id(("watcher-activity-row", index)).w_full().min_w_0()
-                    .flex().items_start().gap(px(10.))
+                    .flex().items_center().gap(px(7.))
                     .child(div().id(("watcher-activity-meta", index))
                         .debug_selector(move || format!("watcher-activity-meta-{index}"))
-                        .w(px(51.2 * ratio)).flex_shrink_0().flex().flex_col()
-                        .font_family(design::FONT_MONO).text_size(px(7.2 * ratio)).line_height(px(10.4 * ratio))
-                        .child(div().debug_selector(move || format!("watcher-activity-type-{index}")).whitespace_normal().text_color(rgb(if matches!(kind.as_str(), "tool" | "computer") {
-                            palette.accent
-                        } else { palette.muted })).child(kind.replace('_', " ")))
-                        .child(div().debug_selector(move || format!("watcher-activity-time-{index}")).whitespace_nowrap().text_color(rgb(palette.muted)).child(event_time(event))))
+                        .flex_shrink_0().flex().items_center().gap(px(4.))
+                        .font_family(design::FONT_MONO).text_size(px(7.6 * ratio)).line_height(px(11. * ratio))
+                        .child(div().debug_selector(move || format!("watcher-activity-type-{index}"))
+                            .w(px(10. * ratio)).h(px(10. * ratio)).flex_shrink_0()
+                            .text_color(rgb(icon_color))
+                            .child(Icon::new(watcher_activity_icon(&kind)).size(px(9. * ratio))))
+                        .child(div().debug_selector(move || format!("watcher-activity-time-{index}"))
+                            .whitespace_nowrap().text_color(rgb(palette.muted)).child(event_time(event))))
                     .child(div().id(("watcher-activity-description", index))
                         .debug_selector(move || format!("watcher-activity-description-{index}"))
                         .flex_1().min_w_0().font_family(SharedString::from(terminal_font.clone()))
                         .text_size(px(8. * ratio)).line_height(px(12. * ratio))
                         .text_color(rgb(palette.ink)).truncate()
-                        .child(if title.is_empty() { "Activity update".to_owned() } else { title.replace(['\n', '\r'], " ") }))
+                        .child(description))
             );
         }
         let secondary = div()
@@ -1812,21 +2062,6 @@ mod tests {
     use super::*;
 
     #[::core::prelude::v1::test]
-    fn watcher_card_default_prioritizes_activity_then_recency_without_a_goal() {
-        let task = json!({"status":"idle","updatedAt":20});
-        let mut goal = json!({"status":"active","updatedAt":1});
-        assert_eq!(watcher_default_card(Some(&goal), &task, None), WatchCard::Goal);
-        goal["status"] = json!("complete");
-        assert_eq!(watcher_default_card(Some(&goal), &json!({"status":"running","updatedAt":0}), None), WatchCard::Task);
-        assert_eq!(watcher_default_card(Some(&goal), &task, Some(&json!({"status":"active"}))), WatchCard::Task);
-        goal["updatedAt"] = json!(30);
-        assert_eq!(watcher_default_card(Some(&goal), &task, None), WatchCard::Goal);
-        goal["updatedAt"] = json!(10);
-        assert_eq!(watcher_default_card(Some(&goal), &task, None), WatchCard::Task);
-        assert_eq!(watcher_default_card(None, &task, None), WatchCard::Task);
-    }
-
-    #[::core::prelude::v1::test]
     fn watcher_build_indicator_tracks_owner_combined_requests_and_completion() {
         let mut snapshot = json!({"tasks":[{"id":"a","projectId":"p"},{"id":"b","projectId":"p"},{"id":"c","projectId":"q"}],
             "buildRequests":[{"id":"request","taskId":"b","projectId":"p"}],
@@ -1965,6 +2200,82 @@ mod tests {
     }
 
     #[::core::prelude::v1::test]
+    fn watcher_activity_summaries_use_common_tool_arguments_and_accounting() {
+        let command = json!({
+            "kind":"tool", "title":"exec_command",
+            "detail":json!({"arguments":json!({"cmd":"cargo test --lib watcher"}).to_string()}).to_string()
+        });
+        assert_eq!(watcher_activity_text(&command), "Ran cargo test --lib watcher");
+
+        let read = json!({
+            "kind":"tool", "title":"read_file",
+            "detail":json!({"path":"desktop-gpui/src/chat_watcher.rs"}).to_string()
+        });
+        assert_eq!(watcher_activity_text(&read), "Read desktop-gpui/src/chat_watcher.rs");
+
+        let search = json!({
+            "kind":"tool", "title":"web_search",
+            "detail":json!({"arguments":json!({"search_query":[{"q":"GPUI retained view docs"}]}).to_string()}).to_string()
+        });
+        assert_eq!(watcher_activity_text(&search), "Searched for GPUI retained view docs");
+
+        let plan = json!({
+            "kind":"tool", "title":"mcp__monitter__work_plan_start",
+            "detail":json!({"arguments":json!({"title":"Improve Watch event rows"}).to_string()}).to_string()
+        });
+        assert_eq!(watcher_activity_text(&plan), "Worked in monitter · Improve Watch event rows");
+
+        let build_claim = json!({
+            "kind":"tool", "title":"build_claim",
+            "detail":json!({"type":"mcpToolCall","server":"monitter","tool":"build_claim","arguments":{"request_ids":["request"]}}).to_string()
+        });
+        assert_eq!(watcher_activity_text(&build_claim), "Monitter · Build claim");
+
+        let usage = json!({
+            "kind":"usage", "title":"Usage updated",
+            "detail":json!({"tokens":{"input":1234,"output":56,"reasoning":7},"cost":0.0025}).to_string()
+        });
+        assert_eq!(watcher_activity_text(&usage), "1,234 input · 56 output · 7 reasoning · $0.0025");
+
+        let context = json!({
+            "kind":"usage", "title":"Context usage updated",
+            "detail":json!({"usage":{"used":159661,"size":258400}}).to_string()
+        });
+        assert_eq!(watcher_activity_text(&context), "159,661 / 258,400 context (62%)");
+
+        let decision = json!({
+            "kind":"jevDecision", "title":"System One decision",
+            "detail":json!({
+                "labels":{"abstain":"Abstain","blue_square":"Blue square"},
+                "response":{"candidateId":"blue_square","confidence":0.48,"status":"ok"}
+            }).to_string()
+        });
+        assert_eq!(watcher_activity_text(&decision), "System One · Blue square · 48% confidence");
+    }
+
+    #[::core::prelude::v1::test]
+    fn watcher_activity_summaries_keep_reasoning_and_errors_to_one_bounded_line() {
+        let reasoning = json!({
+            "kind":"reasoning", "title":"Reasoning",
+            "detail":json!({"summary":"Inspect the formatter\nthen update its focused tests"}).to_string()
+        });
+        assert_eq!(watcher_activity_text(&reasoning), "Inspect the formatter then update its focused tests");
+
+        let failure = json!({
+            "kind":"error", "title":"Codex error",
+            "detail":json!({"message":"Capacity temporarily unavailable"}).to_string()
+        });
+        assert_eq!(watcher_activity_text(&failure), "Codex error · Capacity temporarily unavailable");
+
+        let long = "word ".repeat(80);
+        let output = json!({"kind":"output","title":"Assistant response","detail":long});
+        let summary = watcher_activity_text(&output);
+        assert!(!summary.contains('\n'));
+        assert!(summary.chars().count() <= 180);
+        assert!(summary.ends_with('…'));
+    }
+
+    #[::core::prelude::v1::test]
     fn watcher_interject_correlates_ack_with_new_or_updated_assistant_reply() {
         let baseline = vec![Rc::new(json!({
             "id":"assistant","taskId":"watch","role":"assistant",
@@ -2088,7 +2399,7 @@ mod native_tests {
                         pane
                     });
                     pane.update(cx, |pane, cx| pane.activity.update(cx, |view, cx| {
-                        view.set_watch_goal_fixture(Some(json!({"status":"active","objective":"Goal objective","createdAt":1,"updatedAt":30})), cx);
+                        view.set_watch_goal_fixture(Some(json!({"status":"active","objective":"Goal objective","tokensUsed":124000,"tokenBudget":2000000,"createdAt":1,"updatedAt":30})), cx);
                     }));
                     retained = Some(pane.clone());
                     gpui_kit::component::Root::new(pane, window, cx)
@@ -2096,41 +2407,33 @@ mod native_tests {
                 let pane = retained.unwrap();
                 visual.simulate_resize(size(gpui_kit::px(width), gpui_kit::px(1100.)));
                 draw(visual); draw(visual);
-                assert!(visual.debug_bounds("watcher-goal").is_some());
-                assert!(visual.debug_bounds("watcher-task-summary").is_none(), "only one card mounts");
+                assert!(visual.debug_bounds("watcher-goal").is_none(), "the full goal interface is removed from Watch");
+                assert!(visual.debug_bounds("watcher-task-summary").is_some(), "the task/work-plan card stays mounted");
                 let slot = visual.debug_bounds("watcher-card-slot").unwrap();
-                let previous = visual.debug_bounds("watcher-card-previous").unwrap();
-                let next = visual.debug_bounds("watcher-card-next").unwrap();
-                assert!(previous.right() <= slot.left() && next.left() >= slot.right(), "arrows sit outside card");
+                let pill = visual.debug_bounds("watcher-goal-pill").unwrap();
+                assert!(pill.top() < slot.bottom() && pill.bottom() > slot.bottom(), "goal pill straddles the card's bottom border");
+                assert!(visual.debug_bounds("watcher-goal-usage").is_some());
+                assert!(visual.debug_bounds("watcher-goal-status").is_some());
+                assert!(visual.debug_bounds("watcher-card-previous").is_none());
+                assert!(visual.debug_bounds("watcher-card-next").is_none());
                 let kind = visual.debug_bounds("watcher-activity-type-0").unwrap();
                 let time = visual.debug_bounds("watcher-activity-time-0").unwrap();
                 let description = visual.debug_bounds("watcher-activity-description-0").unwrap();
-                assert!(time.top() >= kind.bottom() - px(1.) && (time.left() - kind.left()).abs() < px(1.));
-                assert!(description.left() > time.right() && description.top() <= time.top());
+                assert!((time.center().y - kind.center().y).abs() <= px(1.), "icon and timestamp share one line");
+                assert!(time.left() >= kind.right() && description.left() > time.right());
+                assert!((description.center().y - time.center().y).abs() <= px(2.), "description shares the activity line");
                 assert!(description.right() <= visual.debug_bounds("watcher-activity").unwrap().right() + px(1.));
                 assert!(description.size.height <= px(12.1), "long multiline activity stays on one smaller text line: {description:?}");
-                assert!(kind.size.height <= px(10.5) && time.size.height <= px(10.5), "both metadata lines are 20 percent smaller");
-                visual.simulate_click(next.center(), Default::default());
-                draw(visual); draw(visual);
-                assert!(visual.debug_bounds("watcher-goal").is_none());
-                assert!(visual.debug_bounds("watcher-task-summary").is_some());
+                assert!(kind.size.height <= px(10.5) && time.size.height <= px(11.5), "compact icon and timestamp stay subordinate");
                 pane.update(visual, |pane, cx| pane.activity.update(cx, |view, cx| {
-                    view.set_watch_goal_fixture(Some(json!({"status":"active","objective":"Goal objective","createdAt":1,"updatedAt":50})), cx);
+                    view.set_watch_goal_fixture(Some(json!({"status":"paused","objective":"Goal objective","tokensUsed":125000,"tokenBudget":2000000,"createdAt":1,"updatedAt":50})), cx);
                 }));
                 draw(visual); draw(visual);
-                assert!(visual.debug_bounds("watcher-task-summary").is_some(), "counter updates retain explicit selection");
-                let previous = visual.debug_bounds("watcher-card-previous").unwrap();
-                visual.simulate_click(previous.center(), Default::default());
-                draw(visual); draw(visual);
-                assert!(visual.debug_bounds("watcher-goal").is_some());
-                pane.update(visual, |pane, cx| pane.activity.update(cx, |view, cx| {
-                    view.set_watch_goal_fixture(Some(json!({"status":"complete","objective":"Goal objective","createdAt":1,"updatedAt":60})), cx);
-                }));
-                draw(visual); draw(visual);
-                assert!(visual.debug_bounds("watcher-task-summary").is_some(), "goal completion defaults to active task");
+                assert!(visual.debug_bounds("watcher-goal-pill").is_some(), "paused goals remain a compact status pill");
+                assert!(visual.debug_bounds("watcher-task-summary").is_some(), "goal updates never replace the work card");
                 pane.update(visual, |pane, cx| pane.activity.update(cx, |view, cx| view.set_watch_goal_fixture(None, cx)));
                 draw(visual); draw(visual);
-                assert!(visual.debug_bounds("watcher-card-next").is_none(), "single-card case has no dead arrows");
+                assert!(visual.debug_bounds("watcher-goal-pill").is_none());
             }
         }
     }

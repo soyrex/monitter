@@ -1048,7 +1048,6 @@ impl ChatPane {
                 decoration_bounds.chat_column.clone(),
                 working_palette,
             )
-            .with_header_plan_access()
         });
         let working_bubble_change = cx.subscribe(
             &working_bubble,

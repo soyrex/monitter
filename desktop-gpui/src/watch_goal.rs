@@ -70,33 +70,40 @@ pub(super) fn read_delay(
 }
 fn status_label(status: &str) -> &'static str {
     match status {
-        "active" => "Active goal",
-        "paused" => "Goal paused",
-        "blocked" => "Goal blocked",
-        "complete" => "Goal complete",
-        "usageLimited" => "Goal usage limit",
-        "budgetLimited" => "Goal budget reached",
-        _ => "Goal status unknown",
+        "active" => "active",
+        "paused" => "paused",
+        "blocked" => "blocked",
+        "complete" => "complete",
+        "usageLimited" => "usage limited",
+        "budgetLimited" => "budget reached",
+        _ => "unknown",
+    }
+}
+fn compact_token_count(value: u64) -> String {
+    let (divisor, suffix) = if value >= 1_000_000 {
+        (1_000_000., "m")
+    } else if value >= 1_000 {
+        (1_000., "k")
+    } else {
+        return value.to_string();
+    };
+    let scaled = value as f64 / divisor;
+    if scaled >= 10. || scaled.fract() < 0.05 {
+        format!("{scaled:.0}{suffix}")
+    } else {
+        format!("{scaled:.1}{suffix}")
     }
 }
 fn accounting(goal: &Value) -> Option<String> {
-    let mut parts = Vec::new();
-    if let Some(used) = goal["tokensUsed"].as_u64() {
-        parts.push(
-            match goal["tokenBudget"].as_u64().filter(|budget| *budget > 0) {
-                Some(budget) => format!(
-                    "{} / {} tokens used",
-                    token_count(used),
-                    token_count(budget)
-                ),
-                None => format!("{} tokens used", token_count(used)),
-            },
-        );
-    }
-    if let Some(seconds) = goal["timeUsedSeconds"].as_u64() {
-        parts.push(format!("{}:{:02} elapsed", seconds / 60, seconds % 60));
-    }
-    (!parts.is_empty()).then(|| parts.join(" · "))
+    let used = goal["tokensUsed"].as_u64()?;
+    Some(match goal["tokenBudget"].as_u64().filter(|budget| *budget > 0) {
+        Some(budget) => format!(
+            "{} / {} tokens",
+            compact_token_count(used),
+            compact_token_count(budget)
+        ),
+        None => format!("{} tokens", compact_token_count(used)),
+    })
 }
 
 pub(super) fn render(view: &TaskActivityPane, palette: design::Palette, ratio: f32) -> AnyElement {
@@ -114,96 +121,59 @@ pub(super) fn render(view: &TaskActivityPane, palette: design::Palette, ratio: f
                 .into_any_element()
         };
     };
-    let active = goal["status"] == "active";
-    let mut card = div()
-        .id("watcher-goal")
-        .debug_selector(|| "watcher-goal".into())
-        .w_full()
+    let status = status_label(goal["status"].as_str().unwrap_or_default());
+    let active = status == "active";
+    let usage = accounting(goal);
+    let mut pill = div()
+        .id("watcher-goal-pill")
+        .debug_selector(|| "watcher-goal-pill".into())
+        .max_w_full()
         .min_w_0()
-        .flex_shrink_0()
+        .h(px(26. * ratio))
+        .px(px(10. * ratio))
         .flex()
-        .flex_col()
-        .gap(px(8.))
-        .p(px(14.))
-        .text_color(rgb(palette.ink))
+        .items_center()
+        .gap(px(6.))
+        .rounded_full()
+        .border_1()
+        .border_color(rgb(palette.line))
+        .bg(crate::surface_blend::floating_control_background(palette.panel, true))
+        .text_size(px(11. * ratio))
+        .line_height(px(14. * ratio))
+        .text_color(rgb(if active { palette.accent } else { palette.muted }))
+        .child(Icon::default().data(icon_assets::Goal.1).with_size(px(13.)))
         .child(
             div()
-                .flex()
-                .items_center()
-                .gap(px(7.))
-                .text_size(px(11. * ratio))
+                .id("watcher-goal-label")
+                .debug_selector(|| "watcher-goal-label".into())
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(rgb(if active {
-                    palette.accent
-                } else {
-                    palette.muted
-                }))
-                .child(Icon::default().data(icon_assets::Goal.1).with_size(px(14.)))
-                .child(
-                    div()
-                        .id("watcher-goal-status")
-                        .debug_selector(|| "watcher-goal-status".into())
-                        .child(status_label(goal["status"].as_str().unwrap_or_default())),
-                ),
-        )
-        .child(
-            div()
-                .id("watcher-goal-objective")
-                .debug_selector(|| "watcher-goal-objective".into())
-                .min_w_0()
-                .whitespace_normal()
-                .text_size(px(13. * ratio))
-                .child(text(goal, "objective")),
+                .child("Goal"),
         );
-    let progress = &view.watch_progress;
-    if let Some(plan) = &progress.plan {
-        card = card.child(
-            div()
-                .id("watcher-goal-plan-progress")
-                .debug_selector(|| "watcher-goal-plan-progress".into())
-                .text_size(px(11. * ratio))
-                .text_color(rgb(palette.muted))
-                .child(format!(
-                    "Current plan · {} / {} steps complete · {plan}",
-                    progress.completed, progress.total
-                )),
-        );
-    }
-    if let Some(current) = progress.current.as_ref().or(progress.update.as_ref()) {
-        card = card.child(
-            div()
-                .id("watcher-goal-current-step")
-                .debug_selector(|| "watcher-goal-current-step".into())
-                .min_w_0()
-                .whitespace_normal()
-                .text_size(px(12. * ratio))
-                .child(current.clone()),
-        );
-    }
-    if let Some(usage) = accounting(goal) {
-        card = card.child(
+    if let Some(usage) = usage {
+        pill = pill.child(
             div()
                 .id("watcher-goal-usage")
                 .debug_selector(|| "watcher-goal-usage".into())
-                .text_size(px(10. * ratio))
+                .min_w_0()
+                .truncate()
+                .font_family(design::FONT_MONO)
                 .text_color(rgb(palette.muted))
                 .child(usage),
         );
     }
-    if view.read_failures > 0 {
-        card = card.child(
-            div()
-                .text_size(px(10. * ratio))
-                .text_color(rgb(palette.muted))
-                .child("Showing last known goal · update unavailable"),
-        );
-    }
-    card.into_any_element()
+    pill = pill.child(
+        div()
+            .id("watcher-goal-status")
+            .debug_selector(|| "watcher-goal-status".into())
+            .flex_shrink_0()
+            .child(status.to_owned()),
+    );
+    pill.into_any_element()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Progress, accounting, read_delay, status_label};
+    use super::{Progress, accounting, compact_token_count, read_delay, status_label};
     use serde_json::json;
     use std::time::Duration;
     #[test]
@@ -227,11 +197,13 @@ mod tests {
         assert_eq!(
             accounting(&json!({"tokensUsed":1200,"tokenBudget":1000,"timeUsedSeconds":125}))
                 .unwrap(),
-            "1,200 / 1,000 tokens used · 2:05 elapsed"
+            "1.2k / 1k tokens"
         );
         assert!(accounting(&json!({"status":"active"})).is_none());
-        assert_eq!(status_label("complete"), "Goal complete");
-        assert_eq!(status_label("budgetLimited"), "Goal budget reached");
+        assert_eq!(compact_token_count(124000), "124k");
+        assert_eq!(compact_token_count(2000000), "2m");
+        assert_eq!(status_label("complete"), "complete");
+        assert_eq!(status_label("budgetLimited"), "budget reached");
     }
     #[test]
     fn watch_goal_reads_discover_new_goals_and_stop_when_watch_closes() {
@@ -258,7 +230,7 @@ mod native_tests {
         visual.update(|window, cx| window.draw(cx).clear(cx));
     }
     #[gpui_kit::test]
-    fn watch_goal_native_card_updates_without_remounting_and_clears_on_task_change(
+    fn watcher_activity_goal_pill_updates_without_replacing_plan_and_clears_on_task_change(
         cx: &mut TestAppContext,
     ) {
         cx.update(|cx| {
@@ -285,21 +257,19 @@ mod native_tests {
         visual.simulate_resize(size(gpui_kit::px(320.), gpui_kit::px(900.)));
         draw(visual);
         draw(visual);
-        assert!(visual.debug_bounds("watcher-goal").is_none());
+        assert!(visual.debug_bounds("watcher-goal-pill").is_none());
         let pane = retained.unwrap();
         let activity = pane.read_with(visual, |pane, _| pane.activity.clone());
         activity.update(visual, |view, cx| {
-            view.goal = Some(json!({"objective":"Complete the requested desktop update","status":"active","tokensUsed":1200,"tokenBudget":10000,"timeUsedSeconds":65}));
+            view.goal = Some(json!({"objective":"Complete the requested desktop update","status":"active","tokensUsed":124000,"tokenBudget":2000000,"timeUsedSeconds":65}));
             cx.notify();
         });
         draw(visual);
         draw(visual);
         for selector in [
-            "watcher-goal",
+            "watcher-goal-pill",
+            "watcher-goal-label",
             "watcher-goal-status",
-            "watcher-goal-objective",
-            "watcher-goal-plan-progress",
-            "watcher-goal-current-step",
             "watcher-goal-usage",
         ] {
             let bounds = visual
@@ -310,6 +280,11 @@ mod native_tests {
                 "{selector} must fit a narrow pane"
             );
         }
+        assert!(visual.debug_bounds("watcher-goal").is_none());
+        assert!(visual.debug_bounds("watcher-goal-objective").is_none());
+        assert!(visual.debug_bounds("watcher-card-previous").is_none());
+        assert!(visual.debug_bounds("watcher-card-next").is_none());
+        assert!(visual.debug_bounds("watcher-plan").is_some());
         activity.update(visual, |view, cx| {
             view.goal.as_mut().unwrap()["status"] = json!("paused");
             view.watch_progress.current = Some("Awaiting review".into());
@@ -317,12 +292,16 @@ mod native_tests {
         });
         draw(visual);
         draw(visual);
-        assert!(visual.debug_bounds("watcher-goal").is_some());
+        assert!(
+            visual.debug_bounds("watcher-goal-pill").is_some(),
+            "A paused goal remains visible as the compact pill"
+        );
+        assert!(visual.debug_bounds("watcher-plan").is_some());
         activity.update(visual, |view, cx| view.set_context(&snapshot, "other", cx));
         draw(visual);
         draw(visual);
         assert!(
-            visual.debug_bounds("watcher-goal").is_none(),
+            visual.debug_bounds("watcher-goal-pill").is_none(),
             "A goal must never leak across task identities"
         );
     }

@@ -12,6 +12,8 @@ macro_rules! entries {
     };
 }
 entries![
+    ("system-one", "System One backend", "Default backend for routing, classification and advisory decisions.", "SYS-1 Jev TypeSafe Laya local inference"),
+    ("system-one", "System One routing", "Default task routing with per-agent overrides.", "SYS-1 routing recommend auto inherit"),
     ("profile", "Your name", "How agents address you in new chats.", "profile username"),
     ("appearance", "Appearance mode", "System, light or dark appearance.", "theme"),
     ("appearance", "Window transparency", "Primary window surface and background transparency.", "opaque glass blur material opacity"),

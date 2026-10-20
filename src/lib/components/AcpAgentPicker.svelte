@@ -104,7 +104,7 @@
   {#if verified}<p class="verified" role="status"><Check size={14}/>v{verified.protocolVersion} verified{verified.agentName ? ` · ${verified.agentName}` : ''}{verified.agentVersion ? ` ${verified.agentVersion}` : ''}</p>{/if}
   {#if verified && (verified.jevRouting || verified.authLoader || verified.reasoningEffort)}
     <p class="extensions" role="status">
-      {#if verified.jevRouting}<span class="ext-badge jev">Per-turn Jev routing</span>{/if}
+      {#if verified.jevRouting}<span class="ext-badge jev">Per-turn System One routing</span>{/if}
       {#if verified.authLoader}<span class="ext-badge">Auth loader</span>{/if}
       {#if verified.reasoningEffort}<span class="ext-badge">Reasoning effort</span>{/if}
     </p>

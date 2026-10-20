@@ -89,7 +89,7 @@
 
   function outcomeText(): string {
     if (!record || !response) return 'Decision details unavailable';
-    if (response.status === 'unavailable') return 'Jev unavailable';
+    if (response.status === 'unavailable') return 'System One unavailable';
     if (record.toolName === 'jev_route') return typeof response.outcome === 'string' ? response.outcome : 'Route outcome unavailable';
     if (record.toolName === 'jev_choose') {
       const id = typeof response.candidateId === 'string' ? response.candidateId : '';
@@ -139,7 +139,7 @@
       case 'unsupported': return `${model} unavailable to the harness`;
       case 'rejected': return `${model} rejected by the harness`;
       case 'unconfirmed': return `${model} · harness response unconfirmed`;
-      case 'recommended': return 'Jev recommendation only';
+      case 'recommended': return 'System One recommendation only';
       default: return response?.applied !== true ? 'Default kept' : response.modelChanged === true ? 'Selected for this chat' : 'Default model kept';
     }
   }
@@ -195,9 +195,9 @@
 </script>
 
 <details class="jev-card" ontoggle={onToggle}>
-  <summary aria-label={`Jev ${toolLabel}: ${outcomeText()}`}>
-    <div class="jev-top"><span class="jev-mark">Jev</span><span class="jev-kind">{toolLabel}</span><time title={fullTimeText}>{timeText}</time></div>
-    {#if record}<div class="jev-question">{record.question}</div>{:else}<div class="jev-question">Jev decision details unavailable</div>{/if}
+  <summary aria-label={`System One ${toolLabel}: ${outcomeText()}`}>
+    <div class="jev-top"><span class="jev-mark">SYS-1</span><span class="jev-kind">{toolLabel}</span><time title={fullTimeText}>{timeText}</time></div>
+    {#if record}<div class="jev-question">{record.question}</div>{:else}<div class="jev-question">System One decision details unavailable</div>{/if}
     <div class="jev-result-line"><strong title={outcomeText()}>{outcomeText()}</strong>{#if confidence !== null}<span>{record?.toolName === 'jev_route' ? routeConfidenceLabel : 'Confidence'} {Math.round(confidence * 100)}%</span>{/if}</div>
     {#if record?.toolName === 'jev_route'}<div class="jev-route-reasoning">{routeReasoningOutcome()}</div>{/if}
     {#if segments.length}<div class="jev-bar" role="img" aria-label={distributionLabel()} title={distributionLabel()}>{#each segments as segment, index (segment.id)}<span style={`width:${segment.probability * 100}%;background:${segmentColor(segment, index)}`}></span>{/each}</div>{/if}
@@ -209,7 +209,7 @@
     {#if detailError}<p class="jev-detail-state error">Full result unavailable: {detailError}</p>{/if}
     {#if record}<p class="jev-full-question"><span>Question</span>{record.question}</p>{/if}
     {#if response && response.status !== 'unavailable'}
-      {#if detailRows().length}<div class="jev-breakdown" aria-label="Jev probability breakdown">{#each detailRows() as segment (segment.id)}<div class="jev-breakdown-row"><span class:selected={segment.selected}>{segment.label}</span><div class="jev-track"><i style={`width:${segment.probability * 100}%;background:${segmentColor(segment, 0)}`}></i></div><b>{Math.round(segment.probability * 100)}%</b></div>{/each}</div>{/if}
+      {#if detailRows().length}<div class="jev-breakdown" aria-label="System One probability breakdown">{#each detailRows() as segment (segment.id)}<div class="jev-breakdown-row"><span class:selected={segment.selected}>{segment.label}</span><div class="jev-track"><i style={`width:${segment.probability * 100}%;background:${segmentColor(segment, 0)}`}></i></div><b>{Math.round(segment.probability * 100)}%</b></div>{/each}</div>{/if}
       {#if record?.toolName === 'jev_route'}
         <dl class="jev-route-detail">
           <div><dt>Model tier</dt><dd>{routeText('modelTier')}</dd></div>
@@ -228,7 +228,7 @@
           <div><dt>Permission signal</dt><dd>{routePermissionSignal()} · advisory only; existing approvals apply</dd></div>
         </dl>
       {/if}
-    {:else if response?.status === 'unavailable'}<p class="jev-detail-state">Jev could not return a decision for this request.</p>{/if}
+    {:else if response?.status === 'unavailable'}<p class="jev-detail-state">System One could not return a decision for this request.</p>{/if}
     {#if record}<dl class="jev-usage"><div><dt>Model</dt><dd>{record.model ?? 'n/a'}</dd></div><div><dt>Provider</dt><dd>{record.provider ?? 'n/a'}</dd></div><div><dt>Time</dt><dd>{fullTimeText}</dd></div><div><dt>Latency</dt><dd>{latencyText(record.latencyMs)}</dd></div><div><dt>Cost</dt><dd>{costText(record.costUsd)}</dd></div><div><dt>Tokens</dt><dd>{record.inputTokens ?? 'n/a'} in · {record.outputTokens ?? 'n/a'} out</dd></div></dl>{/if}
   </div>
 </details>

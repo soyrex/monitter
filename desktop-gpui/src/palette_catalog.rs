@@ -237,7 +237,7 @@ pub(super) fn entries(view: &Desktop, cx: &App) -> Vec<E> {
     let mut result = vec![];
     result.push(entry(
         "rename-all", "Rename all chat panes",
-        "Check open chats across workspaces with Jev; name changed topics in one admin request",
+        "Check open chats across workspaces with System One; name changed topics in one admin request",
         K::Command,
         blocked || view.preferences_restore || view.preferences_restoring || rename_all_targets(view, cx).is_empty(),
         None,

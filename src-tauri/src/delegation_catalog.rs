@@ -83,6 +83,29 @@ impl DelegationTarget {
         )
     }
 }
+// Directory summaries only read advertisements already discovered by a picker.
+// Codex writes version-suffixed keys; select the latest fresh advertisement
+// without launching a CLI probe while the directory holds workspace locks.
+fn cached_catalog(
+    cache: &std::collections::HashMap<String, (std::time::Instant, ModelCatalog)>,
+    base_key: &str,
+    provider: &str,
+    now: std::time::Instant,
+) -> Option<ModelCatalog> {
+    let prefix = format!("{base_key}\u{1f}");
+    cache.iter()
+        .filter(|(key, (when, _))| {
+            let matches = if provider == "codex" {
+                key.strip_prefix(prefix.as_str()).is_some_and(|version| !version.contains('\u{1f}'))
+            } else {
+                key.as_str() == base_key
+            };
+            matches && now.saturating_duration_since(*when) < MODEL_CATALOG_CACHE_TTL
+        })
+        .max_by_key(|(_, (when, _))| *when)
+        .map(|(_, (_, catalog))| catalog.clone())
+}
+
 impl Service {
     pub(crate) fn delegation_target(
         &self,
@@ -99,12 +122,8 @@ impl Service {
         &self,
         target: &DelegationTarget,
     ) -> Option<ModelCatalog> {
-        self.model_catalogs
-            .lock()
-            .ok()?
-            .get(&target.key())
-            .filter(|(when, _)| when.elapsed() < MODEL_CATALOG_CACHE_TTL)
-            .map(|(_, catalog)| catalog.clone())
+        let cache = self.model_catalogs.lock().ok()?;
+        cached_catalog(&cache, &target.key(), &target.agent.provider, std::time::Instant::now())
     }
     pub(crate) fn delegation_catalog(
         &self,
@@ -166,6 +185,31 @@ mod tests {
     use crate::model::{
         default_snapshot, task_from_agent, CatalogModel, CreateTaskInput, ModelCatalogCurrent,
     };
+
+    #[test]
+    fn directory_cache_uses_newest_fresh_codex_version_without_target_leakage() {
+        use std::{collections::HashMap, time::{Duration, Instant}};
+        let now = Instant::now();
+        let catalog = |source: &str| ModelCatalog {
+            models: vec![],
+            current: ModelCatalogCurrent {
+                model: String::new(), reasoning_effort: None, fast_mode: None,
+            },
+            source: source.into(), warning: None,
+        };
+        let mut cache = HashMap::new();
+        cache.insert("target\u{1f}old-version".into(), (now - Duration::from_secs(2), catalog("old")));
+        cache.insert("target\u{1f}new-version".into(), (now - Duration::from_secs(1), catalog("new")));
+        cache.insert("target-other\u{1f}version".into(), (now, catalog("other target")));
+        cache.insert("target\u{1f}extra-identity\u{1f}version".into(), (now, catalog("other identity")));
+        cache.insert("target".into(), (now, catalog("unversioned")));
+        assert_eq!(cached_catalog(&cache, "target", "codex", now).unwrap().source, "new");
+        cache.remove("target\u{1f}new-version");
+        assert_eq!(cached_catalog(&cache, "target", "codex", now).unwrap().source, "old");
+        assert!(cached_catalog(&cache, "target", "codex", now + MODEL_CATALOG_CACHE_TTL).is_none());
+        assert!(cached_catalog(&cache, "missing", "codex", now).is_none());
+        assert_eq!(cached_catalog(&cache, "target", "opencode", now).unwrap().source, "unversioned");
+    }
 
     #[test]
     fn delegation_target_rejects_configuration_drift_before_commit() {

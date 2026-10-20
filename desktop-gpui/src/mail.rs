@@ -157,8 +157,8 @@ fn batch_checked_at(batch: &Value) -> i64 {
 }
 fn classifier_label(mode: &str) -> String {
     match mode {
-        "jev" => "Jev".into(),
-        "pending" => "Jev pending".into(),
+        "jev" => "System One".into(),
+        "pending" => "System One pending".into(),
         "not_needed" => "Checked".into(),
         "" => "Status not reported".into(),
         _ => format!("{mode} classifier"),
@@ -167,12 +167,12 @@ fn classifier_label(mode: &str) -> String {
 fn classifier_message(mode: &str, fallback_reason: &str) -> Option<String> {
     match mode {
         "pending" => Some(
-            "Waiting for Jev classification. Messages are hidden until classification is complete."
+            "Waiting for System One classification. Messages are hidden until classification is complete."
                 .into(),
         ),
         "jev" => None,
         "not_needed" => Some(
-            "Jev did not classify this batch, so messages are hidden from the actionable inbox."
+            "System One did not classify this batch, so messages are hidden from the actionable inbox."
                 .into(),
         ),
         "" => Some(
@@ -180,7 +180,7 @@ fn classifier_message(mode: &str, fallback_reason: &str) -> Option<String> {
                 .into(),
         ),
         _ => Some(format!(
-            "Jev classification is unavailable ({mode}); messages are hidden from the actionable inbox.{}",
+            "System One classification is unavailable ({mode}); messages are hidden from the actionable inbox.{}",
             if fallback_reason.is_empty() {
                 String::new()
             } else {
@@ -760,7 +760,7 @@ impl MailPane {
                 panel = panel.child(row);
             }
             panel=panel.child("Grant changes use the current configuration revision. Reload settings after a conflict. Removing access takes effect immediately; a newly assigned agent may need a new session.");
-            panel = panel.child("Agent MCP mail access stays read-only. The native inbox can mark messages read after you open them or when Jev confidently identifies low-value bulk mail. Reauthorize existing accounts here to grant that access. Fetched messages become part of the selected agent's context.");
+            panel = panel.child("Agent MCP mail access stays read-only. The native inbox can mark messages read after you open them or when System One confidently identifies low-value bulk mail. Reauthorize existing accounts here to grant that access. Fetched messages become part of the selected agent's context.");
         } else {
             panel =
                 panel.child("Mail settings have not loaded. Retry with Reload account settings.");
@@ -1033,7 +1033,7 @@ impl MailPane {
                     .child("Rich reader blocks scripts, navigation, popups and remote images. Inline raster images only; attachments remain pending.")
                     .child(
                         Button::new("mail-summary")
-                            .label("Summarize thread with Jev")
+                            .label("Summarize thread with System One")
                             .disabled(self.busy)
                             .on_click(cx.listener(|pane, _, _, cx| {
                                 if let (Some(task), Some(id)) =
@@ -1445,9 +1445,9 @@ mod tests {
         assert_eq!(classifier_label(""), "Status not reported");
         assert!(classifier_message("", "").unwrap().contains("not reported"));
         assert!(
-            classifier_message("fallback", "Jev unavailable")
+            classifier_message("fallback", "System One unavailable")
                 .unwrap()
-                .contains("Jev unavailable")
+                .contains("System One unavailable")
         );
     }
 }

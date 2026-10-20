@@ -88,12 +88,12 @@ where F: FnMut(&str, Value) -> Result<Value, String>, G: FnMut(String) -> Result
     }
     let state = serde_json::to_string(all).map_err(|e| e.to_string())?;
     let result = jev(&state, Value::Object(questions))?;
-    let answers = result.get("answers").and_then(Value::as_object).ok_or("Jev returned no typed rename decisions.")?;
+    let answers = result.get("answers").and_then(Value::as_object).ok_or("System One returned no typed rename decisions.")?;
     let mut selected = Vec::new();
     for c in all {
-        let answer = answers.get(&c.key).ok_or("Jev omitted a rename decision.")?;
-        if answer.get("type").and_then(Value::as_str) != Some("noul") { return Err("Jev returned an invalid answer type.".into()) }
-        let probability = answer.get("noul").and_then(Value::as_f64).filter(|n| n.is_finite() && (0.0..=1.0).contains(n)).ok_or("Jev returned invalid rename probability.")?;
+        let answer = answers.get(&c.key).ok_or("System One omitted a rename decision.")?;
+        if answer.get("type").and_then(Value::as_str) != Some("noul") { return Err("System One returned an invalid answer type.".into()) }
+        let probability = answer.get("noul").and_then(Value::as_f64).filter(|n| n.is_finite() && (0.0..=1.0).contains(n)).ok_or("System One returned invalid rename probability.")?;
         if probability >= 0.85 { selected.push(c.clone()); }
     }
     if selected.is_empty() { return Ok(Vec::new()) }
@@ -114,7 +114,8 @@ fn apply(snapshot: &mut Snapshot, original: &[Candidate], names: &[Rename]) -> R
 impl Service {
     pub(crate) fn rename_all(self: &Arc<Self>, targets: Vec<RenameTarget>) -> Result<Snapshot, String> {
         let original = { let data = self.data.lock().map_err(|_| "Monitter state lock failed.")?; candidates(&data.snapshot, &targets)? };
-        let names = plan(&original, |state, questions| crate::model_router::live_jev_system_one(state, questions).map(|r|r.body), |prompt| self.send_admin_turn_with_origin(prompt, self.admin_activity_origin("rename_all", None, Some("Rename all".into()))))?;
+        let backend = self.committed_data()?.snapshot.settings.system_one_backend;
+        let names = plan(&original, |state, questions| crate::model_router::decision_backend(backend).infer(&crate::model_router::DecisionRequest { state: state.into(), questions }).map(|r|r.body), |prompt| self.send_admin_turn_with_origin(prompt, self.admin_activity_origin("rename_all", None, Some("Rename all".into()))))?;
         if names.is_empty() { return self.snapshot() }
         self.mutate(None, |snapshot| { apply(snapshot, &original, &names)?; Ok(snapshot.clone()) })
     }

@@ -127,10 +127,12 @@ export interface Agent {
   collaborationEnabled: boolean;
   /** Separate host-shell capability. Each command needs native approval; unavailable in read-only tasks. */
   terminalExecutionEnabled?: boolean;
-  jevRouting?: JevRoutingMode;
+  jevRouting?: JevRoutingMode | 'inherit';
   jevModelTiers?: JevModelTiers;
   /** Adds Jev's separate decision MCP tools to supported local harness launches. */
   jevDecisionsEnabled?: boolean;
+  /** Advisory backend override; omitted or inherit uses the global System One backend. */
+  decisionBackend?: 'inherit' | 'type_safe' | 'laya';
   /** Internal agents are configurable in Settings but hidden from conversation surfaces. */
   internal?: boolean;
 }
@@ -345,6 +347,10 @@ export interface InteractionInput {
   url: string | null;
 }
 export interface Settings {
+  /** Default backend for System One routing, classification and decisions. */
+  systemOneBackend?: 'type_safe' | 'laya';
+  /** Default task routing mode; agents can override it. */
+  systemOneRouting?: JevRoutingMode;
   /** Opt-in private coordination board for project tasks. */
   projectBoardEnabled?: boolean;
   /** Defaults to true; controls automatic approval of the built-in Monitter MCP tools for Codex and Claude. */

@@ -172,18 +172,37 @@ pub(crate) fn jev_api_key_for_internal_service() -> Result<String, String> {
     }
     let vault = load_vault()?;
     let value = jev_api_key_from_vault(&vault).ok_or_else(|| {
-        "Monitter Environment & Secrets has no TYPESAFE_API_KEY or JEV_API_KEY entry."
-            .to_string()
+        "Monitter Environment & Secrets has no TYPESAFE_API_KEY or JEV_API_KEY entry.".to_string()
     })?;
     *cached = Some(value.clone());
     Ok(value)
 }
 
+/// Optional bearer credential for an explicitly configured local Laya server.
+/// It is read only inside the native backend and is never returned to a client.
+pub(crate) fn laya_api_key_for_internal_service() -> Result<Option<String>, String> {
+    if let Ok(value) = std::env::var("LAYA_API_KEY") {
+        if !value.is_empty() {
+            return Ok(Some(value));
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let vault = load_vault()?;
+        Ok(vault
+            .entries
+            .iter()
+            .find(|entry| entry.name == "LAYA_API_KEY")
+            .map(|entry| entry.value.clone()))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(None)
+    }
+}
+
 fn refresh_jev_api_key_cache(vault: &Vault) {
-    let Ok(mut cached) = JEV_API_KEY_CACHE
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-    else {
+    let Ok(mut cached) = JEV_API_KEY_CACHE.get_or_init(|| Mutex::new(None)).lock() else {
         return;
     };
     *cached = jev_api_key_from_vault(vault);
@@ -424,10 +443,7 @@ mod tests {
         vault
             .entries
             .retain(|entry| entry.name != "TYPESAFE_API_KEY");
-        assert_eq!(
-            jev_api_key_from_vault(&vault).as_deref(),
-            Some("jev-value")
-        );
+        assert_eq!(jev_api_key_from_vault(&vault).as_deref(), Some("jev-value"));
     }
 
     #[test]

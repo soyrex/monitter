@@ -473,11 +473,20 @@ impl Service {
                 let (source, reason) = if model == "auto" {
                     match self.delegation_catalog(&context, false) {
                         Ok(catalog) => {
+                            let backend = {
+                                let data = self.committed_data()?;
+                                let global = data.snapshot.settings.system_one_backend;
+                                data.snapshot.tasks.iter().find(|task| task.id == caller_task)
+                                    .and_then(|task| data.snapshot.agents.iter().find(|agent| agent.id == task.agent_id))
+                                    .map(|agent| agent.decision_backend.resolve(global))
+                                    .unwrap_or(global)
+                            };
                             let chosen = crate::delegation_models::auto_select_model(
                                 &title,
                                 &text,
                                 &catalog,
                                 &context.agent,
+                                backend,
                             );
                             selected_settings = chosen.settings;
                             (chosen.source, chosen.reason)
