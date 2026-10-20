@@ -6816,7 +6816,10 @@ impl ChatPane {
             .flex()
             .items_center()
             .gap(px(if tern_tiles { 8. } else { space::INSET }))
-            .pl(px(if tern_tiles { 13. } else { space::GROUP }))
+            // The identity control is square, so matching the row's vertical
+            // inset keeps its visible mark equidistant from the top and left
+            // pane borders.
+            .pl(px(if tern_tiles { header_padding_y } else { space::GROUP }))
             .pr(px(if tern_tiles {
                 (avatar_size + 2. * header_padding_y - 24.) / 2.
             } else {

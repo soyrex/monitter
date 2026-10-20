@@ -1573,16 +1573,21 @@ impl SidebarUsageWidget {
         let width = SidebarUsageProvider::ALL.len() as f32 * layout.diameter
             + (SidebarUsageProvider::ALL.len() - 1) as f32 * layout.gap
             + if account_controls { CODEX_ACCOUNT_ARROWS_WIDTH } else { 0. };
-        // This retained header view already observes the sidebar's one-second
-        // tick, so the clock shares its time and palette without another timer.
         div().id("workspace-usage-rings").flex_shrink_0()
-            .flex().items_center().gap(px(10.))
-            .child(div().w(px(width)).flex_shrink_0()
-                .child(self.render_rings_row(&merged, layout, palette, true, cx)))
-            .child(div().id("workspace-analog-clock")
-                .debug_selector(|| "workspace-analog-clock".into())
-                .flex_shrink_0()
-                .child(crate::native_clock::clock_face(self.now_ms.max(0) as u64, palette, 28.)))
+            .w(px(width))
+            .child(self.render_rings_row(&merged, layout, palette, true, cx))
+            .into_any_element()
+    }
+    fn build_workspace_clock(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let palette = self.composed_palette.unwrap_or_else(|| {
+            crate::design::palette(&self.snapshot["settings"], window.appearance())
+        });
+        // This retained header view observes the sidebar's existing one-second
+        // tick, so moving the clock does not introduce another timer.
+        div().id("workspace-analog-clock")
+            .debug_selector(|| "workspace-analog-clock".into())
+            .flex_shrink_0()
+            .child(crate::native_clock::clock_face(self.now_ms.max(0) as u64, palette, 28.))
             .into_any_element()
     }
 
@@ -2938,6 +2943,23 @@ fn process_row_icon(process: &Value, is_root: bool) -> AnyElement {
 pub struct WorkspaceUsageRings {
     source: Entity<SidebarUsageWidget>,
     _subscription: Subscription,
+}
+/// The title-bar clock is retained separately from the provider rings so the
+/// shell can place it with navigation controls without duplicating polling.
+pub struct WorkspaceClock {
+    source: Entity<SidebarUsageWidget>,
+    _subscription: Subscription,
+}
+impl WorkspaceClock {
+    pub fn new(source: Entity<SidebarUsageWidget>, cx: &mut Context<Self>) -> Self {
+        let subscription = cx.observe(&source, |_, _, cx| cx.notify());
+        Self { source, _subscription: subscription }
+    }
+}
+impl Render for WorkspaceClock {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.source.update(cx, |source, cx| source.build_workspace_clock(window, cx))
+    }
 }
 impl WorkspaceUsageRings {
     pub fn new(source: Entity<SidebarUsageWidget>, cx: &mut Context<Self>) -> Self {

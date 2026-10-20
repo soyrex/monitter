@@ -3662,6 +3662,7 @@ impl Desktop {
             }
         }).detach();
         self.window.workspace_usage_rings = Some(cx.new(|cx| sidebar_usage::WorkspaceUsageRings::new(widget.clone(), cx)));
+        self.window.workspace_clock = Some(cx.new(|cx| sidebar_usage::WorkspaceClock::new(widget.clone(), cx)));
         self.window.sidebar_usage = Some(widget);
         self.window.sidebar_usage_snapshot = Some(snapshot);
         self.window.sidebar_usage_revision = revision;

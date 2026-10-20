@@ -1376,8 +1376,9 @@ impl Desktop {
             .debug_selector(|| "named-workspace-tabs".into())
             .flex()
             .items_center()
+            .justify_center()
             .gap(px(5.))
-            .flex_1()
+            .flex_shrink_1()
             .min_w_0()
             .overflow_x_scroll()
             .on_drop(cx.workspace_listener(|desktop,drag:&WorkspaceTabDrag,_,cx| {
@@ -1581,10 +1582,11 @@ impl Desktop {
         }
         tabs = tabs.child(
             Button::new("add-workspace")
+                .debug_selector(|| "add-workspace".into())
                 .ghost()
                 .compact()
                 .flex_shrink_0()
-                .label("+")
+                .icon(Icon::new(IconName::Plus).with_size(px(18.)).text_color(rgb(palette.muted)))
                 .accessibility_label("New workspace")
                 .tooltip("New workspace")
                 .disabled(
@@ -1596,67 +1598,72 @@ impl Desktop {
                 )
                 .on_click(cx.workspace_listener(|view, _, window, cx| view.add_named_workspace(window, cx))),
         );
-        let bar = div()
-            .w_full()
-            .flex_shrink_0()
-            .pl(gpui_kit::px(
-                if window.is_fullscreen() || (tern && !self.sidebar_is_hidden() && !self.window.activity_overview_open) {
-                    10.
-                } else {
-                    82.
-                },
-            ))
-            .pr(px(10.))
-            // Share the sidebar controls' centre line and grow only when the
-            // configured font/scale needs more than the native titlebar height.
-            .h(tab_metrics.row_height)
-            .py_0()
-            .flex()
-            .items_center()
-            .gap(px(5.))
-            .on_mouse_down(MouseButton::Left, |event, window, _| {
-                if event.click_count == 2 {
-                    window.titlebar_double_click();
-                } else {
-                    window.start_window_move();
-                }
-            })
-            .map(|bar| {
+        let left_inset = if window.is_fullscreen()
+            || (tern && !self.sidebar_is_hidden() && !self.window.activity_overview_open)
+        { 0. } else { 72. };
+        let left_controls = div()
+            .id("workspace-bar-left-controls")
+            .debug_selector(|| "workspace-bar-left-controls".into())
+            .pl(px(left_inset)).flex().items_center().gap(px(5.))
+            .map(|controls| {
                 let label = if self.sidebar_is_hidden() { "Show sidebar" } else { "Hide sidebar" };
-                bar.child(
-                    Button::new("cycle-main-sidebar")
-                        .track_focus(&self.window.sidebar_toggle_focus)
-                        .ghost()
-                        .compact()
-                        .flex_shrink_0()
-                        .toggled(!self.sidebar_is_hidden())
-                        .icon(Icon::new(IconName::PanelLeft)
-                            .text_color(rgb(if self.sidebar_is_hidden() { palette.ink } else { palette.accent }).opacity(0.5)))
-                        .accessibility_label(label)
-                        .tooltip(label)
-                        .on_click(
-                            cx.workspace_listener(|view, _, window, cx| view.toggle_sidebar(window, cx)),
-                        ),
-                )
+                controls.child(Button::new("cycle-main-sidebar")
+                    .track_focus(&self.window.sidebar_toggle_focus)
+                    .ghost().compact().flex_shrink_0().toggled(!self.sidebar_is_hidden())
+                    .icon(Icon::new(IconName::PanelLeft)
+                        .text_color(rgb(if self.sidebar_is_hidden() { palette.ink } else { palette.accent }).opacity(0.5)))
+                    .accessibility_label(label).tooltip(label)
+                    .on_click(cx.workspace_listener(|view, _, window, cx| view.toggle_sidebar(window, cx))))
             })
             .child(div().id("activity-overview-toggle-hit").debug_selector(|| "activity-overview-toggle".into()).flex().flex_shrink_0()
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .child(Button::new("toggle-activity-overview")
-                .ghost().compact().flex_shrink_0()
-                .toggled(self.window.activity_overview_open)
+                .ghost().compact().flex_shrink_0().toggled(self.window.activity_overview_open)
                 .icon(Icon::new(IconName::Activity).text_color(rgb(if self.window.activity_overview_open { palette.accent } else { palette.ink })))
-                .accessibility_label("Activity overview")
-                .tooltip("Activity overview")
+                .accessibility_label("Activity overview").tooltip("Activity overview")
                 .disabled(!controls_available)
                 .on_click(cx.workspace_listener(|view, _, window, cx| view.toggle_activity_overview(window, cx)))))
-            .child(div().flex_shrink_0().w(px(1.)).h(px(18.)).mx(px(5.))
-                .bg(rgb(palette.ink).opacity(0.24)))
-            .child(tabs)
+            .child(div().flex_shrink_0().w(px(1.)).h(px(18.)).mx(px(5.)).bg(rgb(palette.ink).opacity(0.24)))
+            .children(self.window.workspace_clock.clone())
+            .child(div().flex_shrink_0().w(px(1.)).h(px(18.)).mx(px(5.)).bg(rgb(palette.ink).opacity(0.24)))
+            .child(div().flex().flex_shrink_0()
+                // The surrounding title bar is the native window-drag target.
+                // Keep a real pointer press on this control from bubbling into
+                // that drag surface before Button receives its click.
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(Button::new("split-workspace-vertical")
+                    .debug_selector(|| "split-workspace-vertical".into())
+                    .ghost().compact().flex_shrink_0()
+                    .icon(Icon::new(IconName::SquareSplitVertical).with_size(px(18.)).text_color(rgb(palette.muted)))
+                    .accessibility_label("Split pane vertically").tooltip("Split pane vertically")
+                    .disabled(!controls_available)
+                    .on_click(cx.workspace_listener(|view, _, window, cx| {
+                        let result = if view.neovim_split_focused(true, window, cx) { Ok(()) }
+                            else { view.open_focused_empty_split(true, window, cx) };
+                        if let Err(error) = result { view.window.error = Some(error); cx.notify(); }
+                    }))))
+            .child(div().flex().flex_shrink_0()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(Button::new("split-workspace-horizontal")
+                    .debug_selector(|| "split-workspace-horizontal".into())
+                    .ghost().compact().flex_shrink_0()
+                    .icon(Icon::new(IconName::SquareSplitHorizontal).with_size(px(18.)).text_color(rgb(palette.muted)))
+                    .accessibility_label("Split pane horizontally").tooltip("Split pane horizontally")
+                    .disabled(!controls_available)
+                    .on_click(cx.workspace_listener(|view, _, window, cx| {
+                        let result = if view.neovim_split_focused(false, window, cx) { Ok(()) }
+                            else { view.open_focused_empty_split(false, window, cx) };
+                        if let Err(error) = result { view.window.error = Some(error); cx.notify(); }
+                    }))));
+        let right_controls = div()
+            .id("workspace-bar-right-controls")
+            .debug_selector(|| "workspace-bar-right-controls".into())
+            .ml_auto().flex().items_center().justify_end().gap(px(5.))
             .children(self.window.workspace_usage_rings.clone())
-            .map(|bar| {
+            .map(|controls| {
                 let enabled = self.window.dock.read(cx).auto_size_panes();
                 let label = if enabled { "Turn Auto Size Panes off" } else { "Turn Auto Size Panes on" };
-                bar.child(div().flex_shrink_0().w(px(1.)).h(px(18.)).mx(px(5.)).bg(rgb(palette.ink).opacity(0.24)))
+                controls.child(div().flex_shrink_0().w(px(1.)).h(px(18.)).mx(px(5.)).bg(rgb(palette.ink).opacity(0.24)))
                     .child(Button::new("toggle-auto-size-panes")
                         .ghost().compact().flex_shrink_0().toggled(enabled)
                         .icon(Icon::new(IconName::PanelsTopLeft)
@@ -1671,6 +1678,34 @@ impl Desktop {
             })
             .child(self.ensure_admin_activity(window, cx))
             .child(self.ensure_notification_bell(window, cx));
+        let bar = div()
+            .w_full()
+            .relative()
+            .flex_shrink_0()
+            .px(px(10.))
+            // Share the sidebar controls' centre line and grow only when the
+            // configured font/scale needs more than the native titlebar height.
+            .h(tab_metrics.row_height)
+            .py_0()
+            .flex()
+            .items_center()
+            .gap(px(5.))
+            .on_mouse_down(MouseButton::Left, |event, window, _| {
+                if event.click_count == 2 {
+                    window.titlebar_double_click();
+                } else {
+                    window.start_window_move();
+                }
+            })
+            .child(left_controls)
+            .child(right_controls)
+            // The control groups are intentionally asymmetric. Centre the tab
+            // strip against the title bar itself instead of the space between
+            // those groups so adding clock/split controls cannot move it.
+            .child(div().id("workspace-bar-centered-tabs")
+                .debug_selector(|| "workspace-bar-centered-tabs".into())
+                .absolute().inset_0().flex().items_center().justify_center()
+                .child(tabs));
 
         div()
             .flex_shrink_0()

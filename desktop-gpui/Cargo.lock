@@ -5268,8 +5268,8 @@ dependencies = [
 name = "monitter-gpui-desktop"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "ammonia",
+ "anyhow",
  "argon2",
  "base64 0.22.1",
  "block2 0.6.2",

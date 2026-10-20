@@ -87,6 +87,12 @@ fn chat_header_and_watcher_chrome_stay_scoped_to_the_owning_pane(cx: &mut TestAp
             assert_eq!(hover_sensor.bottom(), header.bottom());
             assert!(icon.left() >= header.left() && icon.right() <= header.right());
             assert!(icon.top() >= header.top() && icon.bottom() <= header.bottom());
+            if tile == NativeTileTheme::Tern {
+                let left_inset = icon.left() - header.left();
+                let top_inset = icon.top() - header.top();
+                assert!((left_inset - top_inset).abs() <= px(1.),
+                    "provider control keeps equal top and left insets: {icon:?} in {header:?}");
+            }
             assert!(
                 icon.size.width <= design::ui_scaled_px(31.),
                 "icon keeps existing identity size"

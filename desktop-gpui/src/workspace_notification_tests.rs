@@ -20,6 +20,18 @@ fn layout(task: &str) -> Value {
         "panel_name":"MonitterNativePane","children":[],"info":{"panel":{"id":format!("chat:{task}")}}
     }],"info":{"tabs":{"active_index":0}}}})
 }
+fn stack_axes(value: &Value, axes: &mut Vec<u64>) {
+    if value["panel_name"] == "StackPanel" {
+        if let Some(axis) = value["info"]["stack"]["axis"].as_u64() {
+            axes.push(axis);
+        }
+    }
+    if let Some(children) = value["children"].as_array() {
+        for child in children {
+            stack_axes(child, axes);
+        }
+    }
+}
 fn mounted(cx: &mut TestAppContext, light: bool) {
     cx.update(|cx| {
         gpui_kit::init(cx);
@@ -38,7 +50,8 @@ fn mounted(cx: &mut TestAppContext, light: bool) {
                     {"id":"other","agentId":"agent","updatedAt":1},
                     {"id":"orphan","agentId":"agent","updatedAt":1}],
                 "messages":[],"channels":[],
-                "approvalRequests":[{"id":"approval","taskId":"other","status":"pending","summary":"Review this request","createdAt":2},
+                "approvalRequests":[{"id":"current-approval","taskId":"current","status":"pending","summary":"Current workspace request","createdAt":1},
+                    {"id":"approval","taskId":"other","status":"pending","summary":"Review this request","createdAt":2},
                     {"id":"global","taskId":"orphan","status":"pending","summary":"Global only","createdAt":3}]}).into();
             view.notification_model.sync(&view.snapshot);
             std::rc::Rc::make_mut(&mut view.snapshot)["messages"] = json!([{"id":"answer","taskId":"other","role":"assistant","text":"Finished the workspace change.","createdAt":20,"phase":"final_answer","streamStatus":"complete"}]);
@@ -46,6 +59,10 @@ fn mounted(cx: &mut TestAppContext, light: bool) {
             view.named_workspaces = Some(NativeWorkspaceSet {active_id:"current".into(),items:[("current","Now"),("other","Later"),("empty","Empty")].into_iter().map(|(id,name)|NativeWorkspace {
                 id:id.into(),name:name.into(),icon:"folder".into(),color:"#38BFD2".into(),url:None,layout:Some(layout(id)),
             }).collect()});
+            view.window.dock.update(cx, |dock, cx| {
+                dock.apply_layout_preset("single", window, cx).unwrap();
+                assert!(dock.focus("empty:preset-1", window, cx));
+            });
             view
         });
         desktop = Some(view.clone());
@@ -61,8 +78,17 @@ fn mounted(cx: &mut TestAppContext, light: bool) {
         let pill = visual.debug_bounds("workspace-notifications-other").expect("inactive workspace pill");
         assert_eq!(pill.size.width, pill.size.height, "notification badge stays circular");
         assert_eq!(pill.size.height, crate::design::ui_scaled_px(16.), "small badge does not grow with plan/interface text size");
-        assert!(visual.debug_bounds("workspace-notifications-current").is_none());
+        assert!(visual.debug_bounds("workspace-notifications-current").is_some(),
+            "selected workspace keeps its nonzero notification pill visible");
         assert!(visual.debug_bounds("workspace-notifications-empty").is_none());
+        if width == 1000. {
+            let tabs = visual.debug_bounds("named-workspace-tabs").expect("centered workspace tabs");
+            assert!((tabs.center().x - px(width / 2.)).abs() <= px(1.),
+                "workspace tabs are centered on the full bar: {tabs:?}");
+            assert!(visual.debug_bounds("split-workspace-vertical").is_some());
+            assert!(visual.debug_bounds("split-workspace-horizontal").is_some());
+            assert!(visual.debug_bounds("add-workspace").is_some());
+        }
         visual.simulate_click(pill.center(), Modifiers::none());
         visual.run_until_parked();
         visual.update(|window,cx|window.draw(cx).clear(cx));
@@ -91,21 +117,72 @@ fn mounted(cx: &mut TestAppContext, light: bool) {
     visual.update(|window,cx|window.draw(cx).clear(cx));
     visual.read(|cx| {
         let entries=desktop.read(cx).notification_model.entries(&desktop.read(cx).snapshot);
-        assert_eq!(entries.len(),2);
+        assert_eq!(entries.len(),3);
         assert!(!entries.iter().any(|entry|entry.id=="task:other"));
     });
     assert!(visual.debug_bounds("notification-row-task:other").is_none());
     assert!(visual.debug_bounds("notification-row-approval:approval").is_some(), "pending approval remains");
     // Authoritative removal closes the empty scoped feed and removes its pill.
     visual.update(|_,cx|desktop.update(cx,|view,cx| {
-        std::rc::Rc::make_mut(&mut view.snapshot)["approvalRequests"][0]["status"]=json!("approved");
+        std::rc::Rc::make_mut(&mut view.snapshot)["approvalRequests"][1]["status"]=json!("approved");
         view.sync_notification_bell(cx);cx.notify();
     }));
     visual.run_until_parked();visual.update(|window,cx|window.draw(cx).clear(cx));
     assert!(visual.debug_bounds("workspace-notifications-other").is_none());
+    assert!(visual.debug_bounds("workspace-notifications-current").is_some(),
+        "unrelated active-workspace notifications remain visible");
     assert!(visual.debug_bounds("notification-list").is_none());
     assert_eq!(visual.debug_bounds("workspace-tab-other").unwrap(),tab_before,"removing the pill preserves tab bounds");
     assert_eq!(visual.debug_bounds("workspace-tab-empty").unwrap(),following_before,"following workspace tab does not shift");
+
+    // These controls live inside the native title-bar drag surface. Exercise
+    // their real pointer path, not only their accessibility action, so a
+    // bubbling mouse-down cannot silently turn the click into a window drag.
+    visual.simulate_resize(size(px(1000.), px(650.)));
+    visual.update(|window, cx| {
+        desktop.update(cx, |view, cx| {
+            assert!(view
+                .window
+                .dock
+                .update(cx, |dock, cx| dock.focus("empty:preset-1", window, cx)));
+        });
+        window.draw(cx).clear(cx);
+    });
+    let vertical = visual.debug_bounds("split-workspace-vertical").unwrap();
+    visual.simulate_click(vertical.center(), Modifiers::none());
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    visual.read(|cx| {
+        let dock = desktop.read(cx).window.dock.read(cx);
+        let layout = dock.serialize(cx).unwrap();
+        let mut axes = Vec::new();
+        stack_axes(&layout["center"], &mut axes);
+        assert_eq!(
+            crate::docking::DockWorkspace::saved_ids(&layout)
+                .unwrap()
+                .len(),
+            2,
+            "vertical split button inserts a pane");
+        assert!(axes.contains(&0),
+            "vertical split button creates side-by-side panes");
+    });
+    let horizontal = visual.debug_bounds("split-workspace-horizontal").unwrap();
+    visual.simulate_click(horizontal.center(), Modifiers::none());
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    visual.read(|cx| {
+        let dock = desktop.read(cx).window.dock.read(cx);
+        let layout = dock.serialize(cx).unwrap();
+        let mut axes = Vec::new();
+        stack_axes(&layout["center"], &mut axes);
+        assert_eq!(
+            crate::docking::DockWorkspace::saved_ids(&layout)
+                .unwrap()
+                .len(),
+            3,
+            "horizontal split button inserts a pane");
+        assert!(axes.contains(&1), "horizontal split button creates stacked panes");
+    });
 }
 #[gpui_kit::test]
 fn workspace_notification_pills_light(cx: &mut TestAppContext) { mounted(cx,true); }

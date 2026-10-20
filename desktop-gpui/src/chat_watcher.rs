@@ -1434,7 +1434,9 @@ impl ChatPane {
             .id("chat-watch-mode-dock")
             .debug_selector(|| "chat-watch-mode-dock".into())
             .absolute()
-            .bottom(px(8.))
+            // Keep the pill immediately above the status bar: its bottom edge
+            // is pinned to the bar's top border as the transcript scrolls.
+            .bottom(px(0.))
             .left_0()
             .right_0()
             .px(px(12.))
@@ -2721,16 +2723,16 @@ mod native_tests {
                     (toggle.center().x - mode_dock.center().x).abs() <= gpui_kit::px(1.),
                     "Watch action stays centered in the bottom dock: {toggle:?} in {mode_dock:?}"
                 );
-                let bottom_gap = gpui_kit::px(600.) - mode_dock.bottom();
-                assert!(
-                    bottom_gap >= gpui_kit::px(8.) && bottom_gap <= gpui_kit::px(12.),
-                    "Watch action stays at the pane bottom: {mode_dock:?}, gap {bottom_gap:?}"
-                );
+                assert!((mode_dock.bottom() - gpui_kit::px(600.)).abs() <= gpui_kit::px(1.),
+                    "Watch pill bottom stays pinned above the pane/status-bar boundary: {mode_dock:?}");
                 assert!(
                     visual.debug_bounds("chat-mode-chat").is_none(),
                     "only the destination action is mounted"
                 );
-                visual.simulate_click(toggle.center(), Default::default());
+                visual.simulate_click(
+                    toggle.center(),
+                    Default::default(),
+                );
                 visual
                     .executor()
                     .advance_clock(std::time::Duration::from_millis(601));

@@ -116,7 +116,7 @@ impl Desktop {
     fn sync_workspace_notification_entries(&mut self, cx: &mut Context<Self>) {
         let entries = self.notification_model.entries(&self.snapshot);
         self.workspace_notifications.retain(|id, _| self.named_workspaces.as_ref().is_some_and(|set|
-            id != &set.active_id && set.items.iter().any(|item| &item.id == id)));
+            set.items.iter().any(|item| &item.id == id)));
         for (id, feed) in &self.workspace_notifications {
             let Some(item) = self.named_workspaces.as_ref().and_then(|set| set.items.iter().find(|item| &item.id == id)) else { continue; };
             let filtered = crate::workspace_notification_scope::entries_for_layout(&entries, item.layout.as_ref());
@@ -131,8 +131,10 @@ impl Desktop {
         let global = self.ensure_notification_bell(window, cx);
         self.sync_workspace_notification_entries(cx);
         let entries = self.notification_model.entries(&self.snapshot);
-        let items: Vec<_> = self.named_workspaces.as_ref().map(|set| set.items.iter()
-            .filter(|item| item.id != set.active_id).cloned().collect()).unwrap_or_default();
+        // A workspace's unread badge is persistent while it has scoped
+        // notifications, including while that workspace is selected. Reading
+        // or dismissing the underlying notifications is what removes it.
+        let items: Vec<_> = self.named_workspaces.as_ref().map(|set| set.items.clone()).unwrap_or_default();
         let mut pills = HashMap::new();
         for item in items {
             let filtered = crate::workspace_notification_scope::entries_for_layout(&entries, item.layout.as_ref());
