@@ -655,11 +655,20 @@ impl OutputBlock {
         if self.generation != generation {
             return;
         }
+        if matches!((name, value), ("status", Some(Value::String(status))) if status == "ready") {
+            self.bridge = Some(context.clone());
+            self.push_update();
+            return;
+        }
+        self.apply_property(name, value, cx);
+    }
+    fn apply_property(
+        &mut self,
+        name: &str,
+        value: Option<&Value>,
+        cx: &mut Context<Self>,
+    ) {
         match (name, value) {
-            ("status", Some(Value::String(status))) if status == "ready" => {
-                self.bridge = Some(context.clone());
-                self.push_update();
-            }
             ("status", Some(Value::String(status)))
                 if matches!(
                     status.as_str(),
@@ -694,6 +703,11 @@ impl OutputBlock {
             ("state", Some(value)) => match sanitize_state(value) {
                 Ok(state) if self.state != state => {
                     self.state = state.clone();
+                    // A prepared action describes the previous form snapshot.
+                    // Require another explicit Prepare after a user edits it.
+                    if self.pending.take().is_some() {
+                        cx.notify();
+                    }
                     if openui_state::save(self.key.clone(), state).is_err() {
                         self.notice = Some("Form values could not be saved.".into());
                         cx.notify();
@@ -933,6 +947,38 @@ mod openui_output_tests {
                 id: Some("1".into())
             }
         );
+    }
+
+    #[::gpui::test]
+    fn editing_form_invalidates_prepared_response_until_prepared_again(cx: &mut TestAppContext) {
+        let block = cx.new(|cx| {
+            // An invalid storage key keeps this bridge-state test off disk.
+            OutputBlock::new(String::new(), "task".into(), "message".into(), 0, cx)
+        });
+        block.update(cx, |block, cx| {
+            let initial = json!({"form":{"colour":"blue"}});
+            let edited = json!({"form":{"colour":"red"}});
+            block.state = initial.clone();
+            block.complete = true;
+            block.status = "rendered".into();
+
+            let prepared = json!({"type":"draft","id":"1","text":"Form response\n{\"colour\":\"blue\"}"});
+            block.apply_property("action", Some(&prepared), cx);
+            assert!(block.pending.as_ref().unwrap().text.contains("blue"));
+
+            block.apply_property("state", Some(&initial), cx);
+            assert!(block.pending.is_some(), "an unchanged state echo keeps the prepared response");
+            block.apply_property("state", Some(&edited), cx);
+            assert_eq!(block.state, edited);
+            assert!(block.pending.is_none(), "editing must remove the stale review action");
+
+            let prepared = json!({"type":"draft","id":"2","text":"Form response\n{\"colour\":\"red\"}"});
+            block.apply_property("action", Some(&prepared), cx);
+            let pending = block.pending.as_ref().unwrap();
+            assert_eq!(pending.id.as_deref(), Some("2"));
+            assert!(pending.text.contains("red"));
+            assert!(!pending.text.contains("blue"));
+        });
     }
 
     #[::gpui::test]
