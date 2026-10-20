@@ -757,7 +757,7 @@ fn ensure_internal_admin(snapshot: &mut Snapshot) -> InternalAdminState {
             jev_routing: model::JevRoutingMode::Off,
             jev_model_tiers: model::JevModelTiers::default(),
             jev_decisions_enabled: false,
-            decision_backend: model::DecisionBackendKind::default(),
+            decision_backend: model::DecisionBackendSelection::default(),
             acp: None,
             internal: true,
             codex_home: None,
@@ -3492,7 +3492,7 @@ impl Service {
             .agents
             .iter()
             .find(|agent| agent.id == task.agent_id && !agent.internal)
-            .map(|agent| agent.decision_backend)
+            .map(|agent| agent.decision_backend.resolve(data.snapshot.settings.system_one_backend))
             .ok_or_else(|| "Jev Decisions caller agent was not found.".into())
     }
 
@@ -5264,24 +5264,22 @@ impl Service {
         agent_id: &str,
         prompt: &str,
     ) -> Result<model_router::JevRoutePlan, String> {
-        let agent = self
-            .committed_data()?
-            .snapshot
-            .agents
+        let data = self.committed_data()?;
+        let agent = data.snapshot.agents
             .iter()
             .find(|agent| agent.id == agent_id)
             .cloned()
             .ok_or("Agent was not found.")?;
         if agent.internal {
-            return Err("Jev routing is not available for the internal Monitter Admin agent.".into());
+            return Err("System One routing is not available for the internal Monitter Admin agent.".into());
         }
-        if agent.jev_routing == model::JevRoutingMode::Off {
-            return Err("Enable Jev routing for this harness before requesting a route.".into());
+        if agent.jev_routing.resolve(data.snapshot.settings.system_one_routing) == model::JevRoutingMode::Off {
+            return Err("Enable System One routing for this harness before requesting a route.".into());
         }
         if prompt.trim().is_empty() {
-            return Err("Write a task before requesting a Jev route.".into());
+            return Err("Write a task before requesting a System One route.".into());
         }
-        let mut plan = model_router::live_jev_route_plan(prompt)?;
+        let mut plan = model_router::live_system_one_route_plan(prompt, agent.decision_backend.resolve(data.snapshot.settings.system_one_backend))?;
         plan.agent_id = Some(agent.id);
         model_router::persist_jev_route_plan(&self.router_trace_dir, &plan)?;
         Ok(plan)
@@ -5292,20 +5290,20 @@ impl Service {
     /// come from the native trace, never from renderer-provided JSON.
     fn record_jev_route(&self, task_id: &str, trace_id: &str) -> Result<(), String> {
         let trace_id = uuid::Uuid::parse_str(trace_id)
-            .map_err(|_| "Jev route trace ID is invalid.".to_string())?
+            .map_err(|_| "System One route trace ID is invalid.".to_string())?
             .to_string();
         let path = self.router_trace_dir.join(format!("{trace_id}.json"));
         let metadata =
-            std::fs::metadata(&path).map_err(|_| "Jev route trace was not found.".to_string())?;
+            std::fs::metadata(&path).map_err(|_| "System One route trace was not found.".to_string())?;
         if metadata.len() > 64 * 1024 {
-            return Err("Jev route trace is too large.".into());
+            return Err("System One route trace is too large.".into());
         }
         let plan: model_router::JevRoutePlan = serde_json::from_slice(
-            &std::fs::read(&path).map_err(|_| "Jev route trace could not be read.".to_string())?,
+            &std::fs::read(&path).map_err(|_| "System One route trace could not be read.".to_string())?,
         )
-        .map_err(|_| "Jev route trace is invalid.".to_string())?;
+        .map_err(|_| "System One route trace is invalid.".to_string())?;
         if plan.trace_id != trace_id || !plan.confidences_are_valid() {
-            return Err("Jev route trace is invalid.".into());
+            return Err("System One route trace is invalid.".into());
         }
         self.mutate(Some(task_id.into()), |state| {
             let task = state
@@ -5314,15 +5312,15 @@ impl Service {
                 .find(|task| task.id == task_id)
                 .ok_or("Task was not found.")?;
             if plan.agent_id.as_deref() != Some(task.agent_id.as_str()) {
-                return Err("Jev route trace does not belong to this task's agent.".into());
+                return Err("System One route trace does not belong to this task's agent.".into());
             }
             let agent = state
                 .agents
                 .iter()
                 .find(|agent| agent.id == task.agent_id)
                 .ok_or("Task agent was not found.")?;
-            if agent.jev_routing == model::JevRoutingMode::Off {
-                return Err("Jev routing is not enabled for this task's agent.".into());
+            if agent.jev_routing.resolve(state.settings.system_one_routing) == model::JevRoutingMode::Off {
+                return Err("System One routing is not enabled for this task's agent.".into());
             }
             if state.events.iter().any(|event| {
                 event.task_id == task_id
@@ -5349,7 +5347,7 @@ impl Service {
                 .model_settings
                 .as_ref()
                 .and_then(|settings| settings.reasoning_effort.as_deref());
-            let auto_eligible = agent.jev_routing == model::JevRoutingMode::SafeAuto
+            let auto_eligible = agent.jev_routing.resolve(state.settings.system_one_routing) == model::JevRoutingMode::SafeAuto
                 && plan.auto_route_eligible();
             let model_status = if !auto_eligible || !applied {
                 "recommended"
@@ -5370,11 +5368,11 @@ impl Service {
                 "recommended"
             };
             let tier = serde_json::to_value(plan.decision.model_tier)
-                .map_err(|_| "Jev route tier could not be recorded.".to_string())?;
+                .map_err(|_| "System One route tier could not be recorded.".to_string())?;
             let tier_label = tier.as_str().unwrap_or("model").replace('_', " ");
             let selected_model: String = task.model.chars().take(100).collect();
             let outcome = if model_status == "recommended" {
-                format!("{tier_label} · Jev recommendation only")
+                format!("{tier_label} · System One recommendation only")
             } else if model_status == "pending" {
                 format!("{tier_label} · {selected_model} requested · checking harness")
             } else if model_changed {
@@ -5431,7 +5429,7 @@ impl Service {
                 id: id(),
                 task_id: task_id.into(),
                 kind: "jevDecision".into(),
-                title: "Jev route".into(),
+                title: "System One route".into(),
                 detail: detail.into(),
                 created_at,
             }));
@@ -5569,7 +5567,7 @@ impl Service {
         query: &str,
         candidates: &[model_router::JevCommandCandidate],
     ) -> Result<model_router::JevCommandPlan, String> {
-        let result = model_router::live_jev_command_plan(query, candidates)?;
+        let result = model_router::live_system_one_command_plan(query, candidates, self.committed_data()?.snapshot.settings.system_one_backend)?;
         model_router::persist_jev_command_plan(&self.router_trace_dir, &result)?;
         Ok(result.plan)
     }
@@ -7909,7 +7907,7 @@ async fn plan_jev_route(
     let service = state.0.clone();
     tauri::async_runtime::spawn_blocking(move || service.plan_jev_route(&agent_id, &prompt))
         .await
-        .map_err(|_| "Jev route worker failed.".to_string())?
+        .map_err(|_| "System One route worker failed.".to_string())?
 }
 
 #[tauri::command]
@@ -7921,7 +7919,7 @@ async fn record_jev_route(
     let service = state.0.clone();
     tauri::async_runtime::spawn_blocking(move || service.record_jev_route(&task_id, &trace_id))
         .await
-        .map_err(|_| "Jev route record worker failed.".to_string())?
+        .map_err(|_| "System One route record worker failed.".to_string())?
 }
 
 /// Native-owner only: make one bounded, advisory Cmd-P selection with the
@@ -9277,6 +9275,9 @@ async fn edit_queued_message(
 }
 
 fn validate_settings(settings: &Settings) -> Result<(), String> {
+    if settings.system_one_routing == model::JevRoutingMode::Inherit {
+        return Err("Global System One routing must be off, recommend, or safe_auto.".into());
+    }
     validate_board_guidance_text(&settings.board_guidance_text, "Default")?;
     if settings.user_name.chars().count() > 80 || settings.user_name.chars().any(char::is_control) {
         return Err("Your name must be at most 80 characters without control characters.".into());

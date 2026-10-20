@@ -397,3 +397,25 @@ fn streaming_controls(presentation: &SearchCardPresentation, cx: &mut Context<De
     }
     card
 }
+
+
+pub(super) fn render_system_one(
+    desktop: &mut Desktop,
+    cx: &mut Context<Desktop>,
+    palette: Palette,
+) -> AnyElement {
+    let presentation = SearchCardPresentation::new(desktop);
+    let settings = desktop.snapshot["settings"].clone();
+    let backend = settings["systemOneBackend"].as_str().unwrap_or("type_safe");
+    let routing = settings["systemOneRouting"].as_str().unwrap_or("off");
+    stack()
+        .child(presentation.card("System One backend", "Default backend for routing, classifications and advisory decisions. Agents can override this choice.", palette)
+            .child(choices(desktop, cx, palette, "systemOneBackend", "System One backend", backend,
+                &[("type_safe", "TypeSafe"), ("laya", "Local Laya")]))
+            .child(settings_hint("TypeSafe uses TYPESAFE_API_KEY from Environment & Secrets. Monitter starts the configured local Laya service on demand when its model is available.", palette)))
+        .child(presentation.card("System One routing", "Default routing for new tasks. Agents can inherit this setting or choose their own mode. Existing explicit agent settings are preserved.", palette)
+            .child(choices(desktop, cx, palette, "systemOneRouting", "System One routing", routing,
+                &[("off", "Off"), ("recommend", "Recommend only"), ("safe_auto", "Safe auto-route")]))
+            .child(settings_hint("Routing can recommend models or apply the agent's model tier mappings. It never changes permissions or approvals.", palette)))
+        .into_any_element()
+}

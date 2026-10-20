@@ -1,7 +1,7 @@
 //! Native Gmail inbox triage.
 //!
 //! Monitter reads assigned native Gmail connections directly, classifies bounded
-//! message summaries with Jev, and persists body-free cards. Full message bodies
+//! message summaries with System One, and persists body-free cards. Full message bodies
 //! are retrieved only for user detail requests and remain in process memory.
 
 use crate::{
@@ -30,14 +30,14 @@ const MAX_SNIPPET_BYTES: usize = 1_500;
 
 /// A background classifier cannot survive a process restart. Convert its
 /// durable provisional projection into an explicit low-confidence fallback so
-/// the UI never claims Jev is still running after startup.
+/// the UI never claims System One is still running after startup.
 pub(crate) fn recover_interrupted_batches(snapshot: &mut crate::model::Snapshot) -> bool {
     let mut changed = false;
     for batch in &mut snapshot.mail_batches {
         if batch.classifier.mode == "pending" {
             batch.classifier = fallback_trace(
                 "fallback",
-                "Jev classification was interrupted by Monitter restarting.",
+                "System One classification was interrupted by Monitter restarting.",
             );
             changed = true;
         }
@@ -257,7 +257,7 @@ impl crate::Service {
                 } else if force_mock {
                     "Mail triage classified locally"
                 } else {
-                    "Mail triage queued for Jev"
+                    "Mail triage queued for System One"
                 }
                 .into(),
                 detail: trace.to_string().into(),
@@ -313,7 +313,9 @@ impl crate::Service {
         let spawn = std::thread::Builder::new()
             .name("monitter-mail-jev".into())
             .spawn(move || {
-                let result = classify_live(&worker_input);
+                let result = service.committed_data().and_then(|data| {
+                    classify_live_with_backend(&worker_input, data.snapshot.settings.system_one_backend)
+                });
                 let _ = service.finish_jev_enrichment(
                     &worker_task_id,
                     &worker_batch_id,
@@ -328,7 +330,7 @@ impl crate::Service {
                 &batch_id,
                 revision,
                 &input,
-                Err("Jev classification worker could not start.".into()),
+                Err("System One classification worker could not start.".into()),
             );
         }
     }
@@ -357,7 +359,7 @@ impl crate::Service {
                 Ok((classifications, evidence)) => {
                     apply_classifications(batch, &input.messages, classifications)?;
                     batch.classifier = trace_from_evidence("jev", evidence, None);
-                    ("Mail triage enriched by Jev", false)
+                    ("Mail triage enriched by System One", false)
                 }
                 Err(error) => {
                     batch.classifier = fallback_trace("fallback", &safe_jev_error(&error));
@@ -388,7 +390,7 @@ impl crate::Service {
             };
             Ok(unimportant)
         })?;
-        // A failed or uncertain Jev run never changes Gmail. A per-message provider
+        // A failed or uncertain System One run never changes Gmail. A per-message provider
         // failure is kept visible in the event stream; subsequent refreshes retry.
         if !mark_read.is_empty() {
             let (task, _) = self.task_and_host(task_id)?;
@@ -788,7 +790,7 @@ fn validate_batch(input: &MailBatchInput) -> Result<(), String> {
         let mut chunk = input.clone();
         chunk.messages = messages.to_vec();
         if jev_state(&chunk)?.len() > model_router::MAX_JEV_PROMPT_BYTES {
-            return Err("A normalized mail classification chunk exceeds Jev's state limit.".into());
+            return Err("A normalized mail classification chunk exceeds System One's state limit.".into());
         }
     }
     Ok(())
@@ -822,13 +824,20 @@ fn bounded_list(values: &[String], count: usize, bytes: usize, name: &str) -> Re
 fn classify_live(
     input: &MailBatchInput,
 ) -> Result<(Vec<MailClassification>, ClassifierEvidence), String> {
+    classify_live_with_backend(input, crate::model::DecisionBackendKind::TypeSafe)
+}
+
+fn classify_live_with_backend(
+    input: &MailBatchInput,
+    backend: crate::model::DecisionBackendKind,
+) -> Result<(Vec<MailClassification>, ClassifierEvidence), String> {
     let mut classifications = Vec::with_capacity(input.messages.len());
     let mut total: Option<ClassifierEvidence> = None;
     for messages in input.messages.chunks(JEV_CHUNK_SIZE) {
         let mut chunk = input.clone();
         chunk.messages = messages.to_vec();
         let (state, questions) = jev_payload(&chunk)?;
-        let result = model_router::live_jev_system_one(&state, questions)?;
+        let result = model_router::decision_backend(backend).infer(&model_router::DecisionRequest { state, questions })?;
         classifications.extend(classifications_from_jev(&result.body, messages.len())?);
         if let Some(evidence) = &mut total {
             evidence.latency_ms = evidence.latency_ms.saturating_add(result.evidence.latency_ms);
@@ -839,7 +848,7 @@ fn classify_live(
             total = Some(result.evidence);
         }
     }
-    Ok((classifications, total.ok_or("No messages were sent to Jev.")?))
+    Ok((classifications, total.ok_or("No messages were sent to System One.")?))
 }
 
 #[cfg(test)]
@@ -1028,7 +1037,7 @@ fn noul_answer(body: &Value, name: &str) -> Result<u8, String> {
         .and_then(|answer| answer.get("noul"))
         .and_then(Value::as_f64)
         .filter(|value| value.is_finite() && (0.0..=1.0).contains(value))
-        .ok_or_else(|| format!("Jev response has invalid Noul answer for '{name}'."))?;
+        .ok_or_else(|| format!("System One response has invalid Noul answer for '{name}'."))?;
     Ok((probability * 100.0).round() as u8)
 }
 
@@ -1036,18 +1045,18 @@ fn typed_answer<T: for<'de> Deserialize<'de>>(body: &Value, name: &str) -> Resul
     let answer = body
         .get("answers")
         .and_then(|answers| answers.get(name))
-        .ok_or_else(|| format!("Jev response omitted '{name}'."))?;
+        .ok_or_else(|| format!("System One response omitted '{name}'."))?;
     let selected = answer
         .get("choice")
         .and_then(Value::as_str)
-        .ok_or_else(|| format!("Jev response has no choice for '{name}'."))?;
+        .ok_or_else(|| format!("System One response has no choice for '{name}'."))?;
     let confidence = answer
         .get("confidence")
         .and_then(Value::as_f64)
         .filter(|value| (0.0..=1.0).contains(value))
-        .ok_or_else(|| format!("Jev response has invalid confidence for '{name}'."))?;
+        .ok_or_else(|| format!("System One response has invalid confidence for '{name}'."))?;
     let value = serde_json::from_value(Value::String(selected.into()))
-        .map_err(|_| format!("Jev returned unsupported choice '{selected}' for '{name}'."))?;
+        .map_err(|_| format!("System One returned unsupported choice '{selected}' for '{name}'."))?;
     Ok((value, (confidence * 100.0).round() as u8))
 }
 
@@ -1179,7 +1188,7 @@ fn apply_classifications(
     classifications: Vec<MailClassification>,
 ) -> Result<(), String> {
     if messages.len() != classifications.len() {
-        return Err("Jev returned the wrong number of mail classifications.".into());
+        return Err("System One returned the wrong number of mail classifications.".into());
     }
     for (message, classification) in messages.iter().zip(classifications) {
         let item = batch
@@ -1187,7 +1196,7 @@ fn apply_classifications(
             .iter_mut()
             .find(|item| item.provider_message_id == message.provider_message_id)
             .ok_or_else(|| {
-                "Jev returned a classification for mail no longer in this inbox.".to_string()
+                "System One returned a classification for mail no longer in this inbox.".to_string()
             })?;
         item.importance = classification.importance;
         item.importance_score = importance_score(classification.importance);
@@ -1328,22 +1337,22 @@ fn safe_jev_error(error: &str) -> String {
     if lower.contains("no typesafe_api_key or jev_api_key") {
         "Add TYPESAFE_API_KEY in Settings > Environment & Secrets.".into()
     } else if lower.contains("keychain") || lower.contains("credential cache") {
-        "Monitter could not read the Jev credential from macOS Keychain.".into()
+        "Monitter could not read the System One credential from macOS Keychain.".into()
     } else if lower.contains("not configured") || lower.contains("api key") {
-        "Jev API access is not configured.".into()
+        "System One API access is not configured.".into()
     } else if lower.contains("timed out") || lower.contains("timeout") {
-        "Jev classification timed out.".into()
+        "System One classification timed out.".into()
     } else if lower.contains("http") || lower.contains("status") {
-        "Jev returned an HTTP error.".into()
+        "System One returned an HTTP error.".into()
     } else if lower.contains("choice")
         || lower.contains("answer")
         || lower.contains("invalid")
         || lower.contains("unsupported")
         || lower.contains("omitted")
     {
-        "Jev returned invalid typed answers.".into()
+        "System One returned invalid typed answers.".into()
     } else {
-        "Jev classification failed.".into()
+        "System One classification failed.".into()
     }
 }
 
@@ -1890,7 +1899,7 @@ mod tests {
         assert_eq!(failure.classifier.mode, "fallback");
         assert_eq!(
             failure.classifier.fallback_reason.as_deref(),
-            Some("Jev returned an HTTP error.")
+            Some("System One returned an HTTP error.")
         );
         assert!(!serde_json::to_string(&snapshot)
             .unwrap()
@@ -1962,7 +1971,7 @@ mod tests {
             .collect();
 
         let error = validate_batch(&source).unwrap_err();
-        assert!(error.contains("one Jev request") || error.contains("Jev's 64 KiB state limit"));
+        assert!(error.contains("one System One request") || error.contains("System One's 64 KiB state limit"));
     }
 
     #[test]
@@ -2263,27 +2272,27 @@ mod tests {
         );
         assert_eq!(
             safe_jev_error("Cannot access the macOS Keychain for Environment & Secrets."),
-            "Monitter could not read the Jev credential from macOS Keychain."
+            "Monitter could not read the System One credential from macOS Keychain."
         );
     }
 
     #[test]
-    #[ignore = "makes one live Jev request using the Keychain-backed Monitter secret"]
+    #[ignore = "makes one live System One request using the Keychain-backed Monitter secret"]
     fn live_jev_mail_smoke_uses_synthetic_envelope() {
         let first_lookup = Instant::now();
         let _ = crate::environment_secrets::jev_api_key_for_internal_service()
-            .expect("first Jev credential lookup");
+            .expect("first System One credential lookup");
         let first_lookup_ms = first_lookup.elapsed().as_millis();
         let cached_lookup = Instant::now();
         let _ = crate::environment_secrets::jev_api_key_for_internal_service()
-            .expect("cached Jev credential lookup");
+            .expect("cached System One credential lookup");
         let cached_lookup_ms = cached_lookup.elapsed().as_millis();
-        let (classified, evidence) = classify_live(&input()).expect("live Jev mail classification");
+        let (classified, evidence) = classify_live(&input()).expect("live System One mail classification");
         assert_eq!(classified.len(), 1);
         assert!(!evidence.provider.is_empty());
         assert!(!evidence.model.is_empty());
         eprintln!(
-            "Jev mail smoke: provider={} model={} first_keychain_ms={} cached_key_ms={} http_latency_ms={}",
+            "System One mail smoke: provider={} model={} first_keychain_ms={} cached_key_ms={} http_latency_ms={}",
             evidence.provider,
             evidence.model,
             first_lookup_ms,

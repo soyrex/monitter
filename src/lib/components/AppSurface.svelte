@@ -2414,7 +2414,7 @@
     expertise: [], responsibilities: [], skills: [], collaborationEnabled: true,
     sandbox: "read-only",
     codexHome: null,
-    jevRouting: 'off',
+    jevRouting: 'inherit',
     jevModelTiers: { fast: '', balanced: '', strong: '', frontier: '' },
   });
   const blankChannel = (): Channel => ({
@@ -3860,10 +3860,11 @@
     let routingNotice = '';
     let routePlan: JevRoutePlan | null = null;
     const routeAgent = taskFormAgent;
-    // An explicit model selection is a user preference and always wins. Jev
-    // never changes the sandbox or approval path. Jev's permission signal is
+    const routeMode = !routeAgent?.jevRouting || routeAgent.jevRouting === 'inherit' ? snapshot?.settings.systemOneRouting ?? 'off' : routeAgent.jevRouting;
+    // An explicit model selection is a user preference and always wins. System One
+    // never changes the sandbox or approval path. System One's permission signal is
     // advisory and does not create a separate review step.
-    if (!draft.createdTaskId && routeAgent?.jevRouting && routeAgent.jevRouting !== 'off' && !modelSettings) {
+    if (!draft.createdTaskId && routeAgent && routeMode !== 'off' && !modelSettings) {
       error = ''; notice = '';
       try {
         routePlan = await bridge.planJevRoute(routeAgent.id, textToSend);
@@ -3871,7 +3872,7 @@
         const label = `${decision.model_tier.replace('_', ' ')} · ${decision.reasoning_level} reasoning`;
         const modelRouteConfidence = routePlan.autoRoutePolicy?.confidence ?? decision.confidence;
         const autoRouteEligible = routePlan.autoRoutePolicy?.eligible ?? decision.confidence >= 0.5;
-        if (routeAgent.jevRouting === 'safe_auto' && autoRouteEligible) {
+        if (routeMode === 'safe_auto' && autoRouteEligible) {
           const tierModel = routeAgent.jevModelTiers?.[decision.model_tier]?.trim() || '';
           const mappedModel = tierModel || routeAgent.model;
           if (mappedModel) {
@@ -3893,21 +3894,21 @@
                   : `${decision.reasoning_level} reasoning is unavailable for this model; its default was kept.`;
               const modelNotice = tierModel
                 ? selected.id === routeAgent.model
-                  ? `Jev recommends its ${decision.model_tier.replace('_', ' ')} tier (${Math.round(modelRouteConfidence * 100)}% route confidence). Its mapped model is already the default: ${selected.name}.`
-                  : `Jev selected ${selected.name} for its ${decision.model_tier.replace('_', ' ')} tier (${Math.round(modelRouteConfidence * 100)}% route confidence).`
-                : `Jev recommends its ${decision.model_tier.replace('_', ' ')} tier (${Math.round(modelRouteConfidence * 100)}% route confidence). No model is mapped to that tier, so the default ${selected.name} was kept.`;
+                  ? `System One recommends its ${decision.model_tier.replace('_', ' ')} tier (${Math.round(modelRouteConfidence * 100)}% route confidence). Its mapped model is already the default: ${selected.name}.`
+                  : `System One selected ${selected.name} for its ${decision.model_tier.replace('_', ' ')} tier (${Math.round(modelRouteConfidence * 100)}% route confidence).`
+                : `System One recommends its ${decision.model_tier.replace('_', ' ')} tier (${Math.round(modelRouteConfidence * 100)}% route confidence). No model is mapped to that tier, so the default ${selected.name} was kept.`;
               routingNotice = `${modelNotice} ${reasoningNotice}`;
             } else {
-              routingNotice = `Jev recommends ${label}, but its mapped model is not advertised by this harness. The harness default model was kept.${routeAgent.provider === 'acp' ? ' Its reasoning choice will be checked against the ACP session.' : ''}`;
+              routingNotice = `System One recommends ${label}, but its mapped model is not advertised by this harness. The harness default model was kept.${routeAgent.provider === 'acp' ? ' Its reasoning choice will be checked against the ACP session.' : ''}`;
             }
           } else {
-            routingNotice = `Jev recommends ${label}; this harness has no mapped model for that tier. ${routeAgent.provider === 'acp' ? 'Its reasoning choice will be checked against the ACP session.' : 'The harness default was kept.'}`;
+            routingNotice = `System One recommends ${label}; this harness has no mapped model for that tier. ${routeAgent.provider === 'acp' ? 'Its reasoning choice will be checked against the ACP session.' : 'The harness default was kept.'}`;
           }
         } else {
-          routingNotice = `Jev recommends ${label} (${Math.round(modelRouteConfidence * 100)}% route confidence). The harness default model was kept.`;
+          routingNotice = `System One recommends ${label} (${Math.round(modelRouteConfidence * 100)}% route confidence). The harness default model was kept.`;
         }
       } catch (reason) {
-        error = `Jev routing could not run: ${text(reason)}`;
+        error = `System One routing could not run: ${text(reason)}`;
         updateOptimisticMessage(optimistic.id, { status: 'not-confirmed', error: text(reason) });
         retainFailedTaskDraft(draftId, captured.text);
         finishDraftComposerFocusTransfer(draftId);
@@ -3939,7 +3940,7 @@
         try {
           await bridge.recordJevRoute(resolvedTaskId, routePlan.traceId);
         } catch (reason) {
-          notice = `${routingNotice} Jev's route card could not be saved: ${text(reason)}`.trim();
+          notice = `${routingNotice} System One's route card could not be saved: ${text(reason)}`.trim();
         }
       }
       const baselineIds = new Set(snapshot?.messages.filter(message => message.taskId === resolvedTaskId).map(message => message.id) ?? []);
@@ -4940,19 +4941,19 @@
       const plan = await bridge.planJevCommand(normalized, candidates);
       if (request !== jevPaletteRequest || palette !== 'controls' || jevPalette.query !== normalized) return;
       const candidate = controlItems.find(item => item.id === plan.candidateId && !item.disabled);
-      if (!candidate) throw new Error('Jev returned a control that is no longer available.');
+      if (!candidate) throw new Error('System One returned a control that is no longer available.');
       jevPalette = {
         query: normalized,
         loading: false,
         suggestion: {
           candidateId: candidate.id,
           label: candidate.label,
-          detail: `Jev · ${Math.round(plan.confidence * 100)}% · ${plan.reason}`,
+          detail: `System One · ${Math.round(plan.confidence * 100)}% · ${plan.reason}`,
         },
       };
     } catch (reason) {
       if (request !== jevPaletteRequest || palette !== 'controls') return;
-      jevPalette = { query: normalized, loading: false, error: `Jev unavailable: ${text(reason)}` };
+      jevPalette = { query: normalized, loading: false, error: `System One unavailable: ${text(reason)}` };
     }
   }
   function closeCommandPalette() {
@@ -5001,7 +5002,7 @@
     if (id.startsWith('__jev-suggestion:')) {
       const candidateId = id.slice('__jev-suggestion:'.length);
       if (jevPalette.suggestion?.candidateId !== candidateId || !controlItems.some(item => item.id === candidateId && !item.disabled)) {
-        jevPalette = { query: jevPalette.query, loading: false, error: 'That Jev suggestion is no longer available.' };
+        jevPalette = { query: jevPalette.query, loading: false, error: 'That System One suggestion is no longer available.' };
         return;
       }
       id = candidateId;
@@ -5723,7 +5724,7 @@
               <div class="composer-actions">{@render voiceButton()}<button class="primary composer-control" aria-label={composerPending[`draft:${currentDraftId}`] ? "Starting task" : "Send task message"} title={composerPending[`draft:${currentDraftId}`] ? "Starting…" : "Send"} disabled={composerPending[`draft:${currentDraftId}`] || !canSend || !taskAgentId} onclick={send}>{#if composerPending[`draft:${currentDraftId}`]}<LoaderCircle class="spin" size={15}/>{:else}<CornerDownLeft size={16}/>{/if}</button></div>
             </div>
             </div>
-      <div class="composer-footer"><div class="composer-left">{@render voiceStatus()}{#if taskFormAgent}<AccessPicker provider={taskFormAgent.provider} sandbox={draftSandbox} disabled={draftSendPending||filesBusy} onchange={changeSandbox}/>{/if}</div><div class="composer-right"><ModelPicker target={currentTaskDraft.createdTaskId?{taskId:currentTaskDraft.createdTaskId}:{agentId:taskAgentId,projectId:taskProjectId||null,codexHome:taskFormAgent?.provider==='codex'?taskFormAgent.codexHome??null:null}} settings={draftModelSettings} fallbackModel={taskFormAgent?.model??''} disabled={draftSendPending||filesBusy} jevMode={taskFormAgent?.jevRouting ?? 'off'} onchange={changeModel}/></div></div>
+      <div class="composer-footer"><div class="composer-left">{@render voiceStatus()}{#if taskFormAgent}<AccessPicker provider={taskFormAgent.provider} sandbox={draftSandbox} disabled={draftSendPending||filesBusy} onchange={changeSandbox}/>{/if}</div><div class="composer-right"><ModelPicker target={currentTaskDraft.createdTaskId?{taskId:currentTaskDraft.createdTaskId}:{agentId:taskAgentId,projectId:taskProjectId||null,codexHome:taskFormAgent?.provider==='codex'?taskFormAgent.codexHome??null:null}} settings={draftModelSettings} fallbackModel={taskFormAgent?.model??''} disabled={draftSendPending||filesBusy} jevMode={!taskFormAgent?.jevRouting || taskFormAgent.jevRouting === 'inherit' ? snapshot?.settings.systemOneRouting ?? 'off' : taskFormAgent.jevRouting} onchange={changeModel}/></div></div>
           </dialog>
           <div class="suggestions" aria-label="Suggestions">
             <button onclick={()=>{composer='Review this project and suggest the next concrete step.'; updateSlash(composer);}}>Review this project</button>
@@ -5771,7 +5772,7 @@
             <div class="composer-footer">
               <div class="composer-left">{@render voiceStatus()}<AccessPicker provider={selectedTask.provider} sandbox={selectedTask.sandbox} disabled={busy||(selectedTask.status==='running' && selectedTask.provider!=='codex')} appliesNextTurn={selectedTask.status==='running' && selectedTask.provider==='codex'} onchange={changeSandbox}/></div>
               <div class="composer-right">
-                <ModelPicker target={{taskId:selectedTask.id,codexHome:selectedTask.provider==='codex'?selectedTask.codexHome??null:null}} settings={selectedTask.modelSettings??null} fallbackModel={selectedTask.model} disabled={busy||(selectedTask.status==='running' && selectedTask.provider!=='codex')} appliesNextTurn={selectedTask.status==='running' && selectedTask.provider==='codex'} jevMode={selectedAgent?.jevRouting ?? 'off'} onchange={changeModel}/>
+                <ModelPicker target={{taskId:selectedTask.id,codexHome:selectedTask.provider==='codex'?selectedTask.codexHome??null:null}} settings={selectedTask.modelSettings??null} fallbackModel={selectedTask.model} disabled={busy||(selectedTask.status==='running' && selectedTask.provider!=='codex')} appliesNextTurn={selectedTask.status==='running' && selectedTask.provider==='codex'} jevMode={!selectedAgent?.jevRouting || selectedAgent.jevRouting === 'inherit' ? snapshot?.settings.systemOneRouting ?? 'off' : selectedAgent.jevRouting} onchange={changeModel}/>
               </div>
             </div>
           </dialog>
@@ -6583,14 +6584,23 @@
         <label>Colour<input type="color" bind:value={draft.color} onchange={() => markAgentDirty(draft.id)} /></label>
       </div>
       <details class="agent-profile">
-        <summary>Jev routing <span class="optional">Optional</span></summary>
+        <summary>System One routing and backend <span class="optional">Optional</span></summary>
         <p>Classifies a new task before it starts. It can suggest a tier, or safely apply a model/reasoning mapping you choose. It never changes permissions, approvals, or the selected model when the user set one explicitly.</p>
-        <label>Mode<select value={draft.jevRouting ?? 'off'} onchange={(event) => { draft.jevRouting = event.currentTarget.value as Agent['jevRouting']; if (!draft.jevModelTiers) draft.jevModelTiers = { fast: '', balanced: '', strong: '', frontier: '' }; markAgentDirty(draft.id); }}>
+        <label>System One backend override
+          <select value={draft.decisionBackend ?? 'inherit'} disabled={busy} onchange={(event) => { draft.decisionBackend = event.currentTarget.value as Agent['decisionBackend']; markAgentDirty(draft.id); }}>
+            <option value="inherit">Use global setting ({snapshot?.settings.systemOneBackend === 'laya' ? 'Local Laya' : 'TypeSafe'})</option>
+            <option value="type_safe">TypeSafe</option>
+            <option value="laya">Local Laya (127.0.0.1:8080)</option>
+          </select>
+        </label>
+        {#if (draft.decisionBackend === 'inherit' || !draft.decisionBackend ? snapshot?.settings.systemOneBackend ?? 'type_safe' : draft.decisionBackend) === 'type_safe'}<p class="hint">TypeSafe requires <code>TYPESAFE_API_KEY</code> saved in Settings → Environment &amp; Secrets.</p>{:else}<p class="hint">Laya requires the local server at <code>http://127.0.0.1:8080/v1/systemone</code>. If it requires authentication, save <code>LAYA_API_KEY</code> in Environment &amp; Secrets. Monitter starts the configured local Laya service on demand when its model is available.</p>{/if}
+        <label>Mode<select value={draft.jevRouting ?? 'inherit'} onchange={(event) => { draft.jevRouting = event.currentTarget.value as Agent['jevRouting']; if (!draft.jevModelTiers) draft.jevModelTiers = { fast: '', balanced: '', strong: '', frontier: '' }; markAgentDirty(draft.id); }}>
+          <option value="inherit">Use global setting ({snapshot?.settings.systemOneRouting ?? 'off'})</option>
           <option value="off">Off</option>
           <option value="recommend">Recommend only</option>
           <option value="safe_auto">Safe auto-route</option>
         </select></label>
-        {#if draft.jevRouting === 'safe_auto' && draft.jevModelTiers}
+        {#if (draft.jevRouting === 'safe_auto' || ((!draft.jevRouting || draft.jevRouting === 'inherit') && snapshot?.settings.systemOneRouting === 'safe_auto')) && draft.jevModelTiers}
           <p class="hint">Map only the models this harness can use. A blank tier keeps this harness’s normal model. Any selected model is still validated by the provider before the task starts.</p>
           <JevTierModelPicker draft={draft} saved={settingsAgents.find(agent => agent.id === draft.id) ?? null} disabled={busy} onchange={(tier, modelId) => { if (agentDraft?.jevModelTiers) { agentDraft.jevModelTiers[tier] = modelId; markAgentDirty(agentDraft.id); } }} />
         {/if}
@@ -6599,19 +6609,12 @@
         {@const jevDecisionsHost = snapshot?.hosts.find(host => host.id === draft.hostId)}
         {@const jevDecisionsSupported = jevDecisionsHost?.kind === 'local' && ['codex', 'claude', 'acp'].includes(draft.provider) && !isAgyHeadlessLaunch(draft.acp)}
         <details class="agent-jev-decisions" open={draft.jevDecisionsEnabled === true}>
-          <summary>Jev Decisions add-on <span class="optional">Optional</span></summary>
+          <summary>System One Decisions add-on <span class="optional">Optional</span></summary>
           <p>Provides separate <code>jev_choose</code> and <code>jev_assess</code> MCP tools for bounded choices and assessments, with guidance to treat their results as recommendations rather than authority. The tools use the selected backend and never grant or change agent permissions.</p>
-          <label>Decision backend
-            <select value={draft.decisionBackend ?? 'type_safe'} disabled={busy} onchange={(event) => { draft.decisionBackend = event.currentTarget.value as 'type_safe' | 'laya'; markAgentDirty(draft.id); }}>
-              <option value="type_safe">TypeSafe Jev</option>
-              <option value="laya">Local Laya (127.0.0.1:8080)</option>
-            </select>
-          </label>
-          {#if (draft.decisionBackend ?? 'type_safe') === 'type_safe'}<p class="hint">TypeSafe requires <code>TYPESAFE_API_KEY</code> saved in Settings → Environment &amp; Secrets.</p>{:else}<p class="hint">Laya requires the local server at <code>http://127.0.0.1:8080/v1/systemone</code>. If it requires authentication, save <code>LAYA_API_KEY</code> in Environment &amp; Secrets. Monitter does not start or download the model.</p>{/if}
           <p class="hint">Supported for local Codex, Claude, and ACP agents. Existing sessions keep their current tool configuration.</p>
           <label class="check-row">
             <input type="checkbox" role="switch" checked={draft.jevDecisionsEnabled === true} disabled={!jevDecisionsSupported || busy} onchange={(event) => { draft.jevDecisionsEnabled = event.currentTarget.checked; markAgentDirty(draft.id); }} />
-            Enable Jev Decisions for this agent
+            Enable System One Decisions for this agent
           </label>
           {#if !jevDecisionsSupported}<p class="hint">Choose a supported local Codex, Claude, or ACP agent to enable this add-on.</p>{/if}
         </details>

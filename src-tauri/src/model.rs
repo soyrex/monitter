@@ -40,14 +40,32 @@ pub struct AcpLaunch {
     pub args: Vec<String>,
 }
 
-/// Provider used by the separate bounded decision tools. This setting never
-/// changes task routing or agent permissions.
+/// Provider used by bounded System One inference. Never changes permissions.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum DecisionBackendKind {
     #[default]
     TypeSafe,
     Laya,
+}
+
+/// Agent override for the global System One provider.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionBackendSelection {
+    #[default]
+    Inherit,
+    TypeSafe,
+    Laya,
+}
+impl DecisionBackendSelection {
+    pub fn resolve(self, global: DecisionBackendKind) -> DecisionBackendKind {
+        match self {
+            Self::Inherit => global,
+            Self::TypeSafe => DecisionBackendKind::TypeSafe,
+            Self::Laya => DecisionBackendKind::Laya,
+        }
+    }
 }
 
 /// A provider-advertised or Monitter-native composer command. Provider wire
@@ -102,9 +120,19 @@ pub const INTERNAL_AGENT_NAME: &str = "Monitter Admin";
 #[serde(rename_all = "snake_case")]
 pub enum JevRoutingMode {
     #[default]
+    Inherit,
     Off,
     Recommend,
     SafeAuto,
+}
+
+impl JevRoutingMode {
+    pub fn resolve(self, global: Self) -> Self {
+        match self {
+            Self::Inherit => if global == Self::Inherit { Self::Off } else { global },
+            explicit => explicit,
+        }
+    }
 }
 
 /// Optional model IDs an operator has explicitly mapped to Jev's abstract
@@ -163,10 +191,10 @@ pub struct Agent {
     /// Older persisted agents remain opted out.
     #[serde(default)]
     pub jev_decisions_enabled: bool,
-    /// Backend for bounded advisory decision calls. Older profiles retain the
-    /// hosted TypeSafe backend.
+    /// Provider override for routing and advisory decisions. Missing values inherit
+    /// the global System One backend; persisted explicit selections are preserved.
     #[serde(default)]
-    pub decision_backend: DecisionBackendKind,
+    pub decision_backend: DecisionBackendSelection,
     /// ACP is intentionally an explicit launcher rather than a growing list
     /// of provider-specific executable fields. It is copied into new tasks.
     #[serde(default)]
@@ -1152,6 +1180,12 @@ pub struct InputOption {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
+    /// Global provider for System One routing, command advice, and decisions.
+    #[serde(default)]
+    pub system_one_backend: DecisionBackendKind,
+    /// Global routing policy; inherit is treated as off for legacy input.
+    #[serde(default = "default_system_one_routing")]
+    pub system_one_routing: JevRoutingMode,
     /// Launch policy for built-in Monitter MCP tools in supported harnesses.
     #[serde(default = "default_auto_approve_monitter_mcp")]
     pub auto_approve_monitter_mcp: bool,
@@ -1231,6 +1265,8 @@ pub struct Settings {
     #[serde(default = "default_voice_transcription_engine")]
     pub voice_transcription_engine: String,
 }
+fn default_system_one_routing() -> JevRoutingMode { JevRoutingMode::Off }
+
 impl Eq for Settings {}
 fn default_auto_approve_monitter_mcp() -> bool {
     true
@@ -1886,10 +1922,10 @@ pub fn default_snapshot() -> Snapshot {
             skills: vec![],
             collaboration_enabled: true,
             terminal_execution_enabled: false,
-            jev_routing: JevRoutingMode::Off,
+            jev_routing: JevRoutingMode::Inherit,
             jev_model_tiers: JevModelTiers::default(),
             jev_decisions_enabled: false,
-            decision_backend: DecisionBackendKind::default(),
+            decision_backend: DecisionBackendSelection::default(),
             acp: None,
             internal: false,
         }],
@@ -1914,6 +1950,8 @@ pub fn default_snapshot() -> Snapshot {
         schedule_runs: vec![],
         pending_throwaway_task_ids: vec![],
         settings: Settings {
+            system_one_backend: DecisionBackendKind::default(),
+            system_one_routing: JevRoutingMode::Off,
             auto_approve_monitter_mcp: true,
             project_board_enabled: false,
             board_guidance_text: None,
@@ -2410,19 +2448,19 @@ mod task_migration_tests {
         }))
         .unwrap();
         assert_eq!(agent.codex_home, None);
-        assert_eq!(agent.jev_routing, JevRoutingMode::Off);
+        assert_eq!(agent.jev_routing, JevRoutingMode::Inherit);
         assert_eq!(agent.jev_model_tiers, JevModelTiers::default());
         assert!(!agent.jev_decisions_enabled);
-        assert_eq!(agent.decision_backend, DecisionBackendKind::TypeSafe);
+        assert_eq!(agent.decision_backend, DecisionBackendSelection::Inherit);
         let mut opted_in = agent.clone();
         opted_in.jev_decisions_enabled = true;
-        opted_in.decision_backend = DecisionBackendKind::Laya;
+        opted_in.decision_backend = DecisionBackendSelection::Laya;
         let value = serde_json::to_value(&opted_in).unwrap();
         assert_eq!(value["jevDecisionsEnabled"], true);
         assert_eq!(value["decisionBackend"], "laya");
         let restored = serde_json::from_value::<Agent>(value).unwrap();
         assert!(restored.jev_decisions_enabled);
-        assert_eq!(restored.decision_backend, DecisionBackendKind::Laya);
+        assert_eq!(restored.decision_backend, DecisionBackendSelection::Laya);
         assert_eq!(task.codex_home, None);
     }
 

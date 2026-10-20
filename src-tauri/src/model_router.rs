@@ -1232,6 +1232,33 @@ pub(crate) fn system_one_with_client(
 /// Plans a Cmd-P selection using the locally cached Keychain credential. This
 /// function classifies a bounded local UI catalogue; it never executes the
 /// selected command, changes permissions, or creates a task.
+pub(crate) fn live_system_one_command_plan(
+    query: &str,
+    candidates: &[JevCommandCandidate],
+    kind: crate::model::DecisionBackendKind,
+) -> Result<JevCommandPlanningResult, String> {
+    validate_jev_command_input(query, candidates)?;
+    let eligible = candidates.iter().filter(|candidate| !jev_command_candidate_is_sensitive(candidate)).cloned().collect::<Vec<_>>();
+    if eligible.is_empty() {
+        return Err("No non-sensitive commands are eligible for System One command planning.".into());
+    }
+    let (state, questions) = jev_command_payload(query, &eligible)?;
+    let result = decision_backend(kind).infer(&DecisionRequest { state, questions })?;
+    let trace_id = Uuid::new_v4().to_string();
+    let plan = jev_command_plan_from_jev(&result.body, &eligible, trace_id.clone())?;
+    Ok(JevCommandPlanningResult {
+        plan: plan.clone(),
+        trace: JevCommandPlanTrace {
+            trace_id,
+            query_fingerprint: fingerprint(query),
+            catalogue_fingerprint: fingerprint(&catalogue_fingerprint_input(candidates)?),
+            candidate_id: plan.candidate_id.clone(),
+            confidence: plan.confidence,
+            classifier_evidence: result.evidence,
+        },
+    })
+}
+
 pub(crate) fn live_jev_command_plan(
     query: &str,
     candidates: &[JevCommandCandidate],
@@ -2165,6 +2192,36 @@ pub(crate) fn persist_jev_command_plan(
             "Could not write Jev command plan {}: {error}",
             path.display()
         )
+    })
+}
+
+pub(crate) fn live_system_one_route_plan(
+    prompt: &str,
+    kind: crate::model::DecisionBackendKind,
+) -> Result<JevRoutePlan, String> {
+    if prompt.len() > MAX_JEV_PROMPT_BYTES {
+        return Err(format!("System One routing input exceeds the {} KiB limit.", MAX_JEV_PROMPT_BYTES / 1024));
+    }
+    let result = if contains_sensitive_signal(&prompt.to_lowercase()) {
+        MockJevClassifier.classify(prompt)?
+    } else {
+        let payload = jev_request(prompt, "");
+        let result = decision_backend(kind).infer(&DecisionRequest {
+            state: prompt.into(),
+            questions: payload["questions"].clone(),
+        })?;
+        ClassifierResult { decision: decision_from_jev(&result.body)?, evidence: result.evidence }
+    };
+    let auto_route_policy = auto_route_policy(&result.decision);
+    Ok(JevRoutePlan {
+        trace_id: Uuid::new_v4().to_string(),
+        agent_id: None,
+        prompt_fingerprint: fingerprint(prompt),
+        policy_version: ROUTING_POLICY_VERSION.into(),
+        question_schema_version: ROUTING_QUESTION_SCHEMA_VERSION.into(),
+        decision: result.decision,
+        auto_route_policy,
+        classifier_evidence: result.evidence,
     })
 }
 

@@ -1155,6 +1155,7 @@ impl Desktop {
             }
             "behaviour" => settings_general::render_behavior(self, cx, palette),
             "conversation" => settings_general::render_conversation(self, cx, palette),
+            "system-one" => settings_general::render_system_one(self, cx, palette),
             "appearance" | "interface" | "typography" | "terminal" => {
                 settings_appearance::render(self, window, cx, palette, &category)
             }

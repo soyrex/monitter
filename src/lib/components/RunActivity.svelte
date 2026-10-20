@@ -69,7 +69,7 @@
   );
   type RouterTraceView = { requested: string; actual: string; rationale: string; error: string };
   function routerTraceView(item: RunEvent): RouterTraceView | null {
-    if (item.kind !== 'status' || !item.title.startsWith('Jev route ')) return null;
+    if (item.kind !== 'status' || (!item.title.startsWith('Jev route ') && !item.title.startsWith('System One route '))) return null;
     try {
       const detail = JSON.parse(item.detail) as { trace?: Record<string, unknown> };
       const trace = detail.trace;

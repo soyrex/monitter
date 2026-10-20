@@ -3,7 +3,7 @@
 //! The parent owns composer and Git layout. Drop `render_context_bar(...)`
 //! inside the composer box, at its bottom edge, and `render_footer(...)`
 //! beneath it. The pane owns only task-scoped permissions, model catalog,
-//! Jev routing status and reported context usage.
+//! System One routing status and reported context usage.
 //!
 //! Frozen integration API:
 //! - `ComposerFooterPane::new(service, snapshot, task_id, window, cx)`
@@ -810,7 +810,10 @@ impl ComposerFooterPane {
             .as_ref()
             .and_then(|a| a.get("jevRouting"))
             .and_then(Value::as_str)
-            .unwrap_or("off");
+            .unwrap_or("inherit");
+        let jev_mode = if jev_mode == "inherit" {
+            self.snapshot["settings"]["systemOneRouting"].as_str().unwrap_or("off")
+        } else { jev_mode };
         let settings = self.selected_settings(&task);
         let catalog = self.catalog.clone();
         let catalog_loading = self.catalog_loading;
@@ -1070,7 +1073,7 @@ impl ComposerFooterPane {
             .accessibility_label(format!(
                 "{}Model: {}",
                 if jev_enabled {
-                    "Jev routing enabled for new chats. "
+                    "System One routing enabled for new chats. "
                 } else {
                     ""
                 },
@@ -1093,7 +1096,7 @@ impl ComposerFooterPane {
                                 .text_color(rgb(palette.accent))
                                 .font_family(cx.theme().font_family.clone())
                                 .text_size(design::ui_scaled_px(8. * interface_font_ratio))
-                                .child("JEV"),
+                                .child("SYS-1"),
                         )
                     })
                     .child(

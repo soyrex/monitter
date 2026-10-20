@@ -159,7 +159,7 @@ impl Service {
         let mut broker = self
             .jev_decisions_broker
             .lock()
-            .map_err(|_| "Jev Decisions broker lock failed.")?;
+            .map_err(|_| "System One Decisions broker lock failed.")?;
         if broker.is_none() {
             let service = Arc::downgrade(self);
             *broker = Some(Broker::start_jev_decisions(Arc::new(
@@ -170,7 +170,7 @@ impl Service {
                     }
                     if !service.jev_decisions_opted_in_running(caller)? {
                         return Err(
-                            "Jev Decisions is not enabled for this running agent task.".into()
+                            "System One Decisions is not enabled for this running agent task.".into()
                         );
                     }
                     let backend_kind = service.jev_decisions_backend_for_running(caller)?;
@@ -207,17 +207,17 @@ impl Service {
         let mut grants = self
             .jev_decisions_grants
             .lock()
-            .map_err(|_| "Jev Decisions grant lock failed.")?;
+            .map_err(|_| "System One Decisions grant lock failed.")?;
         if let Some(grant) = grants.get(task_id) {
             return Ok(Some(grant.clone()));
         }
         let broker = self
             .jev_decisions_broker
             .lock()
-            .map_err(|_| "Jev Decisions broker lock failed.")?;
+            .map_err(|_| "System One Decisions broker lock failed.")?;
         let grant = broker
             .as_ref()
-            .ok_or("Jev Decisions broker is unavailable.")?
+            .ok_or("System One Decisions broker is unavailable.")?
             .session(task_id);
         grants.insert(task_id.into(), grant.clone());
         Ok(Some(grant))
@@ -237,7 +237,7 @@ impl Service {
         }
         self.jev_decisions_grants
             .lock()
-            .map_err(|_| "Jev Decisions grant lock failed.".to_string())
+            .map_err(|_| "System One Decisions grant lock failed.".to_string())
             .map(|grants| grants.get(task_id).cloned())
     }
 
@@ -285,7 +285,7 @@ mod jev_decisions_grant_tests {
             agent,
             &CreateTaskInput {
                 agent_id: agent.id.clone(),
-                title: "Jev grant fixture".into(),
+                title: "System One grant fixture".into(),
                 native_session_id: None,
                 parent_task_id: None,
                 channel_id: None,
@@ -311,7 +311,7 @@ mod jev_decisions_grant_tests {
                     .tasks
                     .iter_mut()
                     .find(|task| task.id == task_id)
-                    .ok_or("Jev grant fixture task is missing.")?;
+                    .ok_or("System One grant fixture task is missing.")?;
                 task.status = "running".into();
                 Ok(())
             })
@@ -366,15 +366,15 @@ mod jev_decisions_grant_tests {
                     .tasks
                     .iter()
                     .find(|task| task.id == task_id)
-                    .ok_or("Jev backend fixture task is missing.")?
+                    .ok_or("System One backend fixture task is missing.")?
                     .agent_id
                     .clone();
                 snapshot
                     .agents
                     .iter_mut()
                     .find(|agent| agent.id == agent_id)
-                    .ok_or("Jev backend fixture agent is missing.")?
-                    .decision_backend = model::DecisionBackendKind::Laya;
+                    .ok_or("System One backend fixture agent is missing.")?
+                    .decision_backend = model::DecisionBackendSelection::Laya;
                 Ok(())
             })
             .unwrap();

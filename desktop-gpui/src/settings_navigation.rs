@@ -17,6 +17,7 @@ pub(super) const CATEGORIES: &[Category] = &[
     Category { id: "behaviour", label: "Keyboard & focus", description: "Keyboard navigation and how panes receive focus.", group: "Workspace", icon: IconName::Settings2 },
     Category { id: "conversation", label: "Conversation", description: "Writing messages, streaming replies and showing activity.", group: "Workspace", icon: IconName::MessageSquare },
     Category { id: "agents", label: "Agents", description: "Configure agents, their hosts and permission modes.", group: "Agents & integrations", icon: IconName::Bot },
+    Category { id: "system-one", label: "System One", description: "Default backend and routing with per-agent overrides.", group: "Agents & integrations", icon: IconName::Brain },
     Category { id: "providers", label: "Providers & models", description: "Review configured providers and choose models for chats.", group: "Agents & integrations", icon: IconName::Network },
     Category { id: "accounts", label: "Accounts", description: "Local harness accounts available to your agents.", group: "Agents & integrations", icon: IconName::User },
     Category { id: "collaboration", label: "Collaboration", description: "Agent delegation, project boards and shared guidance.", group: "Agents & integrations", icon: IconName::Users },

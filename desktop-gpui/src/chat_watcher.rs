@@ -411,7 +411,7 @@ fn watcher_decision_text(event: &Value) -> Option<String> {
                 .to_owned()
         })
     });
-    let mut parts = vec!["Jev".to_owned()];
+    let mut parts = vec!["System One".to_owned()];
     if candidate == Some("abstain") {
         parts.push("abstained".to_owned());
         if let Some(reason) = reason {
@@ -2244,13 +2244,13 @@ mod tests {
         assert_eq!(watcher_activity_text(&context), "159,661 / 258,400 context (62%)");
 
         let decision = json!({
-            "kind":"jevDecision", "title":"Jev decision",
+            "kind":"jevDecision", "title":"System One decision",
             "detail":json!({
                 "labels":{"abstain":"Abstain","blue_square":"Blue square"},
                 "response":{"candidateId":"blue_square","confidence":0.48,"status":"ok"}
             }).to_string()
         });
-        assert_eq!(watcher_activity_text(&decision), "Jev · Blue square · 48% confidence");
+        assert_eq!(watcher_activity_text(&decision), "System One · Blue square · 48% confidence");
     }
 
     #[::core::prelude::v1::test]

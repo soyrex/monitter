@@ -400,6 +400,12 @@
       </div>
     {:else if activeCategory === "agents"}
       <div class="section-stack">
+        <section class="setting-card" aria-labelledby="system-one-heading">
+          <div class="card-heading"><h2 id="system-one-heading">System One</h2><p>Choose the default backend for routing, classifications and advisory decisions. Agents can override these defaults.</p></div>
+          <label>Backend<select value={settings.systemOneBackend ?? 'type_safe'} disabled={pending > 0} onchange={(event) => void save({ systemOneBackend: event.currentTarget.value as Settings['systemOneBackend'] })}><option value="type_safe">TypeSafe</option><option value="laya">Local Laya</option></select></label>
+          <label>Task routing<select value={settings.systemOneRouting ?? 'off'} disabled={pending > 0} onchange={(event) => void save({ systemOneRouting: event.currentTarget.value as Settings['systemOneRouting'] })}><option value="off">Off</option><option value="recommend">Recommend only</option><option value="safe_auto">Safe auto-route</option></select></label>
+          <p class="hint">TypeSafe uses <code>TYPESAFE_API_KEY</code> from Environment &amp; Secrets. Local Laya runs on this desktop and starts on demand when its configured model is available.</p>
+        </section>
         {#if agentEditor}{@render agentEditor()}{/if}
         <section class="setting-card" aria-labelledby="permissions-heading">
           <div class="card-heading"><h2 id="permissions-heading">Agent permissions</h2><p>Permission modes are configured per agent. Each task keeps the permission mode captured when it was created, so changing an agent affects future tasks.</p></div>

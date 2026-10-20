@@ -214,7 +214,7 @@
       <label>OAuth client secret <small>{config.clientSecretConfigured ? 'Saved; leave blank to keep the current secret.' : 'Stored securely and never shown again.'}</small><input type="password" bind:value={clientSecret} autocomplete="new-password" /></label>
       <div class="actions"><button type="button" disabled={saving} onclick={() => { clientId = config?.clientId ?? ''; clientSecret = ''; showSetup = false; }}>Cancel</button><button type="button" class="primary" disabled={saving || !clientId.trim()} onclick={() => void saveClient()}>{saving ? 'Saving…' : 'Save app settings'}</button></div>
     </details>
-    <p class="footnote">Agent MCP access stays read-only. The native inbox can mark messages read after you open them or Jev confidently identifies low-value bulk mail. Reauthorize existing accounts here to grant that access. Fetched messages become part of the selected agent's context.</p>
+    <p class="footnote">Agent MCP access stays read-only. The native inbox can mark messages read after you open them or System One confidently identifies low-value bulk mail. Reauthorize existing accounts here to grant that access. Fetched messages become part of the selected agent's context.</p>
   {/if}
 </section>
 

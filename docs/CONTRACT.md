@@ -485,20 +485,21 @@ reconnection and a new authoritative snapshot.
   are shown as such on the route card. A timed-out setting is shown as unconfirmed and the turn
   fails without claiming the harness applied it. Jev never changes ACP permission controls.
 - `plan_jev_command { query: string, candidates: JevCommandCandidate[] }` -> `JevCommandPlan`
-  (native-owner only; requires the Keychain-backed `TYPESAFE_API_KEY`; `JEV_API_KEY` is a legacy alias). The caller supplies a bounded catalogue of
+  (native-owner only; uses the global System One backend). The caller supplies a bounded catalogue of
   currently enabled Cmd-P controls. Jev may select only one offered candidate ID and returns a typed confidence
   and bounded reason. The command records a fingerprinted audit trace without raw query/catalogue text and never
   executes a control. The UI must revalidate the candidate against its current enabled catalogue and require a
   second explicit selection before dispatch. LAN, mobile, and shared callers cannot invoke this command.
+- `Settings.systemOneRouting: 'off' | 'recommend' | 'safe_auto'` sets the global System One routing policy (default `off`). `Agent.jevRouting` also accepts `inherit`; missing and new agent values inherit the global policy while existing explicit routing choices remain intact. The backend resolves the policy again when recording a route. Global `inherit` is rejected on save. Wire commands and `jev` tool/event keys remain compatible; user-facing labels use System One or SYS-1.
 - `Agent.jevDecisionsEnabled?: boolean` opts a non-internal agent into the bounded decision MCP tools. Missing and false are
   disabled. This is separate from `jevRouting` and does not alter task routing. For an opted-in agent, the
   supported local harness adapter exposes a dedicated MCP endpoint to that harness with the separate
   `jev_choose` and `jev_assess` tools and their decision guidance. The endpoint is local to the desktop runtime;
-  its transport address is runtime-managed and is not a stable public URL. `Agent.decisionBackend?: 'type_safe' | 'laya'`
-  selects the inference provider; missing values default to `type_safe`. TypeSafe requires the native
+  its transport address is runtime-managed and is not a stable public URL. `Settings.systemOneBackend: 'type_safe' | 'laya'` selects the global System One inference provider (default `type_safe`).
+  `Agent.decisionBackend?: 'inherit' | 'type_safe' | 'laya'` overrides it for task routing and bounded decisions; missing values and `inherit` use the global provider. Existing explicit provider choices are preserved. TypeSafe requires the native
   Keychain-backed `TYPESAFE_API_KEY` (`JEV_API_KEY` remains a legacy alias). Laya uses only
-  `http://127.0.0.1:8080/v1/systemone` and Monitter does not start the local server or acquire its model. If the local server requires a bearer token, it is read from `LAYA_API_KEY` in Environment & Secrets or the Monitter process environment and passed only through the native HTTP client's private input. The selected backend is used for
-  bounded decision inference only and does not affect Jev routing. The current saved backend is
+  `http://127.0.0.1:8080/v1/systemone`; Monitter starts the configured installed local service on demand when its model is available, without acquiring a model. If the local server requires a bearer token, it is read from `LAYA_API_KEY` in Environment & Secrets or the Monitter process environment and passed only through the native HTTP client's private input. The selected backend is used for
+  task routing and bounded decision inference. Cmd-P advice, mail classification, and Rename all use the global backend. Automatic delegation model advice uses the initiating agent override, falling back to the global backend. The current saved backend is
   consulted for each decision call, so changing it does not restart or reconfigure an existing session. It is available only to
   local Codex, Claude, and ACP harnesses. SSH and unsupported harness adapters do not receive it. The internal
   Monitter Admin agent is excluded. Jev tools may return bounded typed decisions and assessments only: they do

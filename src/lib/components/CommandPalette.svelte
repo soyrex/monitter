@@ -130,14 +130,14 @@ import Archive from "@lucide/svelte/icons/archive";
         id: `__jev-suggestion:${jev.suggestion.candidateId}`,
         label: jev.suggestion.label,
         detail: jev.suggestion.detail,
-        group: 'Jev suggestion',
+        group: 'System One suggestion',
       }];
     }
     return [...matched, {
       id: '__jev-interpret',
-      label: jev?.loading ? 'Jev is interpreting…' : 'Interpret with Jev',
+      label: jev?.loading ? 'System One is interpreting…' : 'Interpret with System One',
       detail: jev?.error || 'Map this intent to one available Monitter control',
-      group: 'Jev',
+      group: 'System One',
       disabled: jev?.loading,
     }];
   });

@@ -7,12 +7,12 @@
   const integer = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 });
   const totalTokens = $derived(metadata.inputTokens + metadata.outputTokens);
   const routeSummary = $derived(metadata.routeApplied === true
-    ? 'Jev applied this route.'
+    ? 'System One applied this route.'
     : metadata.applicationError
-      ? 'Jev proposed a route, but Mona kept the working runtime.'
+      ? 'System One proposed a route, but Mona kept the working runtime.'
       : metadata.routeApplied === false
-        ? 'Jev kept the current runtime.'
-        : 'Jev routing details');
+        ? 'System One kept the current runtime.'
+        : 'System One routing details');
 </script>
 
 <details class="response-metadata">
@@ -25,7 +25,7 @@
       <div><dt>Tokens</dt><dd>{integer.format(totalTokens)} total</dd></div>
       <div><dt>Input</dt><dd>{integer.format(metadata.inputTokens)}</dd></div>
       <div><dt>Output</dt><dd>{integer.format(metadata.outputTokens)}</dd></div>
-      {#if metadata.requestedModel}<div><dt>Jev requested</dt><dd>{metadata.requestedModel}{metadata.requestedEffort ? ` · ${metadata.requestedEffort}` : ''}</dd></div>{/if}
+      {#if metadata.requestedModel}<div><dt>System One requested</dt><dd>{metadata.requestedModel}{metadata.requestedEffort ? ` · ${metadata.requestedEffort}` : ''}</dd></div>{/if}
       {#if metadata.confidence != null}<div><dt>Confidence</dt><dd>{Math.round(metadata.confidence * 100)}%</dd></div>{/if}
     </dl>
     <p class="route-summary">{routeSummary}</p>

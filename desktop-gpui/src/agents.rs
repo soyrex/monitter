@@ -87,10 +87,10 @@ const AGENT_FIELDS: &[(&str, &str)] = &[
     ("color", "Identity color (#RRGGBB)"),
     ("codexHome", "Existing local Codex home (optional)"),
     ("acpCommand", "External launcher executable"),
-    ("tierFast", "Jev fast model"),
-    ("tierBalanced", "Jev balanced model"),
-    ("tierStrong", "Jev strong model"),
-    ("tierFrontier", "Jev frontier model"),
+    ("tierFast", "System One fast model"),
+    ("tierBalanced", "System One balanced model"),
+    ("tierStrong", "System One strong model"),
+    ("tierFrontier", "System One frontier model"),
 ];
 const AGENT_TEXT: &[(&str, &str)] = &[
     ("instructions", "Instructions"),
@@ -213,7 +213,7 @@ impl AgentHostPane {
         let local = items(&snapshot, "hosts")
             .into_iter()
             .find(|host| text(host, "kind") == "local");
-        let agent = json!({"id":"","name":"","description":"","instructions":"","provider":"codex","model":"","hostId":local.as_ref().map(|host|text(host,"id")).unwrap_or_default(),"cwd":local.as_ref().map(|host|text(host,"defaultCwd")).unwrap_or_default(),"color":"#3f9d6a","avatar":null,"expertise":[],"responsibilities":[],"skills":[],"collaborationEnabled":true,"terminalExecutionEnabled":false,"sandbox":"read-only","codexHome":null,"acp":null,"jevRouting":"off","jevDecisionsEnabled":false,"decisionBackend":"type_safe","jevModelTiers":{"fast":"","balanced":"","strong":"","frontier":""}});
+        let agent = json!({"id":"","name":"","description":"","instructions":"","provider":"codex","model":"","hostId":local.as_ref().map(|host|text(host,"id")).unwrap_or_default(),"cwd":local.as_ref().map(|host|text(host,"defaultCwd")).unwrap_or_default(),"color":"#3f9d6a","avatar":null,"expertise":[],"responsibilities":[],"skills":[],"collaborationEnabled":true,"terminalExecutionEnabled":false,"sandbox":"read-only","codexHome":null,"acp":null,"jevRouting":"inherit","jevDecisionsEnabled":false,"decisionBackend":"inherit","jevModelTiers":{"fast":"","balanced":"","strong":"","frontier":""}});
         let host = json!({"id":"","name":"","kind":"ssh","address":"","user":"","port":22,"identityFile":"","defaultCwd":"","codexPath":"","claudePath":"","opencodePath":"","hermesPath":""});
         let mut pane = Self {
             service,
@@ -671,7 +671,7 @@ impl Render for AgentHostPane {
                 if pane.mode==Mode::Agents {
                     pane.agent_drafts.insert(text(&pane.agent,"id"),pane.agent_value(cx));
                     let local=items(&pane.snapshot,"hosts").into_iter().find(|host|text(host,"kind")=="local");
-                    pane.agent=json!({"id":"","name":"","description":"","instructions":"","avatar":null,"provider":"codex","model":"","hostId":local.as_ref().map(|host|text(host,"id")).unwrap_or_default(),"cwd":"","color":"#3f9d6a","sandbox":"read-only","expertise":[],"responsibilities":[],"skills":[],"collaborationEnabled":true,"terminalExecutionEnabled":false,"codexHome":null,"acp":null,"jevRouting":"off","jevDecisionsEnabled":false,"decisionBackend":"type_safe","jevModelTiers":{"fast":"","balanced":"","strong":"","frontier":""}});
+                    pane.agent=json!({"id":"","name":"","description":"","instructions":"","avatar":null,"provider":"codex","model":"","hostId":local.as_ref().map(|host|text(host,"id")).unwrap_or_default(),"cwd":"","color":"#3f9d6a","sandbox":"read-only","expertise":[],"responsibilities":[],"skills":[],"collaborationEnabled":true,"terminalExecutionEnabled":false,"codexHome":null,"acp":null,"jevRouting":"inherit","jevDecisionsEnabled":false,"decisionBackend":"inherit","jevModelTiers":{"fast":"","balanced":"","strong":"","frontier":""}});
                     pane.catalog=None;pane.removal=None;pane.bind_agent(window,cx);
                 } else {
                     if let Ok(host)=pane.host_value(cx){pane.host_drafts.insert(text(&pane.host,"id"),host);}
@@ -867,11 +867,11 @@ impl Render for AgentHostPane {
             if gemini {
                 form = form.child("Gemini's lowest supported permission level allows edits.");
             }
-            form=form.child("Access is validated by the saved harness and backend. Jev routing never grants permissions.");
+            form=form.child("Access is validated by the saved harness and backend. System One routing never grants permissions.");
             for (key, label) in [
                 ("collaborationEnabled", "Allow collaboration"),
                 ("terminalExecutionEnabled", "Allow native terminal requests"),
-                ("jevDecisionsEnabled", "Enable Jev decision tools"),
+                ("jevDecisionsEnabled", "Enable System One decision tools"),
             ] {
                 let enabled = draft[key] == true;
                 form = form.child(
@@ -885,15 +885,15 @@ impl Render for AgentHostPane {
                         })),
                 );
             }
-            form = form.child("Decision backend applies to bounded jev_choose/jev_assess calls. Laya uses only http://127.0.0.1:8080; start the local Laya server separately. If it requires authentication, save LAYA_API_KEY in Environment & Secrets.");
-            for (backend, label) in [("type_safe", "TypeSafe"), ("laya", "Laya local")] {
+            form = form.child("System One backend applies to routing and advisory decisions. Inherit uses the global setting. Monitter starts the configured local Laya service on demand when its model is available. If it requires authentication, save LAYA_API_KEY in Environment & Secrets.");
+            for (backend, label) in [("inherit", "Use global setting"), ("type_safe", "TypeSafe"), ("laya", "Laya local")] {
                 form = form.child(
                     Button::new(format!("decision-backend-{backend}"))
                         .compact()
                         .label(format!(
-                            "Decision backend: {label}{}",
+                            "System One backend: {label}{}",
                             if (text(&draft, "decisionBackend").is_empty()
-                                && backend == "type_safe")
+                                && backend == "inherit")
                                 || text(&draft, "decisionBackend") == backend
                             {
                                 " ✓"
@@ -908,14 +908,14 @@ impl Render for AgentHostPane {
                         })),
                 );
             }
-            for mode in ["off", "recommend", "safe_auto"] {
+            for (mode, label) in [("inherit", "Use global setting"), ("off", "Off"), ("recommend", "Recommend only"), ("safe_auto", "Safe auto-route")] {
                 form = form.child(
                     Button::new(mode)
                         .compact()
                         .label(format!(
-                            "Jev routing: {}{}",
-                            mode,
-                            if text(&draft, "jevRouting") == mode {
+                            "System One routing: {}{}",
+                            label,
+                            if text(&draft, "jevRouting") == mode || (text(&draft, "jevRouting").is_empty() && mode == "inherit") {
                                 " ✓"
                             } else {
                                 ""

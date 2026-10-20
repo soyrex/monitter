@@ -50,12 +50,12 @@
   const metric = (value: number | undefined) => value !== undefined ? `${value}%` : 'Not retained';
   const cost = (value: number | null) => value === null ? 'Not reported' : `$${(value / 1_000_000).toFixed(6)}`;
   const unavailableMessage = $derived(batch.classifier.mode === 'pending'
-    ? 'Waiting for Jev classification. Messages are hidden until classification is complete.'
+    ? 'Waiting for System One classification. Messages are hidden until classification is complete.'
     : batch.classifier.mode === 'jev'
       ? ''
       : batch.classifier.mode === 'not_needed'
-        ? 'Jev did not classify this batch, so messages are hidden from the actionable inbox.'
-        : `Jev classification is unavailable (${batch.classifier.mode}); messages are hidden from the actionable inbox. ${batch.classifier.fallbackReason ?? ''}`);
+        ? 'System One did not classify this batch, so messages are hidden from the actionable inbox.'
+        : `System One classification is unavailable (${batch.classifier.mode}); messages are hidden from the actionable inbox. ${batch.classifier.fallbackReason ?? ''}`);
 
   function showMetrics(event: MouseEvent, card: MailCard) {
     event.preventDefault();
@@ -113,7 +113,7 @@
   <header>
     <span class="mail-icon"><Mail size={16}/></span>
     <span><strong>Actionable inbox</strong><small>{batch.accountLabel} · checked {checked}</small></span>
-    <span class:pending={batch.classifier.mode === 'pending'} class:degraded={!['jev', 'pending', 'not_needed'].includes(batch.classifier.mode)} class="classifier">{batch.classifier.mode === 'jev' ? 'Jev' : batch.classifier.mode === 'pending' ? 'Jev pending' : batch.classifier.mode === 'not_needed' ? 'Checked' : `${batch.classifier.mode} classifier`}</span>
+    <span class:pending={batch.classifier.mode === 'pending'} class:degraded={!['jev', 'pending', 'not_needed'].includes(batch.classifier.mode)} class="classifier">{batch.classifier.mode === 'jev' ? 'System One' : batch.classifier.mode === 'pending' ? 'System One pending' : batch.classifier.mode === 'not_needed' ? 'Checked' : `${batch.classifier.mode} classifier`}</span>
   </header>
   <div class="inbox-summary" aria-label="Inbox summary">
     <strong>{actionable.length}</strong><span>actionable</span>{#if newCount}<strong class="new-count">{newCount}</strong><span>new</span>{/if}
@@ -126,7 +126,7 @@
           <button class="back" aria-label="Back to inbox" onclick={close}><ArrowLeft size={17}/><span>Inbox</span></button>
           <span class="score-stack">
             <span class={`importance ${importanceClass(selected.importance)}`}>{selected.importanceScore}</span>
-            <button class="metrics-button" aria-label={`Show Jev classifications for ${selected.subject || 'email'}`} onclick={(event) => showMetrics(event, selected!)}><Info size={13}/></button>
+            <button class="metrics-button" aria-label={`Show System One classifications for ${selected.subject || 'email'}`} onclick={(event) => showMetrics(event, selected!)}><Info size={13}/></button>
           </span>
           <span class="mail-copy">
             <span class="mail-row"><strong>{selected.subject || '(no subject)'}</strong>{#if selected.isNew}<em class="new-pill">New</em>{/if}<time>{received(selected.receivedAt)}</time></span>
@@ -150,7 +150,7 @@
       </article>
     {:else}
       <div class="mail-scroll" aria-label="Email message list">
-      {#if groups.length === 0}<div class="empty-inbox"><strong>{batch.classifier.mode === 'jev' ? 'No messages meet the actionable inbox criteria.' : 'Actionable messages are hidden.'}</strong><span>{batch.classifier.mode === 'jev' ? 'Only work related messages requiring your action are shown.' : 'A completed Jev classification is required before messages can be shown.'}</span></div>{/if}
+      {#if groups.length === 0}<div class="empty-inbox"><strong>{batch.classifier.mode === 'jev' ? 'No messages meet the actionable inbox criteria.' : 'Actionable messages are hidden.'}</strong><span>{batch.classifier.mode === 'jev' ? 'Only work related messages requiring your action are shown.' : 'A completed System One classification is required before messages can be shown.'}</span></div>{/if}
       {#each groups as group (group.key)}
         <section class="mail-group" aria-label={group.label}>
           <h3>{group.label}<span>{group.items.length}</span></h3>
@@ -160,7 +160,7 @@
                 <button class="mail-card-open" onclick={() => void open(item)} aria-label={`Open ${item.subject || 'email'} from ${item.from}`}></button>
                 <span class="score-stack">
                   <span class={`importance ${importanceClass(item.importance)}`}>{item.importanceScore}</span>
-                  <button class="metrics-button" aria-label={`Show Jev classifications for ${item.subject || 'email'}`} onclick={(event) => showMetrics(event, item)}><Info size={13}/></button>
+                  <button class="metrics-button" aria-label={`Show System One classifications for ${item.subject || 'email'}`} onclick={(event) => showMetrics(event, item)}><Info size={13}/></button>
                 </span>
                 <span class="mail-copy">
                   <span class="mail-row"><strong>{item.subject || '(no subject)'}</strong>{#if item.isNew}<em class="new-pill">New</em>{/if}<time>{received(item.receivedAt)}</time></span>
@@ -178,12 +178,12 @@
     {/if}
   </div>
   <div class="sync-receipt" role="status">Checked {checked} · {batch.lastAdded ?? 0} added · {batch.lastUpdated ?? 0} refreshed</div>
-  <footer><ShieldCheck size={13}/><span>Showing only messages that meet the Jev inbox criteria. Jev receives bounded envelope snippets; messages load when opened.</span></footer>
+  <footer><ShieldCheck size={13}/><span>Showing only messages that meet the System One inbox criteria. System One receives bounded envelope snippets; messages load when opened.</span></footer>
 </section>
 
 {#if metricsCard && metricsAnchor}
-  <div class="metrics-popup" role="dialog" aria-label={`Jev classifications for ${metricsCard.subject || 'email'}`} use:floating={{anchor: metricsAnchor, side: 'right'}}>
-    <header><span><strong>Jev categorisation</strong><small>{metricsCard.subject || '(no subject)'}</small></span><button aria-label="Close Jev classifications" onclick={closeMetrics}><X size={14}/></button></header>
+  <div class="metrics-popup" role="dialog" aria-label={`System One classifications for ${metricsCard.subject || 'email'}`} use:floating={{anchor: metricsAnchor, side: 'right'}}>
+    <header><span><strong>System One categorisation</strong><small>{metricsCard.subject || '(no subject)'}</small></span><button aria-label="Close System One classifications" onclick={closeMetrics}><X size={14}/></button></header>
     <div class="classification-list">
       <div><span>Importance</span><strong>{label(metricsCard.importance)}</strong><em>{metric(metricsCard.classificationMetrics?.importanceConfidence)}</em></div>
       <div><span>Intent</span><strong>{label(metricsCard.intent)}</strong><em>{metric(metricsCard.classificationMetrics?.intentConfidence)}</em></div>
