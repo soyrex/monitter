@@ -49,3 +49,16 @@ test('blocks drafts during streaming, errors, and sensitive-field output',()=>{
  c.update({source:'root = Root([Input("password", "Password")])',complete:true});assert.match(c.error,/Sensitive/);assert.equal(c.submit(),null);
  c.update({source:'x'.repeat(65537),complete:false});assert.match(c.error,/source limit/);c.dispose();
 });
+test('rejects sensitive aliases and invalid field/form/state names consistently',()=>{
+ const names=['passwd','apikey','api_key','privatekey','private_key','PASSWORD','__proto__','constructor','prototype','','x'.repeat(65),'é'.repeat(33),'bad\nname','bad\u0085name'];
+ for(const name of names){
+  assert.deepEqual(safeState(Object.fromEntries([[name,'filtered']])),{},name);
+  for(const component of ['Input','Form']){
+   const c=new Controller();const args=component==='Form'?`${JSON.stringify(name)}, []`:`${JSON.stringify(name)}, "Label"`;
+   c.update({source:`root = Root([${component}(${args})])`,complete:true});
+   assert.match(c.error,/Sensitive|invalid/,`${component}: ${JSON.stringify(name)}`);assert.equal(c.submit(),null);c.dispose();
+  }
+ }
+ const valid='é'.repeat(32);assert.deepEqual(safeState({[valid]:'retained'}),{[valid]:'retained'});
+ const c=new Controller();c.update({source:'$api_key = "sensitive"\nroot = Root([Input("ordinary", "Label", $api_key)])',complete:true});assert.match(c.error,/Sensitive|invalid/);assert.equal(c.submit(),null);c.dispose();
+});

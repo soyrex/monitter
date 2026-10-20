@@ -1,6 +1,6 @@
 import {z,createLibrary,defineComponent,createStreamingParser,createStore,evaluateRoot,resolveStateField,markReactive,parseMessage} from './vendor/core.js';
-const secret=/(password|secret|token|credential|authorization|cookie)/i;
-const unsafeName=name=>secret.test(name)||['__proto__','constructor','prototype'].includes(name);
+const secret=/(password|passwd|secret|token|credential|authorization|cookie|api_?key|private_?key)/i;
+const unsafeName=name=>typeof name!=='string'||!name.length||name.length>64||new TextEncoder().encode(name).length>64||/[\u0000-\u001f\u007f-\u009f]/u.test(name)||secret.test(name)||['__proto__','constructor','prototype'].includes(name);
 const reactive=s=>{markReactive(s);return s;};
 const children=z.array(z.any());
 const specs={
@@ -21,7 +21,7 @@ export function safeState(value,depth=0){
  if(typeof value==='number')return Number.isFinite(value)?value:undefined;
  if(typeof value==='string')return value.slice(0,2048);
  if(Array.isArray(value))return value.slice(0,32).map(v=>safeState(v,depth+1)??null);
- if(value&&typeof value==='object')return Object.fromEntries(Object.entries(value).slice(0,64).filter(([k])=>!secret.test(k)&&!['__proto__','constructor','prototype'].includes(k)).map(([k,v])=>[k,safeState(v,depth+1)]).filter(([,v])=>v!==undefined));
+ if(value&&typeof value==='object')return Object.fromEntries(Object.entries(value).slice(0,64).filter(([k])=>!unsafeName(k)).map(([k,v])=>[k,safeState(v,depth+1)]).filter(([,v])=>v!==undefined));
  return undefined;
 }
 function boundedState(value){const state=safeState(value)||{};return JSON.stringify(state).length<=16384?state:{};}
@@ -42,10 +42,11 @@ export class Controller{
    const content=parseMessage(source,{streaming:!this.complete}).content;
    const result=this.parser.set(content,this.complete);
    if(result.queryStatements.length||result.mutationStatements.length)throw Error('Query and Mutation are unavailable in native output.');
+   if(Object.keys(result.stateDeclarations).some(unsafeName))throw Error('Sensitive or invalid state names are unavailable in native output.');
    const errors=result.meta.errors.filter(e=>e.severity!=='warning');
    if(errors.length&&this.complete)throw Error(errors.map(e=>e.message).join('\n'));
    if((!errors.length||!this.root)&&(result.root||result.rootExpression)){this.result=result;this.hydrating=true;this.store.initialize(result.stateDeclarations,{});this.hydrating=false;this.evaluate();}
-   if(!this.root&&this.complete)throw Error('OpenUI did not produce a supported Root component.');
+   if(!this.root&&this.complete&&!this.error)throw Error('OpenUI did not produce a supported Root component.');
   }catch(error){this.hydrating=false;if(this.complete||/unavailable|limit/.test(String(error)))this.error=String(error?.message||error).slice(0,2048);}
   this.onChange();
  }
@@ -53,7 +54,7 @@ export class Controller{
  validate(node,depth=0,count={n:0}){
   if(depth>20||++count.n>300)throw Error('OpenUI exceeds the native component limit.');
   if(!specs[node.typeName])throw Error(`Unsupported component: ${node.typeName}`);
-  if(node.props?.name&&unsafeName(node.props.name))throw Error('Sensitive fields are unavailable in native output.');
+  if(node.props?.name!==undefined&&unsafeName(node.props.name))throw Error('Sensitive or invalid form/field names are unavailable in native output.');
   if(node.typeName==='Table'&&(node.props.columns.length>8||node.props.rows.length>32||node.props.rows.some(row=>row.length>8)))throw Error('Native tables support up to 8 columns and 32 rows.');
   if(node.typeName==='Select'&&node.props.options.length>32)throw Error('Native selects support up to 32 options.');
   for(const child of node.props?.children||[]){if(child&&child.type==='element')this.validate(child,depth+1,count);}
