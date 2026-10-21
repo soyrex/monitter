@@ -695,7 +695,7 @@ impl OutputBlock {
                     .as_f64()
                     .filter(|height| height.is_finite() && *height >= 0.)
                 {
-                    let height = (height as f32).clamp(80., 1600.);
+                    let height = (height as f32).clamp(80., 100_000.);
                     if (self.height - height).abs() >= 1. {
                         self.height = height;
                         self.invalidate(cx);

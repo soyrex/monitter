@@ -531,6 +531,44 @@ mod mounted {
                 pane.read_with(visual, |pane, cx| pane.draft(cx)).is_empty(),
                 "streaming, native field edits and completion must never prepare/send a composer draft"
             );
+            // Exercise the same two-card rows used by generated company cards.
+            // Narrowing the pane must reflow cards and increase measured height.
+            let prose = "Editable interfaces with long descriptions that must wrap within the available card width. ".repeat(4);
+            let cards = format!(
+                "root = Root([Row([Card(\"First\", [Text({0})]), Card(\"Second\", [Text({0})])]), Row([Card(\"Third\", [Text({0})]), Card(\"Fourth\", [Text({0})])])])",
+                serde_json::to_string(&prose).unwrap()
+            );
+            snapshot["messages"][0]["text"] = json!(format!("```openui\n{cards}\n```"));
+            publish_stream_revision(&pane, visual, &snapshot, "responsive-cards");
+            // This stage has no Input; settle independently from the form helper.
+            for _ in 0..60 {
+                draw(visual);
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let wide_height = visual.debug_bounds(body_selector).unwrap().size.height;
+            visual.simulate_resize(size(px(430.), px(900.)));
+            wait_for(visual, "narrow cards grow transcript height", |visual| {
+                visual
+                    .debug_bounds(body_selector)
+                    .is_some_and(|b| b.size.height > wide_height + px(40.))
+            });
+            let list = pane.read_with(visual, |pane, _| {
+                pane.transcripts.get(&task).unwrap().list.clone()
+            });
+            let before = list.logical_scroll_top();
+            let viewport = visual.debug_bounds("retained-transcript-viewport").unwrap();
+            visual.simulate_event(gpui::ScrollWheelEvent {
+                position: viewport.center(),
+                delta: gpui::ScrollDelta::Pixels(point(px(0.), px(120.))),
+                ..Default::default()
+            });
+            draw(visual);
+            let after = list.logical_scroll_top();
+            assert_ne!(
+                (before.item_ix, before.offset_in_item),
+                (after.item_ix, after.offset_in_item),
+                "wheel over native OpenUI must move the host transcript"
+            );
         }));
         std::panic::set_hook(Box::new(move |info| previous(info)));
         if let Err(payload) = result {

@@ -989,14 +989,14 @@ pub(crate) fn pointer(surface: &Rc<Surface>, event: PointerEvent) {
 }
 
 /// A wheel event from the window.
-pub(crate) fn wheel(surface: &Rc<Surface>, event: WheelEvent) {
+pub(crate) fn wheel(surface: &Rc<Surface>, event: WheelEvent) -> bool {
     let (x, y) = (event.x, event.y);
     surface.input.last.set(Some((x, y)));
     let (mut dx, mut dy) = (event.dx, event.dy);
     // Mice have no pinch: Ctrl + wheel pinches, as it zooms on desktops
     // (precision touchpads pinch this way too).
     if event.modifiers.ctrl && dy != 0.0 && wheel_zoom(surface, x, y, dy) {
-        return;
+        return true;
     }
     if !event.precise && dx == 0.0 && event.modifiers.shift {
         (dx, dy) = (dy, dx);
@@ -1010,14 +1010,14 @@ pub(crate) fn wheel(surface: &Rc<Surface>, event: WheelEvent) {
             .find(|v| v.kind() == ViewKind::Input)
         && crate::text_input::wheel(&field, dy)
     {
-        return;
+        return true;
     }
     let kind = if event.precise {
         WheelInput::Touchpad { phased: false }
     } else {
         WheelInput::Step
     };
-    wheel_input(surface, x, y, dx, dy, event.time * 1000.0, kind);
+    wheel_input(surface, x, y, dx, dy, event.time * 1000.0, kind)
 }
 
 /// A key from the window; true when handled. Only key downs (and their
@@ -2444,7 +2444,7 @@ pub(crate) enum GesturePhase {
 /// and end. Fingers resting on the touchpad stop a glide; lifting them
 /// glides on with the gesture's velocity. Touchpads whose events have no
 /// phases (every event [`GesturePhase::Moved`]) end once they pause.
-pub(crate) fn touchpad(surface: &Rc<Surface>, event: WheelEvent, phase: GesturePhase) {
+pub(crate) fn touchpad(surface: &Rc<Surface>, event: WheelEvent, phase: GesturePhase) -> bool {
     let input = &surface.input;
     let time = event.time * 1000.0;
     let (x, y) = (event.x, event.y);
@@ -2462,7 +2462,7 @@ pub(crate) fn touchpad(surface: &Rc<Surface>, event: WheelEvent, phase: GestureP
             );
             if event.dx == 0.0 && event.dy == 0.0 {
                 touchpad_hold(surface, x, y, time);
-                return;
+                return input.wheel.borrow().is_some();
             }
         }
         GesturePhase::Moved => {
@@ -2479,7 +2479,7 @@ pub(crate) fn touchpad(surface: &Rc<Surface>, event: WheelEvent, phase: GestureP
                     time,
                     WheelInput::Stop { fling: false },
                 );
-                return;
+                return true;
             }
         }
         GesturePhase::Ended | GesturePhase::Cancelled => {}
@@ -2487,9 +2487,9 @@ pub(crate) fn touchpad(surface: &Rc<Surface>, event: WheelEvent, phase: GestureP
     let phased =
         phase != GesturePhase::Moved || input.wheel.borrow().as_ref().is_some_and(|w| w.phased);
     if event.modifiers.ctrl && event.dy != 0.0 && wheel_zoom(surface, x, y, event.dy) {
-        return;
+        return true;
     }
-    wheel_input(
+    let handled = wheel_input(
         surface,
         x,
         y,
@@ -2500,8 +2500,9 @@ pub(crate) fn touchpad(surface: &Rc<Surface>, event: WheelEvent, phase: GestureP
     );
     if matches!(phase, GesturePhase::Ended | GesturePhase::Cancelled) {
         let fling = phase == GesturePhase::Ended;
-        wheel_input(surface, x, y, 0.0, 0.0, time, WheelInput::Stop { fling });
+        return wheel_input(surface, x, y, 0.0, 0.0, time, WheelInput::Stop { fling }) || handled;
     }
+    handled
 }
 
 /// A touchpad pinch event in `phase` at `(x, y)`: `delta` is GPUI's (the
@@ -3019,6 +3020,28 @@ mod tests {
             s.behavior.enabled = true;
         }
         (surface, scroll)
+    }
+
+    #[test]
+    fn embedded_surface_only_claims_scroll_it_handles() {
+        let (surface, scroll) = scrolling_surface();
+        let event = WheelEvent {
+            x: 100.0,
+            y: 100.0,
+            dx: 0.0,
+            dy: 20.0,
+            precise: false,
+            modifiers: Modifiers::default(),
+            time: 1.0,
+        };
+        assert!(wheel(&surface, event));
+        assert!(offset(&scroll) > 0.0);
+        // A static embedded card must leave the wheel for its host transcript.
+        scroll.state_mut().scroll = None;
+        surface.input.latch.borrow_mut().take();
+        assert!(!wheel(&surface, event));
+        assert!(!touchpad(&surface, event, GesturePhase::Moved));
+        assert!(!touchpad(&surface, event, GesturePhase::Ended));
     }
 
     fn pad(surface: &Rc<Surface>, dy: f32, time: f64, phase: GesturePhase) {

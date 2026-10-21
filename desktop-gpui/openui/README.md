@@ -32,7 +32,7 @@ Retain the same AppView across revisions. `messageId` + `blockId` identify state
 
 User submission sets `action: {type:"draft", text:string, id:string}`. The monotonically increasing id permits deduplication. The host validates bounds, exposes its own review control, inserts into the editable composer only on user approval, and preserves explicit Send. Source never supplies a raw action or command.
 
-`status` is `ready`, `incomplete` (no usable tree), `rendered`, or `error`. `error` is a bounded string. `height` is measured intrinsic content height, clamped to 80–1600 points; a native Scroll retains access to taller content. Theme CSS colors come from the host.
+`status` is `ready`, `incomplete` (no usable tree), `rendered`, or `error`. `error` is a bounded string. `height` is measured intrinsic content height, clamped to 80–100000 points. Output contributes its full measured height to the host transcript; the transcript owns vertical scrolling, with no nested Scroll. Rows wrap and cards use a flexible 280-point preferred width bounded by the available pane width. Theme CSS colors come from the host.
 
 ## Reproducibility and build
 

@@ -1,4 +1,4 @@
-import { mount, signal, cleanup, batch, View, Text, Input, Scroll } from "nsh";
+import { mount, signal, cleanup, batch, View, Text, Input } from "nsh";
 import { nativeComponent } from "nsh/native";
 import { Controller } from "./controller.mjs";
 
@@ -10,14 +10,14 @@ function App(){
  let controller;
  function sync(){
   const live=new Set();
-  function reconcile(node,path,form){
+  function reconcile(node,path,form,parentType){
    const key=path+":"+(node.statementId||"")+":"+node.typeName;
    live.add(key);
    let rec=records.get(key);
    if(!rec){rec={key,type:node.typeName,props:signal(node.props,{equals:false}),children:signal([]),form};records.set(key,rec);}
-   rec.form=form;rec.props.set(node.props);
+   rec.form=form;rec.parentType=parentType;rec.props.set(node.props);
    const nextForm=node.typeName==="Form"?node.props.name:form;
-   const children=(node.props.children||[]).filter(n=>n&&n.type==="element").map((child,i)=>reconcile(child,path+"/"+i,nextForm));
+   const children=(node.props.children||[]).filter(n=>n&&n.type==="element").map((child,i)=>reconcile(child,path+"/"+i,nextForm,node.typeName));
    rec.children.set(children);
    return rec;
   }
@@ -39,7 +39,7 @@ function App(){
   });
  }
  function submit(form,label){const payload=controller.submit(form,label);if(payload)action.set(payload);}
- const textStyle=()=>({fontFamily:theme().fontFamily,fontSize:theme().fontSize,color:theme().ink});
+ const textStyle=()=>({minWidth:0,maxWidth:"100%",flexShrink:1,fontFamily:theme().fontFamily,fontSize:theme().fontSize,color:theme().ink});
  const mutedStyle=()=>({...textStyle(),fontSize:12,color:theme().muted});
  function button(label,onPress,selected=false){return <View role="button" accessibilityLabel={label} onPress={onPress} style={{padding:10,minHeight:36,borderRadius:7,borderWidth:1,borderColor:selected?theme().accent:theme().line,backgroundColor:selected?theme().panel:theme().paper,opacity:controller.complete?1:0.6}}><Text style={textStyle()}>{label}</Text></View>;}
  function Children(props){return <Each of={props.record.children()} key={r=>r.key}>{rec=><Node record={rec()}/>}</Each>;}
@@ -49,11 +49,11 @@ function App(){
   const field=()=>{p();return controller.field({typeName:rec.type,props:p()},rec.form);};
   const fieldValue=()=>field().value;
   const setField=value=>field().setValue(value);
-  const box=()=>({gap:10,padding:0,flexShrink:0});
+  const box=()=>({gap:10,padding:0,minWidth:0,maxWidth:"100%",flexShrink:0});
   switch(rec.type){
-   case "Root":case "Stack":return <View style={box()}><Children record={rec}/></View>;
-   case "Row":return <View style={{...box(),flexDirection:"row",flexWrap:"wrap",alignItems:"center"}}><Children record={rec}/></View>;
-   case "Card":return <View style={{...box(),padding:14,borderRadius:10,borderWidth:1,borderColor:theme().line,backgroundColor:theme().panel}}><Text style={{...textStyle(),fontWeight:"600"}}>{p().title}</Text><Children record={rec}/></View>;
+   case "Root":case "Stack":return <View style={{...box(),width:"100%"}}><Children record={rec}/></View>;
+   case "Row":return <View style={{...box(),flexDirection:"row",flexWrap:"wrap",alignItems:"stretch",width:"100%"}}><Children record={rec}/></View>;
+   case "Card":return <View style={{...box(),...(rec.parentType==="Row"?{flexBasis:280,flexGrow:1,flexShrink:1}:{width:"100%"}),padding:14,borderRadius:10,borderWidth:1,borderColor:theme().line,backgroundColor:theme().panel}}><Text style={{...textStyle(),fontWeight:"600"}}>{p().title}</Text><Children record={rec}/></View>;
    case "Heading":return <Text style={{...textStyle(),fontSize:20,fontWeight:"600"}}>{p().content}</Text>;
    case "Text":return <Text selectable style={textStyle()}>{p().content}</Text>;
    case "Badge":return <View style={{alignSelf:"flex-start",paddingHorizontal:8,paddingVertical:4,borderRadius:8,backgroundColor:theme().panel,borderWidth:1,borderColor:theme().line}}><Text style={{...mutedStyle(),color:theme().accent}}>{p().label}</Text></View>;
@@ -66,11 +66,11 @@ function App(){
    default:return <Text style={mutedStyle()}>Unsupported native component.</Text>;
   }
  }
- return <View>
+ return <View style={{width:"100%",minWidth:0}}>
   <Bridge state={state()} action={action()} status={status()} error={error()} height={height()} onUpdate={update} style={{height:0,width:0}}/>
-  <Scroll style={{height:height()}}><View style={{padding:8,gap:8}} onLayout={event=>{const h=Math.max(80,Math.min(1600,Math.ceil(event.height)+16));if(Number.isFinite(h)&&Math.abs(h-height())>1)height.set(h);}}>
+  <View style={{width:"100%",minWidth:0,padding:8,gap:8,flexShrink:0}} onLayout={event=>{const h=Math.max(80,Math.min(100000,Math.ceil(event.height)));if(Number.isFinite(h)&&Math.abs(h-height())>1)height.set(h);}}>
    <Each of={roots()} key={rec=>rec.key}>{rec=><Node record={rec()}/>}</Each>
-  </View></Scroll>
+  </View>
  </View>;
 }
 mount(App);
