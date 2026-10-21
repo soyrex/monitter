@@ -445,6 +445,16 @@
       ],
       "status": "implemented_unverified",
       "evidence": "Retained workspace hosts share one Desktop controller, backend subscription and preference writer. Workspace menus move to a new native window and return to main; closing a detached window returns its active and cached workspaces. Device-local ownership and placement are bounded and persisted. The macOS adapter supplies native internal drag completion and global window coordinates; Windows/Linux use menu actions until native drag adapters are implemented. Native browser reparenting currently supports macOS; unsupported transfers fail visibly while preserving the source. 54 focused desktop native tests and 88 vendor lifecycle/accessibility tests pass on the final source; an earlier full desktop snapshot passed 808 tests. An isolated macOS preview records native drag completion and successful transfer, but visual return/close acceptance remains pending. No cross-platform runtime acceptance is claimed."
+    },
+    {
+      "id": "openui_standard_native_components",
+      "sourcePaths": [
+        "desktop-gpui/openui",
+        "desktop-gpui/src/openui_output.rs",
+        "desktop-gpui/src/openui_runtime_tests.rs"
+      ],
+      "status": "implemented_partial",
+      "evidence": "Isolated feat/openui-native-standard-components: 20/20 native OpenUI tests and 30/30 JavaScript tests pass on 2026-10-21 (build run 11e48f53-9d02-49b1-b708-c306dc093fbe). Real mounted transcript verifies native Input paint, retained edits during streaming/completion/replay, responsive cards and host wheel propagation. Native calendar, modal, carousel, table editing and nine Canvas chart families verified. Remote media, rich Markdown, specialized table editors, slider dragging and chart hover remain unmatched; README records limitations. Shared app cache required active build-script regeneration after checkout switch. Subsequently merged to local main; no packaging, installation or activation."
     }
   ],
   "latestVerification": {

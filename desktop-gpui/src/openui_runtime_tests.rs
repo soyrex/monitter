@@ -12,15 +12,15 @@ const RENDERER: &str = include_str!(concat!(env!("OUT_DIR"), "/openui-renderer.j
 
 enum Observation {
     Batch(MountBatch),
-    Error,
+    Error(String),
 }
 struct Sink(mpsc::Sender<Observation>);
 impl MountSink for Sink {
     fn submit(&self, batch: MountBatch) {
         let _ = self.0.send(Observation::Batch(batch));
     }
-    fn report_error(&self, _: &str) {
-        let _ = self.0.send(Observation::Error);
+    fn report_error(&self, error: &str) {
+        let _ = self.0.send(Observation::Error(error.to_owned()));
     }
 }
 
@@ -30,6 +30,8 @@ struct Runtime {
     bridge: Option<u32>,
     props: HashMap<String, Value>,
     texts: HashMap<u32, String>,
+    labels: HashMap<u32, String>,
+    canvases: HashMap<u32, usize>,
 }
 impl Runtime {
     fn start() -> Self {
@@ -44,7 +46,7 @@ impl Runtime {
             call_budget: Duration::from_millis(100),
             max_nodes: 1000,
             max_op_values: 16_384,
-            max_canvas_ops: 1000,
+            max_canvas_ops: 8192,
             ..Default::default()
         };
         let (tx, rx) = mpsc::channel();
@@ -56,6 +58,8 @@ impl Runtime {
             bridge: None,
             props: HashMap::new(),
             texts: HashMap::new(),
+            labels: HashMap::new(),
+            canvases: HashMap::new(),
         }
     }
     fn wait(&mut self, expected: impl Fn(&Self) -> bool) {
@@ -71,8 +75,8 @@ impl Runtime {
             );
             self.engine.control().frame();
             match self.rx.recv_timeout(Duration::from_millis(20)) {
-                Ok(Observation::Error) => {
-                    panic!("trusted renderer reported a QuickJS runtime error")
+                Ok(Observation::Error(error)) => {
+                    panic!("trusted renderer reported a QuickJS runtime error: {error}")
                 }
                 Ok(Observation::Batch(batch)) => {
                     operations += batch.items.len();
@@ -99,7 +103,24 @@ impl Runtime {
                             MountItem::Text { id, text, .. } => {
                                 self.texts.insert(id, text.text.clone());
                             }
+                            MountItem::ViewProps { id, props } => {
+                                if let Some(label) = props.accessibility.label {
+                                    self.labels.insert(id, label.to_string());
+                                }
+                            }
+                            MountItem::AccessibilityLabel { id, label } => {
+                                if let Some(label) = label {
+                                    self.labels.insert(id, label.to_string());
+                                } else {
+                                    self.labels.remove(&id);
+                                }
+                            }
+                            MountItem::Canvas { id, drawing } => {
+                                self.canvases.insert(id,drawing.ops.len());
+                            }
                             MountItem::Delete { id } => {
+                                self.canvases.remove(&id);
+                                self.labels.remove(&id);
                                 self.texts.remove(&id);
                             }
                             _ => {}
@@ -118,6 +139,11 @@ impl Runtime {
     }
     fn shows(&self, expected: &str) -> bool {
         self.texts.values().any(|text| text == expected)
+    }
+    fn press(&mut self, label: &str) {
+        let id = self.labels.iter().find_map(|(id, current)| (current == label).then_some(*id))
+            .unwrap_or_else(|| panic!("native control missing: {label}"));
+        self.engine.control().dispatch_event(id, EventKind::Press, EventPayload::None);
     }
     fn update(&mut self, source: &str, complete: bool) {
         // Clear the observed status, so a previous commit cannot satisfy a new turn.
@@ -140,11 +166,11 @@ impl Runtime {
 fn trusted_renderer_quickjs_mount_update_stream_and_reject() {
     let mut runtime = Runtime::start();
     runtime.wait(|r| r.bridge.is_some() && r.status("ready"));
-    runtime.update("root = Root([Text(\"QuickJS smoke\")])", false);
+    runtime.update("root = Root([TextContent(\"QuickJS smoke\")])", false);
     runtime.wait(|r| r.status("rendered") && r.shows("QuickJS smoke"));
     // Append to a still-open program, then finish the same identity.
     runtime.update(
-        "root = Root([Text(\"QuickJS smoke\"), Text(\"Appended\")])",
+        "root = Root([TextContent(\"QuickJS smoke\"), TextContent(\"Appended\")])",
         true,
     );
     // Status may remain rendered and therefore need no fresh property write.
@@ -161,6 +187,112 @@ fn trusted_renderer_quickjs_mount_update_stream_and_reject() {
         runtime.props.get("action").is_none_or(Value::is_null),
         "unsupported output prepared an action"
     );
+}
+
+#[test]
+fn trusted_renderer_standard_tabs_and_repeated_field_interactions() {
+    let mut runtime = Runtime::start();
+    runtime.wait(|r| r.bridge.is_some() && r.status("ready"));
+    runtime.update(r#"root = Stack([
+      Tabs([TabItem("first", "First tab", [TextContent("First panel")]), TabItem("second", "Second tab", [TextContent("Second panel")])]),
+      Form("reply", Buttons([Button("Prepare")]), [
+        Chips("choices", "multiple", [ChipItem("a", "Choice A"), ChipItem("b", "Choice B")]),
+        Slider("amount", "continuous", 0, 10, 1, [0], "Amount")
+      ])
+    ])"#, true);
+    runtime.wait(|r| r.status("rendered") && r.shows("First panel") && r.labels.values().any(|s| s == "Choice B"));
+    runtime.press("Second tab");
+    runtime.wait(|r| r.shows("Second panel") && !r.shows("First panel"));
+    runtime.press("Choice A");
+    runtime.wait(|r| r.props.get("state").is_some_and(|state| state["reply"]["choices"] == json!(["a"])));
+    runtime.press("Choice B");
+    runtime.wait(|r| r.props.get("state").is_some_and(|state| state["reply"]["choices"] == json!(["a", "b"])));
+    runtime.press("+");
+    runtime.wait(|r| r.props.get("state").is_some_and(|state| state["reply"]["amount"] == json!([1])));
+    runtime.press("+");
+    runtime.wait(|r| r.props.get("state").is_some_and(|state| state["reply"]["amount"] == json!([2])));
+    runtime.press("Prepare");
+    runtime.wait(|r| r.props.get("action").is_some_and(|action| action["type"] == "draft"));
+    assert!(runtime.props["action"]["text"].as_str().unwrap().contains("choices"));
+}
+
+#[test]
+fn trusted_renderer_retains_table_input_and_updates_streamed_choices() {
+    let mut runtime = Runtime::start();
+    runtime.wait(|r| r.bridge.is_some() && r.status("ready"));
+    let source = r#"root = Stack([Form("reply", Buttons([Button("Prepare")]), [
+      EditableTable("table", [{type:"text",key:"item",header:"Item"}], [{id:"one",values:["old"]}]),
+      TextArea("notes", "Notes", 3, {}, "Two\nlines"),
+      Chips("choices", "multiple", [ChipItem("a", "Original choice")]),
+      CheckBoxGroup("checks", [CheckBoxItem("Original check", "", "ready")])
+    ])])"#;
+    runtime.update(source, true);
+    runtime.wait(|r| r.status("rendered") && r.labels.values().any(|s| s == "Item, row 1"));
+    let input = runtime.labels.iter().find_map(|(id,label)| (label=="Item, row 1").then_some(*id)).unwrap();
+    for (count, text) in [(1,"edited"),(2,"edited again")] {
+        runtime.engine.control().dispatch_event(input, EventKind::ChangeText, EventPayload::Text { text:text.into(), count });
+        runtime.wait(|r| r.props.get("state").is_some_and(|state| state["reply"]["table"][0]["values"][0]==text));
+        assert_eq!(runtime.labels.get(&input).map(String::as_str),Some("Item, row 1"),"editing remounted a native input");
+    }
+    runtime.update(&source.replace("Original choice","Revised choice").replace("Original check","Revised check"), true);
+    runtime.wait(|r| r.labels.values().any(|s| s == "Revised choice") && r.labels.values().any(|s| s == "Revised check"));
+    runtime.press("Revised choice");
+    runtime.wait(|r| r.props.get("state").is_some_and(|state| state["reply"]["choices"]==json!(["a"])));
+    runtime.press("Revised check");
+    runtime.wait(|r| r.props.get("state").is_some_and(|state| state["reply"]["checks"]["ready"]==true));
+}
+
+#[test]
+fn trusted_renderer_date_calendar_selects_a_serializable_range() {
+    let mut runtime = Runtime::start();
+    runtime.wait(|r| r.bridge.is_some() && r.status("ready"));
+    runtime.update(r#"root = Stack([Form("reply", Buttons([Button("Prepare")]), [DatePicker("dates", "range", {}, {from:"2026-10-01T00:00:00.000Z",to:"2026-10-02T00:00:00.000Z"})])])"#, true);
+    runtime.wait(|r| r.status("rendered") && r.labels.values().any(|s| s == "Choose 2026-10-04"));
+    runtime.press("Choose 2026-10-04");
+    runtime.wait(|r| r.props.get("state").is_some_and(|state| state["reply"]["dates"]["from"]=="2026-10-04T00:00:00.000Z"));
+    runtime.press("Choose 2026-10-07");
+    runtime.wait(|r| r.props.get("state").is_some_and(|state| state["reply"]["dates"]["to"]=="2026-10-07T00:00:00.000Z"));
+}
+
+#[test]
+fn trusted_renderer_records_native_chart_geometry() {
+    let mut runtime = Runtime::start();
+    runtime.engine.control().resize(nsh_core::Size::new(nsh_core::geometry::px(640.),nsh_core::geometry::px(900.)));
+    runtime.wait(|r| r.bridge.is_some() && r.status("ready"));
+    runtime.update(r#"root = Stack([
+      LineChart(["Jan","Feb","Mar"], [Series("Sales",[-5,8,3])], "step"),
+      PieChart(["A","B"],[3,7],"donut"),
+      ScatterChart([ScatterSeries("Samples",[Point(-1,2,3),Point(3,4,5)])])
+    ])"#, true);
+    runtime.wait(|r| r.status("rendered") && r.canvases.len()==3 && r.canvases.values().all(|count| *count>10));
+}
+
+#[test]
+fn trusted_renderer_mounts_standard_component_fixtures() {
+    let fixtures: Vec<Value> = serde_json::from_str(include_str!("../openui/standard-fixtures.json")).unwrap();
+    for fixture in fixtures {
+        let mut runtime = Runtime::start();
+        runtime.engine.control().resize(nsh_core::Size::new(nsh_core::geometry::px(640.),nsh_core::geometry::px(900.)));
+        runtime.wait(|r| r.bridge.is_some() && r.status("ready"));
+        runtime.update(fixture["source"].as_str().unwrap(), true);
+        runtime.wait(|r| r.status("rendered") && r.shows("Fixture mounted"));
+        assert!(runtime.props.get("error").is_none_or(|error| error.as_str().is_none_or(str::is_empty)), "fixture {}: {:?}",fixture["name"],runtime.props.get("error"));
+    }
+}
+
+#[test]
+fn trusted_renderer_modal_closes_its_binding_and_slider_keeps_range_values() {
+    let mut runtime = Runtime::start();
+    runtime.wait(|r| r.bridge.is_some() && r.status("ready"));
+    runtime.update(r#"$open = true
+root = Stack([Modal("Dialog",$open,[TextContent("Dialog body")]),Form("reply",Buttons([Button("Prepare")]),[Slider("range","continuous",0,10,1,[2,7],"Range")])])"#, true);
+    runtime.wait(|r| r.status("rendered") && r.labels.values().any(|s| s=="Close dialog"));
+    runtime.press("Close dialog");
+    runtime.wait(|r| r.props.get("state").is_some_and(|state| state["$open"]==false));
+    runtime.press("Increase Range 1");
+    runtime.wait(|r| r.props.get("state").is_some_and(|state| state["reply"]["range"]==json!([3,7])));
+    runtime.press("Decrease Range 2");
+    runtime.wait(|r| r.props.get("state").is_some_and(|state| state["reply"]["range"]==json!([3,6])));
 }
 
 #[cfg(feature = "performance-profiling")]
@@ -328,7 +460,7 @@ mod mounted {
     }
 
     fn settled_body_height(visual: &mut VisualTestContext, selector: &'static str) -> f32 {
-        let mut height = 0.;
+        let mut height: f32 = 0.;
         let mut stable = 0;
         wait_for(visual, "stable native message layout", |visual| {
             let Some(bounds) = visual.debug_bounds(selector) else {
@@ -433,8 +565,8 @@ mod mounted {
             let message_id = format!("openui-mounted-message-{}", uuid::Uuid::new_v4());
             // A usable form inside an unfinished Root array. The official parser
             // can render this prefix while both the program and fence remain open.
-            let prefix = "$name = \"blue\"\nroot = Root([Form(\"reply\", [Input(\"colour\", \"Mounted colour\", $name)], \"Prepare response\")";
-            let appended = format!("{prefix}, Text(\"Appended content acknowledged\")])");
+            let prefix = "$name = \"blue\"\nroot = Root([Form(\"reply\", Buttons([Button(\"Prepare response\")]), [Input(\"colour\", \"Mounted colour\", \"text\", {}, $name)])";
+            let appended = format!("{prefix}, TextContent(\"Appended content acknowledged\")])");
             let mut snapshot = json!({
                 "settings":{"theme":"dark","interfaceScale":100,"interfaceFontSize":14},
                 "tasks":[{"id":task,"title":"Mounted OpenUI","agentId":"fixture-agent",
@@ -533,9 +665,9 @@ mod mounted {
             );
             // Exercise the same two-card rows used by generated company cards.
             // Narrowing the pane must reflow cards and increase measured height.
-            let prose = "Editable interfaces with long descriptions that must wrap within the available card width. ".repeat(4);
+            let prose = "Editable interfaces with long descriptions that must wrap within the available card width. ".repeat(12);
             let cards = format!(
-                "root = Root([Row([Card(\"First\", [Text({0})]), Card(\"Second\", [Text({0})])]), Row([Card(\"Third\", [Text({0})]), Card(\"Fourth\", [Text({0})])])])",
+                "root = Root([Row([Card([CardHeader(\"First\"), TextContent({0})]), Card([CardHeader(\"Second\"), TextContent({0})])]), Row([Card([CardHeader(\"Third\"), TextContent({0})]), Card([CardHeader(\"Fourth\"), TextContent({0})])])])",
                 serde_json::to_string(&prose).unwrap()
             );
             snapshot["messages"][0]["text"] = json!(format!("```openui\n{cards}\n```"));
@@ -555,15 +687,28 @@ mod mounted {
             let list = pane.read_with(visual, |pane, _| {
                 pane.transcripts.get(&task).unwrap().list.clone()
             });
-            let before = list.logical_scroll_top();
             let viewport = visual.debug_bounds("retained-transcript-viewport").unwrap();
+            eprintln!("OpenUI scroll geometry: wrapper={viewport:?}, list={:?}, body={:?}, max={:?}, items={}", list.viewport_bounds(), visual.debug_bounds(body_selector), list.max_offset_for_scrollbar(), list.item_count());
+            // The host first consumes wheel movement to collapse the composer.
+            // Prime that legitimate chrome motion before measuring the list.
+            for _ in 0..3 {
+                visual.simulate_event(gpui::ScrollWheelEvent {
+                    position: viewport.center(),
+                    delta: gpui::ScrollDelta::Pixels(point(px(0.), px(80.))),
+                    ..Default::default()
+                });
+                draw(visual);
+            }
+            let before = list.logical_scroll_top();
             visual.simulate_event(gpui::ScrollWheelEvent {
                 position: viewport.center(),
-                delta: gpui::ScrollDelta::Pixels(point(px(0.), px(120.))),
+                delta: gpui::ScrollDelta::Pixels(point(px(0.), px(40.))),
                 ..Default::default()
             });
             draw(visual);
+            draw(visual);
             let after = list.logical_scroll_top();
+            eprintln!("OpenUI scroll result: before={before:?} after={after:?}, max={:?}", list.max_offset_for_scrollbar());
             assert_ne!(
                 (before.item_ix, before.offset_in_item),
                 (after.item_ix, after.offset_in_item),

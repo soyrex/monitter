@@ -767,7 +767,9 @@ impl Element for SurfaceElement {
         surface.drawing();
         crate::access::prepaint(surface, &self.focus, window, cx);
         window.set_focus_handle(&self.focus, cx);
-        let hitbox = window.insert_hitbox(bounds, HitboxBehavior::BlockMouse);
+        // Keep mouse ownership inside the surface, but leave the embedding
+        // scroll container eligible when NSH does not consume a wheel event.
+        let hitbox = window.insert_hitbox(bounds, HitboxBehavior::BlockMouseExceptScroll);
         // Native components and web views take the input over their boxes.
         crate::native::prepaint(surface, window, cx);
         hitbox

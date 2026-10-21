@@ -5,6 +5,8 @@ fn main() {
     for file in [
         "renderer.tsx",
         "controller.mjs",
+        "calendar.mjs",
+        "charts.mjs",
         "vendor/core.js",
         "vendor/provenance.json",
         "bundle.mjs",
@@ -13,10 +15,13 @@ fn main() {
     ] {
         println!("cargo:rerun-if-changed=openui/{file}");
     }
+    println!("cargo:rerun-if-env-changed=CARGO_MANIFEST_DIR");
     let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
     let compiled = out.join("openui.compiled.js");
+    let source = fs::read_to_string(root.join("openui/renderer.tsx"))
+        .expect("read trusted renderer from the active checkout");
     let code =
-        nsh_bundler::compile_module("renderer.tsx", include_str!("openui/renderer.tsx"), &[])
+        nsh_bundler::compile_module("renderer.tsx", &source, &[])
             .expect("compile trusted OpenUI NSH renderer");
     fs::write(&compiled, code).expect("write compiled OpenUI renderer");
     let status = Command::new("node")

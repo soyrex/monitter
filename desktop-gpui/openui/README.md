@@ -1,43 +1,62 @@
-# OpenUI Lang → native NSH
+# OpenUI Lang on native GPUI Fast
 
-Trusted adapter code interprets OpenUI's typed tree and renders native NSH views. Model output is never treated as JS/TSX, HTML, a module path, or a command. Query/Mutation are unavailable. Form submission prepares a bounded draft for the Rust host's composer review control; it never sends a message.
+This adapter uses the project's pinned OpenUI Lang 1.0.1 parser and library format, then reconciles its typed component references into trusted NSH renderers hosted in GPUI Fast. It does not execute model-authored JSX, HTML, JavaScript, URLs, commands, or OpenUI action expressions. The native library root is `Stack`; component props and their positional order follow the OpenUI library pinned at `9823ec05d4b29bc78d101676dc16b44fe17f1830`.
 
-The allowlist is `Root`, `Stack`, `Row`, `Card`, `Heading`, `Text`, `Badge`, `Form`, `Input`, `Select`, `Checkbox`, `Button`, and `Table`. Arguments are positional in the following example:
+## Native core coverage
+
+The native registry covers the components in the pinned OpenUI Lang standard library, using trusted NSH renderers hosted in GPUI Fast. Component references and positional props follow the pinned schemas. Native presentation is not React visual parity; the table lists the deliberate limitations:
+
+| Group | Components | Native behavior |
+| --- | --- | --- |
+| Layout | `Stack`, `Tabs`, `TabItem`, `Accordion`, `AccordionItem`, `Steps`, `StepsItem`, `Carousel`, `Separator`, `Modal` | Responsive stacks and cards; local tab/accordion selection; steps displayed in order; carousel page buttons; native modal window layers with dismiss controls and reactive `open` binding. |
+| Content | `Card`, `CardHeader`, `TextContent`, `MarkDownRenderer`, `Callout`, `TextCallout`, `CodeBlock`, `InlineHeader` | Native themed text and containers. CodeBlock preserves the standard `language` and `codeString` props. Markdown is rendered as plain selectable text. |
+| Forms | `Form`, `FormControl`, `Label`, `Input`, `TextArea`, `Select`, `SelectItem`, `DatePicker`, `Slider`, `CheckBoxGroup`, `CheckBoxItem`, `RadioGroup`, `RadioItem`, `SwitchGroup`, `SwitchItem`, `Chips`, `ChipItem`, `OptionCards`, `OptionCard` | Native editable fields and selections. Form buttons prepare a bounded draft for the composer; the user reviews it and sends explicitly. |
+| Actions | `Button`, `Buttons`, `IconButton` | Button labels become draft actions; OpenUI `Action` expressions are not run. Icon names render as text labels where native icon mapping is unavailable. |
+| Data | `Table`, `Col`, `EditableTable`, `EntityList`, `Tag`, `TagBlock`, `ListBlock`, `ListItem`, `Icon` | Bounded native tables, editable plain-text cell values, key/value lists and tags; component-valued read-only table cells are shown as text. Specialized select/date/url cell editors are not provided. |
+| Charts | `BarChart`, `LineChart`, `AreaChart`, `HorizontalBarChart`, `RadarChart`, `PieChart`, `RadialChart`, `SingleStackedBarChart`, `ScatterChart`, `Series`, `Slice`, `ScatterSeries`, `Point` | Native Canvas geometry, axes and theme-based legends. Grouped/diverging stacked bars, line/area curves, pie/donut, concentric radial arcs, radar polygons and scatter/bubble plots. Hover tooltips are not provided. |
+| Cards | `SnippetCardBlock`, `SnippetCardItem`, `OverviewCardBlock`, `OverviewCardItem`, `ContextCardBlock`, `ContextCardItem`, `CompositeCardBlock`, `CompositeCardItem`, `VisualCardBlock`, `VisualCardItem`, `Text`, `BoldText`, `IconText`, `ImageText`, `ImageTextLarge`, `MetricIndicatorInline`, `MetricIndicatorWithStrikethrough` | Native text, metrics and responsive card layouts. Image slots use descriptive placeholders. |
+| Media | `Image`, `ImageBlock`, `ImageGallery` | Preserve alt text and captions in native placeholders. This renderer does not fetch or decode model supplied image URLs. |
+
+`AgentInterface`, `ToolCall`, and `ToolResult` are host chat-shell components rather than assistant output components, so they remain outside this renderer. All other registry names have explicit native render paths. Remote media are placeholders because the output engine has no network/filesystem grants. Markdown currently remains plain selectable text; swipe gestures, specialized table editors and chart tooltips remain unmatched as detailed below.
+
+Some components are intentionally simplified by available native primitives: `TextArea` uses native multiline editing; `DatePicker` uses a month calendar with single/range selection and serialized ISO date values; `Slider` changes by step buttons; `Carousel` uses page buttons without swipe navigation; `Modal` uses NSH’s native dialog layer with close, Escape and backdrop dismissal; and `Callout` remains visible until its bound state changes. `MarkDownRenderer` displays its source as selectable text. Image components preserve alt text but do not fetch remote URLs. Charts draw native Canvas geometry for grouped/stacked bars, lines/areas, pie/donut, radial, radar and scatter/bubbles. Natural curves use smooth Bézier interpolation, dense point markers are sampled, and category legends show the first eight entries. Pie/radial charts use absolute magnitudes for signed values and preserve signed legend text. Chart recording is bounded to 8192 encoded values per canvas (the tested maximum is 2954). Form submission enforces required, email, URL, numeric, range, and length rules. Regex `pattern` rules accept only anchored expressions with at most one repetition operator; groups, alternation, and other constructs are rejected to keep untrusted validation bounded. Non-password `Input` types use a plain text control. These components preserve their OpenUI wire schemas and state values where practical, but they do not claim visual or interaction parity with React.
+
+## Examples
 
 ```openui
 $name = "Alex"
-root = Root([
-  Heading("Delivery preferences"),
-  Card("Order", [Text("Review these details before preparing a response."), Badge("Draft")]),
-  Form("reply", [
-    Input("name", "Name", $name, "Enter a name"),
-    Select("delivery", "Delivery", ["Pickup", "Shipping"], "Pickup"),
-    Checkbox("confirmed", "Details checked", false)
-  ], "Prepare response"),
-  Table(["Item", "Quantity"], [["Sample", 2]])
+root = Stack([
+  Card([CardHeader("Delivery preferences"), TextContent("Review your choices before preparing a response.")]),
+  Form("reply", Buttons([Button("Prepare response")]), [
+    FormControl("Name", Input("name", "Enter a name", "text", {}, $name)),
+    FormControl("Delivery", Select("delivery", [SelectItem("pickup", "Pickup"), SelectItem("ship", "Shipping")], "Choose delivery"))
+  ]),
+  Table([Col("Item", ["Sample"]), Col("Quantity", [2], "number")])
 ])
 ```
 
-`Root(children)`, `Stack(children)`, `Row(children)`, `Card(title, children)`, `Heading(content)`, `Text(content)`, `Badge(label)`, `Form(name, children, submitLabel?)`, `Input(name, label, value?, placeholder?)`, `Select(name, label, options, value?)`, `Checkbox(name, label, checked?)`, `Button(label)`, `Table(columns, rows)`. String/boolean field props support OpenUI `$binding` state. There are no password controls. Tables allow eight columns and 32 rows; selects allow 32 choices; trees allow 300 components and depth 20. Invalid final output reports a host fallback; a partial revision retains the last usable tree. Stable keyed native records retain input entities during streaming and state updates.
+Core positional signatures are `Stack(children, direction?, gap?, align?, justify?, wrap?)`, `Card(children, variant?, direction?, gap?, align?, justify?, wrap?)`, `Tabs(items)`, `TabItem(value, trigger, content)`, `Accordion(items)`, `AccordionItem(value, trigger, content)`, `Form(name, buttons, fields?)`, `FormControl(label, input, hint?)`, `Input(name, placeholder?, type?, rules?, value?)`, `Select(name, items, placeholder?, rules?, value?, size?)`, `Button(label, action?, variant?, type?, size?)`, `Buttons(buttons, direction?)`, `Table(columns)`, `Col(label, data, type?)`, `BarChart(labels, series, variant?, xLabel?, yLabel?, height?)`, and `Series(category, values)`. Nested content uses references such as `TabItem` content arrays, `SelectItem` option references, and `Col` table references; the adapter reconciles these through streaming updates.
 
-## Native bridge
+## Safety and limits
 
-Register `monitter.openui.bridge`. JS declares props `state`, `action`, `status`, `error`, `height` and event `Update` (handler `onUpdate`). On `status: "ready"`, emit:
+Query and Mutation are unavailable. Input names and state keys are screened for secrets and prototype keys; password inputs are rejected. State is bounded to 16 KiB, depth six, 64 object keys, 32 array values, and 2 KiB per string. Output is limited to 64 KiB per OpenUI block, 300 components and depth 20. Tables allow eight columns and 32 rows; selects allow 32 items; charts allow eight series and 32 points. An incomplete stream retains the last usable tree. Field edits survive revisions for the same message/block identity. The Rust host independently sanitizes persisted state and draft payloads.
 
-```json
-{"source":"root = Root([Text(\"Hello\")])","complete":true,"state":{},"messageId":"message UUID","blockId":"0","theme":{"dark":true,"accent":"#86a9ff","paper":"#171b22","panel":"#202630","ink":"#e6e9ef","muted":"#a4aebd","line":"#384353","fontFamily":".AppleSystemUIFont","fontSize":14}}
-```
+## Native bridge and build
 
-Retain the same AppView across revisions. `messageId` + `blockId` identify state; switching identity resets parser/store, while subsequent `state` echoes for the same identity do not overwrite edits. `state` is initially null (host must ignore it); user edits emit a JSON object snapshot: `$binding` keys plus plain form/field values. Initial hydration never emits an action or a state save. `action: null` clears any pending draft on an Update. State snapshots are bounded to 16 KiB, nesting depth four, 64 keys/container, 32 array entries, and 2 KiB/string; secret-like/prototype keys are excluded. Rust must independently sanitize and persist by block/library identity (`monitter-native-v1`).
+The renderer is compiled by NSH's `compile_module("renderer.tsx", source, &[])`, then bundled with `node desktop-gpui/openui/bundle.mjs <compiled.js> <openui-renderer.js>`. Do not run the TSX through React's JSX transform. The NSH capability grant remains empty and browser-only storage is replaced with an ephemeral backend.
 
-User submission sets `action: {type:"draft", text:string, id:string}`. The monotonically increasing id permits deduplication. The host validates bounds, exposes its own review control, inserts into the editable composer only on user approval, and preserves explicit Send. Source never supplies a raw action or command.
+The runtime emits `status` (`ready`, `incomplete`, `rendered`, or `error`), bounded error text, intrinsic height, sanitized state, and a `draft` action. Rust treats the action as a reviewable composer draft only; it never sends automatically. See `openui_output.rs` for the message parser, persistence identity, fallback, and final bounds.
 
 `status` is `ready`, `incomplete` (no usable tree), `rendered`, or `error`. `error` is a bounded string. `height` is measured intrinsic content height, clamped to 80–100000 points. Output contributes its full measured height to the host transcript; the transcript owns vertical scrolling, with no nested Scroll. Rows wrap and cards use a flexible 280-point preferred width bounded by the available pane width. Theme CSS colors come from the host.
 
-## Reproducibility and build
+`npm ci --ignore-scripts` installs pinned build dependencies. `npm run vendor` regenerates `vendor/core.js` from the ignored official clone at `../../artifacts/openui-nsh/upstream`, requiring the pinned commit and recording provenance. Application builds use the checked-in trusted bundle and perform no download/install step.
 
-`npm ci --ignore-scripts` installs pinned build dependencies; no script installs or fetches during application builds. `npm run vendor` regenerates `vendor/core.js` from the ignored official clone at `../../artifacts/openui-nsh/upstream`, requiring commit `9823ec05d4b29bc78d101676dc16b44fe17f1830`. This bundles the official framework-independent parser/library/evaluator/store, Zod 4.4.3, and the message protocol, with licenses and a SHA-256 provenance record. Server-only `ci-info` discovery is replaced by an inert module. NSH grants remain empty.
+## Verification receipt (2026-10-21)
 
-Use NSH's `compile_module("renderer.tsx", source, &[])` first. Then `node desktop-gpui/openui/bundle.mjs /absolute/renderer.compiled.js /absolute/openui-renderer.js` bundles imports while leaving `nsh`, `nsh/*`, and `nsh:rt` native. Do not run this TSX through React's JSX transform. The runtime uses only checked-in trusted JS and the configured empty NSH capabilities.
+On the isolated `feat/openui-native-standard-components` branch, all 30 JavaScript tests and all 20 native OpenUI tests passed. Native build run `11e48f53-9d02-49b1-b708-c306dc093fbe` exited zero. Coverage includes the pinned standard-schema fixtures, calendar range values, modal state, chart Canvas geometry, retained table inputs and streamed choices. The real transcript regression checks native Input painting, edits through streaming/completion/cache replay, responsive card wrapping and host wheel scrolling over native output.
 
-`npm test` verifies streaming, field identity/state restore, replay envelopes, unsupported tools/components, and state redaction with the actual vendored official parser. Native focus, scrolling, theme, host fallback, and composer review require the running Fast UI target.
+The NSH surface and hosted-component hitboxes preserve mouse isolation while allowing unhandled wheel events to reach the host list. Native scroll handlers still receive the event first and can consume it.
+
+The shared app cache can reuse a build script from another worktree with an older embedded renderer. The build script now reads renderer source from its runtime manifest directory. When switching between this branch and an older canonical checkout sharing the same target directory, force regeneration by touching `desktop-gpui/build.rs` before the coordinated build. The successful receipt followed that regeneration; dependency caches were retained. Disk finished with approximately 19 GiB free, with no cleanup performed in this work.
+
+These results verify this documented native subset, including the approximations above. The isolated port was subsequently merged into local main. It has not been packaged, installed or activated as part of this delivery.
