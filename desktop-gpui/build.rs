@@ -7,6 +7,7 @@ fn main() {
         "controller.mjs",
         "calendar.mjs",
         "charts.mjs",
+        "media.mjs",
         "vendor/core.js",
         "vendor/provenance.json",
         "bundle.mjs",

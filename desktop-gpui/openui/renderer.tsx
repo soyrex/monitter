@@ -3,8 +3,10 @@ import { nativeComponent } from "nsh/native";
 import { Controller, componentChildren } from "./controller.mjs";
 import { dateKey, monthKey, monthDays, chooseDate } from "./calendar.mjs";
 import { Canvas } from "nsh/canvas";
+import { Image as NativeImage } from "nsh/image";
 import { Dialog } from "nsh/base";
 import { drawChart } from "./charts.mjs";
+import { safeImageSource } from "./media.mjs";
 
 const Bridge = nativeComponent("monitter.openui.bridge", {props:["state","action","status","error","height"],events:["Update"]});
 function cellText(value){
@@ -19,6 +21,7 @@ function cellText(value){
 function App(){
  const theme=signal({dark:true,accent:"#86a9ff",paper:"#171b22",panel:"#202630",ink:"#e6e9ef",muted:"#a4aebd",line:"#384353",fontFamily:".AppleSystemUIFont",fontSize:14});
  const state=signal(null);const action=signal(null);const status=signal("ready");const error=signal("");const height=signal(100);
+ const approvedMedia=signal({});
  const roots=signal([]);const records=new Map();
  let controller;
  function sync(){
@@ -49,6 +52,7 @@ function App(){
   batch(()=>{
    action.set(null);
    if(value.theme&&typeof value.theme==="object")theme.set({...theme(),...value.theme});
+   approvedMedia.set(value.media||{});
    controller.update(value);
   });
  }
@@ -88,7 +92,7 @@ function App(){
    case "ListItem":return <View role={p().action?"button":undefined} accessibilityLabel={p().actionLabel||p().title} onPress={p().action?()=>submit(rec.form,p().title):undefined} style={{flex:1,flexDirection:"row",justifyContent:"space-between",gap:10}}><View><Text selectable style={textStyle()}>{p().title}</Text>{p().subtitle?<Text style={mutedStyle()}>{p().subtitle}</Text>:null}</View>{p().actionLabel?<Text style={{...mutedStyle(),color:theme().accent}}>{p().actionLabel}</Text>:null}</View>;
    case "EntityList":{const row=(item,index)=><View key={index} style={{flexDirection:"row",justifyContent:"space-between",gap:10,paddingVertical:6,borderBottomWidth:1,borderColor:theme().line}}><Text style={mutedStyle()}>{item.left}</Text><Text selectable style={textStyle()}>{item.right}</Text></View>;return <View style={{...box(),width:"100%",padding:10,borderWidth:1,borderColor:theme().line,borderRadius:8}}>{p().header?row(p().header,"header"):null}{(p().rows||[]).map(row)}{p().footer?row(p().footer,"footer"):null}</View>;}
    case "CodeBlock":return <View style={{width:"100%",padding:10,borderRadius:6,backgroundColor:theme().paper,borderWidth:1,borderColor:theme().line}}><Text selectable style={{...textStyle(),fontFamily:"monospace"}}>{p().codeString}</Text>{p().language?<Text style={mutedStyle()}>{p().language}</Text>:null}</View>;
-   case "Image":case "ImageBlock":return <View accessibilityLabel={p().alt||"Image unavailable"} style={{width:"100%",minHeight:48,padding:10,borderRadius:6,borderWidth:1,borderColor:theme().line,backgroundColor:theme().paper}}><Text style={mutedStyle()}>{p().alt||"Image"} · image loading is unavailable in the native output renderer</Text></View>;
+   case "Image":case "ImageBlock":{const src=safeImageSource(p().src,approvedMedia());return src?<NativeImage src={src} resizeMode="cover" accessibilityLabel={p().alt||"Image"} style={{width:"100%",height:rec.type==="ImageBlock"?320:200,borderRadius:8,backgroundColor:theme().paper}}/>:<View accessibilityLabel={p().alt||"Image unavailable"} style={{width:"100%",minHeight:48,padding:10,borderRadius:6,borderWidth:1,borderColor:theme().line,backgroundColor:theme().paper}}><Text style={mutedStyle()}>{p().alt||"Image"} · unsupported image source</Text></View>;}
    case "ImageGallery":return <View style={{...box(),width:"100%",flexDirection:"row",flexWrap:"wrap"}}><Each of={p().images||[]} key={image=>image.src}>{image=><View accessibilityLabel={image().alt||"Image unavailable"} style={{flexBasis:140,flexGrow:1,padding:10,borderRadius:6,borderWidth:1,borderColor:theme().line,backgroundColor:theme().paper}}><Text style={mutedStyle()}>{image().alt||"Image"} · image loading unavailable</Text>{image().details?<Text style={textStyle()}>{image().details}</Text>:null}</View>}</Each></View>;
    case "Tabs":return <View style={box()}><View style={{flexDirection:"row",flexWrap:"wrap",gap:6}}><Each of={rec.children()} key={child=>child.key}>{child=><View role="tab" accessibilityLabel={child().props().trigger} accessibilityState={{selected:rec.local()===child().props().value}} onPress={()=>{if(controller.complete)rec.local.set(child().props().value);}} style={{padding:8,borderBottomWidth:2,borderColor:rec.local()===child().props().value?theme().accent:theme().line}}><Text style={textStyle()}>{child().props().trigger}</Text></View>}</Each></View>{<Each of={rec.children().filter(child=>child.type==="TabItem"&&child.props().value===rec.local())} key={child=>child.key}>{child=><Node record={child()}/>}</Each>}</View>;
    case "TabItem":return rec.parent?.local?.()===p().value?<View style={box()}><Children record={rec}/></View>:null;

@@ -14,6 +14,7 @@ use serde_json::{Map, Value, json};
 use std::{
     cell::RefCell,
     collections::{BTreeMap, HashMap, HashSet},
+    path::{Path, PathBuf},
     rc::{Rc, Weak},
     sync::Arc,
     time::{Duration, Instant},
@@ -28,6 +29,93 @@ const MAX_STATE: usize = 16 * 1024;
 const MAX_DRAFT: usize = 8 * 1024;
 const BRIDGE: &str = "monitter.openui.bridge";
 const RENDERER: &str = include_str!(concat!(env!("OUT_DIR"), "/openui-renderer.js"));
+const MAX_MEDIA_FILES: usize = 8;
+const MAX_MEDIA_BYTES: u64 = 2 * 1024 * 1024;
+
+fn media_directory() -> Option<PathBuf> {
+    let home = PathBuf::from(std::env::var_os("HOME")?);
+    #[cfg(target_os = "macos")]
+    return Some(home.join("Library/Application Support/Monitter/openui-public-media"));
+    #[cfg(not(target_os = "macos"))]
+    return Some(
+        std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".local/share"))
+            .join("monitter/openui-public-media"),
+    );
+}
+
+fn media_name(candidate: &str) -> Option<&str> {
+    let (hash, extension) = candidate.split_once('.')?;
+    if hash.len() != 64
+        || !hash
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return None;
+    }
+    if !matches!(extension, "jpg" | "png" | "webp") {
+        return None;
+    }
+    Some(candidate)
+}
+
+// Only host-validated, public preview files are exposed to the NSH Image
+// primitive. Model text never supplies a filesystem path or network URL.
+fn approved_media(source: &str, directory: &Path) -> Map<String, Value> {
+    let mut approved = Map::new();
+    let Ok(root) = directory.canonicalize() else {
+        return approved;
+    };
+    let mut seen = HashSet::new();
+    for (start, _) in source.match_indices("media:") {
+        let rest = &source[start + "media:".len()..];
+        let end = rest
+            .find(|character: char| {
+                !character.is_ascii_lowercase() && !character.is_ascii_digit() && character != '.'
+            })
+            .unwrap_or(rest.len());
+        let name = &rest[..end];
+        if media_name(name).is_none() || !seen.insert(name) {
+            continue;
+        }
+        if approved.len() >= MAX_MEDIA_FILES {
+            break;
+        }
+        let path = root.join(name);
+        let Ok(metadata) = path.symlink_metadata() else {
+            continue;
+        };
+        if !metadata.is_file()
+            || metadata.file_type().is_symlink()
+            || metadata.len() > MAX_MEDIA_BYTES
+        {
+            continue;
+        }
+        let Ok(canonical) = path.canonicalize() else {
+            continue;
+        };
+        if canonical.parent() != Some(root.as_path()) {
+            continue;
+        }
+        let Ok((width, height)) = image::image_dimensions(&canonical) else {
+            continue;
+        };
+        if width == 0
+            || height == 0
+            || width > 4096
+            || height > 4096
+            || u64::from(width) * u64::from(height) > 8_000_000
+        {
+            continue;
+        }
+        approved.insert(
+            format!("media:{name}"),
+            Value::String(canonical.to_string_lossy().into_owned()),
+        );
+    }
+    approved
+}
 
 /// NSH's storage API is not controlled by the empty capability grant. Its
 /// default file backend must therefore be replaced explicitly. Each mounted
@@ -523,7 +611,8 @@ impl OutputBlock {
                 "ink":format!("#{:06x}",p.ink),"muted":format!("#{:06x}",p.muted),"line":format!("#{:06x}",p.line),
                 "fontFamily":design::FONT_SANS,"monoFontFamily":design::FONT_MONO,"fontSize":13}));
             bridge.emit("Update", json!({"source":self.source,"complete":self.complete,"state":self.state,
-                "theme":theme,"messageId":self.message,"blockId":self.ordinal,"revision":self.revision}));
+                "theme":theme,"media":media_directory().map(|dir| approved_media(&self.source, &dir)).unwrap_or_default(),
+                "messageId":self.message,"blockId":self.ordinal,"revision":self.revision}));
         }
     }
     fn hydrate(&mut self, cx: &mut Context<Self>) -> bool {
@@ -643,7 +732,16 @@ impl OutputBlock {
             view.on_error(move |_error| {
                 #[cfg(test)]
                 if std::env::var_os("MONITTER_OPENUI_MOUNTED_TEST_CHILD").is_some() {
-                    eprintln!("OpenUI mounted engine error category: {}", if _error.contains("budget") || _error.contains("interrupted") { "time-budget" } else if _error.contains("memory") { "memory" } else { "runtime" });
+                    eprintln!(
+                        "OpenUI mounted engine error category: {}",
+                        if _error.contains("budget") || _error.contains("interrupted") {
+                            "time-budget"
+                        } else if _error.contains("memory") {
+                            "memory"
+                        } else {
+                            "runtime"
+                        }
+                    );
                 }
                 if let Some(send) = send_error.borrow_mut().take() {
                     let _ = send.send(());
@@ -911,6 +1009,42 @@ mod openui_output_tests {
             identity("task", "message", 1)
         );
         assert!(identity("../profile", "message", 0).is_none());
+    }
+    #[::core::prelude::v1::test]
+    fn public_media_is_bounded_to_regular_raster_files_in_its_directory() {
+        let root = std::env::temp_dir().join(format!("openui-media-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let name = format!("{}.png", "a".repeat(64));
+        let path = root.join(&name);
+        image::RgbImage::new(2, 2).save(&path).unwrap();
+        let source = format!("root = Image(\"Photo\", \"media:{name}\")");
+        let media = approved_media(&source, &root);
+        assert_eq!(
+            media.get(&format!("media:{name}")).and_then(Value::as_str),
+            Some(path.to_str().unwrap())
+        );
+        assert!(approved_media("root = Image(\"media:../../private.png\")", &root).is_empty());
+        assert!(
+            approved_media("root = Image(\"https://example.com/photo.jpg\")", &root).is_empty()
+        );
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, b"not an image").unwrap();
+        assert!(approved_media(&source, &root).is_empty());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            std::fs::remove_file(&path).unwrap();
+            let outside =
+                std::env::temp_dir().join(format!("openui-outside-{}", uuid::Uuid::new_v4()));
+            image::RgbImage::new(2, 2)
+                .save(&outside.with_extension("png"))
+                .unwrap();
+            symlink(outside.with_extension("png"), &path).unwrap();
+            assert!(approved_media(&source, &root).is_empty());
+            std::fs::remove_file(&path).unwrap();
+            std::fs::remove_file(outside.with_extension("png")).unwrap();
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
     #[::core::prelude::v1::test]
     fn state_replay_is_bounded_and_excludes_secret_fields() {
