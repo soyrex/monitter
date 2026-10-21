@@ -302,12 +302,15 @@ pub(crate) fn install(
             modifiers: crate::keys::modifiers(&e.modifiers),
             time: s.clock(),
         };
-        if precise {
-            crate::input::touchpad(&s, event, gesture_phase(e.touch_phase));
+        let handled = if precise {
+            crate::input::touchpad(&s, event, gesture_phase(e.touch_phase))
         } else {
-            crate::input::wheel(&s, event);
+            crate::input::wheel(&s, event)
+        };
+        // Embedded surfaces must not trap the host transcript's wheel events.
+        if handled {
+            cx.stop_propagation();
         }
-        cx.stop_propagation();
         crate::rt::flush(cx);
     });
 

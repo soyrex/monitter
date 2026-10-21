@@ -755,8 +755,9 @@ impl ComponentItem {
         let (focus, element) = window.with_content_mask(Some(mask), |window| {
             // Under the component's own hitboxes: nsh's input (and the
             // embedding app's, under the surface) stays away from its box.
+            // Unhandled wheel events can still bubble to NSH and the host.
             if geometry.shows() {
-                window.insert_hitbox(geometry.visible, HitboxBehavior::BlockMouse);
+                window.insert_hitbox(geometry.visible, HitboxBehavior::BlockMouseExceptScroll);
             }
             // Given exactly the container's size.
             let mut root = gpui::div()

@@ -293,7 +293,7 @@ async fn run_step(window: WindowHandle<AppView>, step: Step, cx: &mut AsyncApp) 
                     modifiers: Modifiers::default(),
                     time: s.clock(),
                 },
-            )
+            );
         }),
         Step::Type(text) => input(cx, &|s| crate::text_input::char_input(s, &text)),
         Step::Mark(text) => input(cx, &|s| crate::text_input::mark(s, &text)),

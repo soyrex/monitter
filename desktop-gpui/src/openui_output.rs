@@ -181,7 +181,7 @@ fn secret_key(key: &str) -> bool {
 /// again, including nested and reactive (`$name`) form fields.
 pub(crate) fn sanitize_state(value: &Value) -> Result<Value, &'static str> {
     fn walk(value: &Value, depth: usize) -> Result<Value, &'static str> {
-        if depth > 4 {
+        if depth > 6 {
             return Err("Form state is too deeply nested.");
         }
         match value {
@@ -621,7 +621,7 @@ impl OutputBlock {
                         call_budget: Duration::from_millis(100),
                         max_nodes: 1000,
                         max_op_values: 16_384,
-                        max_canvas_ops: 1000,
+                        max_canvas_ops: 8192,
                         ..Default::default()
                     },
                     ..Default::default()
@@ -640,7 +640,11 @@ impl OutputBlock {
                 }),
             );
             // Never display/log JS stack or generated form values in diagnostics.
-            view.on_error(move |_| {
+            view.on_error(move |_error| {
+                #[cfg(test)]
+                if std::env::var_os("MONITTER_OPENUI_MOUNTED_TEST_CHILD").is_some() {
+                    eprintln!("OpenUI mounted engine error category: {}", if _error.contains("budget") || _error.contains("interrupted") { "time-budget" } else if _error.contains("memory") { "memory" } else { "runtime" });
+                }
                 if let Some(send) = send_error.borrow_mut().take() {
                     let _ = send.send(());
                 }
@@ -669,6 +673,10 @@ impl OutputBlock {
             self.push_update();
             return;
         }
+        #[cfg(test)]
+        if name == "status" && std::env::var_os("MONITTER_OPENUI_MOUNTED_TEST_CHILD").is_some() {
+            eprintln!("OpenUI mounted status: {:?}", value.and_then(Value::as_str));
+        }
         self.apply_property(name, value, cx);
     }
     fn apply_property(&mut self, name: &str, value: Option<&Value>, cx: &mut Context<Self>) {
@@ -695,7 +703,7 @@ impl OutputBlock {
                     .as_f64()
                     .filter(|height| height.is_finite() && *height >= 0.)
                 {
-                    let height = (height as f32).clamp(80., 1600.);
+                    let height = (height as f32).clamp(80., 100_000.);
                     if (self.height - height).abs() >= 1. {
                         self.height = height;
                         self.invalidate(cx);
@@ -917,8 +925,10 @@ mod openui_output_tests {
             safe,
             "restart hydration must preserve supported state"
         );
+        let table = json!({"reply":{"table":[{"id":"one","values":["kept",2]}]}});
+        assert_eq!(sanitize_state(&table).unwrap(), table);
         assert!(sanitize_state(&json!({"field":"x".repeat(2049)})).is_err());
-        assert!(sanitize_state(&json!({"a":{"b":{"c":{"d":{"e":1}}}}})).is_err());
+        assert!(sanitize_state(&json!({"a":{"b":{"c":{"d":{"e":{"f":{"g":1}}}}}}})).is_err());
     }
 
     #[::core::prelude::v1::test]

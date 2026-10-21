@@ -1,0 +1,62 @@
+[
+  {
+    "name": "layout",
+    "source": "root = Stack([Card([CardHeader(\"Title\", \"Subtitle\"), Tabs([TabItem(\"first\", \"Tab\", [TextContent(\"Tab body\")])]), Accordion([AccordionItem(\"one\", \"Details\", [TextContent(\"Accordion body\")])]), Steps([StepsItem(\"Step\", \"Details\")]), Carousel([[TextContent(\"Page one\")],[TextContent(\"Page two\")]]), Separator(\"horizontal\"), Modal(\"Dialog\", true, [TextContent(\"Dialog body\")])]),TextContent(\"Fixture mounted\")])"
+  },
+  {
+    "name": "content",
+    "source": "root = Stack([Stack([Heading(\"Heading\"), Text(\"text\",\"Value\",\"Subtext\"), BoldText(\"text\",\"Bold\"), Badge(\"Badge\"), Tag(\"Tag\"), TagBlock([\"One\",\"Two\"]), Callout(\"info\",\"Title\",\"Description\",true), TextCallout(\"neutral\",\"Title\",\"Description\"), CodeBlock(\"js\",\"const value = 1\"), InlineHeader(\"Heading\",\"Description\"), MarkDownRenderer(\"# Markdown\")]),TextContent(\"Fixture mounted\")])"
+  },
+  {
+    "name": "choices",
+    "source": "root = Stack([Form(\"choices\", Buttons([Button(\"Prepare\"),IconButton(\"Info\",Icon(\"info\"))]), [FormControl(\"Name\",Input(\"name\",\"Name\",\"text\",{},\"Alex\")),Label(\"Details\"),TextArea(\"notes\",\"Notes\",3,{},\"Two\\nlines\"),Select(\"size\",[SelectItem(\"one\",\"One\")],\"Size\",{},\"one\"), CheckBoxGroup(\"checks\",[CheckBoxItem(\"Ready\",\"Details\",\"ready\",true)]),RadioGroup(\"radio\",[RadioItem(\"One\",\"Details\",\"one\")],\"one\"),SwitchGroup(\"switches\",[SwitchItem(\"Ready\",\"Details\",\"ready\",true)]),Chips(\"chips\",\"multiple\",[ChipItem(\"one\",\"One\")],{},[\"one\"]),OptionCards(\"option\",\"single\",[OptionCard(\"one\",\"One\",\"Details\",Icon(\"info\"))]),Slider(\"amount\",\"continuous\",0,10,1,[2],\"Amount\"),DatePicker(\"date\",\"single\",{},\"2026-10-21\")]),TextContent(\"Fixture mounted\")])"
+  },
+  {
+    "name": "data",
+    "source": "root = Stack([Stack([Table([Col(\"Name\",[\"Sample\"],\"string\"),Col(\"Count\",[2],\"number\")]),EditableTable(\"edit\",[{type:\"text\",key:\"name\",header:\"Name\"}],[{id:\"one\",values:[\"Sample\"]}]),EntityList([{left:\"Name\",right:\"Sample\"}]),ListBlock([ListItem(\"Title\",\"Details\")]), FollowUpBlock([FollowUpItem(\"Next\")])]),TextContent(\"Fixture mounted\")])"
+  },
+  {
+    "name": "cards",
+    "source": "root = Stack([Stack([SnippetCardBlock([SnippetCardItem(\"one\",Text(\"text\",\"Left\"),Text(\"number\",\"2\")),SnippetCardItem(\"two\",Text(\"text\",\"Other\"))]),OverviewCardBlock([OverviewCardItem(\"one\",Text(\"text\",\"Top\"),Text(\"text\",\"Bottom\")),OverviewCardItem(\"two\",Text(\"text\",\"Other\"))]),ContextCardBlock([ContextCardItem(\"one\",IconText(Icon(\"info\"),\"neutral\",\"m\",\"Title\"),\"Body\"),ContextCardItem(\"two\",\"Other\",\"Body\")]),CompositeCardBlock([CompositeCardItem(\"one\",InlineHeader(\"Header\"),[TextContent(\"Body\")],{price:Text(\"number\",\"20\"),button:Button(\"Choose\")}),CompositeCardItem(\"two\",InlineHeader(\"Other\"),[])]),VisualCardBlock([VisualCardItem(TextContent(\"Body\"),\"one\",null,Tag(\"New\")),VisualCardItem(TextContent(\"Other\"),\"two\")]),ImageText(\"https://example.invalid/a.png\",\"Alt\",\"Title\"),ImageTextLarge(\"https://example.invalid/b.png\",\"Alt\",\"Large\"),MetricIndicatorInline(\"20\",\"total\",{direction:\"up\",value:2}),MetricIndicatorWithStrikethrough(\"20\",\"total\",\"25\",{direction:\"down\",value:2})]),TextContent(\"Fixture mounted\")])"
+  },
+  {
+    "name": "media",
+    "source": "root = Stack([Stack([Image(\"Alt\",\"https://example.invalid/a.png\"),ImageBlock(\"https://example.invalid/b.png\",\"Alt\"),ImageGallery([{src:\"https://example.invalid/c.png\",alt:\"Alt\",details:\"Caption\"}])]),TextContent(\"Fixture mounted\")])"
+  },
+  {
+    "name": "BarChart",
+    "source": "root = Stack([BarChart([\"A\",\"B\"],[Series(\"Values\",[2,5])]),TextContent(\"Fixture mounted\")])"
+  },
+  {
+    "name": "HorizontalBarChart",
+    "source": "root = Stack([HorizontalBarChart([\"A\",\"B\"],[Series(\"Values\",[2,5])]),TextContent(\"Fixture mounted\")])"
+  },
+  {
+    "name": "LineChart",
+    "source": "root = Stack([LineChart([\"A\",\"B\"],[Series(\"Values\",[2,5])]),TextContent(\"Fixture mounted\")])"
+  },
+  {
+    "name": "AreaChart",
+    "source": "root = Stack([AreaChart([\"A\",\"B\"],[Series(\"Values\",[2,5])]),TextContent(\"Fixture mounted\")])"
+  },
+  {
+    "name": "RadarChart",
+    "source": "root = Stack([RadarChart([\"A\",\"B\"],[Series(\"Values\",[2,5])]),TextContent(\"Fixture mounted\")])"
+  },
+  {
+    "name": "PieChart",
+    "source": "root = Stack([PieChart([\"A\",\"B\"],[2,5]),TextContent(\"Fixture mounted\")])"
+  },
+  {
+    "name": "RadialChart",
+    "source": "root = Stack([RadialChart([\"A\",\"B\"],[2,5]),TextContent(\"Fixture mounted\")])"
+  },
+  {
+    "name": "SingleStackedBarChart",
+    "source": "root = Stack([SingleStackedBarChart([\"A\",\"B\"],[2,5]),TextContent(\"Fixture mounted\")])"
+  },
+  {
+    "name": "ScatterChart",
+    "source": "root = Stack([ScatterChart([ScatterSeries(\"Samples\",[Point(1,2,3)])]),TextContent(\"Fixture mounted\")])"
+  }
+]
