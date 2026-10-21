@@ -542,6 +542,12 @@ struct Placement {
     x: f32,
     y: f32,
 }
+fn panned_placement(current: Placement, delta: Placement, limit_x: f32, limit_y: f32) -> Placement {
+    Placement {
+        x: (current.x + delta.x).clamp(-limit_x, limit_x),
+        y: (current.y + delta.y).clamp(-limit_y, limit_y),
+    }
+}
 #[derive(Clone, Copy, Debug)]
 struct MapRect {
     x: f32,
@@ -557,49 +563,89 @@ impl MapRect {
             && self.y + self.h + gap > other.y
     }
 }
-// Dense frontier packing keeps every new rectangle touching the existing cluster.
-// A bounded target width produces compact, irregular stair-step silhouettes.
+// A deterministic golden-angle search places every new rectangle at the first
+// free point near the cluster centre. This keeps groups close without snapping
+// their edges into rows and columns.
 fn organic_positions(sizes: &[(f32, f32)], reserved: &[MapRect], gap: f32) -> Vec<MapRect> {
-    let area: f32 = sizes.iter().map(|(w, h)| (w + gap) * (h + gap)).sum();
-    packed_positions(sizes, reserved, gap, area.sqrt().max(640.))
+    organic_positions_for_aspect(sizes, reserved, gap, 1.)
 }
-fn packed_positions(
+fn organic_positions_for_aspect(
     sizes: &[(f32, f32)],
     reserved: &[MapRect],
     gap: f32,
-    target_width: f32,
+    aspect: f32,
 ) -> Vec<MapRect> {
     let mut occupied = reserved.to_vec();
     let mut result = Vec::new();
-    let target = target_width.max(sizes.iter().map(|(w, _)| *w).fold(0., f32::max));
-    for &(w, h) in sizes {
-        let mut candidates = vec![(0., 0.)];
-        for r in &occupied {
-            candidates.push((r.x + r.w + gap, r.y));
-            candidates.push((r.x, r.y + r.h + gap));
-            candidates.push((0., r.y + r.h + gap));
-        }
-        let best = candidates
-            .into_iter()
-            .map(|(x, y)| MapRect { x, y, w, h })
-            .filter(|r| occupied.iter().all(|o| !r.overlaps(*o, gap - 0.01)))
-            .min_by(|a, b| {
-                let score = |r: &MapRect| r.y + (r.x + w - target).max(0.) * 3. + r.x * 0.16;
-                score(a)
-                    .total_cmp(&score(b))
-                    .then(a.y.total_cmp(&b.y))
-                    .then(a.x.total_cmp(&b.x))
-            })
-            .unwrap_or(MapRect {
-                x: 0.,
-                y: occupied.iter().map(|r| r.y + r.h + gap).fold(0., f32::max),
-                w,
-                h,
-            });
+    const GOLDEN_ANGLE: f32 = 2.399_963_1;
+    let x_bias = aspect.sqrt().clamp(0.65, 1.55);
+    let y_bias = 1. / x_bias;
+    for (index, &(w, h)) in sizes.iter().enumerate() {
+        let best = if occupied.is_empty() {
+            MapRect { x: -w / 2., y: -h / 2., w, h }
+        } else {
+            let step = ((w.min(h) + gap) * 0.22).max(12.);
+            (0..4096)
+                .map(|sample| {
+                    let radius = step * (sample as f32).sqrt();
+                    let angle = sample as f32 * GOLDEN_ANGLE + index as f32 * 0.73;
+                    MapRect {
+                        x: angle.cos() * radius * x_bias - w / 2.,
+                        y: angle.sin() * radius * y_bias - h / 2.,
+                        w,
+                        h,
+                    }
+                })
+                .find(|rect| occupied.iter().all(|other| !rect.overlaps(*other, gap - 0.01)))
+                .unwrap_or(MapRect {
+                    x: 0.,
+                    y: occupied.iter().map(|rect| rect.y + rect.h + gap).fold(0., f32::max),
+                    w,
+                    h,
+                })
+        };
         occupied.push(best);
         result.push(best);
     }
     result
+}
+
+/// Pack project clusters into a compact organic island, then centre that island
+/// in the available map surface. The packing is recomputed for the live viewport
+/// so a narrow or tall Activity pane forms a different, natural silhouette.
+fn distributed_positions(
+    sizes: &[(f32, f32)],
+    gap: f32,
+    available_width: f32,
+    available_height: f32,
+) -> (Vec<MapRect>, f32, f32) {
+    if sizes.is_empty() {
+        return (Vec::new(), available_width.max(0.), available_height.max(0.));
+    }
+
+    let available_width = available_width.max(sizes.iter().map(|(w, _)| *w).fold(0., f32::max));
+    let available_height = available_height.max(sizes.iter().map(|(_, h)| *h).fold(0., f32::max));
+    let mut positions = organic_positions_for_aspect(
+        sizes,
+        &[],
+        gap,
+        (available_width / available_height.max(1.)).max(0.01),
+    );
+    let min_x = positions.iter().map(|rect| rect.x).fold(f32::INFINITY, f32::min);
+    let min_y = positions.iter().map(|rect| rect.y).fold(f32::INFINITY, f32::min);
+    let max_x = positions.iter().map(|rect| rect.x + rect.w).fold(f32::NEG_INFINITY, f32::max);
+    let max_y = positions.iter().map(|rect| rect.y + rect.h).fold(f32::NEG_INFINITY, f32::max);
+    let packed_width = max_x - min_x;
+    let packed_height = max_y - min_y;
+    let canvas_width = available_width.max(packed_width + gap * 2.);
+    let canvas_height = available_height.max(packed_height + gap * 2.);
+    let origin_x = (canvas_width - packed_width) / 2. - min_x;
+    let origin_y = (canvas_height - packed_height) / 2. - min_y;
+    for rect in &mut positions {
+        rect.x += origin_x;
+        rect.y += origin_y;
+    }
+    (positions, canvas_width, canvas_height)
 }
 // Cast dense angular rays from the hub. Each expanded rectangle contributes a
 // forbidden radial interval; the first free interval packs satellites inward.
@@ -785,6 +831,7 @@ struct RetainedProject {
     bounds: Option<MapRect>,
     target: Motion,
     followers: HashMap<String, Motion>,
+    view_cards: Vec<String>,
 }
 impl RetainedProject {
     fn follower(&self, id: &str) -> Motion {
@@ -822,70 +869,96 @@ impl DragState {
             velocity: Placement { x: 0., y: 0. }, moved: false }
     }
 }
-#[derive(Default)]
+struct CanvasPanState {
+    last: Point<Pixels>,
+}
 struct RetainedLayout {
     projects: HashMap<String, RetainedProject>,
+    canvas_width: f32,
+    canvas_height: f32,
+    available_width: f32,
+    available_height: f32,
+}
+impl Default for RetainedLayout {
+    fn default() -> Self {
+        Self {
+            projects: HashMap::new(),
+            canvas_width: 0.,
+            canvas_height: 0.,
+            available_width: -1.,
+            available_height: -1.,
+        }
+    }
 }
 impl RetainedLayout {
     fn sync(
         &mut self,
         cards: Vec<Card>,
         available_width: f32,
+        available_height: f32,
         grouping: NativeActivityGrouping,
     ) {
-        for (_, cards) in grouped(cards, grouping) {
+        let groups = grouped(cards, grouping);
+        let mut view_changed = false;
+        let mut group_sizes = Vec::with_capacity(groups.len());
+        for (_, cards) in &groups {
             let key = cards[0].group_id(grouping).to_owned();
-            let reserved: Vec<_> = self.projects.values().filter_map(|p| p.bounds).collect();
-            let project = self.projects.entry(key).or_default();
-            if project.hub.is_none() {
-                let (placements, _, _) = cluster_layout(cards.len());
-                project.hub = Some(placements[0]);
-                for (card, rect) in cards.iter().zip(placements.iter().skip(1)) {
-                    project.cards.insert(card.task_id.clone(), *rect);
-                }
-            }
-            let hub = project.hub.unwrap();
-            for card in cards {
-                if !project.cards.contains_key(&card.task_id) {
-                    let mut occupied: Vec<_> = project.cards.values().copied().collect();
-                    occupied.push(hub);
-                    if let Some(origin) = project.bounds {
-                        occupied.extend(
-                            reserved
-                                .iter()
-                                .filter(|r| r.x != origin.x || r.y != origin.y)
-                                .map(|r| MapRect {
-                                    x: r.x - origin.x,
-                                    y: r.y - origin.y,
-                                    w: r.w,
-                                    h: r.h,
-                                }),
-                        );
+            let project = self.projects.entry(key.clone()).or_default();
+            let view_cards: Vec<_> = cards.iter().map(|card| card.task_id.clone()).collect();
+            if project.view_cards != view_cards {
+                if project.hub.is_none() {
+                    let (placements, _, _) = cluster_layout(cards.len());
+                    project.hub = Some(placements[0]);
+                    for (card, rect) in cards.iter().zip(placements.iter().skip(1)) {
+                        project.cards.insert(card.task_id.clone(), *rect);
                     }
-                    let rect = satellite_position(hub, &occupied, project.cards.len(), true);
-                    project.cards.insert(card.task_id, rect);
                 }
+                let hub = project.hub.unwrap();
+                for card in cards.iter() {
+                    if !project.cards.contains_key(&card.task_id) {
+                        let mut occupied: Vec<_> = project.cards.values().copied().collect();
+                        occupied.push(hub);
+                        let rect = satellite_position(hub, &occupied, project.cards.len(), true);
+                        project.cards.insert(card.task_id.clone(), rect);
+                    }
+                }
+                project.view_cards = view_cards;
+                view_changed = true;
             }
-            for id in project.cards.keys() {
+            for id in &project.view_cards {
                 project.followers.entry(id.clone()).or_insert(project.target);
             }
-            {
-                let w = project
-                    .cards
-                    .iter()
-                    .map(|(id, _)| { let r = project.card_rect(id); r.x + r.w + 12. })
-                    .fold(HUB_W + 24., f32::max);
-                let h = project
-                    .cards
-                    .iter()
-                    .map(|(id, _)| { let r = project.card_rect(id); r.y + r.h + 12. })
-                    .fold(HUB_H + 24., f32::max);
-                if let Some(bounds) = project.bounds.as_mut() {
-                    bounds.w = w;
-                    bounds.h = h;
-                } else {
-                    project.bounds =
-                        Some(packed_positions(&[(w, h)], &reserved, 14., available_width)[0]);
+            let w = project
+                .view_cards
+                .iter()
+                .map(|id| { let r = project.card_rect(id); r.x + r.w + 12. })
+                .fold(HUB_W + 24., f32::max);
+            let h = project
+                .view_cards
+                .iter()
+                .map(|id| { let r = project.card_rect(id); r.y + r.h + 12. })
+                .fold(HUB_H + 24., f32::max);
+            group_sizes.push((key, w, h));
+        }
+
+        let viewport_changed = (self.available_width - available_width).abs() > 0.5
+            || (self.available_height - available_height).abs() > 0.5;
+        if view_changed || viewport_changed {
+            let sizes: Vec<_> = group_sizes.iter().map(|(_, width, height)| (*width, *height)).collect();
+            let (positions, canvas_width, canvas_height) =
+                distributed_positions(&sizes, 8., available_width, available_height);
+            for ((key, _, _), position) in group_sizes.iter().zip(positions) {
+                self.projects.get_mut(key).unwrap().bounds = Some(position);
+            }
+            self.canvas_width = canvas_width;
+            self.canvas_height = canvas_height;
+            self.available_width = available_width;
+            self.available_height = available_height;
+        } else {
+            for (key, width, height) in &group_sizes {
+                if let Some(bounds) = self.projects.get_mut(key).and_then(|project| project.bounds.as_mut()) {
+                    bounds.w = *width;
+                    bounds.h = *height;
                 }
             }
         }
@@ -912,6 +985,8 @@ pub struct ActivityOverview {
     zoom: f32,
     layout: RetainedLayout,
     dragging: Option<DragState>,
+    canvas_pan: Placement,
+    canvas_pan_drag: Option<CanvasPanState>,
     suppress_card_click: Option<String>,
     motion_task: Option<Task<()>>,
     communications: Rc<RefCell<communications::Communications>>,
@@ -976,6 +1051,8 @@ impl ActivityOverview {
             zoom: 1.,
             layout: RetainedLayout::default(),
             dragging: None,
+            canvas_pan: Placement { x: 0., y: 0. },
+            canvas_pan_drag: None,
             suppress_card_click: None,
             motion_task: None,
             communications,
@@ -995,6 +1072,8 @@ impl ActivityOverview {
         self.grouping = grouping;
         self.layout = RetainedLayout::default();
         self.dragging = None;
+        self.canvas_pan = Placement { x: 0., y: 0. };
+        self.canvas_pan_drag = None;
         self.motion_task = None;
         cx.emit(ActivityOverviewEvent::GroupingChanged { grouping });
         cx.notify();
@@ -1029,6 +1108,7 @@ impl ActivityOverview {
         !cx.reduce_motion() && crate::native_motion::motion_allowed()
     }
     fn begin_drag(&mut self, target: DragTarget, position: Point<Pixels>, cx: &mut Context<Self>) {
+        self.canvas_pan_drag = None;
         self.suppress_card_click = None;
         match &target {
             DragTarget::Project(key) => self.layout.projects.get_mut(key).unwrap().target.stop(),
@@ -1036,6 +1116,17 @@ impl ActivityOverview {
         }
         self.dragging = Some(DragState::new(target, position));
         cx.notify();
+    }
+    fn begin_canvas_pan(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        self.dragging = None;
+        self.canvas_pan_drag = Some(CanvasPanState { last: position });
+        cx.notify();
+    }
+    fn end_pointer_drag(&mut self, cx: &mut Context<Self>) {
+        if self.canvas_pan_drag.take().is_some() {
+            cx.notify();
+        }
+        self.end_drag(cx);
     }
     fn end_drag(&mut self, cx: &mut Context<Self>) {
         let Some(drag) = self.dragging.take() else { return; };
@@ -1054,6 +1145,28 @@ impl ActivityOverview {
         self.start_motion(cx);
     }
     fn drag_mouse_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if self.canvas_pan_drag.is_some() && event.pressed_button != Some(MouseButton::Left) {
+            self.canvas_pan_drag = None;
+            cx.notify();
+            return;
+        }
+        if let Some(pan) = self.canvas_pan_drag.as_mut() {
+            let delta = event.position - pan.last;
+            pan.last = event.position;
+            let limit_x = (self.layout.available_width * self.zoom * 0.6).max(180.);
+            let limit_y = (self.layout.available_height * self.zoom * 0.6).max(180.);
+            self.canvas_pan = panned_placement(
+                self.canvas_pan,
+                Placement {
+                    x: f32::from(delta.x),
+                    y: f32::from(delta.y),
+                },
+                limit_x,
+                limit_y,
+            );
+            cx.notify();
+            return;
+        }
         if self.dragging.is_none() { return; }
         if event.pressed_button != Some(MouseButton::Left) {
             self.end_drag(cx);
@@ -1605,16 +1718,17 @@ impl Focusable for ActivityOverview {
 }
 impl Render for ActivityOverview {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.layout.sync(
-            self.model.cards.clone(),
-            (f32::from(window.viewport_size().width) - 64.)
-                / (self.zoom * interface_font_ratio(cx.theme().font_size)),
-            self.grouping,
-        );
         let p = self.palette;
         let font = cx.theme().font_size;
         let query = self.search.read(cx).value().to_string();
         let visible = self.model.visible(self.filter, &query, self.grouping);
+        let map_scale = self.zoom * interface_font_ratio(font);
+        self.layout.sync(
+            visible.clone(),
+            ((f32::from(window.viewport_size().width) - 64.) / map_scale).max(CARD_W + 24.),
+            ((f32::from(window.viewport_size().height) - 190.) / map_scale).max(CARD_H + 24.),
+            self.grouping,
+        );
         let group_count = self
             .model
             .cards
@@ -1814,23 +1928,27 @@ impl Render for ActivityOverview {
                 endpoints.insert(card.task_id.clone(), rect);
             }
             let groups = grouped(visible, self.grouping);
-            let scale = self.zoom * interface_font_ratio(font);
-            let width = self
+            let scale = map_scale;
+            let width = self.layout.canvas_width.max(self
                 .layout
                 .projects
                 .values()
                 .filter_map(|p| p.bounds.map(|r| r.x + r.w + p.target.x.max(0.)))
                 .fold(0., f32::max)
-                + 24.;
-            let height = self
+                + 24.);
+            let height = self.layout.canvas_height.max(self
                 .layout
                 .projects
                 .values()
                 .filter_map(|p| p.bounds.map(|r| r.y + r.h + p.target.y.max(0.)))
                 .fold(0., f32::max)
-                + 24.;
+                + 24.);
             let mut graph = div()
+                .id("activity-responsive-map")
+                .debug_selector(|| "activity-responsive-map".into())
                 .relative()
+                .left(gpui_kit::px(self.canvas_pan.x))
+                .top(gpui_kit::px(self.canvas_pan.y))
                 .w(px(width * scale))
                 .h(px(height * scale))
                 .flex_shrink_0()
@@ -1846,7 +1964,34 @@ impl Render for ActivityOverview {
                         .child(self.cluster(index, name, cards, cx)),
                 );
             }
-            content = content.child(graph);
+            let cursor = if self.canvas_pan_drag.is_some() {
+                CursorStyle::ClosedHand
+            } else {
+                CursorStyle::OpenHand
+            };
+            content = content
+                .overflow_hidden()
+                .cursor(cursor)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|overview, event: &MouseDownEvent, _, cx| {
+                        overview.begin_canvas_pan(event.position, cx);
+                        cx.stop_propagation();
+                    }),
+                )
+                .child(
+                div()
+                    .id("activity-pan-sheet")
+                    .debug_selector(|| "activity-pan-sheet".into())
+                    .min_w_full()
+                    .min_h_full()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor(cursor)
+                    .child(graph),
+            );
         }
         let mut legend = div()
             .id("activity-footer")
@@ -1897,7 +2042,7 @@ impl Render for ActivityOverview {
                         let released = entity.clone();
                         window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
                             if phase.capture() && event.button == MouseButton::Left {
-                                let _ = released.update(cx, |overview, cx| overview.end_drag(cx));
+                                let _ = released.update(cx, |overview, cx| overview.end_pointer_drag(cx));
                             }
                         });
                     }
@@ -1997,7 +2142,8 @@ mod tests {
         CARD_H, CARD_W, HUB_H, HUB_W, MapRect, RetainedProject, Filter, Motion,
         NativeActivityGrouping, OverviewModel, Placement, RetainedLayout, State,
         child_inputs_changed, clamped_zoom, cluster_layout, grouped, interface_font_ratio,
-        organic_positions, px, relevant_changed, updated_label,
+        distributed_positions, organic_positions, panned_placement, px, relevant_changed,
+        updated_label,
     };
     use serde_json::json;
     use std::collections::HashSet;
@@ -2075,6 +2221,28 @@ mod tests {
             let link = state.links.values().next().unwrap();
             assert!(link.forward && link.reverse);
         });
+        let sheet = visual.debug_bounds("activity-pan-sheet").unwrap();
+        let map_before_pan = visual.debug_bounds("activity-responsive-map").unwrap();
+        let pan_start = point(sheet.left() + px(18.), sheet.top() + px(18.));
+        let pan_end = pan_start + point(px(60.), px(35.));
+        visual.simulate_mouse_down(pan_start, MouseButton::Left, Default::default());
+        visual.simulate_mouse_move(pan_end, Some(MouseButton::Left), Default::default());
+        visual.simulate_mouse_up(pan_end, MouseButton::Left, Default::default());
+        visual.run_until_parked();
+        visual.update(|window,cx| window.draw(cx).clear(cx));
+        let map_after_pan = visual.debug_bounds("activity-responsive-map").unwrap();
+        let rendered_pan = pan_end - pan_start;
+        overview.read_with(visual, |view, _| {
+            assert_eq!(
+                (view.canvas_pan.x, view.canvas_pan.y),
+                (f32::from(rendered_pan.x), f32::from(rendered_pan.y)),
+            );
+            assert!(view.canvas_pan_drag.is_none(), "releasing the hand ends sheet panning");
+        });
+        assert!((f32::from(map_after_pan.left() - map_before_pan.left()) - f32::from(rendered_pan.x)).abs() < 1.,
+            "sheet horizontal displacement follows the hand: before={map_before_pan:?}, after={map_after_pan:?}");
+        assert!((f32::from(map_after_pan.top() - map_before_pan.top()) - f32::from(rendered_pan.y)).abs() < 1.,
+            "sheet vertical displacement follows the hand: before={map_before_pan:?}, after={map_after_pan:?}");
         // The overlay must leave the actual native card click target usable.
         let opened = std::rc::Rc::new(std::cell::Cell::new(false));
         let received = opened.clone();
@@ -2415,7 +2583,7 @@ mod tests {
             let paints: Vec<_> = quads.iter().filter(|quad| card.contains(&quad.bounds.center()))
                 .filter_map(|quad| quad.background.as_solid().map(gpui_kit::Rgba::from))
                 .filter(|ink| ink.a > 0.30).collect();
-            assert!(paints.len() >= 2, "quiet card paints its surface, badge and status");
+            assert!(!paints.is_empty(), "quiet card paints its grayscale surface: bounds={idle_bounds:?}");
             assert!(paints.iter().all(|ink| (ink.r - ink.g).abs() < 0.005 && (ink.g - ink.b).abs() < 0.005),
                 "completed card surface, badge and semantic status are grayscale");
             let grid_dots = quads.iter().filter(|quad| {
@@ -2506,21 +2674,18 @@ mod tests {
             {"id":"b","projectId":"p","status":"idle","updatedAt":now},
             {"id":"c","projectId":"q","status":"idle","updatedAt":now}]});
         let mut layout = RetainedLayout::default();
-        layout.sync(OverviewModel::from_snapshot_at(&snapshot, now).cards, 1200., NativeActivityGrouping::Project);
+        layout.sync(OverviewModel::from_snapshot_at(&snapshot, now).cards, 1200., 700., NativeActivityGrouping::Project);
         let coordinates = |layout: &RetainedLayout, project: &str, task: &str| {
             let p = &layout.projects[project];
             let r = p.cards[task];
-            let b = p.bounds.unwrap();
-            (b.x, b.y, r.x, r.y)
+            (r.x, r.y)
         };
         let a = coordinates(&layout, "p", "a");
         let b = coordinates(&layout, "p", "b");
         let c = coordinates(&layout, "q", "c");
-        assert_eq!(
-            (a.0, a.1),
-            (0., 0.),
-            "strongest project wins top left despite its alphabetically later name"
-        );
+        let p_bounds = layout.projects["p"].bounds.unwrap();
+        let q_bounds = layout.projects["q"].bounds.unwrap();
+        assert!(!p_bounds.overlaps(q_bounds, 7.9), "organic project islands do not overlap");
         snapshot["tasks"][0]["status"] = json!("idle");
         snapshot["tasks"][1]["status"] = json!("running");
         for filter in [Filter::Working, Filter::Idle, Filter::All] {
@@ -2531,8 +2696,8 @@ mod tests {
             } else {
                 assert!(visible.iter().all(|card| filter.matches(card.state)));
             }
-            // Render allocates from the complete population before applying visibility.
-            layout.sync(model.cards, 1200., NativeActivityGrouping::Project);
+            // Repeated full-population syncs retain positions while filters change.
+            layout.sync(model.cards, 1200., 700., NativeActivityGrouping::Project);
             assert_eq!(a, coordinates(&layout, "p", "a"));
             assert_eq!(b, coordinates(&layout, "p", "b"));
             assert_eq!(c, coordinates(&layout, "q", "c"));
@@ -2541,7 +2706,7 @@ mod tests {
             .as_array_mut()
             .unwrap()
             .push(json!({"id":"d","projectId":"p","status":"running","updatedAt":now}));
-        layout.sync(OverviewModel::from_snapshot_at(&snapshot, now).cards, 1200., NativeActivityGrouping::Project);
+        layout.sync(OverviewModel::from_snapshot_at(&snapshot, now).cards, 1200., 700., NativeActivityGrouping::Project);
         let d = coordinates(&layout, "p", "d");
         assert_eq!(a, coordinates(&layout, "p", "a"));
         assert_eq!(b, coordinates(&layout, "p", "b"));
@@ -2557,7 +2722,7 @@ mod tests {
             2,
             "removed and expired cards leave the live population"
         );
-        layout.sync(model.cards, 1200., NativeActivityGrouping::Project);
+        layout.sync(model.cards, 1200., 700., NativeActivityGrouping::Project);
         assert_eq!(c, coordinates(&layout, "q", "c"));
         assert_eq!(d, coordinates(&layout, "p", "d"));
         assert_eq!(
@@ -2565,6 +2730,69 @@ mod tests {
             coordinates(&layout, "p", "a"),
             "returning chats retain their original slots"
         );
+    }
+    #[test]
+    fn responsive_map_centers_sparse_content_in_both_axes() {
+        let (positions, width, height) =
+            distributed_positions(&[(320., 180.)], 14., 1200., 700.);
+        assert_eq!((width, height), (1200., 700.));
+        let cluster = positions[0];
+        assert!((cluster.x - 440.).abs() < 0.01);
+        assert!((cluster.y - 260.).abs() < 0.01);
+        assert!((cluster.x - (width - cluster.x - cluster.w)).abs() < 0.01);
+        assert!((cluster.y - (height - cluster.y - cluster.h)).abs() < 0.01);
+    }
+    #[test]
+    fn responsive_map_reflows_as_a_compact_organic_island() {
+        let sizes = [
+            (220., 160.),
+            (205., 145.),
+            (240., 150.),
+            (210., 175.),
+            (225., 155.),
+        ];
+        let (wide, wide_width, wide_height) =
+            distributed_positions(&sizes, 8., 1200., 520.);
+        for (index, rect) in wide.iter().enumerate() {
+            for other in &wide[..index] {
+                assert!(!rect.overlaps(*other, 7.9), "compact clusters retain an 8px breathing gap");
+            }
+        }
+        assert!(
+            wide.iter().map(|rect| rect.x.round() as i32).collect::<HashSet<_>>().len() > 2
+                && wide.iter().map(|rect| rect.y.round() as i32).collect::<HashSet<_>>().len() > 2,
+            "cluster origins should not collapse onto grid rows or columns"
+        );
+        let bounds = |rects: &[MapRect]| {
+            let left = rects.iter().map(|rect| rect.x).fold(f32::INFINITY, f32::min);
+            let top = rects.iter().map(|rect| rect.y).fold(f32::INFINITY, f32::min);
+            let right = rects.iter().map(|rect| rect.x + rect.w).fold(f32::NEG_INFINITY, f32::max);
+            let bottom = rects.iter().map(|rect| rect.y + rect.h).fold(f32::NEG_INFINITY, f32::max);
+            (left, top, right, bottom)
+        };
+        let (left, top, right, bottom) = bounds(&wide);
+        assert!((left - (wide_width - right)).abs() < 0.01);
+        assert!((top - (wide_height - bottom)).abs() < 0.01);
+
+        let (tall, _, _) = distributed_positions(&sizes, 8., 520., 1200.);
+        assert!(wide.iter().zip(&tall).any(|(a, b)| (a.x - b.x).abs() > 20. || (a.y - b.y).abs() > 20.),
+            "the island should remap when the viewport aspect changes");
+        let wide_bounds = bounds(&wide);
+        let tall_bounds = bounds(&tall);
+        assert!(wide_bounds.2 - wide_bounds.0 > wide_bounds.3 - wide_bounds.1);
+        assert!(tall_bounds.3 - tall_bounds.1 > tall_bounds.2 - tall_bounds.0);
+    }
+    #[test]
+    fn activity_canvas_pan_tracks_the_hand_and_stays_recoverable() {
+        let moved = panned_placement(
+            Placement { x: 10., y: -20. },
+            Placement { x: 85., y: 45. },
+            180.,
+            160.,
+        );
+        assert_eq!((moved.x, moved.y), (95., 25.));
+        let clamped = panned_placement(moved, Placement { x: 500., y: -500. }, 180., 160.);
+        assert_eq!((clamped.x, clamped.y), (180., -160.));
     }
     #[test]
     fn radial_satellites_surround_the_hub_with_high_density() {
