@@ -28,6 +28,13 @@ fn text(v: &Value, k: &str) -> String {
 fn items(v: &Value, k: &str) -> Vec<Value> {
     v[k].as_array().cloned().unwrap_or_default()
 }
+fn apply_catalog_reply(snapshot: &mut Value, reply: &Value) {
+    for key in ["agents", "hosts"] {
+        if let Some(catalog) = reply.get(key) {
+            snapshot[key] = catalog.clone();
+        }
+    }
+}
 fn lines(v: &Value, k: &str) -> String {
     items(v, k)
         .iter()
@@ -406,17 +413,17 @@ impl AgentHostPane {
             match result {
                 Err(error)=>pane.error=Some(error),
                 Ok(value)=>match response {
-                    Response::AgentDeleted(id)=>{pane.snapshot=value;pane.agent_drafts.remove(&id);pane.agent=Value::Null;pane.removal=None;pane.notice=Some("Agent removed using the selected chat handling policy.".into());}
+                    Response::AgentDeleted(id)=>{apply_catalog_reply(&mut pane.snapshot,&value);pane.agent_drafts.remove(&id);pane.agent=Value::Null;pane.removal=None;pane.notice=Some("Agent removed using the selected chat handling policy.".into());}
                     Response::AgentSaved(old)=>{
                         let id=text(&pane.agent,"id");
                         let saved=items(&value,"agents").into_iter().find(|agent|if id.is_empty(){!old.contains(&text(agent,"id"))}else{text(agent,"id")==id});
-                        pane.snapshot=value;
+                        apply_catalog_reply(&mut pane.snapshot,&value);
                         if let Some(agent)=saved {pane.agent_drafts.remove(&text(&agent,"id"));pane.agent=agent;}
                         pane.notice=Some("Agent saved. Existing chats keep their captured runtime configuration.".into());
                     }
                     Response::HostSaved(old)=>{
                         let id=text(&pane.host,"id");let saved=items(&value,"hosts").into_iter().find(|host|if id.is_empty(){!old.contains(&text(host,"id"))}else{text(host,"id")==id});
-                        pane.snapshot=value;if let Some(host)=saved {pane.host_drafts.remove(&text(&host,"id"));pane.host=host;}
+                        apply_catalog_reply(&mut pane.snapshot,&value);if let Some(host)=saved {pane.host_drafts.remove(&text(&host,"id"));pane.host=host;}
                         pane.notice=Some("Host saved. No credentials were read or copied.".into());
                     }
                     Response::Probe=>pane.probe=Some(value),Response::Accounts=>pane.accounts=value.as_array().cloned().unwrap_or_default(),

@@ -272,8 +272,10 @@ impl SchedulePane {
                 pane.busy = false;
                 match result {
                     Err(error) => pane.error = Some(error),
-                    Ok(snapshot) => {
-                        pane.snapshot = snapshot;
+                    Ok(reply) => {
+                        // The save response contains only the editable catalog.
+                        // Preserve the rest of the retained UI projection.
+                        pane.snapshot["schedules"] = reply["schedules"].clone();
                         if was_new {
                             let candidates: Vec<Value> = rows(&pane.snapshot, "schedules")
                                 .into_iter().filter(|row| !old_ids.contains(&field(row,"id"))

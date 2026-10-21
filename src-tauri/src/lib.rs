@@ -151,6 +151,7 @@ mod voice;
 use admin_turn_broker::{spawn_admin_turn_watchdog, AdminTurnBroker, AdminTurnReply};
 use model::*;
 use runner::Parsed;
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
@@ -2023,6 +2024,25 @@ impl Service {
         command: &str,
         args: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
+        self.portable_invoke(command, args, false)
+    }
+
+    /// Native panes receive mutation receipts and refresh through typed UI deltas.
+    /// Never serialize the workspace's historical data just to acknowledge a save.
+    pub(crate) fn native_invoke(
+        self: &Arc<Self>,
+        command: &str,
+        args: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        self.portable_invoke(command, args, true)
+    }
+
+    fn portable_invoke(
+        self: &Arc<Self>,
+        command: &str,
+        args: serde_json::Value,
+        native: bool,
+    ) -> Result<serde_json::Value, String> {
         if !command_available_on_surface(command, "lan")? {
             return Err(format!("LAN command '{command}' is not available."));
         }
@@ -2040,12 +2060,35 @@ impl Service {
         fn value<T: serde::Serialize>(result: T) -> Result<serde_json::Value, String> {
             serde_json::to_value(result).map_err(|e| format!("Could not encode response: {e}"))
         }
-        fn snapshot_value(snapshot: Snapshot) -> Result<serde_json::Value, String> {
+        let snapshot_value = |snapshot: Snapshot| -> Result<serde_json::Value, String> {
+            if native {
+                // These editors consume the updated catalog immediately. Other
+                // mutations need only acceptance; publication supplies UI state.
+                // Project/agent/host catalogs contain no transcript history.
+                return match command {
+                    "save_agent" | "delete_agent" => value(json!({"agents": snapshot.agents})),
+                    "save_host" | "delete_host" => value(json!({"hosts": snapshot.hosts})),
+                    "save_project" | "save_project_ideas" | "delete_project" =>
+                        value(json!({"projects": snapshot.projects})),
+                    "save_channel" => {
+                        // A channel embeds its messages; creation only needs its
+                        // identity to select the newly saved channel.
+                        value(json!({"channels": snapshot.channels.iter().map(|channel|
+                            json!({"id": channel.id, "name": channel.name})
+                        ).collect::<Vec<_>>()}))
+                    }
+                    "autoname" => value(json!({"tasks": snapshot.tasks.iter()
+                        .filter(|task| Some(task.id.as_str()) == args["target"]["taskId"].as_str())
+                        .map(|task| json!({"id": task.id, "title": task.title}))
+                        .collect::<Vec<_>>()})),
+                    _ => value(json!({"accepted": true})),
+                };
+            }
             // Keep full snapshots inside the service for its own invariants,
             // but never serialize the historical diagnostic transcript over
             // the owner LAN bridge.
             value(lan_sync::compact_snapshot(&snapshot))
-        }
+        };
         match command {
             "get_command_capabilities" => value(command_capabilities("lan")?),
             "get_snapshot" => value(self.snapshot()?),
@@ -2172,7 +2215,10 @@ impl Service {
             "create_task" => value(self.create_task(arg(&args, "input")?)?),
             "handoff_task" => value(self.handoff_task(arg(&args, "input")?)?),
             "fork_task" => value(self.fork_task(arg(&args, "input")?)?),
-            "autoname" => value(self.autoname(arg(&args, "target")?)?),
+            "autoname" => {
+                let snapshot = self.autoname(arg(&args, "target")?)?;
+                if native { snapshot_value(snapshot) } else { value(snapshot) }
+            }
             "rename_task" => {
                 let id: String = arg(&args, "id")?;
                 let title: String = arg(&args, "title")?;

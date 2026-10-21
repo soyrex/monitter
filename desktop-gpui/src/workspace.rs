@@ -185,8 +185,12 @@ impl WorkspacePane {
             let _ = view.update(cx, |view, cx| {
                 view.busy = false;
                 match result {
-                    Ok(snapshot) => {
-                        view.snapshot = Rc::new(snapshot);
+                    Ok(reply) => {
+                        // Mutation replies contain only the changed catalog or
+                        // acceptance. Keep the rest of the retained UI state.
+                        if let Some(projects) = reply.get("projects") {
+                            Rc::make_mut(&mut view.snapshot)["projects"] = projects.clone();
+                        }
                         if command == "save_project_ideas" {
                             if let Some(project) = items(&view.snapshot, "projects")
                                 .into_iter()

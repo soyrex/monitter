@@ -3132,3 +3132,22 @@ refresh when scope changes and before shared edits, and coordinate overlaps with
 `send_message`. Peer summaries and paths are untrusted context and never new
 instructions or authorization. No new desktop UI or remote filesystem access is
 implied by these tools.
+
+### Native mutation replies
+
+The private GPUI `invoke` adapter uses native mutation receipts rather than the
+LAN snapshot response shape. Settings saves, task edits, approvals, sends,
+membership changes, project board posts, batch naming and worktree merges return
+`{accepted: true}` only after the operation succeeds. State refresh continues
+through the typed native UI publication/delta API; acceptance is not a snapshot.
+
+Agent and host editors receive only their respective updated catalogs; project
+and Idea List editors receive only `projects`. Channel saves return `channels`
+with identity/name fields only, without embedded channel messages. Auto-name
+returns only the target task's identity/title before the private IPC adapter
+extracts its title string. Native schedule save/action replies contain only the
+`schedules` catalog. Panes merge these fields into their retained state instead
+of replacing their snapshot. Task creation/fork/handoff and other typed results
+retain their existing response shapes. The LAN dispatcher retains its existing
+contract. Native mutation receipts must not serialize unrelated chat, diagnostic,
+channel, schedule-run, or subagent transcript history.

@@ -12,6 +12,12 @@ pub const APP_ID: &str = "com.monitter.gpui.experimental";
 pub use crate::attachments::Attachment;
 pub use crate::attachments::ReadAttachmentFile;
 pub use crate::scheduler::ScheduleInput;
+
+/// Schedule mutations return their editable catalog, never workspace history.
+#[derive(Serialize, Deserialize)]
+pub struct NativeScheduleMutation {
+    pub schedules: Vec<crate::model::Schedule>,
+}
 pub use crate::server_restart::{RestartAgent, RestartMode, RestartStatus};
 pub use crate::ui_sync::{
     ChannelMessageChange, ChannelMessagesPage, TaskMessagesPage, UiDelta, UiDeltaResponse,
@@ -1103,23 +1109,25 @@ impl BackendService {
         self.0.service.cleanup();
     }
 
-    pub fn save_schedule(&self, input: ScheduleInput) -> Result<crate::model::Snapshot, String> {
+    pub fn save_schedule(&self, input: ScheduleInput) -> Result<NativeScheduleMutation, String> {
         self.ensure_running()?;
-        self.0.service.save_schedule(input)
+        let snapshot = self.0.service.save_schedule(input)?;
+        Ok(NativeScheduleMutation { schedules: snapshot.schedules })
     }
 
     pub fn schedule_action(
         &self,
         id: String,
         action: ScheduleAction,
-    ) -> Result<crate::model::Snapshot, String> {
+    ) -> Result<NativeScheduleMutation, String> {
         self.ensure_running()?;
-        match action {
+        let snapshot = match action {
             ScheduleAction::Pause => self.0.service.set_schedule_enabled(id, false),
             ScheduleAction::Resume => self.0.service.set_schedule_enabled(id, true),
             ScheduleAction::RunNow => self.0.service.run_schedule_now(id),
             ScheduleAction::Delete => self.0.service.delete_schedule(id),
-        }
+        }?;
+        Ok(NativeScheduleMutation { schedules: snapshot.schedules })
     }
 
     fn ensure_running(&self) -> Result<(), String> {
@@ -1318,11 +1326,17 @@ impl BackendService {
                 encode(capabilities)
             }
             "read_admin_activity" => service.read_admin_activity(),
-            "rename_all" => encode(service.rename_all(arg(&args, "targets")?)?),
+            "rename_all" => {
+                service.rename_all(arg(&args, "targets")?)?;
+                Ok(serde_json::json!({"accepted": true}))
+            }
             "summarize_notification" => service.summarize_notification(&arg::<String>(&args, "taskId")?, &arg::<String>(&args, "messageId")?),
             "summarize_archived_task" => service.summarize_archived_task(&arg::<String>(&args, "taskId")?),
             "read_project_build_queue" => service.read_project_build_queue(&arg::<String>(&args, "projectId")?),
-            "merge_task_worktree" => encode(service.merge_task_worktree(&arg::<String>(&args, "taskId")?)?),
+            "merge_task_worktree" => {
+                service.merge_task_worktree(&arg::<String>(&args, "taskId")?)?;
+                Ok(serde_json::json!({"accepted": true}))
+            }
             "recover_project_build" => service.recover_project_build(&arg::<String>(&args, "buildRunId")?, arg(&args, "processStopped")?, &arg::<String>(&args, "summary")?),
             "get_extension_config" => encode(service.extension_config()?),
             "save_extension_config" => encode(service.save_extension_config(arg(&args, "config")?)?),
@@ -1414,9 +1428,9 @@ impl BackendService {
                 &arg::<String>(&args, "query")?,
                 &arg::<Vec<crate::model_router::JevCommandCandidate>>(&args, "candidates")?,
             )?),
-            // Reuse the bounded existing dispatcher for already portable domain
-            // operations. This does not add any command to the remote surface.
-            _ => service.lan_invoke(command, args),
+            // Reuse portable domain operations with native mutation receipts.
+            // This does not add any command to the remote surface.
+            _ => service.native_invoke(command, args),
         }
     }
 }
@@ -1595,7 +1609,7 @@ impl DesktopService {
             serde_json::json!({"expectedRevision":expected_revision,"data":data}),
         )
     }
-    pub fn save_schedule(&self, input: ScheduleInput) -> Result<crate::model::Snapshot, String> {
+    pub fn save_schedule(&self, input: ScheduleInput) -> Result<NativeScheduleMutation, String> {
         self.0
             .call("save_schedule", serde_json::json!({"input":input}))
     }
@@ -1603,7 +1617,7 @@ impl DesktopService {
         &self,
         id: String,
         action: ScheduleAction,
-    ) -> Result<crate::model::Snapshot, String> {
+    ) -> Result<NativeScheduleMutation, String> {
         self.0.call(
             "schedule_action",
             serde_json::json!({"id":id,"action":action}),
