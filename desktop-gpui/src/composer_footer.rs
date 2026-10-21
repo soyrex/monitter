@@ -383,13 +383,30 @@ impl ComposerFooterPane {
             return;
         };
         let service = self.service.clone();
-        let work = cx.background_executor().spawn(async move {
-            service.invoke("get_usage_overview", json!({"policy":"cache-only"}))
-        });
+        // Cache reads can wait behind a provider refresh in the backend. Never
+        // occupy GPUI's shared GCD executor while waiting on that blocking IPC:
+        // retained footers can otherwise starve command acknowledgements.
+        let (sender, receiver) = futures::channel::oneshot::channel();
+        if let Err(error) = std::thread::Builder::new()
+            .name("monitter-composer-usage".into())
+            .spawn(move || {
+                let _ = sender.send(service.invoke(
+                    "get_usage_overview", json!({"policy":"cache-only"}),
+                ));
+            })
+        {
+            self.usage_refresh.complete(&request, self.usage_clock.elapsed());
+            self.usage_loading = false;
+            self.usage_error = Some(format!("Could not start usage reader: {error}"));
+            cx.notify();
+            return;
+        }
         self.usage_loading = true;
         self.usage_error = None;
         cx.spawn(async move |entity, cx| {
-            let result = work.await;
+            let result = receiver.await.unwrap_or_else(|_| {
+                Err("Composer usage reader stopped before responding.".into())
+            });
             let _ = entity.update(cx, |pane, cx| {
                 if pane
                     .usage_refresh

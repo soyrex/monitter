@@ -2742,10 +2742,36 @@ impl ChatPane {
             "recoveryStartedAt": chrono::Utc::now().timestamp_millis(),
         });
         let recovery_executor = cx.background_executor().clone();
+        // A blocking IPC wait must not consume a shared GPUI worker. Usage
+        // reads from other retained panes may already be waiting on the
+        // backend; approvals and sends still need their own path to complete.
+        let (sender, receiver) = futures::channel::oneshot::channel();
+        let command_service = service.clone();
+        let command_args = args.clone();
+        if let Err(error) = std::thread::Builder::new()
+            .name("monitter-chat-command".into())
+            .spawn(move || {
+                let _ = sender.send(command_service.invoke(
+                    command_wire_name(command), command_args,
+                ));
+            })
+        {
+            self.busy = false;
+            self.starting_turn = false;
+            self.composer_footer.update(cx, |footer, cx| footer.set_busy(false, cx));
+            if command == "cancel_task" {
+                self.stop_requests.complete();
+            }
+            self.error = Some(format!("Could not start chat command: {error}"));
+            cx.notify();
+            return;
+        }
         let task = cx
             .background_executor()
             .spawn(async move {
-                let result = service.invoke(command_wire_name(command), args.clone());
+                let result = receiver.await.unwrap_or_else(|_| {
+                    Err("Chat command worker stopped before responding. Check the chat before retrying.".into())
+                });
                 if command == "cancel_task" && result.as_ref().err().is_some_and(|error| error == "Task is not running.") {
                     return Ok(json!({"stopped":true}));
                 }
