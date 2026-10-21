@@ -1629,7 +1629,7 @@ impl Desktop {
             .child(Button::new("split-workspace-vertical")
                     .debug_selector(|| "split-workspace-vertical".into())
                     .ghost().compact().flex_shrink_0()
-                    .icon(Icon::new(IconName::SquareSplitVertical).with_size(px(18.)).text_color(rgb(palette.muted)))
+                    .icon(Icon::new(IconName::SquareSplitHorizontal).with_size(px(18.)).text_color(rgb(palette.muted)))
                     .accessibility_label("Split pane vertically").tooltip("Split pane vertically")
                     .disabled(!controls_available)
                     // This row is also the native titlebar drag surface. Keep
@@ -1654,7 +1654,7 @@ impl Desktop {
             .child(Button::new("split-workspace-horizontal")
                     .debug_selector(|| "split-workspace-horizontal".into())
                     .ghost().compact().flex_shrink_0()
-                    .icon(Icon::new(IconName::SquareSplitHorizontal).with_size(px(18.)).text_color(rgb(palette.muted)))
+                    .icon(Icon::new(IconName::SquareSplitVertical).with_size(px(18.)).text_color(rgb(palette.muted)))
                     .accessibility_label("Split pane horizontally").tooltip("Split pane horizontally")
                     .disabled(!controls_available)
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())

@@ -1434,11 +1434,12 @@ impl ChatPane {
             .id("chat-watch-mode-dock")
             .debug_selector(|| "chat-watch-mode-dock".into())
             .absolute()
-            // Keep the pill immediately above the status bar: its bottom edge
-            // is pinned to the bar's top border as the transcript scrolls.
-            .bottom(px(0.))
+            // The dock is positioned relative to the status-bar container,
+            // so its fixed-height center stays on that container's top rule.
+            .top(px(-12.))
             .left_0()
             .right_0()
+            .h(px(24.))
             .px(px(12.))
             .flex()
             .items_center()
@@ -2719,12 +2720,25 @@ mod native_tests {
                 let mode_dock = visual
                     .debug_bounds("chat-watch-mode-dock")
                     .expect("bottom mode dock");
+                let status_bar = visual
+                    .debug_bounds("pane-drawer-toolbar")
+                    .expect("chat status bar");
                 assert!(
                     (toggle.center().x - mode_dock.center().x).abs() <= gpui_kit::px(1.),
                     "Watch action stays centered in the bottom dock: {toggle:?} in {mode_dock:?}"
                 );
-                assert!((mode_dock.bottom() - gpui_kit::px(600.)).abs() <= gpui_kit::px(1.),
-                    "Watch pill bottom stays pinned above the pane/status-bar boundary: {mode_dock:?}");
+                assert!(
+                    (mode_dock.center().y - status_bar.top()).abs() <= gpui_kit::px(1.),
+                    "Watch pill stays vertically centered over the status-bar top border: pill={mode_dock:?}, bar={status_bar:?}"
+                );
+                assert!(
+                    visual.debug_bounds("work-plan-menu-pill").is_none(),
+                    "the status bar no longer duplicates the Work Plan surface"
+                );
+                assert!(
+                    visual.debug_bounds("agent-map-pill").is_none(),
+                    "the superseded Agent Map action is removed from the status bar"
+                );
                 assert!(
                     visual.debug_bounds("chat-mode-chat").is_none(),
                     "only the destination action is mounted"

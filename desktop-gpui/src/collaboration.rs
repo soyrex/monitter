@@ -8,8 +8,7 @@ use gpui_kit::{
     Bounds, Element, ElementId, GlobalElementId, Hitbox, InspectorElementId, LayoutId, StyledText,
 };
 use gpui_kit::{
-    assets::__private as icon_assets,
-    component::{ActiveTheme as _, Icon, Sizable, button::*},
+    component::{ActiveTheme as _, button::*},
     prelude::*,
     *,
 };
@@ -26,6 +25,7 @@ use completion_feedback::CompletionMarker;
 pub(crate) mod build_queue;
 
 const TRANSCRIPT_WORKER_STACK: usize = 8 * 1024 * 1024;
+pub(super) const PANE_STATUS_BAR_HEIGHT: f32 = 34.;
 
 /// Plain selectable text for the child output log. This deliberately avoids
 /// Markdown interpretation so the transcript reads like terminal output.
@@ -1200,7 +1200,7 @@ impl SubagentPane {
         palette: crate::design::Palette,
         pane_height: f32,
         pane_width: f32,
-        graph_open: bool,
+        _graph_open: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -1281,53 +1281,32 @@ impl SubagentPane {
         };
         let mut bar = div()
             .w_full()
+            .h(px(PANE_STATUS_BAR_HEIGHT))
             .flex()
             .items_center()
             .gap(px(5.))
             .border_t_1()
             .border_color(rgb(palette.line))
             .px(px(10.))
-            .py(px(5.))
             .bg(crate::surface_blend::background(
                 crate::surface_blend::Area::Pane,
                 palette.paper,
             ));
         if has_subagents {
-            bar = bar
-                .child(pill(
-                    "subagent-menu-pill",
-                    action_button("subagent-menu-toggle", format!("Subagents ({})", self.items.len()), gpui_kit::assets::IconName::Users)
-                        .toggled(self.menus.subagents)
-                        .on_click(cx.listener(|pane, _, _, cx| {
-                            pane.menus.toggle_subagents();
-                            cx.notify();
-                        })),
-                    self.menus.subagents,
-                ))
-                .child(pill(
-                    "agent-map-pill",
-                    action_button("agent-map-open", "Agent map".into(), gpui_kit::assets::IconName::GitFork)
-                        .on_click(cx.listener(|_, _, _, cx| cx.emit(SubagentPaneEvent::ShowGraph))),
-                    graph_open,
-                ));
-        }
-        if has_plan {
-            bar = bar.child(div().flex_1()).child(pill(
-                "work-plan-menu-pill",
-                action_button("work-plan-menu-toggle", "Work Plan".into(), gpui_kit::assets::IconName::FileText)
-                    .toggled(self.menus.plan)
+            bar = bar.child(pill(
+                "subagent-menu-pill",
+                action_button("subagent-menu-toggle", format!("Subagents ({})", self.items.len()), gpui_kit::assets::IconName::Users)
+                    .toggled(self.menus.subagents)
                     .on_click(cx.listener(|pane, _, _, cx| {
-                        pane.menus.toggle_plan();
+                        pane.menus.toggle_subagents();
                         cx.notify();
                     })),
-                self.menus.plan,
+                self.menus.subagents,
             ));
         }
         if let Some(project_id) = &build_project {
             let count = build_queue::pending_count(&self.snapshot, project_id);
-            if !has_plan {
-                bar = bar.child(div().flex_1());
-            }
+            bar = bar.child(div().flex_1());
             bar = bar.child(pill(
                 "build-queue-menu-pill",
                 action_button("build-queue-menu-toggle", if count > 0 {

@@ -5526,6 +5526,8 @@ impl Render for ChatPane {
                 cx,
             )
         });
+        let watcher_toggle = (!self.watcher.enabled)
+            .then(|| self.render_watcher_toggle(palette, cx));
         // Build the shared surface once, before entering either layout. Besides
         // retaining one set of input listeners, this keeps its construction out
         // of Watch's large native layout frame.
@@ -5769,9 +5771,13 @@ impl Render for ChatPane {
                     .child(
                         div()
                             .id("composer-companion-controls")
+                            .relative()
                             .w_full()
                             .flex_shrink_0()
-                            .child(visor),
+                            .child(visor)
+                            .when_some(watcher_toggle, |controls, toggle| {
+                                controls.child(toggle)
+                            }),
                     ),
             ));
         let scale = design::interface_scale();
@@ -6539,9 +6545,6 @@ impl Render for ChatPane {
             .text_color(rgb(palette.ink))
             .child(measurement)
             .child(upper_workspace)
-            .when(!self.watcher.enabled, |pane| {
-                pane.child(self.render_watcher_toggle(palette, cx))
-            })
             .children(approval_overlay)
             .into_any_element()
     }
