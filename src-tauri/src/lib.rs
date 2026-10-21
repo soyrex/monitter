@@ -540,6 +540,11 @@ const MODEL_CATALOG_CACHE_TTL: Duration = Duration::from_secs(60);
 /// Matches the user-facing 45-second interface deadline; the broker watchdog
 /// terminates the resident transport on expiry.
 const ADMIN_TURN_TIMEOUT: Duration = Duration::from_secs(45);
+const ADMIN_MESSAGE_ORDER_ERROR: &str = "system and developer messages must precede conversation entries";
+
+fn admin_message_order_rejected(error: &str) -> bool {
+    error.contains(ADMIN_MESSAGE_ORDER_ERROR)
+}
 
 fn codex_cli_version(codex_path: &str) -> String {
     let bin = if codex_path.trim().is_empty() {
@@ -1262,6 +1267,25 @@ impl Service {
                     _ => {}
                 }
             }
+            Ok(())
+        })
+    }
+
+    /// Forget a Codex Admin thread whose provider rejected its message order.
+    /// The old thread cannot accept another turn, so the next mini-task must
+    /// start a clean session instead of resuming it again.
+    fn reset_internal_admin_session(&self, task_id: &str) -> Result<(), String> {
+        self.mutate_data(Some(task_id.into()), |data| {
+            let Some(task) = data
+                .snapshot
+                .tasks
+                .iter_mut()
+                .find(|task| task.id == task_id)
+            else {
+                return Err("Monitter Admin task was not found.".into());
+            };
+            task.native_session_id = None;
+            task.updated_at = now();
             Ok(())
         })
     }
@@ -4364,7 +4388,15 @@ impl Service {
     pub(crate) fn send_admin_turn_with_origin(self: &Arc<Self>, prompt: String, origin: admin_activity::AdminActivityOrigin) -> Result<String, String> {
         let activity_id = self.admin_activity.begin(origin, self.admin_activity_model(None))?;
         let sensitive_prompt = admin_activity::sensitive(&prompt);
-        let result = self.send_admin_turn_inner(prompt, &activity_id);
+        let result = match self.send_admin_turn_inner(prompt.clone(), &activity_id) {
+            Err(error) if admin_message_order_rejected(&error) => {
+                // The provider rejected this request before generating a
+                // response. Retry once after the failed worker has discarded
+                // its saved thread id, so the replacement starts clean.
+                self.send_admin_turn_inner(prompt, &activity_id)
+            }
+            result => result,
+        };
         let (status, detail) = match &result {
             Ok(output) => ("succeeded", if sensitive_prompt { "Generated response omitted because the source may contain sensitive data.".into() } else { format!("Generated response (not an applied change): {output}") }),
             Err(error) => (if error.contains("45-second interface deadline") { "timeout" } else { "failed" }, admin_activity::failure_detail(error).to_owned()),
@@ -4539,6 +4571,9 @@ impl Service {
                 control.terminate_owned();
                 let _ = control.wait_for_teardown(runtime_gc::RUNTIME_RELEASE_TIMEOUT);
                 let _ = self.finalise_internal_admin_turn(&task_id, "interrupted", None);
+                if admin_message_order_rejected(&error) {
+                    self.reset_internal_admin_session(&task_id)?;
+                }
                 Err(error)
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
