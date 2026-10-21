@@ -423,6 +423,7 @@ impl Render for EmptyPane {
                                 palette,
                                 card_style,
                                 font_size,
+                                Some(&self.focus),
                                 cx.listener(|_, _, _, cx| {
                                     cx.emit(EmptyPaneEvent::Action(EmptyPaneAction::Chat));
                                 }),
@@ -435,6 +436,7 @@ impl Render for EmptyPane {
                                 palette,
                                 card_style,
                                 font_size,
+                                None,
                                 cx.listener(|_, _, _, cx| {
                                     cx.emit(EmptyPaneEvent::Action(EmptyPaneAction::Terminal));
                                 }),
@@ -447,6 +449,7 @@ impl Render for EmptyPane {
                                 palette,
                                 card_style,
                                 font_size,
+                                None,
                                 cx.listener(|_, _, _, cx| {
                                     cx.emit(EmptyPaneEvent::Action(EmptyPaneAction::Neovim));
                                 }),
@@ -459,6 +462,7 @@ impl Render for EmptyPane {
                                 palette,
                                 card_style,
                                 font_size,
+                                None,
                                 cx.listener(|_, _, _, cx| {
                                     cx.emit(EmptyPaneEvent::Action(EmptyPaneAction::Browser));
                                 }),
@@ -485,6 +489,7 @@ fn action_card(
     palette: design::Palette,
     button_style: ButtonCustomVariant,
     font_size: Pixels,
+    focus_handle: Option<&FocusHandle>,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
     let group = SharedString::from(format!("empty-pane-card-{id}"));
@@ -513,6 +518,7 @@ fn action_card(
                 .border_color(rgb(palette.accent))
                 .text_color(rgb(palette.ink))
         })
+        .when_some(focus_handle, |button, focus| button.track_focus(focus))
         .custom(button_style)
         .accessibility_label(label)
         .disabled(disabled)
