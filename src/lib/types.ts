@@ -277,9 +277,14 @@ export interface RunEvent {
 }
 /** A revision-aware, compact UI projection. A null snapshot means unchanged. */
 export interface UiSnapshotResponse { revision: string; snapshot: Snapshot | null; }
+export type MetadataFieldPatch =
+  | { kind: 'replace'; value: unknown }
+  | { kind: 'rows'; upserts: Record<string, unknown>; removed: string[]; order?: string[] | null }
+  | { kind: 'map'; upserts: Record<string, unknown>; removed: string[] };
 export interface UiDelta {
   fromRevision: string;
-  metadata: Snapshot;
+  metadata?: Snapshot | null;
+  metadataPatch?: { fields: Record<string, MetadataFieldPatch> } | null;
   messages: Message[];
   removedMessageIds: string[];
   retainedChannelIds: string[];

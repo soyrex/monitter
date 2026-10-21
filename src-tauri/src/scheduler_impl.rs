@@ -31,6 +31,26 @@ impl Service {
         self: &Arc<Self>,
         input: ScheduleInput,
     ) -> Result<Snapshot, String> {
+        self.save_schedule_with_creation_id(input, None)
+    }
+
+    /// Native callers preallocate identity so acknowledgements need no catalog.
+    pub(crate) fn save_schedule_native(
+        self: &Arc<Self>,
+        mut input: ScheduleInput,
+    ) -> Result<String, String> {
+        let creation_id = input.id.trim().is_empty().then(crate::model::id);
+        if let Some(id) = &creation_id { input.id = id.clone(); }
+        let saved_id = input.id.clone();
+        self.save_schedule_with_creation_id(input, creation_id)?;
+        Ok(saved_id)
+    }
+
+    fn save_schedule_with_creation_id(
+        self: &Arc<Self>,
+        input: ScheduleInput,
+        creation_id: Option<String>,
+    ) -> Result<Snapshot, String> {
         let mut schedule = input.into_schedule()?;
         // Verify the agent exists and is non-internal.
         {
@@ -42,8 +62,11 @@ impl Service {
         }
         let now = crate::model::now();
         self.mutate(None, |snapshot| {
-            if schedule.id.is_empty() {
-                schedule.id = crate::model::id();
+            if schedule.id.is_empty() || creation_id.as_deref() == Some(schedule.id.as_str()) {
+                if schedule.id.is_empty() { schedule.id = crate::model::id(); }
+                if snapshot.schedules.iter().any(|row| row.id == schedule.id) {
+                    return Err("Schedule ID already exists.".into());
+                }
                 schedule.created_at = now;
                 schedule.updated_at = now;
                 schedule.consecutive_failures = 0;

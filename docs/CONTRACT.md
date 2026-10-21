@@ -3141,13 +3141,40 @@ membership changes, project board posts, batch naming and worktree merges return
 `{accepted: true}` only after the operation succeeds. State refresh continues
 through the typed native UI publication/delta API; acceptance is not a snapshot.
 
-Agent and host editors receive only their respective updated catalogs; project
-and Idea List editors receive only `projects`. Channel saves return `channels`
-with identity/name fields only, without embedded channel messages. Auto-name
-returns only the target task's identity/title before the private IPC adapter
-extracts its title string. Native schedule save/action replies contain only the
-`schedules` catalog. Panes merge these fields into their retained state instead
-of replacing their snapshot. Task creation/fork/handoff and other typed results
-retain their existing response shapes. The LAN dispatcher retains its existing
-contract. Native mutation receipts must not serialize unrelated chat, diagnostic,
-channel, schedule-run, or subagent transcript history.
+Agent, host, project and channel saves return `{accepted: true, savedId}`;
+deletes that need an identity return `deletedId`. Ideas saves return only their
+revision. Native schedule save/action replies carry acknowledgement and affected
+identity only. Normalized records arrive through the authoritative UI feed;
+editors preserve newer drafts and select the exact saved identity. Auto-name
+returns only the target identity/title, extracted to a title by private IPC.
+Task creation/fork/handoff and other typed results retain scoped result shapes.
+
+Current web/Tauri/LAN clients negotiate `invoke_ui_mutation` before dispatch.
+Its explicit mutation allowlist returns these same receipts; the web bridge
+materializes the existing Snapshot facade from a fresh revision delta after the
+acknowledgement. It never retries a dispatched mutation through a legacy route.
+Older clients retain their original command reply contracts.
+
+### Incremental metadata and scoped recovery
+
+Native clients negotiate `read_native_ui_changes_v2`; web/LAN clients request
+`get_ui_delta` with `metadataPatch: true`. These deltas omit full `metadata` and
+carry `metadataPatch.fields`: replacements, stable-ID row upserts/removals and
+optional ordering, or map entry upserts/removals. Top-level patch field names
+are Rust snake_case; row and map values retain their ordinary JSON shape.
+Channel message bodies remain in their separate delta field. Patches are
+journaled within the existing 128-revision/8-MiB bound. Missing history, malformed
+patches or projection failures require an authoritative reset; clients never
+advance a revision with a partial patch. Initial/reset snapshots remain compact
+projections. Old callers without negotiation still receive full metadata.
+
+`save_native_preferences_receipt` returns only the saved CAS revision. The
+client reuses its exact validated submitted data locally. The older preferences
+endpoint remains available for compatibility. `confirm_native_command` is a
+read-only boolean authority check for the requested queue item, approval or task;
+send recovery additionally reads a bounded page for its one task. Neither path
+downloads a workspace snapshot or replays an ambiguous mutation.
+
+Sharing/controller projections consume the current revisioned owner cache and
+existing bounded transcript pages; they do not first fetch all durable history.
+Raw snapshot endpoints remain explicit compatibility/diagnostic operations.

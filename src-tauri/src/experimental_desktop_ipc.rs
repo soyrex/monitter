@@ -629,7 +629,7 @@ mod unix {
     }
     fn read_only_request(method: &str, args: &Value) -> bool {
         match method {
-            "read_browser_open_requests" | "read_ui_changes" | "read_native_ui_changes" | "read_idle_runtime_status" | "read_task_messages" | "read_channel_messages" | "read_attachment_file" | "load_native_preferences" | "read_lan_status" | "get_agent_extension_assignments" | "subscribe_changes" => true,
+            "read_browser_open_requests" | "read_ui_changes" | "read_native_ui_changes" | "read_native_ui_changes_v2" | "confirm_native_command" | "read_idle_runtime_status" | "read_task_messages" | "read_channel_messages" | "read_attachment_file" | "load_native_preferences" | "read_lan_status" | "get_agent_extension_assignments" | "subscribe_changes" => true,
             "invoke" => matches!(args["command"].as_str(), Some("read_admin_activity" | "get_snapshot" | "get_ui_snapshot" | "get_ui_delta" | "get_process_metrics" | "get_task_messages" | "get_channel_messages" | "get_task_events" | "get_task_event_detail" | "get_usage_overview" | "get_task_goal" | "get_task_slash_commands" | "get_subagent_transcript" | "get_task_git_status" | "get_task_git_diff" | "list_terminals" | "read_terminal" | "get_command_capabilities")),
             _ => false,
         }
@@ -1348,10 +1348,14 @@ pub(super) fn dispatch(backend: &BackendService, method: &str, args: Value) -> R
             Ok(result)
         }
         "read_ui_changes" => encode(backend.read_ui_changes(optional::<String>(&args, "revision")?.as_deref())?),
-        "read_native_ui_changes" => {
+        "read_native_ui_changes" | "read_native_ui_changes_v2" => {
             let args: NativeUiChangesArgs = serde_json::from_value(args)
                 .map_err(|_| "Invalid native UI change arguments.")?;
-            encode(backend.read_native_ui_changes(args.revision.as_deref(), &args.message_task_ids)?)
+            encode(if method == "read_native_ui_changes_v2" {
+                backend.read_native_ui_changes_v2(args.revision.as_deref(), &args.message_task_ids)?
+            } else {
+                backend.read_native_ui_changes(args.revision.as_deref(), &args.message_task_ids)?
+            })
         },
         "work_log_owner" => backend.work_log_owner(&arg::<String>(&args,"operation")?,arg(&args,"args")?),
         "publish_report_theme" => {
@@ -1360,6 +1364,7 @@ pub(super) fn dispatch(backend: &BackendService, method: &str, args: Value) -> R
         "read_browser_open_requests" => encode(backend.read_browser_open_requests()?),
         "ack_browser_open_request" => { backend.ack_browser_open_request(&arg::<String>(&args, "id")?)?; Ok(Value::Null) },
         "read_idle_runtime_status" => backend.read_idle_runtime_status(),
+        "confirm_native_command" => encode(backend.confirm_native_command(&arg::<String>(&args, "command")?, &arg::<Value>(&args, "args")?, &arg::<Value>(&args, "before")?)?),
         "read_task_messages" => encode(backend.read_task_messages(&arg::<String>(&args, "taskId")?, optional::<String>(&args, "beforeId")?.as_deref(), optional(&args, "limit")?)?),
         "read_channel_messages" => encode(backend.read_channel_messages(&arg::<String>(&args, "channelId")?, optional::<String>(&args, "beforeId")?.as_deref(), optional(&args, "limit")?)?),
         "read_attachment_file" => encode(backend.read_attachment_file(&arg::<String>(&args, "sourcePath")?)?),
@@ -1369,6 +1374,12 @@ pub(super) fn dispatch(backend: &BackendService, method: &str, args: Value) -> R
         "import_project_history" => encode(backend.import_project_history(arg(&args, "input")?)?),
         "validate_project_history" => { backend.validate_project_history(arg(&args, "input")?)?; Ok(Value::Null) },
         "save_native_preferences" => encode(backend.save_native_preferences(&arg::<String>(&args, "expectedRevision")?, arg(&args, "data")?)?),
+        "save_native_preferences_receipt" => {
+            let saved = backend.save_native_preferences(
+                &arg::<String>(&args, "expectedRevision")?, arg(&args, "data")?,
+            )?;
+            encode(NativePreferenceReceipt { revision: saved.revision })
+        }
         "save_schedule" => encode(backend.save_schedule(arg(&args, "input")?)?),
         "schedule_action" => encode(backend.schedule_action(arg(&args, "id")?, arg(&args, "action")?)?),
         "read_lan_status" => encode(backend.read_lan_status()?),

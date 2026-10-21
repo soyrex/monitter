@@ -2037,6 +2037,52 @@ impl Service {
         self.portable_invoke(command, args, true)
     }
 
+    /// Only these existing Snapshot mutations may opt into bounded receipts.
+    /// Never route arbitrary reads or recursively invoke this endpoint.
+    fn invoke_ui_mutation(
+        self: &Arc<Self>,
+        command: &str,
+        args: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        const MUTATIONS: &[&str] = &[
+            "resolve_approval",
+            "revoke_approval_rule",
+            "resolve_input",
+            "save_host",
+            "delete_host",
+            "save_agent",
+            "delete_agent",
+            "save_project",
+            "save_project_ideas",
+            "delete_project",
+            "post_project_board_note",
+            "set_task_project",
+            "rename_task",
+            "autoname",
+            "delete_task",
+            "delete_archived_task",
+            "set_task_archived",
+            "clear_task_context",
+            "send_message",
+            "resume_task",
+            "cancel_task",
+            "cancel_queued_message",
+            "edit_queued_message",
+            "set_channel_agent_conversation",
+            "stop_channel_agent_conversation",
+            "save_settings",
+            "save_channel",
+            "set_channel_membership",
+            "send_channel_message",
+            "set_task_model_settings",
+            "set_task_sandbox",
+        ];
+        if !MUTATIONS.contains(&command) {
+            return Err(format!("Command '{command}' does not support UI mutation receipts."));
+        }
+        self.native_invoke(command, args)
+    }
+
     fn portable_invoke(
         self: &Arc<Self>,
         command: &str,
@@ -2062,21 +2108,7 @@ impl Service {
         }
         let snapshot_value = |snapshot: Snapshot| -> Result<serde_json::Value, String> {
             if native {
-                // These editors consume the updated catalog immediately. Other
-                // mutations need only acceptance; publication supplies UI state.
-                // Project/agent/host catalogs contain no transcript history.
                 return match command {
-                    "save_agent" | "delete_agent" => value(json!({"agents": snapshot.agents})),
-                    "save_host" | "delete_host" => value(json!({"hosts": snapshot.hosts})),
-                    "save_project" | "save_project_ideas" | "delete_project" =>
-                        value(json!({"projects": snapshot.projects})),
-                    "save_channel" => {
-                        // A channel embeds its messages; creation only needs its
-                        // identity to select the newly saved channel.
-                        value(json!({"channels": snapshot.channels.iter().map(|channel|
-                            json!({"id": channel.id, "name": channel.name})
-                        ).collect::<Vec<_>>()}))
-                    }
                     "autoname" => value(json!({"tasks": snapshot.tasks.iter()
                         .filter(|task| Some(task.id.as_str()) == args["target"]["taskId"].as_str())
                         .map(|task| json!({"id": task.id, "title": task.title}))
@@ -2091,9 +2123,12 @@ impl Service {
         };
         match command {
             "get_command_capabilities" => value(command_capabilities("lan")?),
+            "invoke_ui_mutation" => self.invoke_ui_mutation(
+                &arg::<String>(&args, "command")?, arg(&args, "args")?,
+            ),
             "get_snapshot" => value(self.snapshot()?),
             "get_process_metrics" => value(self.process_metrics()?),
-            "get_ui_delta" => value(self.ui_delta(args.get("revision").and_then(|value| value.as_str()))?),
+            "get_ui_delta" => value(self.ui_delta_with_metadata_patch(args.get("revision").and_then(|value| value.as_str()), args.get("metadataPatch").and_then(serde_json::Value::as_bool).unwrap_or(false))?),
             "get_channel_messages" => value(self.channel_messages(
                 &arg::<String>(&args, "channelId")?,
                 args.get("beforeId").and_then(|value| value.as_str()),
@@ -2144,10 +2179,10 @@ impl Service {
             "list_codex_accounts" => value(self.list_codex_accounts()?),
             "save_host" => {
                 let mut host: Host = arg(&args, "host")?;
-                self.mutate(None, |s| {
-                    if host.id.trim().is_empty() {
-                        host.id = id()
-                    }
+                if native && host.id.trim().is_empty() { host.id = id(); }
+                let saved_id = host.id.clone();
+                let snapshot = self.mutate(None, |s| {
+                    if host.id.trim().is_empty() { host.id = id(); }
                     if host.name.trim().is_empty() {
                         return Err("Host name is required.".into());
                     }
@@ -2163,12 +2198,13 @@ impl Service {
                         s.hosts.push(host)
                     }
                     Ok(s.clone())
-                })
-                .and_then(snapshot_value)
+                })?;
+                if native { value(json!({"accepted": true, "savedId": saved_id})) }
+                else { snapshot_value(snapshot) }
             }
             "delete_host" => {
                 let id: String = arg(&args, "id")?;
-                self.mutate(None, |s| {
+                let snapshot = self.mutate(None, |s| {
                     let host = s
                         .hosts
                         .iter()
@@ -2194,12 +2230,17 @@ impl Service {
                     }
                     s.hosts.retain(|h| h.id != id);
                     Ok(s.clone())
-                })
-                .and_then(snapshot_value)
+                })?;
+                if native { value(json!({"accepted": true, "deletedId": id})) }
+                else { snapshot_value(snapshot) }
             }
             "save_agent" => {
-                let agent: Agent = arg(&args, "agent")?;
-                self.save_agent(agent).and_then(snapshot_value)
+                let mut agent: Agent = arg(&args, "agent")?;
+                if native && agent.id.trim().is_empty() { agent.id = id(); }
+                let saved_id = agent.id.clone();
+                let snapshot = self.save_agent(agent)?;
+                if native { value(json!({"accepted": true, "savedId": saved_id})) }
+                else { snapshot_value(snapshot) }
             }
             "delete_agent" => {
                 let id: String = arg(&args, "id")?;
@@ -2210,7 +2251,9 @@ impl Service {
                     },
                     None => DeleteAgentChatHandling::Archive,
                 };
-                self.delete_agent(&id, handling).and_then(snapshot_value)
+                let snapshot = self.delete_agent(&id, handling)?;
+                if native { value(json!({"accepted": true, "deletedId": id})) }
+                else { snapshot_value(snapshot) }
             }
             "create_task" => value(self.create_task(arg(&args, "input")?)?),
             "handoff_task" => value(self.handoff_task(arg(&args, "input")?)?),
@@ -2251,9 +2294,28 @@ impl Service {
             "set_task_archived" => snapshot_value(
                 self.set_task_archived(&arg::<String>(&args, "taskId")?, arg(&args, "archived")?)?,
             ),
-            "save_project" => snapshot_value(self.save_project(arg(&args, "project")?)?),
-            "save_project_ideas" => snapshot_value(self.save_project_ideas(&arg::<String>(&args, "projectId")?, arg(&args, "ideas")?, arg(&args, "expectedRevision")?)?),
-            "delete_project" => snapshot_value(self.delete_project(&arg::<String>(&args, "id")?)?),
+            "save_project" => {
+                let mut project: Project = arg(&args, "project")?;
+                if native && project.id.trim().is_empty() { project.id = id(); }
+                let saved_id = project.id.clone();
+                let snapshot = self.save_project(project)?;
+                if native { value(json!({"accepted": true, "savedId": saved_id})) }
+                else { snapshot_value(snapshot) }
+            },
+            "save_project_ideas" => {
+                if native {
+                    let revision = self.save_project_ideas_ack(&arg::<String>(&args, "projectId")?, arg(&args, "ideas")?, arg(&args, "expectedRevision")?)?;
+                    value(json!({"accepted": true, "revision": revision}))
+                } else {
+                    snapshot_value(self.save_project_ideas(&arg::<String>(&args, "projectId")?, arg(&args, "ideas")?, arg(&args, "expectedRevision")?)?)
+                }
+            },
+            "delete_project" => {
+                let id: String = arg(&args, "id")?;
+                let snapshot = self.delete_project(&id)?;
+                if native { value(json!({"accepted": true, "deletedId": id})) }
+                else { snapshot_value(snapshot) }
+            },
             "post_project_board_note" => snapshot_value(self.post_project_board_note(
                 &arg::<String>(&args, "projectId")?, &arg::<String>(&args, "text")?, &arg::<String>(&args, "requestId")?,
             )?),
@@ -2328,7 +2390,14 @@ impl Service {
                 let settings: Settings = arg(&args, "settings")?;
                 snapshot_value(save_settings_blocking(self, settings)?)
             }
-            "save_channel" => snapshot_value(self.save_channel(arg(&args, "channel")?)?),
+            "save_channel" => {
+                let mut channel: Channel = arg(&args, "channel")?;
+                if native && channel.id.trim().is_empty() { channel.id = id(); }
+                let saved_id = channel.id.clone();
+                let snapshot = self.save_channel(channel)?;
+                if native { value(json!({"accepted": true, "savedId": saved_id})) }
+                else { snapshot_value(snapshot) }
+            },
             "set_channel_membership" => snapshot_value(self.set_channel_membership(
                 &arg::<String>(&args, "channelId")?,
                 &arg::<String>(&args, "agentId")?,
@@ -7976,6 +8045,19 @@ fn get_command_capabilities() -> Result<CommandCapabilities, String> {
     command_capabilities("native")
 }
 
+/// Negotiated receipt adapter. Legacy mutation commands keep their results.
+#[tauri::command]
+async fn invoke_ui_mutation(
+    state: State<'_, AppState>,
+    command: String,
+    args: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let service = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || service.invoke_ui_mutation(&command, args))
+        .await
+        .map_err(|error| format!("UI mutation worker failed: {error}"))?
+}
+
 /// Native-owner only: route a fresh prompt through the locally stored Jev
 /// credential. The secret, raw prompt, and filesystem authority never cross
 /// this command boundary.
@@ -8161,9 +8243,9 @@ async fn get_ui_snapshot(
 }
 
 #[tauri::command]
-async fn get_ui_delta(state: State<'_, AppState>, revision: Option<String>) -> Result<ui_sync::UiDeltaResponse, String> {
+async fn get_ui_delta(state: State<'_, AppState>, revision: Option<String>, metadata_patch: Option<bool>) -> Result<ui_sync::UiDeltaResponse, String> {
     let service = state.0.clone();
-    tauri::async_runtime::spawn_blocking(move || service.ui_delta(revision.as_deref()))
+    tauri::async_runtime::spawn_blocking(move || service.ui_delta_with_metadata_patch(revision.as_deref(), metadata_patch.unwrap_or(false)))
         .await.map_err(|error| format!("Snapshot delta worker failed: {error}"))?
 }
 
@@ -10722,6 +10804,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_snapshot,
             get_command_capabilities,
+            invoke_ui_mutation,
             plan_jev_route,
             record_jev_route,
             plan_jev_command,

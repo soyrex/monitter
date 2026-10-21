@@ -21,6 +21,31 @@
         "lan"
       ]
     },
+    "invoke_ui_mutation": {
+      "arguments": [
+        {
+          "name": "command",
+          "rustName": "command",
+          "rustType": "String",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "args",
+          "rustName": "args",
+          "rustType": "serde_json::Value",
+          "tsType": "JsonValue",
+          "optional": false
+        }
+      ],
+      "resultRustType": "serde_json::Value",
+      "resultTsType": "JsonValue",
+      "legacyCompatible": false,
+      "surfaces": [
+        "native",
+        "lan"
+      ]
+    },
     "plan_jev_route": {
       "arguments": [
         {
@@ -372,6 +397,13 @@
           "rustName": "revision",
           "rustType": "Option<String>",
           "tsType": "string | null",
+          "optional": true
+        },
+        {
+          "name": "metadataPatch",
+          "rustName": "metadata_patch",
+          "rustType": "Option<bool>",
+          "tsType": "boolean | null",
           "optional": true
         }
       ],

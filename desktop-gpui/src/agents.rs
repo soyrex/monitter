@@ -18,7 +18,7 @@ use monitter_lib::{
 };
 use serde_json::{json, Value};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     io::Read,
     sync::Arc,
 };
@@ -27,13 +27,6 @@ fn text(v: &Value, k: &str) -> String {
 }
 fn items(v: &Value, k: &str) -> Vec<Value> {
     v[k].as_array().cloned().unwrap_or_default()
-}
-fn apply_catalog_reply(snapshot: &mut Value, reply: &Value) {
-    for key in ["agents", "hosts"] {
-        if let Some(catalog) = reply.get(key) {
-            snapshot[key] = catalog.clone();
-        }
-    }
 }
 fn lines(v: &Value, k: &str) -> String {
     items(v, k)
@@ -168,8 +161,8 @@ enum Mode {
 }
 enum Response {
     AgentDeleted(String),
-    AgentSaved(HashSet<String>),
-    HostSaved(HashSet<String>),
+    AgentSaved(Option<Value>),
+    HostSaved(Option<Value>),
     Probe,
     Accounts,
     Discovery,
@@ -184,6 +177,8 @@ pub struct AgentHostPane {
     host: Value,
     agent_form: Form,
     host_form: Form,
+    pending_agent_save: Option<(String, Value, Option<Value>)>,
+    pending_host_save: Option<(String, Value, Option<Value>)>,
     agent_drafts: HashMap<String, Value>,
     host_drafts: HashMap<String, Value>,
     busy: bool,
@@ -230,6 +225,8 @@ impl AgentHostPane {
             host,
             agent_form,
             host_form,
+            pending_agent_save: None,
+            pending_host_save: None,
             agent_drafts: HashMap::new(),
             host_drafts: HashMap::new(),
             busy: false,
@@ -252,9 +249,39 @@ impl AgentHostPane {
         pane
     }
     /// External sync preserves unsaved editor fields and per-record drafts.
-    pub fn set_snapshot(&mut self, snapshot: &Value, _window: &mut Window, cx: &mut Context<Self>) {
+    pub fn set_snapshot(&mut self, snapshot: &Value, window: &mut Window, cx: &mut Context<Self>) {
         self.snapshot = snapshot.clone();
+        self.reconcile_saved_editors(window, cx);
         cx.notify();
+    }
+    /// Receipts can arrive after their feed update. Reconcile from the retained
+    /// authoritative row too, but never adopt the unchanged pre-save row for an
+    /// edited request, or replace fields the user edited after submitting.
+    fn reconcile_saved_editors(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((id, submitted, baseline)) = self.pending_agent_save.clone() {
+            if let Some(saved) = items(&self.snapshot, "agents").into_iter().find(|row| text(row, "id") == id) {
+                if baseline.as_ref() != Some(&saved) || saved == submitted {
+                    if self.agent_value(cx) == submitted {
+                        self.agent = saved;
+                        self.bind_agent(window, cx);
+                    }
+                    if self.agent_drafts.get(&id) == Some(&submitted) { self.agent_drafts.remove(&id); }
+                    self.pending_agent_save = None;
+                }
+            }
+        }
+        if let Some((id, submitted, baseline)) = self.pending_host_save.clone() {
+            if let Some(saved) = items(&self.snapshot, "hosts").into_iter().find(|row| text(row, "id") == id) {
+                if baseline.as_ref() != Some(&saved) || saved == submitted {
+                    if self.host_value(cx).ok().as_ref() == Some(&submitted) {
+                        self.host = saved;
+                        self.bind_host(window, cx);
+                    }
+                    if self.host_drafts.get(&id) == Some(&submitted) { self.host_drafts.remove(&id); }
+                    self.pending_host_save = None;
+                }
+            }
+        }
     }
     fn bind_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.avatar_epoch = self.avatar_epoch.wrapping_add(1);
@@ -413,17 +440,25 @@ impl AgentHostPane {
             match result {
                 Err(error)=>pane.error=Some(error),
                 Ok(value)=>match response {
-                    Response::AgentDeleted(id)=>{apply_catalog_reply(&mut pane.snapshot,&value);pane.agent_drafts.remove(&id);pane.agent=Value::Null;pane.removal=None;pane.notice=Some("Agent removed using the selected chat handling policy.".into());}
-                    Response::AgentSaved(old)=>{
-                        let id=text(&pane.agent,"id");
-                        let saved=items(&value,"agents").into_iter().find(|agent|if id.is_empty(){!old.contains(&text(agent,"id"))}else{text(agent,"id")==id});
-                        apply_catalog_reply(&mut pane.snapshot,&value);
-                        if let Some(agent)=saved {pane.agent_drafts.remove(&text(&agent,"id"));pane.agent=agent;}
+                    Response::AgentDeleted(id)=>{pane.agent_drafts.remove(&id);pane.agent=Value::Null;pane.removal=None;pane.notice=Some("Agent removed using the selected chat handling policy.".into());}
+                    Response::AgentSaved(baseline)=>{
+                        let id=text(&value,"savedId");
+                        if !id.is_empty() {
+                            pane.agent_drafts.remove("");
+                            pane.agent["id"]=json!(id);
+                            pane.agent_drafts.insert(id.clone(),pane.agent.clone());
+                            pane.pending_agent_save=Some((id,pane.agent.clone(),baseline));
+                        }
                         pane.notice=Some("Agent saved. Existing chats keep their captured runtime configuration.".into());
                     }
-                    Response::HostSaved(old)=>{
-                        let id=text(&pane.host,"id");let saved=items(&value,"hosts").into_iter().find(|host|if id.is_empty(){!old.contains(&text(host,"id"))}else{text(host,"id")==id});
-                        apply_catalog_reply(&mut pane.snapshot,&value);if let Some(host)=saved {pane.host_drafts.remove(&text(&host,"id"));pane.host=host;}
+                    Response::HostSaved(baseline)=>{
+                        let id=text(&value,"savedId");
+                        if !id.is_empty() {
+                            pane.host_drafts.remove("");
+                            pane.host["id"]=json!(id);
+                            pane.host_drafts.insert(id.clone(),pane.host.clone());
+                            pane.pending_host_save=Some((id,pane.host.clone(),baseline));
+                        }
                         pane.notice=Some("Host saved. No credentials were read or copied.".into());
                     }
                     Response::Probe=>pane.probe=Some(value),Response::Accounts=>pane.accounts=value.as_array().cloned().unwrap_or_default(),
@@ -570,14 +605,10 @@ impl AgentHostPane {
             value["collaborationEnabled"] = json!(false);
         }
         self.agent = value.clone();
-        let old = items(&self.snapshot, "agents")
-            .iter()
-            .map(|agent| text(agent, "id"))
-            .collect();
         self.invoke(
             "save_agent",
             json!({"agent":value}),
-            Response::AgentSaved(old),
+            Response::AgentSaved(items(&self.snapshot, "agents").into_iter().find(|row| text(row, "id") == text(&self.agent, "id"))),
             cx,
         );
     }
@@ -585,14 +616,10 @@ impl AgentHostPane {
         match self.host_value(cx) {
             Ok(host) => {
                 self.host = host.clone();
-                let old = items(&self.snapshot, "hosts")
-                    .iter()
-                    .map(|host| text(host, "id"))
-                    .collect();
                 self.invoke(
                     "save_host",
                     json!({"host":host}),
-                    Response::HostSaved(old),
+                    Response::HostSaved(items(&self.snapshot, "hosts").into_iter().find(|row| text(row, "id") == text(&self.host, "id"))),
                     cx,
                 );
             }
@@ -604,7 +631,8 @@ impl AgentHostPane {
     }
 }
 impl Render for AgentHostPane {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.reconcile_saved_editors(window, cx);
         let mut nav = div()
             .id("agent-host-index")
             .w(px(210.))

@@ -179,28 +179,25 @@ impl WorkspacePane {
         let service = self.service.clone();
         let work = cx
             .background_executor()
-            .spawn(async move { service.invoke(command, args) });
+            .spawn(async move {
+                if command == "save_project_ideas" {
+                    let project_id = args["projectId"].as_str().ok_or("Missing project ID.")?;
+                    let ideas = serde_json::from_value(args["ideas"].clone()).map_err(|error| error.to_string())?;
+                    let expected_revision = args["expectedRevision"].as_u64().ok_or("Missing ideas revision.")?;
+                    service.save_project_ideas(project_id, ideas, expected_revision).map(|revision| json!({"revision": revision}))
+                } else { service.invoke(command, args) }
+            });
         cx.spawn(async move |view, cx| {
             let result = work.await;
             let _ = view.update(cx, |view, cx| {
                 view.busy = false;
                 match result {
                     Ok(reply) => {
-                        // Mutation replies contain only the changed catalog or
-                        // acceptance. Keep the rest of the retained UI state.
-                        if let Some(projects) = reply.get("projects") {
-                            Rc::make_mut(&mut view.snapshot)["projects"] = projects.clone();
+                        if command == "save_project" {
+                            if let Some(id) = reply["savedId"].as_str() { view.selected = Some(id.to_owned()); }
                         }
                         if command == "save_project_ideas" {
-                            if let Some(project) = items(&view.snapshot, "projects")
-                                .into_iter()
-                                .find(|project| Some(text(project, "id")) == view.selected)
-                            {
-                                view.ideas = items(&project, "ideas");
-                                view.ideas_revision = project["ideasRevision"]
-                                    .as_u64()
-                                    .unwrap_or(view.ideas_revision);
-                            }
+                            if let Some(revision) = reply["revision"].as_u64() { view.ideas_revision = revision; }
                         }
                         if command == "post_project_board_note" {
                             view.posted_note =

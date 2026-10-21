@@ -13,14 +13,19 @@ pub use crate::attachments::Attachment;
 pub use crate::attachments::ReadAttachmentFile;
 pub use crate::scheduler::ScheduleInput;
 
-/// Schedule mutations return their editable catalog, never workspace history.
+/// Small acknowledgement; the authoritative UI feed supplies schedule data.
 #[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct NativeScheduleMutation {
-    pub schedules: Vec<crate::model::Schedule>,
+    pub accepted: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub saved_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deleted_id: Option<String>,
 }
 pub use crate::server_restart::{RestartAgent, RestartMode, RestartStatus};
 pub use crate::ui_sync::{
-    ChannelMessageChange, ChannelMessagesPage, TaskMessagesPage, UiDelta, UiDeltaResponse,
+    ChannelMessageChange, ChannelMessagesPage, TaskMessagesPage, UiDelta, UiDeltaResponse, MetadataPatch,
 };
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
@@ -286,6 +291,11 @@ pub enum NativeDetailTab {
 pub struct NativePreferences {
     pub revision: String,
     pub data: NativePreferenceData,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct NativePreferenceReceipt {
+    revision: String,
 }
 impl Default for NativePreferences {
     fn default() -> Self {
@@ -1111,8 +1121,8 @@ impl BackendService {
 
     pub fn save_schedule(&self, input: ScheduleInput) -> Result<NativeScheduleMutation, String> {
         self.ensure_running()?;
-        let snapshot = self.0.service.save_schedule(input)?;
-        Ok(NativeScheduleMutation { schedules: snapshot.schedules })
+        let saved_id = self.0.service.save_schedule_native(input)?;
+        Ok(NativeScheduleMutation { accepted: true, saved_id: Some(saved_id), deleted_id: None })
     }
 
     pub fn schedule_action(
@@ -1121,13 +1131,19 @@ impl BackendService {
         action: ScheduleAction,
     ) -> Result<NativeScheduleMutation, String> {
         self.ensure_running()?;
-        let snapshot = match action {
+        let deleted = matches!(action, ScheduleAction::Delete);
+        let receipt_id = id.clone();
+        match action {
             ScheduleAction::Pause => self.0.service.set_schedule_enabled(id, false),
             ScheduleAction::Resume => self.0.service.set_schedule_enabled(id, true),
             ScheduleAction::RunNow => self.0.service.run_schedule_now(id),
             ScheduleAction::Delete => self.0.service.delete_schedule(id),
         }?;
-        Ok(NativeScheduleMutation { schedules: snapshot.schedules })
+        Ok(NativeScheduleMutation {
+            accepted: true,
+            saved_id: (!deleted).then(|| receipt_id.clone()),
+            deleted_id: deleted.then_some(receipt_id),
+        })
     }
 
     fn ensure_running(&self) -> Result<(), String> {
@@ -1168,6 +1184,11 @@ impl BackendService {
         self.0.service.native_ui_delta(revision, message_task_ids)
     }
 
+    pub fn read_native_ui_changes_v2(&self, revision: Option<&str>, message_task_ids: &[String]) -> Result<UiDeltaResponse, String> {
+        self.ensure_running()?;
+        self.0.service.native_ui_delta_patched(revision, message_task_ids)
+    }
+
     /// Read-only local diagnostics for the persistent server's idle collector.
     /// Deliberately not part of the shared/mobile command allowlist.
     pub fn publish_report_theme(&self, theme: &crate::report_styles::ReportTheme) -> Result<(), String> { self.ensure_running()?; self.0.service.publish_report_theme(theme) }
@@ -1177,6 +1198,32 @@ impl BackendService {
     pub fn read_idle_runtime_status(&self) -> Result<Value, String> {
         self.ensure_running()?;
         self.0.service.idle_runtime_status()
+    }
+
+    /// Confirm only the affected queue item, approval or task. Never transfer
+    /// workspace metadata or replay a mutation after an ambiguous response.
+    pub fn confirm_native_command(&self, command: &str, args: &Value, before: &Value) -> Result<bool, String> {
+        self.ensure_running()?;
+        let data = self.0.service.committed_data()?;
+        let snapshot = &data.snapshot;
+        let text = |key: &str| args[key].as_str().unwrap_or_default();
+        Ok(match command {
+            "send_message" => snapshot.queued_messages.iter().filter(|row| {
+                row.task_id == text("taskId") && row.text == text("text")
+                    && row.sender_agent_id.is_none()
+                    && serde_json::json!(row.attachment_ids) == args.get("attachmentIds").cloned().unwrap_or_else(|| serde_json::json!([]))
+                    && before["recoveryStartedAt"].as_i64().is_none_or(|started| row.created_at >= started)
+                    && !before["queuedMessages"].as_array().into_iter().flatten().any(|old| old["id"].as_str() == Some(row.id.as_str()))
+            }).take(2).count() == 1,
+            "edit_queued_message" => snapshot.queued_messages.iter().any(|row| row.id == text("id") && row.text == text("text")),
+            "resolve_input" | "resolve_approval" | "resolve_mcp_approval" => snapshot.approval_requests.iter().any(|row| {
+                row.id == text("approvalId") && matches!(row.status.as_str(), "approved" | "denied")
+                    && if command == "resolve_input" { row.response.as_ref() == args.get("response") }
+                    else { row.decision.as_deref() == args["decision"].as_str() }
+            }),
+            "cancel_task" => snapshot.tasks.iter().any(|row| row.id == text("taskId") && matches!(row.status.as_str(), "interrupted" | "idle" | "completed")),
+            _ => false,
+        })
     }
 
     pub fn read_task_messages(
@@ -1539,11 +1586,21 @@ impl DesktopService {
     ) -> Result<UiDeltaResponse, String> {
         native_ui_changes_or_legacy(
             &self.1,
-            || self.0.call("read_native_ui_changes", serde_json::json!({
+            || match self.0.call("read_native_ui_changes_v2", serde_json::json!({
                 "revision": revision, "messageTaskIds": message_task_ids,
-            })),
+            })) {
+                Err(error) if error == ipc::UNKNOWN_PRIVATE_NATIVE_METHOD => self.0.call("read_native_ui_changes", serde_json::json!({
+                    "revision": revision, "messageTaskIds": message_task_ids,
+                })),
+                result => result,
+            },
             || self.read_ui_changes(revision),
         )
+    }
+    pub fn confirm_native_command(&self, command: &str, args: &Value, before: &Value) -> Result<bool, String> {
+        self.0.call("confirm_native_command", serde_json::json!({"command":command,"args":args,"before":{
+            "queuedMessages": before["queuedMessages"], "recoveryStartedAt":before["recoveryStartedAt"],
+        }}))
     }
     pub fn read_task_messages(
         &self,
@@ -1604,10 +1661,16 @@ impl DesktopService {
         expected_revision: &str,
         data: NativePreferenceData,
     ) -> Result<NativePreferences, String> {
-        self.0.call(
-            "save_native_preferences",
-            serde_json::json!({"expectedRevision":expected_revision,"data":data}),
-        )
+        // The owner validates and persists these exact values without rewriting
+        // them. Only its new CAS revision needs to cross the socket again.
+        let args = serde_json::json!({"expectedRevision": expected_revision, "data": &data});
+        match self.0.call::<NativePreferenceReceipt>("save_native_preferences_receipt", args.clone()) {
+            Ok(receipt) => Ok(NativePreferences { revision: receipt.revision, data }),
+            // An older owner rejects this method before executing a write.
+            Err(error) if error == ipc::UNKNOWN_PRIVATE_NATIVE_METHOD =>
+                self.0.call("save_native_preferences", args),
+            Err(error) => Err(error),
+        }
     }
     pub fn save_schedule(&self, input: ScheduleInput) -> Result<NativeScheduleMutation, String> {
         self.0

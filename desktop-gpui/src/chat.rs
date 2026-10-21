@@ -2738,6 +2738,7 @@ impl ChatPane {
         let before = json!({
             "messages": known_messages,
             "queuedMessages": self.snapshot["queuedMessages"].as_array().into_iter().flatten()
+                .filter(|message| message["taskId"] == args["taskId"])
                 .map(|message| json!({"id":message["id"]})).collect::<Vec<_>>(),
             "recoveryStartedAt": chrono::Utc::now().timestamp_millis(),
         });
@@ -2792,25 +2793,12 @@ impl ChatPane {
                                 return Ok(json!({"accepted":true}));
                             }
                         }
-                        // A running turn may have queued the prompt instead.
-                        // Native metadata is the fallback, never the legacy
-                        // full snapshot containing durable message history.
-                        if let Ok(value) = service.read_ui_changes(None) {
-                            connected = true;
-                            if let Some(snapshot) = value.snapshot {
-                                let queued = snapshot.queued_messages.into_iter()
-                                    .filter(|message| message.task_id == field(&args, "taskId")).collect::<Vec<_>>();
-                                after["queuedMessages"] = json!(queued);
-                                if connection_recovery::confirmed(command, &args, &before, &after) {
-                                    return Ok(json!({"accepted":true}));
-                                }
-                            }
-                        }
-                    } else if let Ok(value) = service.invoke("get_ui_snapshot", json!({})) {
+                    }
+                    // The backend answers a scoped authority check with one
+                    // boolean; no workspace or catalog is downloaded here.
+                    if let Ok(confirmed) = service.confirm_native_command(command, &args, &before) {
                         connected = true;
-                        if connection_recovery::confirmed(command, &args, &before, &value["snapshot"]) {
-                            return Ok(value);
-                        }
+                        if confirmed { return Ok(json!({"accepted":true})); }
                     }
                 }
                 Err(if connected {

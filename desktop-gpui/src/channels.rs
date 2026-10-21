@@ -99,7 +99,7 @@ pub(super) fn reconcile_cursors(
 }
 enum ResultKind {
     Snapshot,
-    Created(HashSet<String>),
+    Created,
     Sent { channel: String, draft: String },
 }
 
@@ -317,12 +317,7 @@ impl ChannelPane {
         channel["name"] = json!(self.name.read(cx).value().to_string());
         channel["description"] = json!(self.topic.read(cx).value().to_string());
         let kind = if self.creating {
-            ResultKind::Created(
-                self.channels()
-                    .iter()
-                    .map(|channel| field(channel, "id"))
-                    .collect(),
-            )
+            ResultKind::Created
         } else {
             ResultKind::Snapshot
         };
@@ -352,19 +347,11 @@ impl ChannelPane {
                 match result {
                     Err(error) => pane.error = Some(error),
                     Ok(value) => match kind {
-                        ResultKind::Created(old_ids) => {
-                            if let Some(channel) = rows(&value, "channels")
-                                .into_iter()
-                                .find(|channel| !old_ids.contains(&field(channel, "id")))
-                            {
-                                let id = field(&channel, "id");
-                                pane.selected = Some(id.clone());
+                        ResultKind::Created => {
+                            if let Some(id) = value["savedId"].as_str() {
+                                pane.selected = Some(id.to_owned());
                                 pane.creating = false;
-                                pane.recipients = pane
-                                    .recipient_selections
-                                    .get(&id)
-                                    .cloned()
-                                    .unwrap_or_default();
+                                pane.recipients = pane.recipient_selections.get(id).cloned().unwrap_or_default();
                             }
                             pane.notice = Some("Channel saved.".into());
                         }

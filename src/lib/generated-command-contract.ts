@@ -8,6 +8,10 @@ export const LEGACY_COMPATIBLE_COMMANDS = ["get_snapshot","plan_jev_route","reco
 export interface CommandArgs {
   "get_snapshot": {  };
   "get_command_capabilities": {  };
+  "invoke_ui_mutation": {
+  command: string;
+  args: JsonValue;
+  };
   "plan_jev_route": {
   agentId: string;
   prompt: string;
@@ -64,6 +68,7 @@ export interface CommandArgs {
   };
   "get_ui_delta": {
   revision?: string | null;
+  metadataPatch?: boolean | null;
   };
   "get_task_messages": {
   taskId: string;
@@ -440,6 +445,7 @@ export interface CommandArgs {
 export interface CommandResults {
   "get_snapshot": Snapshot;
   "get_command_capabilities": CommandCapabilities;
+  "invoke_ui_mutation": JsonValue;
   "plan_jev_route": JevRoutePlan;
   "record_jev_route": void;
   "plan_jev_command": JevCommandPlan;

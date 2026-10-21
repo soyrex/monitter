@@ -255,7 +255,7 @@ export function createOperatorScopedBridge(
     cleanAttachments(share);
     if (visitorAttachments.size >= 64) throw new Error('Send or end sharing before uploading more files.');
     if (!validAttachment(file)) throw new Error('Attachment must be a valid file up to 8 MiB.');
-    const snapshot = await (bridge.getLegacySnapshot?.() ?? bridge.getSnapshot());
+    const snapshot = await bridge.getSnapshot();
     check(share);
     if (!sharedTaskIds(snapshot, share).has(taskId)) throw new Error('This chat is not shared with this collaborator.');
     if (previewDataUrl !== undefined && (previewDataUrl.length > 48_000 || !safePreview(previewDataUrl))) throw new Error('Attachment preview must be a safe raster image.');
@@ -266,12 +266,12 @@ export function createOperatorScopedBridge(
   } : undefined;
   const getTaskMessages = bridge.getTaskMessages ? async (taskId: string, beforeId?: string, limit?: number) => {
     const share = current();
-    const before = await (bridge.getLegacySnapshot?.() ?? bridge.getSnapshot());
+    const before = await bridge.getSnapshot();
     check(share);
     if (!sharedTaskIds(before, share).has(taskId)) throw new Error('This chat is not shared with this collaborator.');
     const page = await bridge.getTaskMessages!(taskId, beforeId, Math.min(limit ?? 40, 40));
     check(share);
-    const after = await (bridge.getLegacySnapshot?.() ?? bridge.getSnapshot());
+    const after = await bridge.getSnapshot();
     check(share);
     if (!sharedTaskIds(after, share).has(taskId)) throw new Error('This chat is not shared with this collaborator.');
     const budget = { remaining: MAX_SHARED_PREVIEW_BYTES };
@@ -287,7 +287,7 @@ export function createOperatorScopedBridge(
   return {
     async getSnapshot() {
       const share = current();
-      const snapshot = await (bridge.getLegacySnapshot?.() ?? bridge.getSnapshot());
+      const snapshot = await bridge.getSnapshot();
       check(share);
       return project(snapshot, share);
     },
@@ -300,7 +300,7 @@ export function createOperatorScopedBridge(
         const stored = visitorAttachments.get(id);
         return typeof id !== 'string' || !stored || stored.share !== share || stored.taskId !== taskId;
       })) throw new Error('Attachments must be uploaded by this visitor for this shared chat.');
-      const snapshot = await (bridge.getLegacySnapshot?.() ?? bridge.getSnapshot());
+      const snapshot = await bridge.getSnapshot();
       check(share);
       if (!sharedTaskIds(snapshot, share).has(taskId)) throw new Error('This chat is not shared with this collaborator.');
       // No await between this final permission check and invoking durable send.
@@ -310,7 +310,7 @@ export function createOperatorScopedBridge(
       // retaining them would permit an unbounded in-memory replay set.
       for (const attachmentId of attachmentIds) visitorAttachments.delete(attachmentId);
       check(share);
-      const next = 'tasks' in result ? result : await (bridge.getLegacySnapshot?.() ?? bridge.getSnapshot());
+      const next = 'tasks' in result ? result : await bridge.getSnapshot();
       check(share);
       return project(next, share);
     },

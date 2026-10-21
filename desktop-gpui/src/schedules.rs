@@ -254,10 +254,6 @@ impl SchedulePane {
         self.confirm = None;
         let service = self.service.clone();
         let was_new = matches!(&operation,Operation::Save(input) if input.id.is_empty());
-        let old_ids: Vec<String> = rows(&self.snapshot, "schedules")
-            .iter()
-            .map(|row| field(row, "id"))
-            .collect();
         let deleted = matches!(&operation, Operation::Action(_, ScheduleAction::Delete));
         let worker = cx.background_executor().spawn(async move {
             let snapshot = match operation {
@@ -273,22 +269,12 @@ impl SchedulePane {
                 match result {
                     Err(error) => pane.error = Some(error),
                     Ok(reply) => {
-                        // The save response contains only the editable catalog.
-                        // Preserve the rest of the retained UI projection.
-                        pane.snapshot["schedules"] = reply["schedules"].clone();
                         if was_new {
-                            let candidates: Vec<Value> = rows(&pane.snapshot, "schedules")
-                                .into_iter().filter(|row| !old_ids.contains(&field(row,"id"))
-                                    && field(row,"agentId")==pane.draft.agent_id
-                                    && field(row,"title")==pane.draft.title
-                                    && field(row,"prompt")==pane.draft.prompt).collect();
-                            if candidates.len()==1 {
-                                let id=field(&candidates[0],"id");
-                                pane.drafts.remove(""); pane.selected=id.clone();
-                                pane.drafts.insert(id,pane.draft.clone());
-                            } else {
-                                pane.created_unselected = true;
-                                pane.notice=Some("Schedule created; select the saved row in the list before making further edits.".into());
+                            if let Some(id) = reply["savedId"].as_str() {
+                                let id = id.to_owned();
+                                pane.drafts.remove("");
+                                pane.selected = id.clone();
+                                pane.drafts.insert(id, pane.draft.clone());
                             }
                         }
                         if deleted {

@@ -170,7 +170,19 @@ impl NativeState {
             return ApplyResult::Gap;
         }
         let old = self.snapshot.as_ref().unwrap();
-        let mut metadata = delta.metadata;
+        let mut metadata = match (delta.metadata, delta.metadata_patch) {
+            (Some(metadata), None) => metadata,
+            (None, Some(patch)) => match patch.apply(old) {
+                Ok(mut metadata) => {
+                    for id in &delta.retained_subagent_transcript_ids {
+                        metadata.subagent_transcripts.remove(id);
+                    }
+                    metadata
+                }
+                Err(_) => return ApplyResult::Gap,
+            },
+            _ => return ApplyResult::Gap,
+        };
         let channels: BTreeSet<_> = metadata
             .channels
             .iter()
@@ -461,7 +473,8 @@ mod tests {
         metadata.subagent_transcripts.clear();
         UiDelta {
             from_revision: "e:1".into(),
-            metadata,
+            metadata: Some(metadata),
+            metadata_patch: None,
             messages: vec![],
             removed_message_ids: vec![],
             retained_channel_ids: vec!["c".into()],

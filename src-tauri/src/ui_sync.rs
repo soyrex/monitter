@@ -25,12 +25,297 @@ pub struct UiDelta {
     pub from_revision: String,
     /// Current metadata and compact activity. Its messages array is empty;
     /// clients keep their loaded pages and apply the explicit message changes.
-    pub metadata: Snapshot,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<Snapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata_patch: Option<MetadataPatch>,
     pub messages: Vec<Message>,
     pub removed_message_ids: Vec<String>,
     pub retained_channel_ids: Vec<String>,
     pub channel_message_changes: Vec<ChannelMessageChange>,
     pub retained_subagent_transcript_ids: Vec<String>,
+}
+
+/// Opt-in metadata changes, journaled once per committed revision.
+/// Lists with stable IDs carry only upserts/removals and an order when changed.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MetadataPatch {
+    pub fields: BTreeMap<String, MetadataFieldPatch>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum MetadataFieldPatch {
+    Replace {
+        value: serde_json::Value,
+    },
+    Rows {
+        upserts: BTreeMap<String, serde_json::Value>,
+        removed: Vec<String>,
+        order: Option<Vec<String>>,
+    },
+    Map {
+        upserts: BTreeMap<String, serde_json::Value>,
+        removed: Vec<String>,
+    },
+}
+
+impl MetadataPatch {
+    fn between(before: &Snapshot, after: &Snapshot) -> Result<Self, serde_json::Error> {
+        let mut fields = BTreeMap::new();
+        macro_rules! field {
+            ($name:ident) => {
+                if before.$name != after.$name {
+                    let old = serde_json::to_value(&before.$name)?;
+                    let new = serde_json::to_value(&after.$name)?;
+                    fields.insert(
+                        stringify!($name).to_string(),
+                        metadata_field_patch(old, new),
+                    );
+                }
+            };
+        }
+        field!(hosts);
+        field!(agents);
+        field!(tasks);
+        field!(mail_batches);
+        field!(work_plans);
+        field!(build_requests);
+        field!(build_runs);
+        field!(events);
+        field!(channels);
+        field!(project_board_messages);
+        field!(projects);
+        field!(settings);
+        field!(collaborations);
+        field!(subagent_sessions);
+        field!(subagent_transcripts);
+        field!(queued_messages);
+        field!(approval_requests);
+        field!(approval_rules);
+        field!(schedules);
+        field!(chat_archive_rules);
+        field!(schedule_runs);
+        field!(pending_throwaway_task_ids);
+        Ok(Self { fields })
+    }
+
+    fn extend(&mut self, next: &Self) {
+        for (key, change) in &next.fields {
+            match (self.fields.get_mut(key), change) {
+                (
+                    Some(MetadataFieldPatch::Rows {
+                        upserts,
+                        removed,
+                        order,
+                    }),
+                    MetadataFieldPatch::Rows {
+                        upserts: adds,
+                        removed: deletes,
+                        order: next_order,
+                    },
+                ) => {
+                    merge_metadata_entries(upserts, removed, adds, deletes);
+                    if next_order.is_some() {
+                        *order = next_order.clone();
+                    }
+                }
+                (
+                    Some(MetadataFieldPatch::Map { upserts, removed }),
+                    MetadataFieldPatch::Map {
+                        upserts: adds,
+                        removed: deletes,
+                    },
+                ) => merge_metadata_entries(upserts, removed, adds, deletes),
+                _ => {
+                    self.fields.insert(key.clone(), change.clone());
+                }
+            }
+        }
+    }
+
+    /// Materialize against the client's retained metadata. Invalid patches cause
+    /// a reset instead of advancing the client's revision with partial state.
+    pub fn apply(&self, snapshot: &Snapshot) -> Result<Snapshot, String> {
+        let mut result = snapshot.clone();
+        macro_rules! apply_field {
+            ($name:ident, $patch:expr) => {{
+                let mut value =
+                    serde_json::to_value(&result.$name).map_err(|error| error.to_string())?;
+                apply_metadata_field(&mut value, $patch)?;
+                result.$name = serde_json::from_value(value).map_err(|error| error.to_string())?;
+            }};
+        }
+        for (key, patch) in &self.fields {
+            match key.as_str() {
+                "hosts" => apply_field!(hosts, patch),
+                "agents" => apply_field!(agents, patch),
+                "tasks" => apply_field!(tasks, patch),
+                "mail_batches" => apply_field!(mail_batches, patch),
+                "work_plans" => apply_field!(work_plans, patch),
+                "build_requests" => apply_field!(build_requests, patch),
+                "build_runs" => apply_field!(build_runs, patch),
+                "events" => apply_field!(events, patch),
+                "channels" => apply_field!(channels, patch),
+                "project_board_messages" => apply_field!(project_board_messages, patch),
+                "projects" => apply_field!(projects, patch),
+                "settings" => apply_field!(settings, patch),
+                "collaborations" => apply_field!(collaborations, patch),
+                "subagent_sessions" => apply_field!(subagent_sessions, patch),
+                "subagent_transcripts" => apply_field!(subagent_transcripts, patch),
+                "queued_messages" => apply_field!(queued_messages, patch),
+                "approval_requests" => apply_field!(approval_requests, patch),
+                "approval_rules" => apply_field!(approval_rules, patch),
+                "schedules" => apply_field!(schedules, patch),
+                "chat_archive_rules" => apply_field!(chat_archive_rules, patch),
+                "schedule_runs" => apply_field!(schedule_runs, patch),
+                "pending_throwaway_task_ids" => apply_field!(pending_throwaway_task_ids, patch),
+                _ => return Err("Unknown metadata field.".into()),
+            }
+        }
+        Ok(result)
+    }
+}
+
+fn apply_metadata_field(
+    target: &mut serde_json::Value,
+    patch: &MetadataFieldPatch,
+) -> Result<(), String> {
+    match patch {
+        MetadataFieldPatch::Replace { value } => *target = value.clone(),
+        MetadataFieldPatch::Rows {
+            upserts,
+            removed,
+            order,
+        } => {
+            let rows = target.as_array().ok_or("Invalid metadata rows.")?;
+            let mut ids = Vec::new();
+            let mut entries = BTreeMap::new();
+            for row in rows {
+                let id = row
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or("Missing metadata ID.")?
+                    .to_owned();
+                ids.push(id.clone());
+                entries.insert(id, row.clone());
+            }
+            for id in removed {
+                entries.remove(id);
+            }
+            for (id, row) in upserts {
+                if row.get("id").and_then(serde_json::Value::as_str) != Some(id.as_str()) {
+                    return Err("Invalid metadata ID.".into());
+                }
+                entries.insert(id.clone(), row.clone());
+            }
+            if let Some(order) = order {
+                ids = order.clone();
+            }
+            let mut next = Vec::new();
+            for id in ids {
+                if let Some(row) = entries.remove(&id) {
+                    next.push(row);
+                } else if order.is_some() {
+                    return Err("Invalid metadata order.".into());
+                }
+            }
+            if !entries.is_empty() {
+                return Err("Incomplete metadata order.".into());
+            }
+            *target = serde_json::Value::Array(next);
+        }
+        MetadataFieldPatch::Map { upserts, removed } => {
+            let entries = target.as_object_mut().ok_or("Invalid metadata map.")?;
+            for id in removed {
+                entries.remove(id);
+            }
+            for (id, row) in upserts {
+                entries.insert(id.clone(), row.clone());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn merge_metadata_entries(
+    upserts: &mut BTreeMap<String, serde_json::Value>,
+    removed: &mut Vec<String>,
+    adds: &BTreeMap<String, serde_json::Value>,
+    deletes: &[String],
+) {
+    let mut deleted: BTreeSet<_> = removed.drain(..).collect();
+    for id in deletes {
+        upserts.remove(id);
+        deleted.insert(id.clone());
+    }
+    for (id, row) in adds {
+        deleted.remove(id);
+        upserts.insert(id.clone(), row.clone());
+    }
+    *removed = deleted.into_iter().collect();
+}
+
+fn metadata_field_patch(old: serde_json::Value, new: serde_json::Value) -> MetadataFieldPatch {
+    if let (Some(old), Some(new)) = (old.as_array(), new.as_array()) {
+        let keyed = |rows: &[serde_json::Value]| -> Option<BTreeMap<String, serde_json::Value>> {
+            let mut result = BTreeMap::new();
+            for row in rows {
+                let id = row.get("id")?.as_str()?.to_owned();
+                if result.insert(id, row.clone()).is_some() {
+                    return None;
+                }
+            }
+            Some(result)
+        };
+        if let (Some(before), Some(after)) = (keyed(old), keyed(new)) {
+            let ids = |rows: &[serde_json::Value]| {
+                rows.iter()
+                    .map(|row| row["id"].as_str().unwrap().to_owned())
+                    .collect::<Vec<_>>()
+            };
+            let order = (ids(old) != ids(new)).then(|| ids(new));
+            let removed = before
+                .keys()
+                .filter(|id| !after.contains_key(*id))
+                .cloned()
+                .collect();
+            let upserts = after
+                .into_iter()
+                .filter(|(id, row)| before.get(id) != Some(row))
+                .collect();
+            return MetadataFieldPatch::Rows {
+                upserts,
+                removed,
+                order,
+            };
+        }
+    }
+    if let (Some(before), Some(after)) = (old.as_object(), new.as_object()) {
+        return MetadataFieldPatch::Map {
+            upserts: after
+                .iter()
+                .filter(|(key, row)| before.get(*key) != Some(*row))
+                .map(|(key, row)| (key.clone(), row.clone()))
+                .collect(),
+            removed: before
+                .keys()
+                .filter(|key| !after.contains_key(*key))
+                .cloned()
+                .collect(),
+        };
+    }
+    MetadataFieldPatch::Replace { value: new }
+}
+
+/// Match delta metadata's independent channel-message handling.
+fn metadata_projection(snapshot: &Snapshot) -> Snapshot {
+    let mut result = projection(snapshot, false);
+    for channel in &mut result.channels {
+        channel.messages.clear();
+    }
+    result
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,6 +352,7 @@ struct Revision {
     changed_channels: Option<BTreeSet<String>>,
     channel_changes: Option<Vec<ChannelMessageChange>>,
     changed_subagents: Option<BTreeSet<String>>,
+    metadata_patch: Option<MetadataPatch>,
 }
 
 #[derive(Default)]
@@ -98,6 +384,7 @@ impl Journal {
             changed_channels: None,
             channel_changes: None,
             changed_subagents: None,
+            metadata_patch: None,
         });
         while self.revisions.len() > MAX_JOURNAL_REVISIONS || self.bytes > MAX_JOURNAL_BYTES {
             if let Some(expired) = self.revisions.pop_front() {
@@ -108,6 +395,8 @@ impl Journal {
 
     pub fn record_snapshot(&mut self, number: u64, before: &Snapshot, after: &Snapshot) {
         self.record(number, message_changes(before, after));
+        let metadata_patch =
+            MetadataPatch::between(&metadata_projection(before), &metadata_projection(after)).ok();
         let channel_changes: Vec<_> = after
             .channels
             .iter()
@@ -130,7 +419,13 @@ impl Journal {
             .collect();
         if let Some(revision) = self.revisions.back_mut() {
             let extra = serde_json::to_vec(&channel_changes)
-                .map_or(MAX_JOURNAL_BYTES + 1, |value| value.len());
+                .map_or(MAX_JOURNAL_BYTES + 1, |value| value.len())
+                .saturating_add(
+                    metadata_patch
+                        .as_ref()
+                        .and_then(|patch| serde_json::to_vec(patch).ok())
+                        .map_or(MAX_JOURNAL_BYTES + 1, |value| value.len()),
+                );
             if revision.bytes.saturating_add(extra) > MAX_JOURNAL_BYTES {
                 self.bytes -= revision.bytes;
                 revision.bytes = 0;
@@ -139,6 +434,7 @@ impl Journal {
                 revision.bytes += extra;
                 self.bytes += extra;
                 revision.channel_changes = Some(channel_changes);
+                revision.metadata_patch = metadata_patch;
             }
             revision.changed_channels = Some(
                 after
@@ -169,6 +465,18 @@ impl Journal {
                 break;
             }
         }
+    }
+
+    fn metadata_changes(&self, from: u64, through: u64) -> Option<MetadataPatch> {
+        let mut patch = MetadataPatch::default();
+        for revision in self
+            .revisions
+            .iter()
+            .filter(|item| item.number > from && item.number <= through)
+        {
+            patch.extend(revision.metadata_patch.as_ref()?);
+        }
+        Some(patch)
     }
 
     fn channel_changes(
@@ -477,7 +785,12 @@ pub fn compact_events(
                 .iter()
                 .rev()
                 .take(512)
-                .filter(|index| !matches!(snapshot.events[**index].kind.as_str(), "log" | "output" | "agent_progress"))
+                .filter(|index| {
+                    !matches!(
+                        snapshot.events[**index].kind.as_str(),
+                        "log" | "output" | "agent_progress"
+                    )
+                })
                 .take(crate::lan_sync::MAX_LIVE_EVENTS_PER_TASK)
                 .copied(),
         );
@@ -595,14 +908,33 @@ impl crate::Service {
         before_id: Option<&str>,
         limit: Option<u32>,
     ) -> Result<ChannelMessagesPage, String> {
-        let _writer=self.state_writes.lock().map_err(|_| "Monitter state writer lock failed.")?;
-        let data=self.committed_data()?;
-        if !data.snapshot.channels.iter().any(|channel|channel.id==channel_id) {return Err("Channel was not found.".into());}
-        self.store.channel_messages(channel_id,before_id,limit,format!("{}:{}",self.revision_epoch,data.revision))
+        let _writer = self
+            .state_writes
+            .lock()
+            .map_err(|_| "Monitter state writer lock failed.")?;
+        let data = self.committed_data()?;
+        if !data
+            .snapshot
+            .channels
+            .iter()
+            .any(|channel| channel.id == channel_id)
+        {
+            return Err("Channel was not found.".into());
+        }
+        self.store.channel_messages(
+            channel_id,
+            before_id,
+            limit,
+            format!("{}:{}", self.revision_epoch, data.revision),
+        )
     }
 
     pub(crate) fn ui_delta(&self, revision: Option<&str>) -> Result<UiDeltaResponse, String> {
-        self.ui_delta_with_scope(revision, None)
+        self.ui_delta_with_scope(revision, None, false)
+    }
+
+    pub(crate) fn ui_delta_with_metadata_patch(&self, revision: Option<&str>, metadata_patch: bool) -> Result<UiDeltaResponse, String> {
+        self.ui_delta_with_scope(revision, None, metadata_patch)
     }
 
     pub(crate) fn native_ui_delta(
@@ -611,13 +943,23 @@ impl crate::Service {
         message_task_ids: &[String],
     ) -> Result<UiDeltaResponse, String> {
         let scope = message_task_ids.iter().map(String::as_str).collect();
-        self.ui_delta_with_scope(revision, Some(&scope))
+        self.ui_delta_with_scope(revision, Some(&scope), false)
+    }
+
+    pub(crate) fn native_ui_delta_patched(
+        &self,
+        revision: Option<&str>,
+        message_task_ids: &[String],
+    ) -> Result<UiDeltaResponse, String> {
+        let scope = message_task_ids.iter().map(String::as_str).collect();
+        self.ui_delta_with_scope(revision, Some(&scope), true)
     }
 
     fn ui_delta_with_scope(
         &self,
         revision: Option<&str>,
         message_task_ids: Option<&BTreeSet<&str>>,
+        patch_metadata: bool,
     ) -> Result<UiDeltaResponse, String> {
         let data = self.committed_data()?;
         let current = format!("{}:{}", self.revision_epoch, data.revision);
@@ -633,32 +975,45 @@ impl crate::Service {
             .and_then(|from| {
                 let journal = self.ui_journal.lock().ok()?;
                 let changes = match message_task_ids {
-                    Some(scope) => journal.changes_with_projection(from, data.revision, |message| native_delta_message(message, scope))?,
+                    Some(scope) => {
+                        journal.changes_with_projection(from, data.revision, |message| {
+                            native_delta_message(message, scope)
+                        })?
+                    }
                     None => journal.changes(from, data.revision)?,
                 };
                 let retained = journal.retained(from, data.revision, &data.snapshot);
                 let channels = journal.channel_changes(from, data.revision, &data.snapshot)?;
-                Some((changes, retained, channels))
+                let metadata_patch = if patch_metadata {
+                    Some(journal.metadata_changes(from, data.revision)?)
+                } else {
+                    None
+                };
+                Some((changes, retained, channels, metadata_patch))
             });
         if let Some((
             (messages, removed_message_ids),
             (retained_channel_ids, retained_subagent_transcript_ids),
             channel_message_changes,
+            metadata_patch,
         )) = changes
         {
-            let mut metadata = projection(&data.snapshot, false);
-            for channel in &mut metadata.channels {
-                channel.messages.clear();
-            }
-            for id in &retained_subagent_transcript_ids {
-                metadata.subagent_transcripts.remove(id);
-            }
+            let metadata = if patch_metadata {
+                None
+            } else {
+                let mut metadata = metadata_projection(&data.snapshot);
+                for id in &retained_subagent_transcript_ids {
+                    metadata.subagent_transcripts.remove(id);
+                }
+                Some(metadata)
+            };
             Ok(UiDeltaResponse {
                 revision: current,
                 snapshot: None,
                 delta: Some(UiDelta {
                     from_revision: revision.unwrap().into(),
                     metadata,
+                    metadata_patch,
                     messages,
                     removed_message_ids,
                     retained_channel_ids,
@@ -686,8 +1041,15 @@ impl crate::Service {
     ) -> Result<TaskMessagesPage, String> {
         let _writer = self.state_writes.lock().map_err(|_| "Monitter state writer lock failed.")?;
         let data = self.committed_data()?;
-        if !data.snapshot.tasks.iter().any(|task|task.id==task_id) { return Err("Task was not found.".into()); }
-        self.store.task_messages(task_id,before_id,limit,format!("{}:{}", self.revision_epoch,data.revision))
+        if !data.snapshot.tasks.iter().any(|task| task.id == task_id) {
+            return Err("Task was not found.".into());
+        }
+        self.store.task_messages(
+            task_id,
+            before_id,
+            limit,
+            format!("{}:{}", self.revision_epoch, data.revision),
+        )
     }
 }
 
@@ -1061,7 +1423,7 @@ mod tests {
         let delta = service.ui_delta(Some(&initial.revision)).unwrap();
         let change = delta.delta.as_ref().unwrap();
         assert!(delta.snapshot.is_none());
-        assert!(change.metadata.messages.is_empty());
+        assert!(change.metadata.as_ref().unwrap().messages.is_empty());
         assert_eq!(change.messages.len(), 1);
         assert_eq!(change.messages[0].text, "stream update");
         let older = service

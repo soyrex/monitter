@@ -206,7 +206,7 @@ declare global {
   }
 }
 
-function invoke<C extends CommandName>(
+function invokeRaw<C extends CommandName>(
   command: C,
   ...args: keyof CommandArgs[C] extends never ? [args?: CommandArgs[C]] : [args: CommandArgs[C]]
 ): Promise<CommandResults[C]> {
@@ -214,6 +214,38 @@ function invoke<C extends CommandName>(
   return isLanBrowser()
     ? lanInvoke<CommandResults[C]>(command, payload as Record<string, unknown>)
     : invokeCommand(command, payload as CommandArgs[C]);
+}
+
+// Only Snapshot-returning operations opt in. Sends negotiate their own fast
+// receipt protocol; legacy send responses must retain their full-history shape.
+const snapshotMutationCommands = new Set<string>([
+  'resolve_approval', 'revoke_approval_rule', 'resolve_input',
+  'save_host', 'delete_host', 'save_agent', 'delete_agent',
+  'save_project', 'save_project_ideas', 'delete_project', 'post_project_board_note',
+  'set_task_project', 'rename_task', 'autoname', 'delete_task', 'delete_archived_task',
+  'set_task_archived', 'clear_task_context', 'resume_task', 'cancel_task',
+  'cancel_queued_message', 'edit_queued_message', 'set_channel_agent_conversation',
+  'stop_channel_agent_conversation', 'save_settings', 'save_channel',
+  'set_channel_membership', 'set_task_model_settings', 'set_task_sandbox',
+]);
+
+async function invoke<C extends CommandName>(
+  command: C,
+  ...args: keyof CommandArgs[C] extends never ? [args?: CommandArgs[C]] : [args: CommandArgs[C]]
+): Promise<CommandResults[C]> {
+  if (snapshotMutationCommands.has(command)) {
+    const capabilities = await getCommandCapabilities();
+    if (capabilities?.has('invoke_ui_mutation')) {
+      // Negotiate before dispatch, then invoke exactly once. A rejected or lost
+      // acknowledgement must never trigger a retry through the legacy command.
+      await invokeRaw('invoke_ui_mutation', { command, args: (args[0] ?? {}) as JsonValue });
+      // An event-triggered read may have started before the durable mutation.
+      // Drain it before requesting the state used as this action's result.
+      if (snapshotRequest) await snapshotRequest.catch(() => {});
+      return await getCachedSnapshot() as CommandResults[C];
+    }
+  }
+  return invokeRaw(command, ...args);
 }
 
 function isUnknownCommand(error: unknown) {
@@ -242,7 +274,7 @@ let refreshTimer: ReturnType<typeof setTimeout> | undefined;
 const changedSubscribers = new Set<() => void>();
 
 function invokeUiDelta(revision?: string): Promise<UiDeltaResponse> {
-  return invoke('get_ui_delta', revision === undefined ? {} : { revision });
+  return invoke('get_ui_delta', { ...(revision === undefined ? {} : { revision }), metadataPatch: true });
 }
 
 function invokeTaskMessages(taskId: string, beforeId?: string, limit?: number): Promise<TaskMessagesPage> {

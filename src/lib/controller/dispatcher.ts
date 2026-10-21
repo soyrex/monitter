@@ -247,7 +247,7 @@ export class ControllerDispatcher {
     try {
       let result: ControllerResult;
       switch (request.action) {
-        case 'getSnapshot': result = controllerSnapshot(await (this.client.getLegacySnapshot?.() ?? this.client.getSnapshot())); break;
+        case 'getSnapshot': result = controllerSnapshot(await this.client.getSnapshot()); break;
         case 'getTaskMessages': {
           if (!this.client.getTaskMessages) throw new Error('Task message history is unavailable on this desktop.');
           const page = await this.client.getTaskMessages(request.params.taskId, request.params.beforeId, request.params.limit ?? 40);
@@ -264,7 +264,7 @@ export class ControllerDispatcher {
           // the small durable receipt; no mutation is retried to learn this.
           result = isSendReceipt(sendResult) && options.allowSendReceipt
             ? sendResult
-            : controllerSnapshot(isSendReceipt(sendResult) ? await (this.client.getLegacySnapshot?.() ?? this.client.getSnapshot()) : sendResult);
+            : controllerSnapshot(isSendReceipt(sendResult) ? await this.client.getSnapshot() : sendResult);
           break;
         }
         case 'beginAttachmentUpload': {
