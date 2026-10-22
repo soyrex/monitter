@@ -9484,6 +9484,9 @@ fn validate_settings(settings: &Settings) -> Result<(), String> {
     if !(80..=200).contains(&settings.interface_scale) {
         return Err("Interface scale must be between 80% and 200%.".into());
     }
+    if !(1..=8).contains(&settings.active_pane_border_width) {
+        return Err("Active pane outline thickness must be between 1 and 8 pixels.".into());
+    }
     if !settings.inactive_pane_opacity.is_finite()
         || !(0.1..=0.9).contains(&settings.inactive_pane_opacity)
     {
@@ -11503,6 +11506,22 @@ name@rafa.test",
             validate_settings(&settings),
             Err("Voice transcription engine must be Whisper or Apple on-device.".into())
         );
+    }
+
+    #[test]
+    fn settings_validation_rejects_invalid_active_pane_border_width() {
+        let mut settings = default_snapshot().settings;
+        for width in [1, 8] {
+            settings.active_pane_border_width = width;
+            assert!(validate_settings(&settings).is_ok());
+        }
+        for width in [0, 9] {
+            settings.active_pane_border_width = width;
+            assert_eq!(
+                validate_settings(&settings),
+                Err("Active pane outline thickness must be between 1 and 8 pixels.".into())
+            );
+        }
     }
 
     #[test]

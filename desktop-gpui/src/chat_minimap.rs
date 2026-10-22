@@ -222,6 +222,7 @@ pub(super) fn render(
         },
         move |_, _, window, _cx| {
             window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+                if !super::minimap_preference::enabled() { return; }
                 if phase.bubble() {
                     let target = proximity(event.position, global_bounds.get());
                     let _ = hover_owner.update(cx, |view, cx| {
@@ -248,6 +249,7 @@ pub(super) fn render(
                 }
             });
             window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+                if !super::minimap_preference::enabled() { return; }
                 if phase.bubble()
                     && event.button == MouseButton::Left
                     && release_state.is_scrollbar_dragging()
@@ -273,6 +275,7 @@ pub(super) fn render(
         .debug_selector(|| "chat-minimap".into())
         .child(input)
         .on_mouse_down(MouseButton::Left, move |event, _, cx| {
+            if !super::minimap_preference::enabled() { return; }
             click_state.scrollbar_drag_started();
             let bounds = drag_bounds.get();
             let fraction =
@@ -361,6 +364,9 @@ pub(super) fn render(
                                     .hover(move |style| style.h(gpui_kit::px(marker_height + 4.))),
                             )
                             .content(move |_, window, cx| {
+                                if !super::minimap_preference::enabled() {
+                                    return div().into_any_element();
+                                }
                                 let scroll = window
                                     .use_keyed_state(
                                         SharedString::from(format!(
@@ -410,7 +416,7 @@ pub(super) fn render(
                                     preview.into_any_element()
                                 };
                                 // Reserve the final gap and the slide's travel outside the card.
-                                div().p(px(12.)).child(preview)
+                                div().p(px(12.)).child(preview).into_any_element()
                             }),
                     ),
             );

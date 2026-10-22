@@ -64,7 +64,7 @@ fn draw(visual: &mut VisualTestContext) {
 }
 
 #[gpui_kit::test]
-fn activity_overview_replaces_sidebar_and_keeps_workspace_bar_at_supported_fonts(
+fn activity_overview_keeps_sidebar_toggle_and_hides_split_controls_at_supported_fonts(
     cx: &mut TestAppContext,
 ) {
     for (theme, tile, font) in [
@@ -136,36 +136,42 @@ fn activity_overview_replaces_sidebar_and_keeps_workspace_bar_at_supported_fonts
                 );
                 assert!(row.size.height > px(0.), "card text cannot collapse");
             }
-            assert!(
-                visual.debug_bounds("native-preferences-sidebar").is_none(),
-                "sidebar is replaced"
-            );
+            assert!(visual.debug_bounds("native-preferences-sidebar").is_some(), "sidebar remains mounted");
+            assert!(visual.debug_bounds("cycle-main-sidebar").is_some(), "sidebar toggle remains available");
+            assert!(visual.debug_bounds("split-workspace-vertical").is_none(), "vertical split is hidden in Activity");
+            assert!(visual.debug_bounds("split-workspace-horizontal").is_none(), "horizontal split is hidden in Activity");
             let pane = visual
                 .debug_bounds("activity-overview-pane")
                 .expect("rounded activity pane");
+            let sidebar_bounds = visual
+                .debug_bounds("native-preferences-sidebar")
+                .expect("sidebar remains mounted");
             assert!(
-                pane.left() > px(0.) && pane.right() < px(width),
+                pane.left() > sidebar_bounds.right() && pane.right() < px(width),
                 "pane has a workspace gutter"
             );
             assert!(
                 overview.left() >= pane.left() && overview.right() <= pane.right(),
                 "overview fits its pane"
             );
-            let inset = desktop.read_with(visual, |desktop, _| {
-                let spacing = design::tern_spacing(&desktop.snapshot["settings"]);
-                px(spacing.gutter + if tile == NativeTileTheme::Tern { spacing.outer_padding() } else { 0. })
-            });
-            assert!(
-                (f32::from(pane.size.width - (px(width) - inset * 2.))).abs() < 1.,
-                "pane uses standard gutters: pane={pane:?}, width={width}, inset={inset:?}, tile={tile:?}"
-            );
             assert!(visual.debug_bounds("activity-project-icon").is_some(), "project icon is mounted");
             assert!(visual.debug_bounds("activity-project-spinner").is_some(), "working project has a spinner");
             assert!(visual.debug_bounds("activity-card-spinner-overview-task").is_some(), "working agent has a spinner");
-            if tile == NativeTileTheme::Tern {
-                assert!((f32::from(pane.left() - inset)).abs() < 1., "left perimeter matches dock frame plus shell");
-            }
         }
+        let sidebar_toggle = visual.debug_bounds("cycle-main-sidebar").expect("sidebar toggle in workspace bar");
+        let sidebar_hidden = desktop.read_with(visual, |desktop, _| desktop.window.sidebar_hidden);
+        if !sidebar_hidden {
+            visual.simulate_click(sidebar_toggle.center(), Default::default());
+            draw(visual);
+            desktop.read_with(visual, |desktop, _| assert!(desktop.window.sidebar_hidden));
+        }
+        let sidebar_toggle = visual.debug_bounds("cycle-main-sidebar").expect("toggle remains available while hidden");
+        visual.simulate_click(sidebar_toggle.center(), Default::default());
+        draw(visual);
+        desktop.read_with(visual, |desktop, _| {
+            assert!(!desktop.window.sidebar_hidden, "sidebar toggle reopens it in Activity");
+            assert!(desktop.window.activity_overview_open, "sidebar toggle leaves Activity open");
+        });
         visual.simulate_keystrokes("escape");
         draw(visual);
         desktop.read_with(visual, |desktop, _| {

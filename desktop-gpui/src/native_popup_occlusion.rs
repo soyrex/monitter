@@ -1,10 +1,14 @@
-//! Cut popup-sized holes in native child surfaces and route those clicks to GPUI.
-//! The rest of each browser remains live; closing a popup restores its layer mask.
+//! Legacy fallback for native children that are not in GPUI's composition tree.
+//!
+//! GPUI Fast composition already places deferred menus and popovers above its
+//! managed native surfaces. In that mode this AppKit mask must stay disabled:
+//! the host children include GPUI's own base and overlay views, so cutting a
+//! popup-shaped hole in every child also cuts the menu out of the overlay.
 use gpui_kit::{App, Window};
 
 // Even-odd masks need disjoint holes: overlapping menus must not expose the
 // native view again where two popup rectangles intersect.
-fn disjoint_holes(rectangles: impl IntoIterator<Item = [f64; 4]>) -> Vec<[f64; 4]> {
+pub(crate) fn disjoint_holes(rectangles: impl IntoIterator<Item = [f64; 4]>) -> Vec<[f64; 4]> {
     let mut holes: Vec<[f64; 4]> = Vec::new();
     for rectangle in rectangles {
         let mut pieces = vec![rectangle];
@@ -159,6 +163,13 @@ mod macos {
     }
 
     pub fn finish_frame(window: &mut Window, cx: &mut App) {
+        crate::native_pane_highlight::occlude_popups(window, cx);
+        if window.window_composition_enabled() {
+            // A window can acquire composition after a legacy child was shown.
+            // Restore any old masks before relying on the ordered overlay.
+            clear(window);
+            return;
+        }
         let Some(mtm) = MainThreadMarker::new() else {
             return;
         };
@@ -218,6 +229,9 @@ mod macos {
                     let pointer: *mut NSView = msg_send![children, objectAtIndex: index];
                     if pointer == Retained::as_ptr(&guard).cast_mut().cast() {
                         guard_is_last = index + 1 == count;
+                        continue;
+                    }
+                    if crate::native_pane_highlight::owns_native_view(pointer as usize, window) {
                         continue;
                     }
                     let view = &*pointer;

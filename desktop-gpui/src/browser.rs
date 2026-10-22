@@ -19,7 +19,7 @@ use gpui_wry::WebView;
 pub(crate) use monitter_lib::experimental_desktop::{
     NativeBrowserMetadata as BrowserMetadataSnapshot, NativeBrowserTab as BrowserTabMetadata,
 };
-use std::{collections::HashSet, sync::mpsc, time::Duration};
+use std::{collections::HashSet, time::Duration};
 #[cfg(feature = "performance-profiling")]
 use std::sync::atomic::{AtomicU64, Ordering};
 use url::Url;
@@ -269,54 +269,75 @@ fn load_browser_url(view: &wry::WebView, url: &Url) -> Result<(), String> {
     { Err("Local HTML browsing currently requires macOS.".into()) }
 }
 
+// Used only when the optional installed-Safari metadata is unavailable or
+// slow. Retain Safari's complete browser identity rather than block first use.
+const FALLBACK_SAFARI_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15";
+
+#[cfg(target_os = "macos")]
+fn native_browser_supported() -> bool {
+    static SUPPORTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SUPPORTED.get_or_init(|| {
+        // A cached in-process sysctl, never a child process or filesystem read.
+        let mut version = [0u8; 64];
+        let mut length = version.len();
+        let status = unsafe { libc::sysctlbyname(c"kern.osproductversion".as_ptr(),
+            version.as_mut_ptr().cast(), &mut length, std::ptr::null_mut(), 0) };
+        status == 0 && std::str::from_utf8(&version[..length.min(version.len())])
+            .ok().and_then(|version| version.split('.').next()?.parse::<u32>().ok())
+            .is_some_and(|major| major >= 14)
+    })
+}
+
 /// Match the installed desktop Safari rather than WKWebView's incomplete
 /// browser identity. Safari deliberately freezes its macOS/WebKit tokens;
 /// the Version token follows the local Safari app, including after upgrades.
 #[cfg(target_os = "macos")]
-fn local_safari_user_agent() -> Result<&'static str, String> {
+fn prepare_native_browser() -> Result<&'static str, String> {
     static USER_AGENT: std::sync::OnceLock<Result<String, String>> = std::sync::OnceLock::new();
     USER_AGENT.get_or_init(|| {
-        let output = std::process::Command::new("/usr/libexec/PlistBuddy")
-            .args(["-c", "Print :CFBundleShortVersionString", "/Applications/Safari.app/Contents/Info.plist"])
-            .output().map_err(|error| format!("Cannot read the local Safari version: {error}"))?;
-        let version = String::from_utf8_lossy(&output.stdout);
-        let version = version.trim();
-        if !output.status.success() || version.is_empty()
-            || version.split('.').any(|part| part.is_empty() || !part.bytes().all(|c| c.is_ascii_digit())) {
+        // Called only by the background executor. Cache both checks across all
+        // tabs, without spawning sw_vers or PlistBuddy on the foreground thread.
+        let _ = native_browser_supported();
+        let info = plist::Value::from_file("/Applications/Safari.app/Contents/Info.plist")
+            .map_err(|error| format!("Cannot read the local Safari version: {error}"))?;
+        let version = info.as_dictionary()
+            .and_then(|info| info.get("CFBundleShortVersionString"))
+            .and_then(plist::Value::as_string)
+            .ok_or("Cannot identify the installed Safari version.")?;
+        if version.is_empty() || version.split('.').any(|part| part.is_empty()
+            || !part.bytes().all(|c| c.is_ascii_digit())) {
             return Err("Cannot identify the installed Safari version.".into());
         }
         Ok(format!("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/{version} Safari/605.1.15"))
     }).as_ref().map(String::as_str).map_err(Clone::clone)
 }
 
+#[cfg(not(target_os = "macos"))]
+fn prepare_native_browser() -> Result<&'static str, String> {
+    Err("This experimental browser currently supports macOS only.".into())
+}
+
 fn create_native(
     window: &Window,
     events: futures::channel::mpsc::UnboundedSender<BrowserEvent>,
+    user_agent: &str,
 ) -> Result<wry::WebView, String> {
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (window, events);
+        let _ = (window, events, user_agent);
         return Err("This experimental browser currently supports macOS only.".into());
     }
     #[cfg(target_os = "macos")]
     {
-        // WKWebView ignores filesystem data_directory; its isolated persistent
-        // data-store identifier requires macOS 14. Never silently use default.
-        let supported = std::process::Command::new("/usr/bin/sw_vers")
-            .arg("-productVersion")
-            .output()
-            .ok()
-            .filter(|output| output.status.success())
-            .and_then(|output| String::from_utf8(output.stdout).ok())
-            .and_then(|version| version.trim().split('.').next()?.parse::<u32>().ok())
-            .is_some_and(|major| major >= 14);
-        if !supported {
+        // Preparation normally warms this cached API check in the background.
+        // Always enforce it before using the isolated data-store identifier.
+        if !native_browser_supported() {
             return Err("The isolated browser requires macOS 14 or later.".into());
         }
         let navigation = events.clone();
         let title = events.clone();
         wry::WebViewBuilder::new()
-            .with_user_agent(local_safari_user_agent()?)
+            .with_user_agent(user_agent)
             .with_url("about:blank")
             .with_visible(false)
             .with_focused(false)
@@ -404,6 +425,9 @@ pub(crate) struct BrowserTab {
     address: Entity<InputState>,
     webview: Option<Entity<WebView>>,
     host_window: AnyWindowHandle,
+    native_deferred: bool,
+    _native_init: Option<Task<()>>,
+    pending_navigation: Option<(String, Option<String>)>,
     #[cfg(target_os = "macos")]
     applied_corner_radius: Option<f64>,
     location: String,
@@ -425,6 +449,11 @@ pub(crate) struct BrowserTab {
     _loading_watch: Option<Task<()>>,
     docked_mode: bool,
     dock_group: Option<WeakEntity<gpui_kit::component::dock::TabGroup>>,
+    pane_toolbar_hovered: bool,
+    page_edge_colour: Option<u32>,
+    page_edge_generation: u64,
+    _page_edge_watch: Option<Task<()>>,
+    _omnibar_snapshot_task: Option<Task<()>>,
     palette: Option<crate::design::Palette>,
     interface_font_ratio: f32,
     restoring_metadata: bool,
@@ -443,6 +472,7 @@ pub(crate) struct BrowserTab {
     context_point: (f32, f32),
     context_pane_size: std::rc::Rc<std::cell::Cell<Size<Pixels>>>,
     context_snapshot: Option<std::sync::Arc<RenderImage>>,
+    context_capture_cancel: Option<snapshot::Cancellation>,
     _address_shortcuts: Task<()>,
     _control_actions: Task<()>,
 }
@@ -471,14 +501,17 @@ impl BrowserTab {
         self.loading = loading;
         self._loading_watch.take();
         if loading {
+            self._page_edge_watch.take();
+            self.page_edge_colour = None;
+            self.page_edge_generation = self.page_edge_generation.wrapping_add(1);
             // Pinned Wry emits didCommit/didFinish, but exposes no failure
             // callback. Observe WKWebView's real loading state only while a
             // navigation is pending, so failed/cancelled loads also settle.
-            self._loading_watch = Some(cx.spawn(async move |tab, cx| {
+            if self.visible { self._loading_watch = Some(cx.spawn(async move |tab, cx| {
                 loop {
                     cx.background_executor().timer(Duration::from_millis(100)).await;
                     let keep_watching = tab.update(cx, |tab, cx| {
-                        if !tab.loading || tab.unloaded { return false; }
+                        if !tab.visible || !tab.loading || tab.unloaded { return false; }
                         let native_loading = tab.webview.as_ref().is_some_and(|view| {
                             #[cfg(target_os = "macos")]
                             { unsafe { view.read(cx).raw().webview().isLoading() } }
@@ -493,7 +526,7 @@ impl BrowserTab {
                     }).unwrap_or(false);
                     if !keep_watching { break; }
                 }
-            }));
+            })); }
         }
         cx.notify();
     }
@@ -541,6 +574,9 @@ impl BrowserTab {
         group: Option<WeakEntity<gpui_kit::component::dock::TabGroup>>,
         cx: &mut Context<Self>,
     ) {
+        if group.is_none() {
+            self.pane_toolbar_hovered = false;
+        }
         self.dock_group = group;
         cx.notify();
     }
@@ -593,45 +629,45 @@ impl BrowserTab {
         if !self.visible { return; }
         self.context_menu = None;
         self.context_snapshot = None;
+        if let Some(cancel) = self.context_capture_cancel.take() { cancel.cancel(); }
         self.context_generation = self.context_generation.wrapping_add(1);
         self.omnibar_generation = self.omnibar_generation.wrapping_add(1);
         let generation = self.omnibar_generation;
-        if !self.unloaded && !self.omnibar_open {
-            if let Some(view) = &self.webview {
-                let receiver = snapshot::request(view.read(cx).raw());
-                cx.spawn_in(window, async move |tab, cx| {
-                    let start = std::time::Instant::now();
-                    let bytes = loop {
-                        match receiver.try_recv() {
-                            Ok(bytes) => break bytes,
-                            Err(mpsc::TryRecvError::Disconnected) => break None,
-                            Err(mpsc::TryRecvError::Empty) => {},
-                        }
-                        if start.elapsed() >= Duration::from_millis(150) { break None; }
-                        cx.background_executor().timer(Duration::from_millis(10)).await;
-                    };
-                    let image = cx.background_executor().spawn(async move {
-                        bytes.and_then(|bytes| image::load_from_memory(&bytes).ok()).map(|image| {
-                        let mut rgba = image.to_rgba8();
+        self._omnibar_snapshot_task.take();
+        let request = if !self.unloaded && !self.omnibar_open {
+            self.webview.as_ref().map(|view| snapshot::request(view.read(cx).raw()))
+        } else { None };
+        // Focus is independent of WebKit completing (or never completing) a
+        // snapshot. Attach the optional backdrop only while this overlay lives.
+        self.finish_open_omnibar(window, cx);
+        if let Some(request) = request {
+            self._omnibar_snapshot_task = Some(cx.spawn(async move |tab, cx| {
+                let capture = match futures::future::select(
+                    Box::pin(request.receive()),
+                    Box::pin(cx.background_executor().timer(Duration::from_millis(150))),
+                ).await {
+                    futures::future::Either::Left((capture, _)) => capture,
+                    futures::future::Either::Right(_) => None,
+                };
+                let image = cx.background_executor().spawn(async move {
+                    capture.and_then(snapshot::decode).map(|mut rgba| {
                         for pixel in rgba.pixels_mut() { pixel.0.swap(0, 2); }
                         std::sync::Arc::new(RenderImage::new(vec![image::Frame::new(rgba)]))
-                        })
-                    }).await;
-                    let _ = tab.update_in(cx, |tab, window, cx| {
-                        if tab.omnibar_generation != generation || !tab.visible { return; }
-                        tab.omnibar_snapshot = image;
-                        tab.finish_open_omnibar(window, cx);
-                    });
-                }).detach();
-                return;
-            }
+                    })
+                }).await;
+                let _ = tab.update(cx, |tab, cx| {
+                    if tab.omnibar_generation != generation || !tab.visible || !tab.omnibar_open { return; }
+                    tab.omnibar_snapshot = image;
+                    cx.notify();
+                });
+            }));
         }
-        self.finish_open_omnibar(window, cx);
     }
 
     fn finish_open_omnibar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(controls) = &self.browser_controls { controls.hide(); }
         self.omnibar_open = true;
+        self._page_edge_watch.take();
         self.restoring_metadata = true;
         let address = if self.location == "about:blank" { String::new() } else { self.location.clone() };
         self.address.update(cx, |input, cx| input.set_value(address, window, cx));
@@ -645,6 +681,7 @@ impl BrowserTab {
     fn dismiss_context(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.context_menu = None;
         self.context_snapshot = None;
+        if let Some(cancel) = self.context_capture_cancel.take() { cancel.cancel(); }
         self.context_generation = self.context_generation.wrapping_add(1);
         self.focus.focus(window, cx);
         if self.visible && !self.unloaded && !self.omnibar_open && !crate::session_lock::locked(cx) {
@@ -655,6 +692,7 @@ impl BrowserTab {
 
     fn dismiss_omnibar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.omnibar_open = false;
+        self._omnibar_snapshot_task.take();
         self.omnibar_generation = self.omnibar_generation.wrapping_add(1);
         self.omnibar_snapshot = None;
         self.dirty_address = false;
@@ -673,9 +711,58 @@ impl BrowserTab {
     }
 
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let (events, receiver) = futures::channel::mpsc::unbounded();
-        let native = create_native(window, events);
-        Self::new_with_native(window, cx, native, Some(receiver))
+        let mut tab = Self::new_deferred(window, cx);
+        tab.start_native(window, cx);
+        tab
+    }
+
+    fn new_deferred(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let mut tab = Self::new_with_native(window, cx, Err(String::new()), None);
+        tab.error = None;
+        tab.native_deferred = true;
+        tab
+    }
+
+    fn start_native(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.native_deferred || self._native_init.is_some() { return; }
+        self._native_init = Some(cx.spawn_in(window, async move |tab, cx| {
+            let metadata = cx.background_executor().spawn(async { prepare_native_browser() });
+            let user_agent = match futures::future::select(
+                metadata,
+                Box::pin(cx.background_executor().timer(Duration::from_millis(100))),
+            ).await {
+                futures::future::Either::Left((result, _)) => result.unwrap_or(FALLBACK_SAFARI_USER_AGENT),
+                futures::future::Either::Right(_) => FALLBACK_SAFARI_USER_AGENT,
+            };
+            let _ = tab.update_in(cx, |tab, window, cx| {
+                if !tab.native_deferred { return; }
+                tab.native_deferred = false;
+                let (events, receiver) = futures::channel::mpsc::unbounded();
+                let native = create_native(window, events, user_agent);
+                // Reuse the normal native hook installation while preserving
+                // this entity's input, metadata, focus, visibility and dock state.
+                let ready = Self::new_with_native(window, cx, native, Some(receiver));
+                tab.webview = ready.webview;
+                tab.error = ready.error;
+                #[cfg(target_os = "macos")]
+                { tab.applied_corner_radius = ready.applied_corner_radius; }
+                tab.address_shortcut = ready.address_shortcut;
+                tab.browser_controls = ready.browser_controls;
+                tab.browser_auth = ready.browser_auth;
+                tab.context_click = ready.context_click;
+                tab._context_clicks = ready._context_clicks;
+                tab._address_shortcuts = ready._address_shortcuts;
+                tab._control_actions = ready._control_actions;
+                tab._events = ready._events;
+                if tab.webview.is_some() {
+                    if let Some((url, title)) = tab.pending_navigation.take() {
+                        let _ = tab.open_url(&url, title.as_deref(), cx);
+                    }
+                    if tab.visible { tab.show(cx); }
+                }
+                cx.notify();
+            });
+        }));
     }
 
     #[cfg(feature = "performance-profiling")]
@@ -707,38 +794,43 @@ impl BrowserTab {
         let context_clicks = cx.spawn_in(window, async move |tab, cx| {
             let Some(mut receiver) = context_receiver else { return; };
             while let Some((x, y)) = receiver.next().await {
-                let (send, receive) = mpsc::channel();
+                let (send, receive) = futures::channel::oneshot::channel();
+                let send = std::sync::Mutex::new(Some(send));
                 let request = tab.update(cx, |tab, cx| {
                     if !tab.visible || tab.unloaded || tab.omnibar_open { return None; }
+                    if let Some(cancel) = tab.context_capture_cancel.take() { cancel.cancel(); }
                     tab.context_generation = tab.context_generation.wrapping_add(1);
                     let generation = tab.context_generation;
                     let location = tab.location.clone();
                     let view = tab.webview.as_ref()?;
-                    view.read(cx).raw().evaluate_script_with_callback(&browser_context::hit_test(x,y), move |value| { let _ = send.send(value); }).ok()?;
+                    view.read(cx).raw().evaluate_script_with_callback(&browser_context::hit_test(x,y), move |value| { if let Some(send) = send.lock().ok().and_then(|mut send| send.take()) { let _ = send.send(value); } }).ok()?;
                     Some((generation, location))
                 }).ok().flatten();
                 let Some((generation, location)) = request else { continue; };
-                let started = std::time::Instant::now();
-                let result = loop {
-                    match receive.try_recv() { Ok(result) => break Some(result), Err(mpsc::TryRecvError::Disconnected) => break None, Err(mpsc::TryRecvError::Empty) => {} }
-                    if started.elapsed() >= Duration::from_millis(500) { break None; }
-                    cx.background_executor().timer(Duration::from_millis(10)).await;
+                let result = match futures::future::select(
+                    Box::pin(receive),
+                    Box::pin(cx.background_executor().timer(Duration::from_millis(500))),
+                ).await {
+                    futures::future::Either::Left((result, _)) => result.ok(),
+                    futures::future::Either::Right(_) => None,
                 };
                 let Some(result) = result else { continue; };
                 let snapshot_receiver = tab.update(cx, |tab,cx| {
                     if !tab.visible || tab.unloaded || tab.context_generation != generation || tab.location != location { return None; }
-                    tab.webview.as_ref().map(|view| snapshot::request(view.read(cx).raw()))
+                    let request = tab.webview.as_ref().map(|view| snapshot::request(view.read(cx).raw()))?;
+                    tab.context_capture_cancel = Some(request.cancellation());
+                    Some(request)
                 }).ok().flatten();
                 let image = if let Some(receiver) = snapshot_receiver {
-                    let start = std::time::Instant::now();
-                    let bytes = loop {
-                        match receiver.try_recv() { Ok(bytes) => break bytes, Err(mpsc::TryRecvError::Disconnected) => break None, Err(_) => {} }
-                        if start.elapsed() >= Duration::from_millis(150) { break None; }
-                        cx.background_executor().timer(Duration::from_millis(10)).await;
+                    let capture = match futures::future::select(
+                        Box::pin(receiver.receive()),
+                        Box::pin(cx.background_executor().timer(Duration::from_millis(150))),
+                    ).await {
+                        futures::future::Either::Left((capture, _)) => capture,
+                        futures::future::Either::Right(_) => None,
                     };
                     cx.background_executor().spawn(async move {
-                        bytes.and_then(|bytes| image::load_from_memory(&bytes).ok()).map(|image| {
-                            let mut rgba = image.to_rgba8();
+                        capture.and_then(snapshot::decode).map(|mut rgba| {
                             for pixel in rgba.pixels_mut() { pixel.0.swap(0,2); }
                             std::sync::Arc::new(RenderImage::new(vec![image::Frame::new(rgba)]))
                         })
@@ -783,6 +875,14 @@ impl BrowserTab {
                         return;
                     }
                     let action = match action {
+                        controls::BrowserControlAction::TopHovered(hovered) => {
+                            if tab.docked_mode && !tab.omnibar_open && tab.context_menu.is_none()
+                                && tab.pane_toolbar_hovered != hovered {
+                                tab.pane_toolbar_hovered = hovered;
+                                cx.notify();
+                            }
+                            return;
+                        }
                         controls::BrowserControlAction::Close if tab.has_native_close_control() => {
                             BrowserWorkspaceAction::CloseTab
                         }
@@ -809,8 +909,25 @@ impl BrowserTab {
         } else { (None, None) };
         let address_shortcuts = cx.spawn_in(window, async move |tab, cx| {
             let Some(mut receiver) = shortcut_receiver else { return; };
-            while receiver.next().await.is_some() {
-                if tab.update_in(cx, |tab, window, cx| tab.open_omnibar(window, cx)).is_err() { return; }
+            while let Some(shortcut) = receiver.next().await {
+                if tab.update_in(cx, |tab, window, cx| {
+                    if !tab.visible { return; }
+                    match shortcut {
+                        keyboard::Shortcut::FocusAddress => tab.open_omnibar(window, cx),
+                        keyboard::Shortcut::Reload => {
+                            tab.reload(cx);
+                            if tab.omnibar_open { tab.dismiss_omnibar(window, cx); }
+                        }
+                        keyboard::Shortcut::Back | keyboard::Shortcut::Forward => {
+                            tab.history_step(matches!(shortcut, keyboard::Shortcut::Forward), cx);
+                            if tab.omnibar_open { tab.dismiss_omnibar(window, cx); }
+                        }
+                        keyboard::Shortcut::NewTab => cx.emit(BrowserTabEvent::WorkspaceAction(BrowserWorkspaceAction::NewTab)),
+                        keyboard::Shortcut::CloseTab => cx.emit(BrowserTabEvent::WorkspaceAction(BrowserWorkspaceAction::CloseTab)),
+                        keyboard::Shortcut::NextTab => cx.emit(BrowserTabEvent::WorkspaceAction(BrowserWorkspaceAction::NextTab)),
+                        keyboard::Shortcut::PreviousTab => cx.emit(BrowserTabEvent::WorkspaceAction(BrowserWorkspaceAction::PreviousTab)),
+                    }
+                }).is_err() { return; }
             }
         });
         let enter =
@@ -910,6 +1027,9 @@ impl BrowserTab {
             address,
             webview,
             host_window: window.window_handle(),
+            native_deferred: false,
+            _native_init: None,
+            pending_navigation: None,
             #[cfg(target_os = "macos")]
             applied_corner_radius: None,
             location: "about:blank".into(),
@@ -931,6 +1051,11 @@ impl BrowserTab {
             _loading_watch: None,
             docked_mode: false,
             dock_group: None,
+            pane_toolbar_hovered: false,
+            page_edge_colour: None,
+            page_edge_generation: 0,
+            _page_edge_watch: None,
+            _omnibar_snapshot_task: None,
             palette: None,
             interface_font_ratio: 1.,
             restoring_metadata: false,
@@ -949,9 +1074,59 @@ impl BrowserTab {
             context_point: (0.,0.),
             context_pane_size: std::rc::Rc::new(std::cell::Cell::new(Size::default())),
             context_snapshot: None,
+            context_capture_cancel: None,
             _address_shortcuts: address_shortcuts,
             _control_actions: control_actions,
         }
+    }
+
+    fn page_edge_eligible(&self, cx: &App) -> bool {
+        self.visible && !self.unloaded && !self.loading && !self.omnibar_open
+            && self.context_menu.is_none() && !crate::session_lock::locked(cx)
+            && self.webview.is_some()
+            && (self.page_edge_colour.is_none() || self.pane_toolbar_hovered)
+    }
+
+    fn reconcile_page_edge_watch(&mut self, cx: &mut Context<Self>) {
+        if !self.page_edge_eligible(cx) {
+            self._page_edge_watch.take();
+            return;
+        }
+        if self._page_edge_watch.is_some() { return; }
+        self._page_edge_watch = Some(cx.spawn(async move |tab, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_millis(600)).await;
+                let sample = tab.update(cx, |tab, cx| {
+                    if !tab.page_edge_eligible(cx) { return None; }
+                    tab.webview.as_ref().map(|view| (
+                        tab.page_edge_generation,
+                        snapshot::request_top_edge(view.read(cx).raw()),
+                    ))
+                }).ok().flatten();
+                let Some((generation, request)) = sample else { break; };
+                let capture = match futures::future::select(
+                    Box::pin(request.receive()),
+                    Box::pin(cx.background_executor().timer(Duration::from_millis(250))),
+                ).await {
+                    futures::future::Either::Left((capture, _)) => capture,
+                    futures::future::Either::Right(_) => None,
+                };
+                let colour = cx.background_executor().spawn(async move {
+                    capture.and_then(snapshot::decode).and_then(|image| snapshot::dominant_colour(&image))
+                }).await;
+                let keep_sampling = tab.update(cx, |tab, cx| {
+                    if tab.page_edge_generation != generation || !tab.page_edge_eligible(cx) { return false; }
+                    if let Some(colour) = colour {
+                        if tab.page_edge_colour != Some(colour) {
+                            tab.page_edge_colour = Some(colour);
+                            cx.notify();
+                        }
+                    }
+                    tab.page_edge_eligible(cx)
+                }).unwrap_or(false);
+                if !keep_sampling { break; }
+            }
+        }));
     }
 
     fn navigate(&mut self, cx: &mut Context<Self>) {
@@ -961,6 +1136,28 @@ impl BrowserTab {
     }
 
     pub(crate) fn open_url(&mut self, target: &str, title: Option<&str>, cx: &mut Context<Self>) -> Result<(), String> {
+        if self.native_deferred {
+            let normalized = if target == "about:blank" { target.to_owned() }
+                else { monitter_lib::browser_links::normalize_target(target)? };
+            let url = validated_url(&normalized)?;
+            if url.as_str().len() > MAX_BROWSER_URL_BYTES {
+                return Err("Browser URL exceeds the 8192 byte limit.".into());
+            }
+            let url = url.to_string();
+            self.pending_navigation = Some((url.clone(), title.map(str::to_owned)));
+            self.requested_url = url.clone();
+            self.actual_url = None;
+            self.location = url;
+            if let Some(title) = title { self.title = bounded_title(title); }
+            self.pending_address = Some(self.location.clone());
+            self.dirty_address = false;
+            self.error = None;
+            cx.update_window_context(self.host_window, |window, cx| self.start_native(window, cx))
+                .map_err(|error| error.to_string())?;
+            cx.emit(BrowserTabEvent::MetadataChanged);
+            cx.notify();
+            return Ok(());
+        }
         if let Some(auth) = &self.browser_auth { auth.cancel(); }
         let result = (if target == "about:blank" { Ok(target.to_owned()) } else { monitter_lib::browser_links::normalize_target(target) }).and_then(|target| validated_url(&target)).and_then(|url| {
             if url.as_str().len() > MAX_BROWSER_URL_BYTES {
@@ -985,11 +1182,7 @@ impl BrowserTab {
                 if self.visible && !self.omnibar_open && self.context_menu.is_none() && !crate::session_lock::locked(cx) {
                     if let Some(view) = self.webview.clone() {
                         let shown = view.update(cx, |view, _| {
-                            view.raw()
-                                .set_visible(true)
-                                .map_err(|error| error.to_string())?;
-                            view.show();
-                            Ok::<(), String>(())
+                            view.set_visible(true).map_err(|error| error.to_string())
                         });
                         #[cfg(feature = "performance-profiling")]
                         self.record_native_visibility(true, shown.is_ok());
@@ -1072,24 +1265,25 @@ impl BrowserTab {
         if let Some(auth) = &self.browser_auth { auth.cancel(); }
         if let Some(controls) = &self.browser_controls { controls.hide(); }
         self.context_generation = self.context_generation.wrapping_add(1);
+        if let Some(cancel) = self.context_capture_cancel.take() { cancel.cancel(); }
         self.context_menu = None;
         self.context_snapshot = None;
         self.omnibar_generation = self.omnibar_generation.wrapping_add(1);
         self.omnibar_snapshot = None;
         self.omnibar_open = false;
+        self.pane_toolbar_hovered = false;
         #[cfg(feature = "performance-profiling")]
         HIDE_REQUESTS.fetch_add(1, Ordering::Relaxed);
         self.visible = false;
+        self._page_edge_watch.take();
+        self._loading_watch.take();
+        self._omnibar_snapshot_task.take();
+        self.page_edge_generation = self.page_edge_generation.wrapping_add(1);
         if let Some(view) = self.webview.clone() {
-            let (focus_error, visibility_error) = view.update(cx, |view, _| {
-                let focus_error = view.raw().focus_parent().err();
-                let visibility_error = view.raw().set_visible(false).err();
-                view.hide();
-                (focus_error, visibility_error)
-            });
+            let visibility_error = view.update(cx, |view, _| view.set_visible(false)).err();
             #[cfg(feature = "performance-profiling")]
             self.record_native_visibility(false, visibility_error.is_none());
-            if let Some(error) = visibility_error.or(focus_error) {
+            if let Some(error) = visibility_error {
                 self.error = Some(format!("Cannot hide native browser: {error}"));
             }
         }
@@ -1103,22 +1297,18 @@ impl BrowserTab {
         self.visible = true;
         if let Some(view) = self.webview.clone() {
             if self.unloaded || self.omnibar_open || self.context_menu.is_some() {
-                let result = view.update(cx, |view, _| view.raw().set_visible(false));
+                let result = view.update(cx, |view, _| view.set_visible(false));
                 #[cfg(feature = "performance-profiling")]
                 self.record_native_visibility(false, result.is_ok());
                 if let Err(error) = result {
                     self.error = Some(format!("Cannot hide unloaded browser view: {error}"));
-                } else {
-                    view.update(cx, |view, _| view.hide());
                 }
             } else {
-                let result = view.update(cx, |view, _| view.raw().set_visible(true));
+                let result = view.update(cx, |view, _| view.set_visible(true));
                 #[cfg(feature = "performance-profiling")]
                 self.record_native_visibility(true, result.is_ok());
                 if let Err(error) = result {
                     self.error = Some(format!("Cannot show native browser: {error}"));
-                } else {
-                    view.update(cx, |view, _| view.show());
                 }
             }
         }
@@ -1138,7 +1328,7 @@ impl BrowserTab {
         }
         #[cfg(target_os = "macos")]
         {
-            if self.webview.is_none() { return Err("The browser tab has no native view to transfer.".into()); }
+            if self.webview.is_none() && !self.native_deferred { return Err("The browser tab has no native view to transfer.".into()); }
             reparent_target(window)?;
             Ok(())
         }
@@ -1152,22 +1342,28 @@ impl BrowserTab {
         { let _ = cx; unreachable!("unsupported transfer was rejected by preflight"); }
         #[cfg(target_os = "macos")]
         {
-            let target = reparent_target(window)?;
+            if self.webview.is_none() && self.native_deferred {
+                self._native_init.take();
+                self.host_window = window.window_handle();
+                self.dock_group = None;
+                self.context_pane_size.set(Size::default());
+                let id = cx.entity_id();
+                cx.rehost_entity_window(id, window).map_err(|error| error.to_string())?;
+                self.address.update(cx, |input, cx| input.rehost_to_window(window, cx))?;
+                if self.visible || self.pending_navigation.is_some() { self.start_native(window, cx); }
+                cx.notify();
+                return Ok(());
+            }
             let view = self.webview.clone().ok_or("The browser tab has no native view to transfer.")?;
             let was_visible = self.visible;
             self.hide(cx);
-            if let Err(error) = view.read(cx).raw().set_visible(false) {
-                if was_visible { self.show(cx); }
-                return Err(format!("Cannot hide the browser page before transfer: {error}"));
-            }
-            if let Err(error) = view.read(cx).raw().reparent(objc2::rc::Retained::as_ptr(&target).cast_mut().cast()) {
+            if let Err(error) = view.update(cx, |view, cx| view.reparent(window, cx)) {
                 if was_visible { self.show(cx); }
                 return Err(format!("Cannot move the retained browser page: {error}"));
             }
             self.host_window = window.window_handle();
             self.dock_group = None;
             self.context_pane_size.set(Size::default());
-            view.update(cx, |view, _| view.invalidate_native_bounds());
             // Pane-owned callbacks resolve their subscriber's current window.
             // Pin hidden children too; they need not wait for their first draw.
             let tab_id = cx.entity_id();
@@ -1183,6 +1379,9 @@ impl BrowserTab {
     pub fn close(&mut self, cx: &mut App) {
         self.loading = false;
         self.unloaded = true;
+        self.native_deferred = false;
+        self._native_init.take();
+        self.pending_navigation = None;
         self._loading_watch.take();
         self.hide(cx);
         self.address_shortcut.take();
@@ -1226,6 +1425,9 @@ impl BrowserTab {
 
 impl Render for BrowserTab {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.visible && self.native_deferred { self.start_native(window, cx); }
+        if self.visible && self.loading && self._loading_watch.is_none() { self.set_loading(true, cx); }
+        self.reconcile_page_edge_watch(cx);
         #[cfg(target_os = "macos")]
         self.apply_native_tile_corners(cx);
         // Wait for the owning dock to show a newly created pane, then open the
@@ -1306,8 +1508,9 @@ impl Render for BrowserTab {
                         ));
                     }));
         }
+        let mut page_content = div().flex_1().min_h_0().min_w_0().flex().flex_col();
         if let Some(error) = self.error.as_ref().filter(|_| !self.omnibar_open) {
-            content = content.child(
+            page_content = page_content.child(
                 div()
                     .px(px(10.))
                     .py(px(5.))
@@ -1322,7 +1525,7 @@ impl Render for BrowserTab {
             } else {
                 "Press ⌘L / Ctrl+L to open the saved page or enter an address."
             };
-            content = content.child(
+            page_content = page_content.child(
                 div()
                     .flex_1()
                     .min_h(px(0.))
@@ -1360,9 +1563,159 @@ impl Render for BrowserTab {
             // half of the divider grab band so its real GPUI highlight remains
             // visible and receives pointer events along the entire viewport.
             // Use logical pixels to match the unscaled native divider band.
-            content = content.child(
+            page_content = page_content.child(
                 div().flex_1().min_h(px(0.)).p(gpui::px(4.)).child(view.clone()),
             );
+        }
+        let mut pane_toolbar = None;
+        if self.docked_mode && self.visible && !self.omnibar_open && self.context_menu.is_none() {
+            if let Some(group) = self.dock_group.as_ref().and_then(WeakEntity::upgrade) {
+                let context = group.read(cx).context(cx);
+                let revealed = self.pane_toolbar_hovered;
+                // Match the bottom native navigation HUD: vibrant dark,
+                // 70% charcoal tint, rounded corners, and opaque light icons.
+                let toolbar_ink = 0xf1f3f4;
+                let button_style = ButtonCustomVariant::new(cx)
+                    .foreground(rgb(toolbar_ink).into())
+                    .hover(rgb(toolbar_ink).opacity(0.08).into())
+                    .active(rgb(toolbar_ink).opacity(0.14).into());
+                let grip = div()
+                    .size(px(28.))
+                    .flex_shrink_0()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(3.))
+                    .children((0..3).map(|_| {
+                        div().flex().gap(px(3.)).children((0..3).map(|_| {
+                            div()
+                                .size(px(2.))
+                                .rounded_full()
+                                .bg(rgb(toolbar_ink).opacity(0.5))
+                        }))
+                    }));
+                let drag = gpui_kit::component::dock::pane_drag_region(
+                    div()
+                        .h_full()
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .gap(px(2.))
+                        .child(
+                            div()
+                                .size(px(28.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_color(rgb(toolbar_ink).opacity(0.75))
+                                .child(Icon::new(IconName::Move).with_size(px(16.))),
+                        )
+                        .child(grip),
+                    &context,
+                    cx,
+                );
+                let toolbar = div()
+                    .id("browser-pane-topbar")
+                    .debug_selector(|| "browser-pane-topbar".into())
+                    .h(px(36.))
+                    .flex_shrink_0()
+                    .occlude()
+                    .flex()
+                    .items_center()
+                    .px(px(4.))
+                    .gap(px(2.))
+                    .bg(Background::from(rgb(0x1a1a1a).opacity(0.7)).backdrop_blur(20.))
+                    .rounded(px(14.))
+                    .border_1()
+                    .border_color(rgb(toolbar_ink).opacity(0.10))
+                    .child(drag)
+                    .children(
+                        gpui_kit::component::dock::pane_zoom_control(&context, cx).map(|button| {
+                            button
+                                .w(px(28.))
+                                .h(px(28.))
+                                .p_0()
+                                .custom(button_style)
+                                .debug_selector(|| "browser-pane-maximize".into())
+                        }),
+                    )
+                    .child(
+                        gpui_kit::component::dock::pane_close_control(&context, cx)
+                            .w(px(28.))
+                            .h(px(28.))
+                            .p_0()
+                            .custom(button_style)
+                            .debug_selector(|| "browser-pane-close".into()),
+                    );
+                let sensor = div()
+                    .id("browser-pane-topbar-sensor")
+                    .debug_selector(|| "browser-pane-topbar-sensor".into())
+                    .relative()
+                    .w_full()
+                    .h(px(48.))
+                    .flex_shrink_0()
+                    .flex()
+                    .justify_center()
+                    .items_start()
+                    .overflow_hidden();
+                let hover = cx.listener(|this, hovered: &bool, _, cx| {
+                    if this.pane_toolbar_hovered != *hovered {
+                        this.pane_toolbar_hovered = *hovered;
+                        cx.notify();
+                    }
+                });
+                let leave = cx.listener(|this, _: &MouseExitEvent, _, cx| {
+                    if this.pane_toolbar_hovered {
+                        this.pane_toolbar_hovered = false;
+                        cx.notify();
+                    }
+                });
+                // Observe a fixed pane-relative band in capture. An occluding
+                // toolbar (or the native page) must not make its own sensor lose
+                // hover as soon as it appears. This listener never consumes input.
+                content = content.child(canvas(|_, _, _| (), move |bounds, _, window, _| {
+                    let visible = bounds.intersect(&window.content_mask().bounds);
+                    let band = Bounds::new(visible.origin, size(visible.size.width, px(48.).min(visible.size.height)));
+                    window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+                        if phase == DispatchPhase::Capture {
+                            hover(&band.contains(&event.position), window, cx);
+                        }
+                    });
+                    window.on_mouse_event(move |event: &MouseExitEvent, phase, window, cx| {
+                        if phase == DispatchPhase::Capture { leave(event, window, cx); }
+                    });
+                }).absolute().size_full());
+                pane_toolbar = Some((revealed, sensor, toolbar));
+            }
+        }
+        let update_top_inset = self.browser_controls.as_ref().map(|controls| controls.top_inset_updater());
+        if let Some((revealed, sensor, toolbar)) = pane_toolbar {
+            // One spring drives both the visible bar and its reserved space.
+            // The native document's actual frame moves and shrinks, keeping
+            // fixed website navigation below the controls throughout the slide.
+            content = content.child(div().relative().flex_1().min_h_0().min_w_0()
+                .bg(rgb(self.page_edge_colour.unwrap_or(palette.card)))
+                .flex().flex_col().overflow_hidden().with_spring(
+                    "browser-pane-topbar-slide",
+                    SpringAnimation::new(SpringConfig::new(310., 30., 1.))
+                        .to(if revealed { px(36.) } else { px(0.) })
+                        .from(px(0.)).with_epsilon(0.05),
+                    move |layout, height| {
+                        let height = height.max(px(0.)).min(px(36.));
+                        if let Some(update) = update_top_inset { update(height.as_f32()); }
+                        layout.child(div().h(height).flex_shrink_0())
+                            .child(page_content)
+                            // Preserve the pane clip before deferring above the
+                            // native page, and keep the bar in normal flow.
+                            .child(div().absolute().inset_0().overflow_hidden().flex().flex_col()
+                                .child(deferred(sensor.child(toolbar.mt(height - px(36.))))
+                                    .with_priority(3)))
+                    },
+                ));
+        } else {
+            if let Some(update) = update_top_inset { update(0.); }
+            content = content.child(page_content);
         }
         if let Some(link) = self.context_menu.clone() {
             if let Some(image) = &self.context_snapshot {
@@ -1808,7 +2161,7 @@ impl BrowserPane {
             let ratio = self.interface_font_ratio;
             let docked_mode = self.docked_mode;
             let tab = cx.new(|cx| {
-                let mut tab = BrowserTab::new(window, cx);
+                let mut tab = BrowserTab::new_deferred(window, cx);
                 tab.restore_metadata(metadata, window, cx);
                 tab.docked_mode = docked_mode;
                 if let Some(palette) = palette {
@@ -1821,8 +2174,8 @@ impl BrowserPane {
         }
         self.active = plan.selected_id;
         self.next_id = plan.next_id;
-        // Every restored WebView was created on about:blank; preserve the
-        // pane's existing visibility without loading any saved external URL.
+        // Inactive restored tabs retain metadata only. Native views are created
+        // on first visibility/action, without loading any saved external URL.
         if self.visible {
             if let Some(tab) = self.active_tab() {
                 tab.update(cx, |tab, cx| tab.show(cx));
@@ -2243,6 +2596,113 @@ mod tests {
         });
         let (manager, tabs) = slot.borrow_mut().take().unwrap();
         (manager, tabs, visual)
+    }
+
+    #[gpui_kit::test]
+    fn browser_pane_uses_a_slide_down_dock_drag_topbar(cx: &mut gpui_kit::TestAppContext) {
+        use crate::docking::{DockWorkspace, PaneFactory, PaneSpec};
+        use gpui_kit::{
+            AppContext as _, Focusable as _, Modifiers, MouseButton, component::Root, px,
+            size,
+        };
+        use std::{cell::RefCell, rc::Rc};
+
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            crate::surface_blend::initialize_for_ui_fixture();
+        });
+        let slot = Rc::new(RefCell::new(None));
+        let output = slot.clone();
+        let (_, visual) = cx.add_window_view(move |window, cx| {
+            let factory: PaneFactory = Rc::new(|_, _, _| None);
+            let dock = cx.new(|cx| DockWorkspace::new("browser-topbar-test", factory, window, cx));
+            dock.update(cx, |dock, cx| {
+                dock.apply_layout_preset("columns", window, cx).unwrap();
+            });
+            let tab = cx.new(|cx| {
+                let mut tab = super::BrowserTab::new_with_native(
+                    window,
+                    cx,
+                    Err("offline browser topbar fixture".into()),
+                    None,
+                );
+                tab.error = None;
+                tab.docked_mode = true;
+                tab.visible = true;
+                tab.unloaded = false;
+                tab.initial_address_pending = false;
+                tab.title = "Browser topbar".into();
+                tab
+            });
+            let focus = tab.read(cx).focus_handle(cx);
+            let origin = dock.read(cx).group_for_pane("empty:preset-1", cx).unwrap();
+            dock.update(cx, |dock, cx| {
+                dock.add_browser_beside(
+                    PaneSpec {
+                        id: "browser:topbar-test".into(),
+                        title: "Browser".into(),
+                        content: tab.clone().into(),
+                        focus,
+                        lifecycle: None,
+                        closable: true,
+                    },
+                    Some(origin),
+                    window,
+                    cx,
+                )
+                .unwrap();
+            });
+            *output.borrow_mut() = Some((dock.clone(), tab));
+            Root::new(dock, window, cx)
+        });
+        let (_dock, tab) = slot.borrow_mut().take().unwrap();
+        visual.simulate_resize(size(px(1200.), px(720.)));
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+
+        let sensor = visual
+            .debug_bounds("browser-pane-topbar-sensor")
+            .expect("browser pane mounts its top-edge reveal sensor");
+        let hidden = visual
+            .debug_bounds("browser-pane-topbar")
+            .expect("browser pane mounts its own topbar instead of dock corner chrome");
+        assert!(
+            hidden.size.height >= px(36.) && hidden.size.height <= px(52.),
+            "browser pane topbar stays compact"
+        );
+        assert!(visual.debug_bounds("browser-pane-close").is_some());
+        assert!(visual.debug_bounds("browser-pane-maximize").is_some());
+        let drag = visual
+            .debug_bounds("dock-pane-header-drag-region")
+            .expect("topbar body uses the dock's native DragPanel lifecycle");
+        assert!(drag.size.width >= px(56.) && drag.size.width <= px(64.));
+
+        visual.simulate_mouse_move(sensor.center(), None, Modifiers::none());
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        visual.update(|_, cx| assert!(tab.read(cx).pane_toolbar_hovered));
+        for _ in 0..14 {
+            visual
+                .executor()
+                .advance_clock(std::time::Duration::from_millis(16));
+            visual.update(|window, cx| {
+                window.simulate_next_frame(cx);
+                window.draw(cx).clear(cx);
+            });
+        }
+        let revealed = visual.debug_bounds("browser-pane-topbar").unwrap();
+        assert!(
+            revealed.top() > hidden.top() + px(5.),
+            "topbar slides down on top-edge hover: hidden={hidden:?}, revealed={revealed:?}"
+        );
+
+        // The controls remain outside the drag region; beginning a pane drag
+        // from its body must not trigger close or maximize.
+        let start = visual.debug_bounds("dock-pane-header-drag-region").unwrap().center();
+        visual.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+        visual.simulate_mouse_up(start, MouseButton::Left, Modifiers::none());
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(visual.debug_bounds("browser-pane-topbar").is_some());
     }
 
     #[gpui_kit::test]

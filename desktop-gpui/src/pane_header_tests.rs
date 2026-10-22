@@ -66,7 +66,7 @@ fn native_panel(
             tile_theme: NativeTileTheme::Monitter, tile_backdrop_color: 0x101010,
             paper_color: 0x101010, dark: true,
             border_opacity: 100,
-            show_active_border: true, active_border_color: 0x40aaff,
+            show_active_border: true, active_border_width: 1., active_border_color: 0x40aaff,
             dim_inactive: false, inactive_opacity: 0.6, focus_follows_mouse: false,
         }))),
         auto_hide_tabs: Rc::new(Cell::new(false)),

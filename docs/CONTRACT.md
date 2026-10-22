@@ -28,6 +28,23 @@ conversation composer, preserving existing draft text. Sending still requires th
 normal Send action and existing backend authorization. Output cannot invoke tools,
 grant permissions, execute commands or automatically send messages.
 
+The authenticated collaboration MCP exposes read-only `openui_help({})`, returning
+`{format: "markdown", instructions: string}` from the bundled
+`desktop-gpui/openui/SKILL.md`. It accepts no arguments, reads no user configuration
+and performs no installation or network access. Collaboration-enabled agent
+instructions and MCP initialization advertise the tool. Native rendering still
+depends on the connected client and its installed renderer version.
+
+Opted-in SYS-1 decision sessions receive bundled pre-final presentation guidance
+from `desktop-gpui/openui/presentation-decision.md` through their launch prompt and
+MCP initialization. Agents make at most one existing `jev_choose` request with
+plain/cards/table/chart/form/abstain candidates. Nontrivial UI choices require
+status `ok`, confidence at least 0.75 and consistent local evidence; uncertainty
+or service failure falls back to ordinary Markdown. Explicit user format requests
+and trivial replies skip classification. This is agent-followed advice, not a
+host completion gate or automatic message rewrite. Existing decision opt-in,
+provider selection, input bounds, receipts and permission boundaries apply.
+
 ### Report stylesheet snapshots
 
 The collaboration MCP exposes read-only `get_report_styles({})` and the
@@ -2206,8 +2223,10 @@ small avatar. Closing or successfully moving a pane's last tab removes that pane
 actions finish; cancelled transfers preserve it and terminal transfers keep their live sessions.
 The sole remaining pane stays as the workspace's empty view, and newly created empty splits are
 not removed without a close or completed move.
-`Settings.dimInactivePanes` defaults to true and `inactivePaneOpacity` to 0.6; Preferences
-provides a toggle and 10–90% slider, with validation requiring a finite value from 0.1 to 0.9.
+`Settings.activePaneBorderWidth` defaults to 1; Preferences provides a 1–8px slider and backend
+validation enforces that range. `Settings.dimInactivePanes` defaults to true and
+`inactivePaneOpacity` to 0.6; Preferences provides a toggle and 10–90% slider, with validation
+requiring a finite value from 0.1 to 0.9.
 Pointer or keyboard focus immediately marks the receiving pane or sidebar active; its opacity is always 1.
 
 
@@ -2848,6 +2867,15 @@ and their cursor are transient views only: copying, reply/fork actions and
 persistence continue using the complete authoritative text. A completed response
 may finish its visual reveal before switching to final Markdown; interruption,
 hiding the pane or selecting As received flushes the display immediately.
+
+The GPUI transcript minimap is an optional local presentation, disabled by default,
+including on existing installs with no saved preference. Conversation settings
+apply the selection live and persist only `on`/`off` in the private profile's
+`transcript-minimap.v1` file. Reads and atomic writes run off the UI thread;
+load/save failures are shown in settings. Disabled minimaps prepare no markers
+and mount no scrollbar UI, minimap hit targets, previews or animation;
+wheel, trackpad and keyboard transcript scrolling remain available. This adds no backend settings, IPC or
+shared-client protocol fields and works with an older resident backend.
 
 The GPUI new-tab session picker is a local presentation of existing unarchived
 chat metadata. It searches across projects/workspaces and uses the existing

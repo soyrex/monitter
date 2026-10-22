@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 pub(super) enum BrowserControlAction {
     Close,
     ToggleZoom,
+    TopHovered(bool),
 }
 
 const COMMAND: usize = 1 << 20;
@@ -89,7 +90,10 @@ mod native {
     const PANE_WIDTH: f64 = 88.;
     const CLOSE_TOP: f64 = 8.;
     const CLOSE_RIGHT: f64 = 12.;
-    const TOP_HOVER_HEIGHT: f64 = 64.;
+    fn top_hover_height() -> f64 {
+        // The native document is inset four logical pixels from the pane.
+        f64::from(crate::design::ui_scaled_px(48.).as_f32()) - 4.
+    }
 
     // NSView's default mouse handlers forward through the responder chain to
     // WKWebView. Keep clicks in the toolbar, including its empty padding and
@@ -134,8 +138,8 @@ mod native {
         zoom_button: RefCell<Option<Retained<AnyObject>>>,
         zoomed: Cell<bool>,
         top_hovered: Cell<bool>,
+        pane_top_inset: Cell<f64>,
         keyboard_shown: Cell<bool>,
-        tracking_area: RefCell<Option<Retained<AnyObject>>>,
         buttons: RefCell<Vec<Retained<AnyObject>>>,
         shown: Cell<bool>,
         modifier_hold: RefCell<ModifierHold>,
@@ -162,30 +166,6 @@ mod native {
                     let hit: *mut NSView = msg_send![super(self), hitTest: point];
                     if hit == self as *const Self as *mut NSView { ptr::null_mut() } else { hit }
                 }
-            }
-            #[unsafe(method(updateTrackingAreas))]
-            fn update_tracking_areas(&self) {
-                unsafe {
-                    let _: () = msg_send![super(self), updateTrackingAreas];
-                    if let Some(old) = self.ivars().tracking_area.borrow_mut().take() {
-                        let _: () = msg_send![self, removeTrackingArea: &*old];
-                    }
-                    let bounds = self.bounds();
-                    let rect = NSRect::new(NSPoint::new(0., 0.), NSSize::new(bounds.size.width, TOP_HOVER_HEIGHT.min(bounds.size.height)));
-                    let area: objc2::rc::Allocated<AnyObject> = msg_send![class!(NSTrackingArea), alloc];
-                    // Mouse entered/exited, active for any pane in the active app.
-                    let area: Retained<AnyObject> = msg_send![area, initWithRect: rect, options: (1usize | 64 | 1024), owner: self, userInfo: ptr::null::<AnyObject>()];
-                    let _: () = msg_send![self, addTrackingArea: &*area];
-                    *self.ivars().tracking_area.borrow_mut() = Some(area);
-                }
-            }
-            #[unsafe(method(mouseEntered:))]
-            fn mouse_entered(&self, _: *mut AnyObject) {
-                self.set_top_hovered(true);
-            }
-            #[unsafe(method(mouseExited:))]
-            fn mouse_exited(&self, _: *mut AnyObject) {
-                self.set_top_hovered(false);
             }
             #[unsafe(method(browserClose:))]
             fn close(&self, _: *mut AnyObject) {
@@ -268,14 +248,16 @@ mod native {
         }
 
         fn set_top_hovered(&self, hovered: bool) {
-            self.ivars().top_hovered.set(hovered);
+            if self.ivars().top_hovered.replace(hovered) != hovered {
+                let _ = self.ivars().action_sender.unbounded_send(BrowserControlAction::TopHovered(hovered));
+            }
             self.set_close_shown(hovered || self.ivars().keyboard_shown.get(), true);
         }
 
         fn dismiss(&self, animated: bool) {
             self.cancel_hold();
             self.ivars().keyboard_shown.set(false);
-            self.ivars().top_hovered.set(false);
+            self.set_top_hovered(false);
             self.set_shown(false, animated);
             self.set_close_shown(false, animated);
         }
@@ -425,8 +407,8 @@ mod native {
                     zoom_button: RefCell::new(None),
                     zoomed: Cell::new(false),
                     top_hovered: Cell::new(false),
+                    pane_top_inset: Cell::new(0.),
                     keyboard_shown: Cell::new(false),
-                    tracking_area: RefCell::new(None),
                     buttons: RefCell::new(Vec::new()),
                     shown: Cell::new(false),
                     modifier_hold: RefCell::new(ModifierHold::default()),
@@ -478,38 +460,10 @@ mod native {
                 }
                 overlay.addSubview(&panel);
                 *overlay.ivars().panel.borrow_mut() = Some(panel);
-                let close_panel = BrowserToolbarPanel::alloc(mtm).set_ivars(());
-                let close_panel: Retained<BrowserToolbarPanel> = msg_send![super(close_panel), initWithFrame: NSRect::new(
-                    NSPoint::new((bounds.size.width - CLOSE_RIGHT - PANE_WIDTH).max(0.), -CLOSE_SIZE - 4.),
-                    NSSize::new(PANE_WIDTH, CLOSE_SIZE))];
-                let close_panel: Retained<NSView> = Retained::cast_unchecked(close_panel);
-                close_panel.setAutoresizingMask(objc2_app_kit::NSAutoresizingMaskOptions(1 | 8));
-                close_panel.setAlphaValue(0.);
-                add_surface(&close_panel, PANE_WIDTH, CLOSE_SIZE);
-                for (index, (symbol, label, action)) in [
-                    ("arrow.up.left.and.arrow.down.right", "Expand browser pane", sel!(browserZoom:)),
-                    ("xmark", "Close browser pane", sel!(browserClose:)),
-                ].into_iter().enumerate() {
-                let close: Retained<AnyObject> = msg_send![class!(NSButton), new];
-                let _: () = msg_send![&*close, setFrame: NSRect::new(NSPoint::new(4. + index as f64 * CLOSE_SIZE, 4.), NSSize::new(36., 36.))];
-                let _: () = msg_send![&*close, setBordered: false];
-                let _: () = msg_send![&*close, setButtonType: 0usize];
-                let _: () = msg_send![&*close, setImagePosition: 1usize];
-                let image: *mut AnyObject = msg_send![class!(NSImage), imageWithSystemSymbolName: &*NSString::from_str(symbol), accessibilityDescription: &*NSString::from_str(label)];
-                let _: () = msg_send![&*close, setImage: image];
-                let color: *mut AnyObject = msg_send![class!(NSColor), whiteColor];
-                let _: () = msg_send![&*close, setContentTintColor: color];
-                let _: () = msg_send![&*close, setToolTip: &*NSString::from_str(label)];
-                let _: () = msg_send![&*close, setAccessibilityLabel: &*NSString::from_str(label)];
-                let _: () = msg_send![&*close, setTarget: &*overlay];
-                let _: () = msg_send![&*close, setAction: action];
-                let _: () = msg_send![&*close_panel, addSubview: &*close];
-                if index == 0 { *overlay.ivars().zoom_button.borrow_mut() = Some(close); }
-                }
-                overlay.addSubview(&close_panel);
-                *overlay.ivars().close_panel.borrow_mut() = Some(close_panel);
+                // Pane movement, zoom and close now share one GPUI Fast
+                // slide-down top bar. Keep this AppKit layer only for the
+                // modifier-revealed page navigation controls.
                 let _: () = msg_send![&*browser, addSubview: &*overlay];
-                let _: () = msg_send![&*overlay, updateTrackingAreas];
 
                 let target = overlay.clone();
                 let callback = block2::RcBlock::new(
@@ -534,14 +488,19 @@ mod native {
                             return event;
                         }
                         if !eligible {
+                            target.set_top_hovered(false);
                             return event;
                         }
-                        if matches!(kind, 1 | 3 | 5 | 6 | 7 | 25 | 27) {
+                        if matches!(kind, 1 | 3 | 5 | 6 | 7 | 9 | 25 | 27) {
                             let location: NSPoint = msg_send![event, locationInWindow];
                             let point: NSPoint = msg_send![&*target, convertPoint: location, fromView: ptr::null::<NSView>()];
                             let bounds = target.bounds();
-                            target.set_top_hovered(point.x >= 0. && point.x <= bounds.size.width
-                                && point.y >= 0. && point.y <= TOP_HOVER_HEIGHT.min(bounds.size.height));
+                            let pane_y = point.y + target.ivars().pane_top_inset.get();
+                            // Observe native page motion as well as GPUI chrome.
+                            // Expand by its inset so both paths use the same fixed
+                            // pane band, independent of the sliding bar's hitbox.
+                            target.set_top_hovered(point.x >= -4. && point.x <= bounds.size.width + 4.
+                                && pane_y >= -4. && pane_y <= top_hover_height());
                             return event;
                         }
                         let responder: *mut AnyObject = msg_send![window, firstResponder];
@@ -572,7 +531,7 @@ mod native {
                         event
                     },
                 );
-                let raw: *mut AnyObject = msg_send![class!(NSEvent), addLocalMonitorForEventsMatchingMask: ((1usize << 12) | (1usize << 10) | (1usize << 22) | (1usize << 1) | (1usize << 3) | (1usize << 5) | (1usize << 6) | (1usize << 7) | (1usize << 25) | (1usize << 27)), handler: &*callback];
+                let raw: *mut AnyObject = msg_send![class!(NSEvent), addLocalMonitorForEventsMatchingMask: ((1usize << 12) | (1usize << 10) | (1usize << 22) | (1usize << 1) | (1usize << 3) | (1usize << 5) | (1usize << 6) | (1usize << 7) | (1usize << 9) | (1usize << 25) | (1usize << 27)), handler: &*callback];
                 (Self {
                     overlay,
                     monitor: Retained::retain(raw),
@@ -591,6 +550,11 @@ mod native {
         }
 
         pub(super) fn set_zoomed(&self, zoomed: bool) { self.overlay.set_zoomed(zoomed); }
+
+        pub(super) fn top_inset_updater(&self) -> Box<dyn Fn(f32)> {
+            let overlay = self.overlay.clone();
+            Box::new(move |inset| overlay.ivars().pane_top_inset.set(f64::from(inset)))
+        }
 
         pub(super) fn shortcut_canceller(&self) -> Box<dyn Fn()> {
             let overlay = self.overlay.clone();
@@ -653,6 +617,13 @@ impl BrowserControls {
         { self.native.shortcut_canceller() }
         #[cfg(not(target_os = "macos"))]
         { Box::new(|| {}) }
+    }
+
+    pub(super) fn top_inset_updater(&self) -> Box<dyn Fn(f32)> {
+        #[cfg(target_os = "macos")]
+        { self.native.top_inset_updater() }
+        #[cfg(not(target_os = "macos"))]
+        { Box::new(|_| {}) }
     }
 }
 

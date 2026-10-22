@@ -1,8 +1,13 @@
-use std::{ops::Deref, rc::Rc};
-#[cfg(feature = "performance-profiling")]
-use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(target_os = "macos")]
+mod composition;
+
+#[cfg(target_os = "macos")]
+use composition::NativeWebViewSurface;
 #[cfg(feature = "performance-profiling")]
 use std::sync::OnceLock;
+#[cfg(feature = "performance-profiling")]
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::{cell::Cell, ops::Deref, rc::Rc};
 
 use wry::{
     Rect,
@@ -82,57 +87,105 @@ impl WebViewHandle {
 pub struct WebView {
     focus_handle: FocusHandle,
     webview: Rc<wry::WebView>,
-    visible: bool,
+    visible: Cell<bool>,
     bounds: Bounds<Pixels>,
-    applied_native_bounds: Option<Bounds<Pixels>>,
+    applied_native_geometry: Cell<Option<(Bounds<Pixels>, Bounds<Pixels>, f32)>>,
+    geometry_failed: Cell<bool>,
+    #[cfg(target_os = "macos")]
+    composition: Option<NativeWebViewSurface>,
 }
 
 impl Drop for WebView {
     fn drop(&mut self) {
         self.hide();
+        #[cfg(target_os = "macos")]
+        if let Some(surface) = self.composition.take() {
+            surface.release(self.webview.clone());
+        }
     }
 }
 
 impl WebView {
     /// Create a new WebView from a wry WebView.
-    pub fn new(webview: wry::WebView, _: &mut Window, cx: &mut App) -> Self {
+    pub fn new(webview: wry::WebView, window: &mut Window, cx: &mut App) -> Self {
         let _ = webview.set_bounds(Rect::default());
+        let _ = webview.set_visible(false);
+
+        #[cfg(target_os = "macos")]
+        let composition = match NativeWebViewSurface::new(&webview, window, cx) {
+            Ok(surface) => Some(surface),
+            Err(error) => {
+                log::warn!("WebView composition unavailable: {error:#}");
+                None
+            }
+        };
+        #[cfg(not(target_os = "macos"))]
+        let _ = window;
 
         Self {
             focus_handle: cx.focus_handle(),
-            visible: true,
+            visible: Cell::new(false),
             bounds: Bounds::default(),
-            applied_native_bounds: None,
+            applied_native_geometry: Cell::new(None),
+            geometry_failed: Cell::new(false),
             webview: Rc::new(webview),
+            #[cfg(target_os = "macos")]
+            composition,
         }
+    }
+
+    fn set_native_visible(&self, visible: bool) -> wry::Result<()> {
+        self.webview.set_visible(visible)?;
+        #[cfg(target_os = "macos")]
+        if let Some(surface) = &self.composition {
+            surface
+                .set_visible(visible)
+                .map_err(|error| wry::Error::Io(std::io::Error::other(error)))?;
+        }
+        Ok(())
+    }
+
+    /// Set the caller's visibility preference and synchronize the Wry child
+    /// with its GPUI Fast composition surface.
+    pub fn set_visible(&self, visible: bool) -> wry::Result<()> {
+        let previous = self.visible.get();
+        let focus_result = if !visible && previous {
+            self.webview.focus_parent()
+        } else {
+            Ok(())
+        };
+        self.set_native_visible(visible)?;
+        self.visible.set(visible);
+        #[cfg(feature = "performance-profiling")]
+        if previous != visible {
+            if visible {
+                SHOW_TRANSITIONS.fetch_add(1, Ordering::Relaxed);
+            } else {
+                HIDE_TRANSITIONS.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        focus_result
     }
 
     /// Show the webview.
     pub fn show(&mut self) {
-        if self.visible {
+        if self.visible.get() {
             return;
         }
-        let _ = self.webview.set_visible(true);
-        #[cfg(feature = "performance-profiling")]
-        SHOW_TRANSITIONS.fetch_add(1, Ordering::Relaxed);
-        self.visible = true;
+        let _ = self.set_visible(true);
     }
 
     /// Hide the webview.
     pub fn hide(&mut self) {
-        if !self.visible {
+        if !self.visible.get() {
             return;
         }
-        _ = self.webview.focus_parent();
-        _ = self.webview.set_visible(false);
-        #[cfg(feature = "performance-profiling")]
-        HIDE_TRANSITIONS.fetch_add(1, Ordering::Relaxed);
-        self.visible = false;
+        let _ = self.set_visible(false);
     }
 
     /// Get whether the webview is visible.
     pub fn visible(&self) -> bool {
-        self.visible
+        self.visible.get()
     }
 
     /// Get the current bounds of the webview.
@@ -143,7 +196,54 @@ impl WebView {
     /// Reapply native geometry after the existing child moves to another
     /// native window, even when its logical bounds are unchanged.
     pub fn invalidate_native_bounds(&mut self) {
-        self.applied_native_bounds = None;
+        self.applied_native_geometry.set(None);
+    }
+
+    /// Move the retained native page into another GPUI window's composition
+    /// tree without reloading its document or history.
+    #[cfg(target_os = "macos")]
+    pub fn reparent(&mut self, window: &mut Window, cx: &mut App) -> anyhow::Result<()> {
+        let surface = NativeWebViewSurface::reparent(&self.webview, window, cx)?;
+        if let Some(previous) = self.composition.replace(surface) {
+            previous.remove();
+        }
+        self.applied_native_geometry.set(None);
+        Ok(())
+    }
+
+    fn set_geometry(&self, document: Bounds<Pixels>, clip: Bounds<Pixels>) -> anyhow::Result<()> {
+        let visible = document.intersect(&clip);
+        if visible.is_empty() || !self.visible.get() {
+            self.set_native_visible(false)?;
+            #[cfg(target_os = "macos")]
+            if let Some(surface) = &self.composition {
+                if self.visible.get() && !document.is_empty() {
+                    surface.set_geometry(&self.webview, document, document)?;
+                }
+            }
+            return Ok(());
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(surface) = &self.composition {
+            surface.set_geometry(&self.webview, document, visible)?;
+            surface.set_visible(true)?;
+            self.webview.set_visible(true)?;
+            return Ok(());
+        }
+        self.webview.set_bounds(Rect {
+            position: dpi::LogicalPosition::new(
+                f64::from(document.origin.x),
+                f64::from(document.origin.y),
+            )
+            .into(),
+            size: LogicalSize::new(
+                f64::from(document.size.width),
+                f64::from(document.size.height),
+            )
+            .into(),
+        })?;
+        self.set_native_visible(true)?;
+        Ok(())
     }
 
     /// Go back in the webview history.
@@ -276,18 +376,28 @@ impl Element for WebViewElement {
             return None;
         }
 
+        let parent = self.parent.read(cx);
+        #[cfg(target_os = "macos")]
+        if let Some(surface) = &parent.composition {
+            surface.set_scale_factor(window.scale_factor());
+        }
+        let clip = window.content_mask().bounds;
+        let geometry = (bounds, clip, window.scale_factor());
+
         // Native frame writes can invalidate WKWebView even when GPUI merely
-        // repaints another pane. Keep the retained native surface unchanged
-        // until layout actually moves or resizes it. Cache only successful
-        // writes, allowing a failed platform operation to be retried.
-        if self.parent.read(cx).applied_native_bounds != Some(bounds) {
+        // repaints another pane. Include inherited clipping and display scale
+        // in the cache because the composition surface owns both.
+        if parent.applied_native_geometry.get() != Some(geometry) {
             #[cfg(feature = "performance-profiling")]
             BOUNDS_WRITES.fetch_add(1, Ordering::Relaxed);
             #[cfg(feature = "performance-profiling")]
             if trace_bounds_enabled() {
                 let trace_index = BOUNDS_TRACE_WRITES.fetch_add(1, Ordering::Relaxed);
                 if trace_index < 100 {
-                    let old = self.parent.read(cx).applied_native_bounds.map(numeric_bounds);
+                    let old = parent
+                        .applied_native_geometry
+                        .get()
+                        .map(|(bounds, _, _)| numeric_bounds(bounds));
                     eprintln!(
                         "GPUI PERF native_bounds_change #{} old={:?} new={:?}",
                         trace_index + 1,
@@ -296,25 +406,23 @@ impl Element for WebViewElement {
                     );
                 }
             }
-            let result = self.view.set_bounds(Rect {
-                size: dpi::Size::Logical(LogicalSize {
-                    width: bounds.size.width.into(),
-                    height: bounds.size.height.into(),
-                }),
-                position: dpi::Position::Logical(dpi::LogicalPosition::new(
-                    bounds.origin.x.into(),
-                    bounds.origin.y.into(),
-                )),
-            });
-
-            if result.is_ok() {
-                self.parent
-                    .update(cx, |view, _| view.applied_native_bounds = Some(bounds));
+            if let Err(error) = parent.set_geometry(bounds, clip) {
+                if !parent.geometry_failed.replace(true) {
+                    log::warn!("WebView geometry update failed: {error:#}");
+                }
+                let _ = parent.set_native_visible(false);
+                return None;
             }
+            parent.geometry_failed.set(false);
+            parent.applied_native_geometry.set(Some(geometry));
+        }
+        let visible = bounds.intersect(&clip);
+        if visible.is_empty() {
+            return None;
         }
 
-        // Create a hitbox to handle mouse event
-        Some(window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal))
+        // Native content owns pointer input in its visible rectangle.
+        Some(window.insert_hitbox(visible, gpui::HitboxBehavior::BlockMouse))
     }
 
     fn paint(

@@ -14,6 +14,7 @@ use std::{
 };
 use uuid::Uuid;
 const MAX_BODY: usize = 128 * 1024;
+const MAX_RESPONSE_BODY: usize = 512 * 1024;
 const MAX_HEADER: usize = 16 * 1024;
 const MAX_CONCURRENT: usize = 16;
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
@@ -424,17 +425,26 @@ fn read_deadline(s: &mut TcpStream, b: &mut [u8], at: Instant) -> Result<usize, 
         _ => (400, "Could not read request.".into()),
     })
 }
+// Keep overflow errors inside the JSON-RPC envelope so clients can associate
+// the error with their request instead of failing to deserialize the transport.
+fn encode_response(body: &Value) -> Vec<u8> {
+    let bytes = serde_json::to_vec(body).expect("JSON values are serializable");
+    if bytes.len() <= MAX_RESPONSE_BODY {
+        return bytes;
+    }
+    let error = |reply: &Value| json!({"jsonrpc": "2.0",
+        "id": reply.get("id").cloned().unwrap_or(Value::Null),
+        "error": {"code": -32603, "message": "Monitter broker response exceeded 512 KiB."}});
+    let fallback = match body.as_array() {
+        Some(replies) => Value::Array(replies.iter().map(error).collect()),
+        None => error(body),
+    };
+    serde_json::to_vec(&fallback).expect("JSON-RPC errors are serializable")
+}
+
 fn write_response(mut s: TcpStream, status: u16, body: Option<Value>) -> std::io::Result<()> {
     let has_body = body.is_some();
-    let mut bytes = body
-        .map(|v| {
-            serde_json::to_vec(&v)
-                .unwrap_or_else(|_| b"{\"error\":\"Response encoding failed.\"}".to_vec())
-        })
-        .unwrap_or_default();
-    if bytes.len() > MAX_BODY {
-        bytes = b"{\"error\":\"Monitter broker response exceeded 128 KiB.\"}".to_vec();
-    }
+    let bytes = body.map(|v| encode_response(&v)).unwrap_or_default();
     let reason = match status {
         200 => "OK",
         202 => "Accepted",
@@ -479,6 +489,42 @@ mod tests {
         let b = serde_json::to_vec(&v).unwrap();
         raw(e,&format!("POST /mcp HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {t}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nMCP-Protocol-Version: 2025-03-26\r\nContent-Length: {}\r\n\r\n{}",b.len(),String::from_utf8(b).unwrap()))
     }
+    #[test]
+    fn build_queue_reply_above_request_limit_is_preserved() {
+        let payload = "x".repeat(MAX_BODY + 1024);
+        let b = Broker::start(Arc::new(move |_, name, _| {
+            assert_eq!(name, "build_queue_list");
+            Ok(json!({"requests": [], "runs": [], "summary": payload}))
+        })).unwrap();
+        let g = b.session("x");
+        let response = call(&g.endpoint, &g.token, json!({"jsonrpc": "2.0",
+            "id": "queue", "method": "tools/call",
+            "params": {"name": "build_queue_list", "arguments": {}}}));
+        let (headers, body) = response.split_once("\r\n\r\n").unwrap();
+        assert!(headers.starts_with("HTTP/1.1 200"));
+        let reply: Value = serde_json::from_str(body).unwrap();
+        assert_eq!(reply["jsonrpc"], "2.0");
+        assert_eq!(reply["id"], "queue");
+        let result: Value = serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(result["summary"].as_str().unwrap().len(), MAX_BODY + 1024);
+    }
+
+    #[test]
+    fn oversized_responses_keep_rpc_ids_for_single_and_batch_calls() {
+        let response = json!({"jsonrpc": "2.0", "id": "large",
+            "result": {"content": [{"type": "text", "text": "x".repeat(MAX_RESPONSE_BODY)}]}});
+        let decode = |value: &Value| serde_json::from_slice::<Value>(&encode_response(value)).unwrap();
+        let error = decode(&response);
+        assert_eq!(error["jsonrpc"], "2.0");
+        assert_eq!(error["id"], "large");
+        assert_eq!(error["error"]["code"], -32603);
+        assert!(error.get("result").is_none());
+        let batch = decode(&json!([response, {"jsonrpc": "2.0", "id": 7, "result": {}}]));
+        assert_eq!(batch[0]["id"], "large");
+        assert_eq!(batch[1]["id"], 7);
+        assert_eq!(batch[1]["error"]["code"], -32603);
+    }
+
     #[test]
     fn auth_lifecycle_and_revoke() {
         let n = Arc::new(AtomicUsize::new(0));

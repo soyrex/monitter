@@ -715,6 +715,21 @@ pub(super) fn render(
             ),
         );
     }
+    let show_active_border = settings["showActivePaneBorder"].as_bool().unwrap_or(true);
+    let border_width = state.active_pane_border_width.read(cx).value().end().round() as u8;
+    interface = interface
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(format!("Active pane outline: {border_width}px")),
+        )
+        .child(
+            Slider::new(&state.active_pane_border_width)
+                .disabled(desktop.busy || !show_active_border),
+        )
+        .child(range_footer("1px", "8px", palette));
     let dim_inactive = settings["dimInactivePanes"].as_bool().unwrap_or(true);
     let opacity_percent = state.inactive_pane_opacity.read(cx).value().end().round() as u16;
     interface = interface

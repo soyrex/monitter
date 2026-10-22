@@ -46,9 +46,9 @@ fn mounted(cx: &mut TestAppContext, light: bool) {
             view.preferences_busy = true; // Offline fixture: never persist layout/preferences.
             view.snapshot = json!({"settings":{"theme":if light {"light"} else {"dark"}},
                 "agents":[{"id":"agent","name":"Codex"}],
-                "tasks":[{"id":"current","agentId":"agent","updatedAt":1},
-                    {"id":"other","agentId":"agent","updatedAt":1},
-                    {"id":"orphan","agentId":"agent","updatedAt":1}],
+                "tasks":[{"id":"current","agentId":"agent","status":"idle","updatedAt":1},
+                    {"id":"other","agentId":"agent","status":"running","updatedAt":1},
+                    {"id":"orphan","agentId":"agent","status":"running","updatedAt":1}],
                 "messages":[],"channels":[],
                 "approvalRequests":[{"id":"current-approval","taskId":"current","status":"pending","summary":"Current workspace request","createdAt":1},
                     {"id":"approval","taskId":"other","status":"pending","summary":"Review this request","createdAt":2},
@@ -81,6 +81,15 @@ fn mounted(cx: &mut TestAppContext, light: bool) {
         assert!(visual.debug_bounds("workspace-notifications-current").is_some(),
             "selected workspace keeps its nonzero notification pill visible");
         assert!(visual.debug_bounds("workspace-notifications-empty").is_none());
+        let spinner = visual.debug_bounds("workspace-active-spinner-other")
+            .expect("inactive workspace with a running task has an activity spinner");
+        assert_eq!(spinner.size, size(px(10.), px(10.)), "activity spinner is 10x10");
+        let icon = visual.debug_bounds("workspace-edit-icon-other")
+            .expect("workspace icon anchors the activity spinner");
+        assert!(spinner.center().x > icon.center().x && spinner.center().y < icon.center().y,
+            "activity spinner stays on the icon's top-right corner: icon={icon:?}, spinner={spinner:?}");
+        assert!(visual.debug_bounds("workspace-active-spinner-current").is_none());
+        assert!(visual.debug_bounds("workspace-active-spinner-empty").is_none());
         if width == 1000. {
             let tabs = visual.debug_bounds("named-workspace-tabs").expect("centered workspace tabs");
             assert!((tabs.center().x - px(width / 2.)).abs() <= px(1.),
@@ -108,6 +117,17 @@ fn mounted(cx: &mut TestAppContext, light: bool) {
     }
     let tab_before=visual.debug_bounds("workspace-tab-other").unwrap();
     let following_before=visual.debug_bounds("workspace-tab-empty").unwrap();
+    visual.update(|_,cx|desktop.update(cx,|view,cx| {
+        std::rc::Rc::make_mut(&mut view.snapshot)["tasks"][1]["status"]=json!("idle");
+        cx.notify();
+    }));
+    visual.run_until_parked();visual.update(|window,cx|window.draw(cx).clear(cx));
+    assert!(visual.debug_bounds("workspace-active-spinner-other").is_none(),
+        "spinner disappears when the workspace task stops running");
+    assert_eq!(visual.debug_bounds("workspace-tab-other").unwrap(),tab_before,
+        "removing the spinner preserves tab bounds");
+    assert_eq!(visual.debug_bounds("workspace-tab-empty").unwrap(),following_before,
+        "spinner removal does not shift following workspace tabs");
     // Dismiss an alert through the workspace feed; the global model loses that same entry.
     let pill=visual.debug_bounds("workspace-notifications-other").unwrap();
     visual.simulate_click(pill.center(), Modifiers::none());visual.run_until_parked();

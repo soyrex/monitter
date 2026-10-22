@@ -7,7 +7,9 @@ const MAX_FILE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_NATIVE_BYTES: usize = 16 * 1024;
 fn path() -> Option<std::path::PathBuf> {
     #[cfg(feature = "performance-profiling")]
-    if crate::workspace_window_preview::enabled() { return None; }
+    if crate::workspace_window_preview::enabled() {
+        return None;
+    }
     // Native fixtures must never read or overwrite the user's window placement.
     #[cfg(test)]
     return None;
@@ -51,49 +53,79 @@ fn valid_root(value: &Value) -> bool {
 fn read() -> Option<Value> {
     cached().lock().ok()?.clone()
 }
-/// One bounded writer queue. Enqueue while holding the cache lock so snapshots
-/// cannot reach disk in reverse order when native windows save concurrently.
-fn enqueue(value: Value, flush: bool) {
-    type Write = (Value, Option<std::sync::mpsc::Sender<()>>);
-    static WRITER: std::sync::OnceLock<std::sync::mpsc::SyncSender<Write>> =
-        std::sync::OnceLock::new();
-    let sender = WRITER.get_or_init(|| {
-        let (tx, rx) = std::sync::mpsc::sync_channel::<Write>(1);
+/// A replaceable snapshot and a nonblocking wakeup keep disk latency out of
+/// native event callbacks. The worker never holds the mailbox during I/O.
+#[derive(Default)]
+struct PendingWrite {
+    value: Option<Value>,
+    acknowledgements: Vec<futures::channel::oneshot::Sender<()>>,
+}
+struct Writer {
+    pending: std::sync::Arc<std::sync::Mutex<PendingWrite>>,
+    wake: std::sync::mpsc::SyncSender<()>,
+}
+fn writer() -> &'static Writer {
+    static WRITER: std::sync::OnceLock<Writer> = std::sync::OnceLock::new();
+    WRITER.get_or_init(|| {
+        let pending = std::sync::Arc::new(std::sync::Mutex::new(PendingWrite::default()));
+        let worker_pending = pending.clone();
+        let (wake, receiver) = std::sync::mpsc::sync_channel(1);
         std::thread::spawn(move || {
-            while let Ok((mut value, ack)) = rx.recv() {
-                let mut acknowledgements = ack.into_iter().collect::<Vec<_>>();
-                // Only one queued snapshot can exist. Newer snapshots contain
-                // all placement and ownership updates from the same cache.
-                if let Ok((newer, ack)) = rx.try_recv() {
-                    value = newer;
-                    acknowledgements.extend(ack);
-                }
-                if let Some(path) = path() {
-                    if let Some(parent) = path.parent() {
-                        if std::fs::create_dir_all(parent).is_ok() {
-                            let temporary = path.with_extension("json.tmp");
-                            if let Ok(bytes) = serde_json::to_vec(&value) {
-                                if bytes.len() <= MAX_FILE_BYTES
-                                    && std::fs::write(&temporary, bytes).is_ok()
-                                {
-                                    let _ = std::fs::rename(temporary, path);
-                                }
+            while receiver.recv().is_ok() {
+                let batch = {
+                    let Ok(mut pending) = worker_pending.lock() else {
+                        break;
+                    };
+                    std::mem::take(&mut *pending)
+                };
+                if let Some(value) = batch.value {
+                    if let Some(path) = path() {
+                        let result = (|| -> std::io::Result<()> {
+                            if let Some(parent) = path.parent() {
+                                std::fs::create_dir_all(parent)?;
                             }
+                            let bytes = serde_json::to_vec(&value)?;
+                            if bytes.len() > MAX_FILE_BYTES {
+                                return Err(std::io::Error::other(
+                                    "Window state exceeds size limit",
+                                ));
+                            }
+                            let temporary = path.with_extension("json.tmp");
+                            std::fs::write(&temporary, bytes)?;
+                            std::fs::rename(temporary, path)
+                        })();
+                        if let Err(error) = result {
+                            eprintln!("Could not persist native window placement: {error}");
                         }
                     }
                 }
-                for ack in acknowledgements {
-                    let _ = ack.send(());
+                for acknowledgement in batch.acknowledgements {
+                    let _ = acknowledgement.send(());
                 }
             }
         });
-        tx
-    });
-    let (tx, rx) = std::sync::mpsc::channel();
-    let _ = sender.send((value, if flush { Some(tx) } else { None }));
-    if flush {
-        let _ = rx.recv_timeout(std::time::Duration::from_secs(1));
+        Writer { pending, wake }
+    })
+}
+/// Called under the cache mutex so concurrent placement changes retain order.
+/// The mailbox contains only the latest complete snapshot, never a backlog.
+fn enqueue(value: Value, _flush: bool) {
+    let writer = writer();
+    if let Ok(mut pending) = writer.pending.lock() {
+        pending.value = Some(value);
     }
+    let _ = writer.wake.try_send(());
+}
+/// Quit awaits this barrier asynchronously after capturing all window state.
+/// A full wake channel already guarantees the worker will drain the mailbox.
+pub fn flush_pending() -> futures::channel::oneshot::Receiver<()> {
+    let (send, receive) = futures::channel::oneshot::channel();
+    let writer = writer();
+    if let Ok(mut pending) = writer.pending.lock() {
+        pending.acknowledgements.push(send);
+    }
+    let _ = writer.wake.try_send(());
+    receive
 }
 fn update(mutator: impl FnOnce(&mut Value), flush: bool) -> Result<(), String> {
     let mut cache = cached()
@@ -142,7 +174,9 @@ pub fn primary_window_id() -> WindowId {
     #[cfg(test)]
     return WindowId::main();
     #[cfg(not(test))]
-    load_workspace_windows().map(|state| state.primary_window_id().clone()).unwrap_or_else(WindowId::main)
+    load_workspace_windows()
+        .map(|state| state.primary_window_id().clone())
+        .unwrap_or_else(WindowId::main)
 }
 pub fn load_workspace_windows() -> Option<WorkspaceWindowState> {
     let root = read()?;
@@ -180,6 +214,111 @@ pub fn remove_placement_for(id: &WindowId) -> Result<(), String> {
         false,
     )
 }
+#[derive(Clone, Copy)]
+enum DeferredWindowMode {
+    Windowed,
+    Maximized,
+    Fullscreen,
+}
+impl DeferredWindowMode {
+    fn from_saved(saved: Option<&Value>) -> Self {
+        match saved.and_then(|saved| saved["state"].as_str()) {
+            Some("fullscreen") => Self::Fullscreen,
+            Some("maximized") => Self::Maximized,
+            _ => Self::Windowed,
+        }
+    }
+    fn matches(self, window: &Window) -> bool {
+        match self {
+            Self::Fullscreen => window.is_fullscreen(),
+            Self::Maximized => !window.is_fullscreen() && window.is_maximized(),
+            Self::Windowed => !window.is_fullscreen() && !window.is_maximized(),
+        }
+    }
+}
+#[derive(Clone)]
+struct HiddenNativeRestore {
+    saved: Option<Value>,
+    mode: DeferredWindowMode,
+    revealed_at: Option<std::time::Instant>,
+}
+thread_local! {
+    // Native window identity, rather than the currently selected workspace,
+    // keeps placement protection scoped to the one initially hidden host.
+    static HIDDEN_NATIVE_RESTORES: std::cell::RefCell<std::collections::HashMap<gpui_kit::WindowId, HiddenNativeRestore>> = Default::default();
+}
+
+/// Register placement/native-state restoration without touching AppKit while
+/// the initial styled scene and session-lock authority are still preparing.
+/// Pair with `initial_hidden` and call `finish_hidden_restore` after reveal.
+pub fn restore_native_hidden(window: &Window, _cx: &App) {
+    let saved = read().and_then(|root| placement(&root, &primary_window_id()).cloned());
+    let mode = DeferredWindowMode::from_saved(saved.as_ref());
+    HIDDEN_NATIVE_RESTORES.with(|pending| {
+        pending
+            .borrow_mut()
+            .entry(window.window_handle().window_id())
+            .or_insert(HiddenNativeRestore {
+                saved,
+                mode,
+                revealed_at: None,
+            });
+    });
+}
+
+/// Apply the saved native mode only after the fully styled scene has been
+/// drawn and `activate_window` requested. GPUI queues fullscreen/zoom changes
+/// on the foreground executor; transient placement callbacks stay protected.
+pub fn finish_hidden_restore(window: &Window, cx: &App) {
+    let restore = HIDDEN_NATIVE_RESTORES.with(|pending| {
+        let mut pending = pending.borrow_mut();
+        let restore = pending.get_mut(&window.window_handle().window_id())?;
+        if restore.revealed_at.is_some() {
+            return None;
+        }
+        restore.revealed_at = Some(std::time::Instant::now());
+        Some(restore.clone())
+    });
+    let Some(restore) = restore else {
+        return;
+    };
+    if let Some(saved) = restore.saved.as_ref() {
+        restore_native_placement(saved, window, cx);
+    }
+    // Native archive restoration is synchronous and may already restore zoom.
+    // Check its resulting mode before issuing any toggle (never toggle twice).
+    match restore.mode {
+        DeferredWindowMode::Fullscreen if !window.is_fullscreen() => window.toggle_fullscreen(),
+        DeferredWindowMode::Maximized if !window.is_maximized() && !window.is_fullscreen() => {
+            window.zoom_window()
+        }
+        _ => {}
+    }
+}
+
+fn hidden_restore_blocks_save(window: &Window) -> bool {
+    HIDDEN_NATIVE_RESTORES.with(|pending| {
+        let mut pending = pending.borrow_mut();
+        let key = window.window_handle().window_id();
+        let Some(restore) = pending.get(&key) else {
+            return false;
+        };
+        let Some(revealed_at) = restore.revealed_at else {
+            return true;
+        };
+        // A native transition normally completes within a few frames. Release
+        // protection on the first matching mode, or after a bounded grace period
+        // so an OS-denied transition cannot suppress future user placements.
+        if !restore.mode.matches(window)
+            && revealed_at.elapsed() < std::time::Duration::from_secs(5)
+        {
+            return true;
+        }
+        pending.remove(&key);
+        false
+    })
+}
+
 pub fn restore_native(window: &Window, cx: &App) {
     restore_native_for(&primary_window_id(), window, cx);
 }
@@ -190,6 +329,9 @@ pub fn restore_native_for(id: &WindowId, window: &Window, cx: &App) {
     let Some(saved) = placement(&root, id) else {
         return;
     };
+    restore_native_placement(saved, window, cx);
+}
+fn restore_native_placement(saved: &Value, window: &Window, cx: &App) {
     if saved["state"] == "fullscreen"
         || saved["displays"] != displays(cx)
         || saved["nativeStateBounds"] != saved["bounds"]
@@ -297,6 +439,15 @@ pub fn display_id_for(id: &WindowId, cx: &App) -> Option<DisplayId> {
 pub fn initial(cx: &App) -> Option<WindowBounds> {
     initial_for(&primary_window_id(), cx)
 }
+/// Use the same clamped saved restore geometry without asking GPUI to queue
+/// fullscreen/zoom during Window::new, before the initial hidden scene is ready.
+pub fn initial_hidden(cx: &App) -> Option<WindowBounds> {
+    initial(cx).map(|bounds| match bounds {
+        WindowBounds::Windowed(bounds)
+        | WindowBounds::Maximized(bounds)
+        | WindowBounds::Fullscreen(bounds) => WindowBounds::Windowed(bounds),
+    })
+}
 pub fn initial_for(id: &WindowId, cx: &App) -> Option<WindowBounds> {
     let root = read()?;
     let saved = placement(&root, id)?;
@@ -328,6 +479,11 @@ pub fn save_for(id: &WindowId, window: &Window, cx: &App) {
     save_inner(id, window, cx, false);
 }
 fn save_inner(id: &WindowId, window: &Window, cx: &App, native: bool) {
+    // The temporary windowed startup host must not overwrite the saved mode,
+    // restore bounds or native archive before deferred restoration completes.
+    if hidden_restore_blocks_save(window) {
+        return;
+    }
     let state = if window.is_fullscreen() {
         "fullscreen"
     } else if window.is_maximized() {
@@ -389,8 +545,8 @@ fn save_inner(id: &WindowId, window: &Window, cx: &App, native: bool) {
 
 #[cfg(test)]
 mod tests {
-    use ::core::prelude::v1::test;
     use super::*;
+    use ::core::prelude::v1::test;
     fn b(x: f32, y: f32, w: f32, h: f32) -> Bounds<Pixels> {
         Bounds::new(point(px(x), px(y)), size(px(w), px(h)))
     }

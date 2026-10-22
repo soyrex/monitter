@@ -29,6 +29,7 @@ pub struct SessionLock {
     focus: FocusHandle,
     locked: bool,
     configured: Option<bool>,
+    initialized: bool,
     busy: bool,
     locking: bool,
     pin: Entity<InputState>,
@@ -53,14 +54,9 @@ impl SessionLock {
         Self::new_with_storage(false, window, cx)
     }
     fn new_with_storage(storage: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let result = if storage { store::read_snapshot() } else { Ok(store::LockSnapshot::default()) };
-        let locked = result.as_ref().map(|s| s.locked).unwrap_or(true);
-        let attempts = result.as_ref().map(|s| s.attempts).unwrap_or(0);
-        let retry_after = result.as_ref().ok().and_then(|s| {
-            let remaining = s.retry_until_ms.saturating_sub(unix_ms()).min(60_000);
-            (remaining > 0).then(|| Instant::now() + Duration::from_millis(remaining))
-        });
-        cx.set_global(LockState(locked));
+        // The initial shell is fail-closed until storage supplies authority.
+        // Even a cold or contended SQLite database cannot hold up first paint.
+        cx.set_global(LockState(storage));
         let pin = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder("PIN"));
         let current = cx.new(|cx| {
             InputState::new(window, cx)
@@ -92,43 +88,82 @@ impl SessionLock {
             },
         )
         .detach();
-        let worker = cx
-            .background_executor()
-            .spawn(async move { if storage { store::configured() } else { Ok(false) } });
-        cx.spawn(async move |view, cx| {
-            let result = worker.await;
-            let _ = view.update(cx, |view, cx| {
-                match result {
-                    Ok(configured) => view.configured = Some(configured),
-                    Err(error) => view.error = Some(error),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
+        if storage {
+            Self::load_storage(cx);
+        }
         Self {
             disconnected_fixture: !storage,
             focus: cx.focus_handle(),
-            locked,
-            configured: None,
-            busy: false,
+            locked: storage,
+            configured: (!storage).then_some(false),
+            initialized: !storage,
+            busy: storage,
             locking: false,
             pin,
             current,
             confirmation,
-            error: result.err(),
+            error: None,
             notice: None,
-            attempts,
-            retry_after,
+            attempts: 0,
+            retry_after: None,
             retry_timer: None,
             palette: design::palette(&serde_json::Value::Null, WindowAppearance::Dark),
             lock_generation: 0,
         }
     }
+    fn load_storage(cx: &mut Context<Self>) {
+        let worker = cx.background_executor().spawn(async {
+            let snapshot = store::read_snapshot()?;
+            let configured = store::configured()?;
+            Ok::<_, String>((snapshot, configured))
+        });
+        cx.spawn(async move |view, cx| {
+            let result = worker.await;
+            let _ = view.update(cx, |view, cx| {
+                view.busy = false;
+                match result {
+                    Ok((snapshot, configured)) => {
+                        view.initialized = true;
+                        view.configured = Some(configured);
+                        view.locked = snapshot.locked;
+                        view.attempts = snapshot.attempts;
+                        let remaining = snapshot
+                            .retry_until_ms
+                            .saturating_sub(unix_ms())
+                            .min(60_000);
+                        view.retry_after = (remaining > 0)
+                            .then(|| Instant::now() + Duration::from_millis(remaining));
+                        view.error = None;
+                        cx.set_global(LockState(view.locked));
+                        if !view.locked {
+                            cx.emit(LockEvent::Unlocked);
+                        }
+                    }
+                    Err(error) => {
+                        // Failed authority reads never reveal cached panes.
+                        view.error = Some(error);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+    pub fn is_initialized(&self) -> bool {
+        self.initialized
+    }
+    pub fn requires_lock_persistence(&self) -> bool {
+        self.initialized && self.locked
+    }
     /// Keep the one PIN form and its input observers on the surviving primary.
-    pub(crate) fn rehost_to_window(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Result<(), String> {
+    pub(crate) fn rehost_to_window(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
         let id = cx.entity_id();
-        cx.rehost_entity_window(id, window).map_err(|error| error.to_string())?;
+        cx.rehost_entity_window(id, window)
+            .map_err(|error| error.to_string())?;
         for input in [&self.pin, &self.current, &self.confirmation] {
             input.update(cx, |input, cx| input.rehost_to_window(window, cx))?;
         }
@@ -163,7 +198,9 @@ impl SessionLock {
         }
     }
     pub fn lock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.disconnected_fixture { return; }
+        if self.disconnected_fixture {
+            return;
+        }
         if self.locked || !self.configured() || self.busy {
             return;
         }
@@ -195,12 +232,19 @@ impl SessionLock {
         cx.notify();
     }
     fn retry_storage(&mut self, cx: &mut Context<Self>) {
-        if self.disconnected_fixture { return; }
+        if self.disconnected_fixture {
+            return;
+        }
         if self.busy {
             return;
         }
         self.busy = true;
         self.error = None;
+        if !self.initialized {
+            Self::load_storage(cx);
+            cx.notify();
+            return;
+        }
         let worker = cx
             .background_executor()
             .spawn(async { store::configured() });
@@ -220,7 +264,8 @@ impl SessionLock {
     }
     fn save_pin(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.disconnected_fixture {
-            self.error = Some("Session PIN changes are disabled in the disconnected preview.".into());
+            self.error =
+                Some("Session PIN changes are disabled in the disconnected preview.".into());
             cx.notify();
             return;
         }
@@ -279,8 +324,14 @@ impl SessionLock {
         cx.notify();
     }
     fn unlock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.disconnected_fixture { return; }
-        if !self.locked || self.busy || self.retry_after.is_some_and(|t| Instant::now() < t) {
+        if self.disconnected_fixture {
+            return;
+        }
+        if !self.initialized
+            || !self.locked
+            || self.busy
+            || self.retry_after.is_some_and(|t| Instant::now() < t)
+        {
             return;
         }
         let pin = self.pin.read(cx).value().to_string();
@@ -515,28 +566,43 @@ impl Render for SessionLock {
             .relative()
             .size_full()
             .occlude()
-            .on_mouse_down(MouseButton::Left, cx.listener(|view, _, window, cx| {
-                view.focus(window, cx);
-                cx.stop_propagation();
-            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|view, _, window, cx| {
+                    view.focus(window, cx);
+                    cx.stop_propagation();
+                }),
+            )
             .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
             .capture_key_down(cx.listener(|view, event: &KeyDownEvent, window, cx| {
                 let keystroke = &event.keystroke;
-                if !view.busy && !view.retry_after.is_some_and(|t| Instant::now() < t) {
+                if view.initialized
+                    && !view.busy
+                    && !view.retry_after.is_some_and(|t| Instant::now() < t)
+                {
                     let mut pin = view.pin.read(cx).value().to_string();
                     if keystroke.key == "enter" {
-                        if pin.len() >= 4 { view.unlock(window, cx); }
+                        if pin.len() >= 4 {
+                            view.unlock(window, cx);
+                        }
                     } else if keystroke.key == "backspace" {
-                        if keystroke.modifiers.platform || keystroke.modifiers.control { pin.clear(); }
-                        else { pin.pop(); }
-                        view.pin.update(cx, |input, cx| input.set_value(pin, window, cx));
+                        if keystroke.modifiers.platform || keystroke.modifiers.control {
+                            pin.clear();
+                        } else {
+                            pin.pop();
+                        }
+                        view.pin
+                            .update(cx, |input, cx| input.set_value(pin, window, cx));
                         cx.notify();
                     } else if !keystroke.modifiers.control && !keystroke.modifiers.platform {
                         if let Some(text) = &keystroke.key_char {
                             for digit in text.chars().filter(char::is_ascii_digit) {
-                                if pin.len() < 8 { pin.push(digit); }
+                                if pin.len() < 8 {
+                                    pin.push(digit);
+                                }
                             }
-                            view.pin.update(cx, |input, cx| input.set_value(pin, window, cx));
+                            view.pin
+                                .update(cx, |input, cx| input.set_value(pin, window, cx));
                             view.error = None;
                             cx.notify();
                         }
@@ -548,37 +614,87 @@ impl Render for SessionLock {
                 cx.stop_propagation();
             }))
             .child({
-                let blur = div().absolute().inset_0().bg(
-                    Background::from(rgba(if palette.dark { 0x00000045 } else { 0xffffff45 }))
-                        .backdrop_blur(20.),
-                );
+                let blur = div()
+                    .absolute()
+                    .inset_0()
+                    .bg(
+                        Background::from(rgba(if palette.dark { 0x00000045 } else { 0xffffff45 }))
+                            .backdrop_blur(20.),
+                    );
                 if self.lock_generation > 0 && crate::native_motion::motion_allowed() {
                     blur.with_animation(
                         ("session-lock-blur", self.lock_generation),
                         Animation::new(Duration::from_millis(200)).with_max_fps(60.),
                         |blur, progress| blur.opacity(progress),
-                    ).into_any_element()
-                } else { blur.into_any_element() }
+                    )
+                    .into_any_element()
+                } else {
+                    blur.into_any_element()
+                }
             })
             .flex()
             .items_center()
             .justify_center()
             .child(
-                div().relative().w(px(144.)).h(px(36.))
-                    .child(img(crate::branding::sidebar_wordmark(288.))
-                        .size_full().object_fit(ObjectFit::Contain))
-                    .child(div().absolute().top(px(48.)).left(px(-88.)).w(px(320.))
-                        .flex().flex_col().items_center().gap(px(10.))
-                        .child(div().id("session-lock-pin-marks")
-                            .role(Role::Label).aria_label(format!("{} PIN digits entered", self.pin.read(cx).value().len()))
-                            .text_size(px(36.)).font_weight(FontWeight::MEDIUM)
-                            .text_color(rgb(palette.ink))
-                            .child("*".repeat(self.pin.read(cx).value().len())))
-                        .when_some(self.error.clone(), |entry, error| entry.child(
-                            div().text_sm().text_color(rgb(0xd65b5b)).child(error)))
-                        .when(remaining > 0, |entry| entry.child(
-                            div().text_sm().text_color(rgb(palette.ink))
-                                .child(format!("Try again in {remaining}s")))))
+                div()
+                    .relative()
+                    .w(px(144.))
+                    .h(px(36.))
+                    .child(
+                        img(crate::branding::sidebar_wordmark(288.))
+                            .size_full()
+                            .object_fit(ObjectFit::Contain),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(48.))
+                            .left(px(-88.))
+                            .w(px(320.))
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .gap(px(10.))
+                            .child(
+                                div()
+                                    .id("session-lock-pin-marks")
+                                    .role(Role::Label)
+                                    .aria_label(format!(
+                                        "{} PIN digits entered",
+                                        self.pin.read(cx).value().len()
+                                    ))
+                                    .text_size(px(36.))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(rgb(palette.ink))
+                                    .child(if self.initialized {
+                                        "*".repeat(self.pin.read(cx).value().len())
+                                    } else if self.busy {
+                                        "Opening…".into()
+                                    } else {
+                                        String::new()
+                                    }),
+                            )
+                            .when(!self.initialized && !self.busy, |entry| {
+                                entry.child(
+                                    Button::new("retry-initial-session-storage")
+                                        .label("Retry opening")
+                                        .on_click(
+                                            cx.listener(|view, _, _, cx| view.retry_storage(cx)),
+                                        ),
+                                )
+                            })
+                            .when_some(self.error.clone(), |entry, error| {
+                                entry.child(div().text_sm().text_color(rgb(0xd65b5b)).child(error))
+                            })
+                            .when(remaining > 0, |entry| {
+                                entry.child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(rgb(palette.ink))
+                                        .child(format!("Try again in {remaining}s")),
+                                )
+                            }),
+                    ),
             )
     }
 }

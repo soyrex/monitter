@@ -1,7 +1,7 @@
 //! A noninteractive AppKit outline and outward glow above GPUI/browser child views.
 //! Active-pane painting keeps the view visible; a frame finalizer hides it only
 //! after a rendered workspace observes that no active pane owns it.
-use gpui_kit::{Bounds, Pixels, Point, Rgba, Window};
+use gpui_kit::{App, Bounds, Pixels, Point, Rgba, Window};
 #[cfg(any(test, feature = "performance-profiling"))]
 use std::sync::atomic::{AtomicU64, Ordering};
 #[path = "pane_highlight_state.rs"]
@@ -59,6 +59,8 @@ pub fn finish_frame(_: &Window) {}
 #[cfg(not(target_os = "macos"))]
 pub fn clear(_: &Window) {}
 #[cfg(not(target_os = "macos"))]
+pub fn occlude_popups(_: &mut Window, _: &mut App) {}
+#[cfg(not(target_os = "macos"))]
 pub fn retain_panes(_: &[String], _: &Window) {}
 #[cfg(not(target_os = "macos"))]
 pub fn paint(
@@ -66,6 +68,7 @@ pub fn paint(
     _: Bounds<Pixels>,
     _: Rgba,
     _: Rgba,
+    _: Pixels,
     _: &[Point<Pixels>],
     _: &Window,
 ) -> bool {
@@ -150,11 +153,14 @@ mod macos {
         bounds: Option<Bounds<Pixels>>,
         color: Option<Rgba>,
         glow_color: Option<Rgba>,
+        line_width: Option<Pixels>,
         pulsing: bool,
         contour: Vec<Point<Pixels>>,
         glow_layers: Vec<Retained<AnyObject>>,
         glow_mask: Retained<AnyObject>,
         glow_container: Retained<AnyObject>,
+        popup_mask: Retained<AnyObject>,
+        popup_geometry: Option<(NSRect, Vec<NSRect>)>,
         frame: OverlayFrameState,
     }
     thread_local! {
@@ -195,6 +201,21 @@ mod macos {
                 false
             })
         });
+    }
+
+    pub fn owns_native_view(view: usize, window: &Window) -> bool {
+        let Some(host) = host(window) else {
+            return false;
+        };
+        OVERLAYS.with(|state| {
+            state.borrow().iter().any(|((owner, _), overlay)| {
+                *owner == host as usize
+                    && overlay
+                        .view
+                        .load()
+                        .is_some_and(|overlay_view| Retained::as_ptr(&overlay_view) as usize == view)
+            })
+        })
     }
 
     pub fn begin_frame(window: &Window) {
@@ -283,6 +304,7 @@ mod macos {
         bounds: Bounds<Pixels>,
         color: Rgba,
         glow_color: Rgba,
+        line_width: Pixels,
         contour: &[Point<Pixels>],
         window: &Window,
     ) -> bool {
@@ -322,6 +344,7 @@ mod macos {
                 let mut glow_layers = Vec::with_capacity(20);
                 let glow_mask;
                 let glow_container;
+                let popup_mask;
                 unsafe {
                     let shape: *mut AnyObject = msg_send![class!(CAShapeLayer), layer];
                     let _: () = msg_send![&*view, setLayer: shape];
@@ -339,6 +362,11 @@ mod macos {
                     let _: () = msg_send![shape, addSublayer: glow];
                     glow_container = Retained::retain(glow).expect("new glow container");
                     glow_mask = Retained::retain(mask).expect("new glow mask");
+                    let popup: *mut AnyObject = msg_send![class!(CAShapeLayer), layer];
+                    let _: () = msg_send![popup, setFillColor: white_cg];
+                    let rule = NSString::from_str("evenOdd");
+                    let _: () = msg_send![popup, setFillRule: &*rule];
+                    popup_mask = Retained::retain(popup).expect("new popup mask");
                     for depth in (1..=20).rev() {
                         let band: *mut AnyObject = msg_send![class!(CAShapeLayer), layer];
                         let _: () = msg_send![band, setFillColor: ptr::null::<NativeCGColor>()];
@@ -358,11 +386,14 @@ mod macos {
                     bounds: None,
                     color: None,
                     glow_color: None,
+                    line_width: None,
                     pulsing: false,
                     contour: Vec::new(),
                     glow_layers,
                     glow_mask,
                     glow_container,
+                    popup_mask,
+                    popup_geometry: None,
                     frame: OverlayFrameState::default(),
                 }
             });
@@ -386,6 +417,11 @@ mod macos {
                 }
                 let layer: *mut AnyObject = msg_send![&*view, layer];
                 if !layer.is_null() {
+                    if overlay.line_width != Some(line_width) {
+                        let native_width: f64 = line_width.into();
+                        let _: () = msg_send![layer, setLineWidth: native_width];
+                        overlay.line_width = Some(line_width);
+                    }
                     if bounds_changed {
                         let local = NSRect::new(NSPoint::new(0., 0.), frame.size);
                         let _: () = msg_send![&*overlay.glow_container, setFrame: local];
@@ -514,9 +550,119 @@ mod macos {
             true
         })
     }
+
+    /// Keep the native outline mounted while cutting only the popup-covered
+    /// pixels from its layer. The GPUI popup surface below remains visible and
+    /// the outline never toggles, avoiding open/close flicker.
+    pub fn occlude_popups(window: &mut Window, cx: &mut App) {
+        if MainThreadMarker::new().is_none() {
+            return;
+        }
+        let Some(host_ptr) = host(window) else {
+            return;
+        };
+        let host = unsafe { &*host_ptr };
+        let popup_bounds = gpui_kit::component::surface_backdrop::popup_bounds(window, cx);
+        let host_rects = popup_bounds
+            .iter()
+            .map(|bounds| {
+                let x = f64::from(f32::from(bounds.origin.x));
+                let top = f64::from(f32::from(bounds.origin.y));
+                let width = f64::from(f32::from(bounds.size.width));
+                let height = f64::from(f32::from(bounds.size.height));
+                NSRect::new(
+                    NSPoint::new(
+                        x,
+                        if host.isFlipped() {
+                            top
+                        } else {
+                            host.bounds().size.height - top - height
+                        },
+                    ),
+                    NSSize::new(width, height),
+                )
+            })
+            .collect::<Vec<_>>();
+        let host_rects =
+            crate::native_popup_occlusion::disjoint_holes(host_rects.iter().map(|rect| {
+                [
+                    rect.origin.x,
+                    rect.origin.y,
+                    rect.origin.x + rect.size.width,
+                    rect.origin.y + rect.size.height,
+                ]
+            }))
+            .into_iter()
+            .map(|[x, y, right, bottom]| {
+                NSRect::new(NSPoint::new(x, y), NSSize::new(right - x, bottom - y))
+            })
+            .collect::<Vec<_>>();
+        OVERLAYS.with(|state| {
+            let mut state = state.borrow_mut();
+            state.retain(|_, overlay| overlay.view.load().is_some());
+            unsafe {
+                let _: () = msg_send![class!(CATransaction), begin];
+                let _: () = msg_send![class!(CATransaction), setDisableActions: true];
+                for ((owner, _), overlay) in state.iter_mut() {
+                    if *owner != host_ptr as usize {
+                        continue;
+                    }
+                    let Some(view) = overlay.view.load() else {
+                        continue;
+                    };
+                    let layer: *mut AnyObject = msg_send![&*view, layer];
+                    if layer.is_null() {
+                        continue;
+                    }
+                    if host_rects.is_empty() {
+                        if overlay.popup_geometry.take().is_some() {
+                            let current_mask: *mut AnyObject = msg_send![layer, mask];
+                            if current_mask
+                                == Retained::as_ptr(&overlay.popup_mask).cast_mut()
+                            {
+                                let _: () =
+                                    msg_send![layer, setMask: ptr::null::<AnyObject>()];
+                            }
+                        }
+                        continue;
+                    }
+                    let local_holes = host_rects
+                        .iter()
+                        .map(|rect| msg_send![&*view, convertRect: *rect fromView: host])
+                        .collect::<Vec<NSRect>>();
+                    let bounds = view.bounds();
+                    let geometry = (bounds, local_holes);
+                    let current_mask: *mut AnyObject = msg_send![layer, mask];
+                    let owns_mask =
+                        current_mask == Retained::as_ptr(&overlay.popup_mask).cast_mut();
+                    if owns_mask && overlay.popup_geometry.as_ref() == Some(&geometry) {
+                        continue;
+                    }
+                    let path = CGPathCreateMutable();
+                    if path.is_null() {
+                        continue;
+                    }
+                    CGPathAddRect(path, ptr::null(), bounds);
+                    for rect in &geometry.1 {
+                        CGPathAddRect(path, ptr::null(), *rect);
+                    }
+                    let _: () = msg_send![&*overlay.popup_mask, setFrame: bounds];
+                    let _: () = msg_send![&*overlay.popup_mask, setBounds: bounds];
+                    let _: () = msg_send![&*overlay.popup_mask, setPath: path.cast_const()];
+                    let _: () = msg_send![layer, setMask: &*overlay.popup_mask];
+                    CGPathRelease(path);
+                    overlay.popup_geometry = Some(geometry);
+                }
+                let _: () = msg_send![class!(CATransaction), commit];
+            }
+        });
+    }
 }
 #[cfg(target_os = "macos")]
-pub use macos::{begin_frame, clear, finish_frame, observe_candidate, paint, retain_panes};
+pub use macos::{
+    begin_frame, clear, finish_frame, observe_candidate, occlude_popups, owns_native_view, paint,
+    retain_panes,
+};
 
 #[cfg(all(test, feature = "visual-export"))]
 #[path = "pane_highlight_tests.rs"]

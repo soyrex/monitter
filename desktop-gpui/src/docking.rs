@@ -86,6 +86,8 @@ pub type LifecycleHook = Rc<dyn Fn(PaneLifecycle, &mut Window, &mut App)>;
 /// A factory must return the already-retained pane, or construct a native pane.
 /// It must not open services, start jobs, or read unbounded files synchronously.
 pub type PaneFactory = Rc<dyn Fn(&str, &mut Window, &mut App) -> Option<PaneSpec>>;
+pub type LazyPaneFactory = Rc<dyn Fn(&mut App) -> Result<PaneSpec, String>>;
+
 pub struct PaneSpec {
     pub id: String,
     pub title: SharedString,
@@ -123,8 +125,27 @@ struct PaintState {
     frame_callback_pending: bool,
     removed: Vec<(String, bool)>,
 }
+struct LazyPanePlaceholder { label: String }
+impl Render for LazyPanePlaceholder {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().size_full().flex().items_center().justify_center().child(self.label.clone())
+    }
+}
+struct LazyPaneError { error: String, retry: Rc<dyn Fn(&mut App)> }
+impl Render for LazyPaneError {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let retry = self.retry.clone();
+        div().size_full().flex().flex_col().items_center().justify_center().gap_2()
+            .child(self.error.clone())
+            .child(div().id("retry-saved-pane").cursor_pointer().child("Retry")
+                .on_click(move |_, _, cx| retry(cx)))
+    }
+}
 struct NativePanel {
     spec: PaneSpec,
+    lazy_factory: Option<LazyPaneFactory>,
+    saved_watch_mode: Option<bool>,
+    active: bool,
     paint: Rc<RefCell<PaintState>>,
     removed: bool,
     retaining_layout: Rc<Cell<bool>>,
@@ -136,6 +157,52 @@ struct NativePanel {
     dock_group: Option<WeakEntity<TabGroup>>,
 }
 impl NativePanel {
+    fn install_lazy_spec(&mut self, spec: PaneSpec, window: &mut Window, cx: &mut Context<Self>) {
+        if spec.id != self.spec.id || self.removed { return; }
+        let focused = self.spec.focus.contains_focused(window, cx);
+        self.spec = spec;
+        self.wire_content_group(cx);
+        if let Some(watch_mode) = self.saved_watch_mode {
+            if let Ok(chat) = self.spec.content.clone().downcast::<crate::chat::ChatPane>() {
+                chat.update(cx, |chat, cx| chat.restore_watch_mode(watch_mode, cx));
+            }
+        }
+        let chat = self.spec.content.clone().downcast::<crate::chat::ChatPane>().ok();
+        let browser = self.spec.content.clone().downcast::<crate::browser::BrowserTab>().ok();
+        self.working = chat.as_ref().is_some_and(|chat| chat.read(cx).is_working())
+            || browser.as_ref().is_some_and(|browser| browser.read(cx).is_loading());
+        self._activity_subscription = if let Some(chat) = chat {
+            Some(cx.observe(&chat, |panel, chat, cx| {
+                let working = chat.read(cx).is_working();
+                panel.set_working(working, cx);
+            }))
+        } else { browser.map(|browser| cx.observe(&browser, |panel, browser, cx| {
+            let working = browser.read(cx).is_loading();
+            panel.set_working(working, cx);
+        })) };
+        if let Some(hook) = &self.spec.lifecycle {
+            let visible = self.paint.borrow().visible.contains(&self.spec.id);
+            hook(PaneLifecycle::Visible(visible), window, cx);
+            hook(PaneLifecycle::Active(self.active), window, cx);
+        }
+        if focused { window.focus(&self.spec.focus, cx); }
+        if let Some(group) = self.dock_group.as_ref().and_then(|group| group.upgrade()) {
+            group.update(cx, |_, cx| cx.notify());
+        }
+        cx.notify();
+    }
+    fn wire_content_group(&mut self, cx: &mut Context<Self>) {
+        let group = self.dock_group.clone();
+        if let Ok(ideas) = self.spec.content.clone().downcast::<crate::ideas::IdeasPane>() {
+            ideas.update(cx, |ideas, cx| ideas.set_dock_group(group.clone(), cx));
+        }
+        if let Ok(chat) = self.spec.content.clone().downcast::<crate::chat::ChatPane>() {
+            chat.update(cx, |chat, cx| chat.set_dock_group(group.clone(), cx));
+        }
+        if let Ok(browser) = self.spec.content.clone().downcast::<crate::browser::BrowserTab>() {
+            browser.update(cx, |browser, cx| browser.set_dock_group(group, cx));
+        }
+    }
     fn is_git_pane(&self) -> bool {
         self.spec.id.starts_with("git:") || self.spec.id == "route:repository"
     }
@@ -211,6 +278,7 @@ impl BasePanel for NativePanel {
         self.spec.closable
     }
     fn set_active(&mut self, active: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.active = active;
         if let Some(hook) = &self.spec.lifecycle {
             hook(PaneLifecycle::Active(active), window, cx);
         }
@@ -256,20 +324,14 @@ impl BasePanel for NativePanel {
     fn on_added_to(&mut self, group: WeakEntity<TabGroup>, _: &mut Window, cx: &mut Context<Self>) {
         self.removed = false;
         self.dock_group = Some(group.clone());
-        if let Ok(ideas) = self.spec.content.clone().downcast::<crate::ideas::IdeasPane>() {
-            ideas.update(cx, |ideas, cx| ideas.set_dock_group(Some(group.clone()), cx));
-        }
-        if let Ok(chat) = self.spec.content.clone().downcast::<crate::chat::ChatPane>() {
-            chat.update(cx, |chat, cx| chat.set_dock_group(Some(group.clone()), cx));
-        }
-        if let Ok(browser) = self.spec.content.clone().downcast::<crate::browser::BrowserTab>() {
-            browser.update(cx, |browser, cx| browser.set_dock_group(Some(group), cx));
-        }
+        self.wire_content_group(cx);
     }
     fn dump(&self, cx: &App) -> PanelState {
         let mut info = json!({"id": self.spec.id});
         if let Ok(chat) = self.spec.content.clone().downcast::<crate::chat::ChatPane>() {
             info["watchMode"] = json!(chat.read(cx).persisted_watch_mode());
+        } else if let Some(watch_mode) = self.saved_watch_mode {
+            info["watchMode"] = json!(watch_mode);
         }
         PanelState {
             panel_name: PANEL_NAME.into(),
@@ -307,6 +369,7 @@ impl Panel for NativePanel {
     fn toolbar_in_content(&self, _: &App) -> bool {
         self.spec.id.starts_with("chat:") || self.spec.id.starts_with("draft:") || self.spec.id.starts_with(EMPTY_TAB_PREFIX)
             || self.spec.id == "route:ideas" || self.git_header_visible()
+            || self.spec.content.clone().downcast::<crate::browser::BrowserTab>().is_ok()
     }
     fn close_button_visible(&self, cx: &App) -> bool {
         self.spec.content.clone().downcast::<crate::browser::BrowserTab>()
@@ -320,6 +383,7 @@ impl Panel for NativePanel {
         let candidate = (focused || working) && !crate::preferences_modal::workspace_blocked(cx);
         crate::native_pane_highlight::observe_candidate(&self.spec.id, candidate, window);
         let appearance = appearance.filter(|_| candidate)?;
+        let border_width = px(appearance.active_border_width);
         let pane_id = self.spec.id.clone();
         let mut color = rgb(appearance.active_border_color);
         if !focused { color.a = 0.; }
@@ -330,22 +394,40 @@ impl Panel for NativePanel {
             color.a = if focused { appearance.resolved_active_border_opacity() } else { 0. };
             return Some(canvas(|_, _, _| (), move |bounds, _, window, cx| {
                 if crate::preferences_modal::workspace_blocked(cx) { return; }
-                let contour = crate::pane_appearance::rounded_contour(bounds, px(8.));
+                let contour = crate::pane_appearance::rounded_contour(bounds, px(8.), border_width);
                 // Native and GPUI strokes must not stack their alpha.
-                if !crate::native_pane_highlight::paint(&pane_id, bounds, color, glow_color, &contour, window) {
+                if !crate::native_pane_highlight::paint(
+                    &pane_id,
+                    bounds,
+                    color,
+                    glow_color,
+                    border_width,
+                    &contour,
+                    window,
+                ) {
                     if working { crate::pane_highlight_geometry::paint_outward_glow(&contour, glow_color, window); }
-                    window.paint_quad(gpui::outline(bounds, color, gpui::BorderStyle::Solid)
-                        .corner_radii(px(8.)));
+                    let mut outline = gpui::outline(bounds, color, gpui::BorderStyle::Solid)
+                        .corner_radii(px(8.));
+                    outline.border_widths = border_width.into();
+                    window.paint_quad(outline);
                 }
             }).absolute().inset_0().into_any_element());
         }
         Some(canvas(|_, _, _| (), move |bounds, _, window, cx| {
             if crate::preferences_modal::workspace_blocked(cx) { return; }
-            let contour = crate::pane_highlight_geometry::contour(bounds, tab.get());
-            if !crate::native_pane_highlight::paint(&pane_id, bounds, color, glow_color, &contour, window) {
+            let contour = crate::pane_highlight_geometry::contour(bounds, tab.get(), border_width);
+            if !crate::native_pane_highlight::paint(
+                &pane_id,
+                bounds,
+                color,
+                glow_color,
+                border_width,
+                &contour,
+                window,
+            ) {
                 if working { crate::pane_highlight_geometry::paint_outward_glow(&contour, glow_color, window); }
             }
-            let mut path = gpui::PathBuilder::stroke(gpui::px(1.));
+            let mut path = gpui::PathBuilder::stroke(border_width);
             if let Some(first) = contour.first() {
                 path.move_to(*first);
                 for point in &contour[1..] { path.line_to(*point); }
@@ -413,8 +495,33 @@ pub(crate) fn pane_visual_active(focus: &FocusHandle, window: &Window, cx: &App)
         || gpui_kit::component::surface_backdrop::popup_focus_origin(window, cx)
             .is_some_and(|origin| focus.contains(&origin, window))
 }
+
 impl Render for NativePanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(factory) = self.lazy_factory.take() {
+            let panel = cx.weak_entity();
+            let handle = window.window_handle();
+            // Construct outside both panel and Desktop entity leases. Hidden
+            // tabs keep only their identity/header until they actually render.
+            cx.defer(move |cx| {
+                if !panel.read_with(cx, |panel, _| !panel.removed).unwrap_or(false) { return; }
+                let result = factory(cx);
+                let _ = handle.update(cx, |_, window, cx| {
+                    let _ = panel.update(cx, |panel, cx| match result {
+                        Ok(spec) => panel.install_lazy_spec(spec, window, cx),
+                        Err(error) => {
+                            let retry = factory.clone();
+                            let owner = cx.weak_entity();
+                            let placeholder = cx.new(|_| LazyPaneError { error, retry: Rc::new(move |cx| {
+                                let _ = owner.update(cx, |panel, cx| { panel.lazy_factory = Some(retry.clone()); cx.notify(); });
+                            }) });
+                            panel.spec.content = placeholder.into();
+                            cx.notify();
+                        }
+                    });
+                });
+            });
+        }
         let appearance = self.appearance.get();
         let active = pane_visual_active(&self.spec.focus, window, cx);
         let background = self.background.get_or_insert_with(|| cx.new(|_| crate::pane_appearance::PaneBackground::new())).clone();
@@ -612,6 +719,9 @@ impl DockWorkspace {
                 PanelInfo::Panel(value) => value["watchMode"].as_bool().unwrap_or(false),
                 _ => false,
             };
+            panel.update(cx, |panel, _| {
+                if panel.spec.id.starts_with("chat:") { panel.saved_watch_mode = Some(watch_mode); }
+            });
             let content = panel.read(cx).spec.content.clone();
             if let Ok(chat) = content.downcast::<crate::chat::ChatPane>() {
                 chat.update(cx, |chat, cx| chat.restore_watch_mode(watch_mode, cx));
@@ -935,7 +1045,7 @@ impl DockWorkspace {
                 panel.set_working(working, cx);
             })) };
             NativePanel {
-                spec, paint, removed: false,
+                spec, lazy_factory: None, saved_watch_mode: None, active: false, paint, removed: false,
                 retaining_layout: self.retaining_layout.clone(),
                 appearance: self.appearance.clone(), auto_hide_tabs: self.auto_hide_tabs.clone(),
                 background: None, working, _activity_subscription: activity_subscription, dock_group: None,
@@ -947,6 +1057,25 @@ impl DockWorkspace {
     /// Preflight a real retained pane without changing the displayed layout.
     pub fn register(&mut self, spec: PaneSpec, cx: &mut Context<Self>) -> Result<(), String> {
         self.retain(spec, cx).map(|_| ())
+    }
+    /// Retain tab identity without constructing its hidden service/UI subtree.
+    pub fn register_lazy(&mut self, id: String, title: SharedString, factory: LazyPaneFactory, cx: &mut Context<Self>) -> Result<(), String> {
+        if self.contains(&id) { return Ok(()); }
+        let content = cx.new(|_| LazyPanePlaceholder { label: "Loading pane…".into() });
+        let spec = PaneSpec { id, title, content: content.into(), focus: cx.focus_handle(), lifecycle: None, closable: true };
+        let panel = self.retain(spec, cx)?;
+        panel.update(cx, |panel, _| panel.lazy_factory = Some(factory));
+        Ok(())
+    }
+    pub fn set_lazy_working(&mut self, id: &str, working: bool, cx: &mut Context<Self>) {
+        if let Some(panel) = self.panels.borrow().get(id).cloned() {
+            panel.update(cx, |panel, cx| {
+                if panel.lazy_factory.is_some()
+                    || panel.spec.content.clone().downcast::<LazyPanePlaceholder>().is_ok()
+                    || panel.spec.content.clone().downcast::<LazyPaneError>().is_ok()
+                { panel.set_working(working, cx); }
+            });
+        }
     }
     pub fn has_panes(&self) -> bool {
         !self.panels.borrow().is_empty()
@@ -2102,6 +2231,18 @@ impl DockWorkspace {
                 let spec = match (self.factory)(&id, window, cx) {
                     Some(spec) => spec,
                     None if id.starts_with(EMPTY_TAB_PREFIX) => self.empty_spec(&id, window, cx)?,
+                    None if crate::markdown_pane::path_from_pane_id(&id).is_some() => {
+                        let path = crate::markdown_pane::path_from_pane_id(&id).expect("validated above");
+                        let pane = cx.new(|cx| crate::markdown_pane::MarkdownPane::new(path, window, cx));
+                        PaneSpec {
+                            id: id.clone(),
+                            title: pane.read(cx).title().to_owned().into(),
+                            content: pane.clone().into(),
+                            focus: pane.focus_handle(cx),
+                            lifecycle: None,
+                            closable: true,
+                        }
+                    }
                     None => {
                         return Err(format!(
                             "Pane {id} is unavailable; existing layout retained."

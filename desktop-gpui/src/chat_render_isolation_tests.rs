@@ -43,6 +43,7 @@ struct IsolationHarness {
 fn fixture_key(snapshot: Rc<Value>, rows: Rc<im::Vector<TimelineRow>>) -> TranscriptPreparationKey {
     TranscriptPreparationKey {
         snapshot: Rc::downgrade(&snapshot),
+        minimap_enabled: super::minimap_preference::enabled(),
         rows: Some(rows),
         selected: Some("task".into()),
         palette: design::palette(&Value::Null, WindowAppearance::Dark),

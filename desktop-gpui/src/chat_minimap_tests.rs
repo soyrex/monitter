@@ -18,7 +18,7 @@ struct MinimapHarness {
 
 #[gpui::test]
 fn native_pointer_proximity_brightens_minimap_without_moving_transcript(cx: &mut TestAppContext) {
-    let (host, visual) = fixture(cx);
+    let (host, visual, _minimap) = fixture(cx);
     reveal(visual);
     let rail = visual.debug_bounds("chat-minimap").unwrap();
     let viewport = host.read_with(visual, |host, _| host.viewport.clone());
@@ -58,7 +58,7 @@ fn native_pointer_proximity_brightens_minimap_without_moving_transcript(cx: &mut
 
 #[gpui::test]
 fn composer_hiding_keeps_minimap_rail_and_markers_in_place(cx: &mut TestAppContext) {
-    let (host, visual) = fixture(cx);
+    let (host, visual, _minimap) = fixture(cx);
     reveal(visual);
     let viewport = host.read_with(visual, |host, _| host.viewport.clone());
     let rail = visual.debug_bounds("chat-minimap").unwrap();
@@ -112,7 +112,12 @@ fn draw(visual: &mut VisualTestContext) {
     visual.run_until_parked();
     visual.update(|window, cx| window.draw(cx).clear(cx));
 }
-fn fixture(cx: &mut TestAppContext) -> (Entity<MinimapHarness>, &mut VisualTestContext) {
+fn fixture(cx: &mut TestAppContext) -> (
+    Entity<MinimapHarness>,
+    &mut VisualTestContext,
+    super::super::minimap_preference::FixtureSelection,
+) {
+    let minimap = super::super::minimap_preference::set_for_ui_fixture(true);
     cx.update(|cx| gpui_kit::init(cx));
     let (host, visual) = cx.add_window_view(|_, cx| {
         let palette = design::palette(&Value::Null, WindowAppearance::Dark);
@@ -147,7 +152,7 @@ fn fixture(cx: &mut TestAppContext) -> (Entity<MinimapHarness>, &mut VisualTestC
     });
     visual.update(|window, _| window.activate_window());
     draw(visual);
-    (host, visual)
+    (host, visual, minimap)
 }
 fn reveal(visual: &mut VisualTestContext) {
     visual.simulate_event(ScrollWheelEvent {
@@ -168,7 +173,7 @@ fn reveal(visual: &mut VisualTestContext) {
 }
 #[gpui::test]
 fn native_wheel_reveals_right_aligned_markers_and_click_navigates(cx: &mut TestAppContext) {
-    let (host, visual) = fixture(cx);
+    let (host, visual, _minimap) = fixture(cx);
     assert!(
         visual.debug_bounds("chat-minimap").is_none(),
         "tail starts without the overview"
@@ -279,7 +284,7 @@ fn native_wheel_reveals_right_aligned_markers_and_click_navigates(cx: &mut TestA
 }
 #[gpui::test]
 fn bubble_hover_opens_interactive_full_text_preview(cx: &mut TestAppContext) {
-    let (_, visual) = fixture(cx);
+    let (_, visual, _minimap) = fixture(cx);
     reveal(visual);
     let marker = visual
         .debug_bounds("chat-minimap-marker-20")
@@ -392,7 +397,7 @@ fn bubble_hover_opens_interactive_full_text_preview(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn dragging_continues_outside_rail_and_releases(cx: &mut TestAppContext) {
-    let (host, visual) = fixture(cx);
+    let (host, visual, _minimap) = fixture(cx);
     reveal(visual);
     let rail = visual.debug_bounds("chat-minimap").expect("revealed rail");
     let x = rail.center().x;

@@ -1,4 +1,4 @@
-//! Profile, keyboard, conversation and board controls use the canonical save_settings path.
+//! Profile, keyboard, conversation and board controls, including GUI-local presentation choices.
 use super::*;
 use crate::workspace_windows::DesktopContextExt as _;
 use gpui_kit::component::{Selectable as _, switch::Switch};
@@ -263,6 +263,27 @@ pub(super) fn render_conversation(
         ),
     ] {
         activity = activity.child(toggle(desktop, cx, palette, label, detail, key, enabled));
+    }
+    let minimap_enabled = crate::chat::minimap_preference::enabled();
+    activity = activity.child(
+        settings_toggle(
+            "Transcript minimap",
+            "Show message notches and previews beside the transcript. Off hides the scrollbar; scrolling still works.",
+            minimap_enabled,
+            palette,
+        ).child(
+            Switch::new("settings-transcript-minimap")
+                .checked(minimap_enabled)
+                .accessibility_label("Transcript minimap")
+                .on_change(cx.listener(|_, enabled, _, cx| {
+                    crate::chat::minimap_preference::set(*enabled, cx);
+                    cx.notify();
+                })),
+        ),
+    );
+    if let Some(error) = cx.try_global::<crate::chat::minimap_preference::Selection>()
+        .and_then(|selection| selection.error.as_deref()) {
+        activity = activity.child(settings_hint(error.to_owned(), palette));
     }
     let send = settings["sendWithEnter"] == true;
     let messages = settings_card(

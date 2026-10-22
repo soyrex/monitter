@@ -107,6 +107,7 @@ impl Service {
             "get_report_styles" => self.get_report_styles(),
             "browser_open" => self.browser_open_protocol(caller_task, &required_string(args, "request_id")?, &required_string(args, "url")?, string_arg(args, "title")?),
             "terminal_run" => self.terminal_run_protocol(caller_task, args),
+            "openui_help" => Ok(crate::shared_skills::openui_help()),
             "skills_help" => Ok(crate::shared_skills::help()),
             "list_shared_skills" => self.list_shared_skills_protocol(),
             "install_shared_skill" => self.install_shared_skill_protocol(
@@ -1349,7 +1350,7 @@ fn validate_tool_args(tool: &str, args: &serde_json::Map<String, Value>) -> Resu
         "send_message" => &["to_agent_id", "message", "request_id", "task_id"],
         "get_task_result" | "cancel_delegation" => &["collaboration_id"],
         "wait_for_task" => &["collaboration_id", "timeout_seconds"],
-        "list_messages" | "skills_help" | "list_shared_skills" | "work_plan_list" | "get_report_styles" => &[],
+        "list_messages" | "openui_help" | "skills_help" | "list_shared_skills" | "work_plan_list" | "get_report_styles" => &[],
         "build_queue_list" => &[],
         "build_request" => &["request_id", "title", "command", "cwd", "target_key"],
         "build_request_update" => &["build_request_id", "status"],

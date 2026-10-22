@@ -682,6 +682,29 @@ impl TranscriptState {
         }
         self.update_shared(merged);
     }
+    /// Retire unconfirmed presentation rows and install the first real page in
+    /// one projection update. Held updates must never replay cache-only IDs.
+    pub(super) fn merge_startup_page(&mut self, page: &Value, startup_ids: &HashSet<String>) {
+        if !startup_ids.is_empty() {
+            self.messages = Rc::new(self.messages.iter()
+                .filter(|row| !startup_ids.contains(id(row))).cloned().collect());
+            self.last_compact = self.last_compact.iter()
+                .filter(|row| !startup_ids.contains(id(row))).cloned().collect();
+            self.compact_body_slots = None;
+            self.held_body_patches.retain(|key, _| !startup_ids.contains(key));
+            match &mut self.pending_live {
+                Some(PendingLive::Replace(rows) | PendingLive::Merge(rows)) => {
+                    rows.retain(|row| !startup_ids.contains(id(row)));
+                }
+                None => {}
+            }
+            // Keep the previous projection until merge_page rebuilds once.
+            // That preserves off-tail anchors whose IDs occur in the real page.
+            self.projection_source = None;
+        }
+        self.merge_page(page);
+        if !startup_ids.is_empty() { self.rebuild_body_slots(); }
+    }
     pub fn merge_page(&mut self, page: &Value) {
         let mut merged: Vec<_> = page["messages"]
             .as_array()

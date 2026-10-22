@@ -15,6 +15,8 @@ pub struct PaneAppearance {
     pub dark: bool,
     pub border_opacity: u16,
     pub show_active_border: bool,
+    /// Active pane outline thickness in physical UI pixels.
+    pub active_border_width: f32,
     pub active_border_color: u32,
     pub dim_inactive: bool,
     /// Opacity in the same 0.1–0.9 range as Tauri's percentage slider.
@@ -25,6 +27,7 @@ pub struct PaneAppearance {
 impl PaneAppearance {
     pub fn from_settings(settings: &Value, palette: Palette) -> Self {
         let configured_opacity = settings["inactivePaneOpacity"].as_f64().unwrap_or(0.6) as f32;
+        let configured_border_width = settings["activePaneBorderWidth"].as_f64().unwrap_or(1.) as f32;
         Self {
             tile_theme: crate::design::tile_theme(),
             tile_backdrop_color: tile_backdrop(palette),
@@ -32,6 +35,11 @@ impl PaneAppearance {
             dark: palette.dark,
             border_opacity: crate::design::border_opacity(),
             show_active_border: settings["showActivePaneBorder"].as_bool().unwrap_or(true),
+            active_border_width: if configured_border_width.is_finite() {
+                configured_border_width.clamp(1., 8.)
+            } else {
+                1.
+            },
             active_border_color: palette.accent,
             dim_inactive: settings["dimInactivePanes"].as_bool().unwrap_or(true),
             inactive_opacity: if configured_opacity.is_finite() {
@@ -196,14 +204,19 @@ pub(crate) fn quiet_active_color(accent: u32, backdrop: u32) -> u32 {
     color
 }
 
-/// The same inset 1px rounded outline above GPUI and native child views.
+/// The same inset rounded outline above GPUI and native child views.
 /// Fixed storage avoids allocating a contour on every focused-pane frame.
-pub(crate) fn rounded_contour(bounds: Bounds<Pixels>, radius: Pixels) -> [Point<Pixels>; 36] {
-    let left = bounds.left() + gpui_kit::px(0.5);
-    let top = bounds.top() + gpui_kit::px(0.5);
-    let right = (bounds.right() - gpui_kit::px(0.5)).max(left);
-    let bottom = (bounds.bottom() - gpui_kit::px(0.5)).max(top);
-    let radius = (radius - gpui_kit::px(0.5)).max(gpui_kit::px(0.))
+pub(crate) fn rounded_contour(
+    bounds: Bounds<Pixels>,
+    radius: Pixels,
+    stroke_width: Pixels,
+) -> [Point<Pixels>; 36] {
+    let inset = stroke_width / 2.;
+    let left = bounds.left() + inset;
+    let top = bounds.top() + inset;
+    let right = (bounds.right() - inset).max(left);
+    let bottom = (bounds.bottom() - inset).max(top);
+    let radius = (radius - inset).max(gpui_kit::px(0.))
         .min((right - left) / 2.).min((bottom - top) / 2.);
     let centers = [
         point(left + radius, top + radius),
@@ -282,6 +295,7 @@ mod tests {
     fn defaults_match_tauri_workspace_settings() {
         let appearance = PaneAppearance::from_settings(&json!({}), palette());
         assert!(appearance.show_active_border);
+        assert_eq!(appearance.active_border_width, 1.);
         assert!(appearance.dim_inactive);
         assert_eq!(appearance.inactive_opacity, 0.6);
         assert!(!appearance.focus_follows_mouse);
@@ -298,11 +312,25 @@ mod tests {
     }
 
     #[::core::prelude::v1::test]
+    fn active_outline_width_is_clamped_to_preferences_range() {
+        assert_eq!(
+            PaneAppearance::from_settings(&json!({"activePaneBorderWidth": 0}), palette())
+                .active_border_width,
+            1.
+        );
+        assert_eq!(
+            PaneAppearance::from_settings(&json!({"activePaneBorderWidth": 12}), palette())
+                .active_border_width,
+            8.
+        );
+    }
+
+    #[::core::prelude::v1::test]
     fn rounded_outline_stays_inset_and_clamps_small_tiles() {
         for (width, height) in [(100., 80.), (6., 4.), (1., 1.)] {
             let bounds = Bounds::new(point(gpui_kit::px(10.), gpui_kit::px(20.)),
                 size(gpui_kit::px(width), gpui_kit::px(height)));
-            let contour = rounded_contour(bounds, gpui_kit::px(8.));
+            let contour = rounded_contour(bounds, gpui_kit::px(8.), gpui_kit::px(1.));
             for p in contour {
                 assert!(p.x >= bounds.left() + gpui_kit::px(0.5));
                 assert!(p.x <= bounds.right() - gpui_kit::px(0.5));
@@ -314,5 +342,17 @@ mod tests {
                 assert_eq!(contour[8], point(gpui_kit::px(18.), gpui_kit::px(20.5)));
             }
         }
+    }
+    #[::core::prelude::v1::test]
+    fn thick_rounded_outline_is_inset_by_half_its_width() {
+        let bounds = Bounds::new(
+            point(gpui_kit::px(10.), gpui_kit::px(20.)),
+            size(gpui_kit::px(100.), gpui_kit::px(80.)),
+        );
+        let contour = rounded_contour(bounds, gpui_kit::px(8.), gpui_kit::px(8.));
+        assert!(contour.iter().all(|point| point.x >= bounds.left() + gpui_kit::px(4.)));
+        assert!(contour.iter().all(|point| point.x <= bounds.right() - gpui_kit::px(4.)));
+        assert!(contour.iter().all(|point| point.y >= bounds.top() + gpui_kit::px(4.)));
+        assert!(contour.iter().all(|point| point.y <= bounds.bottom() - gpui_kit::px(4.)));
     }
 }

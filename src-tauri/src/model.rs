@@ -803,6 +803,7 @@ pub fn agent_instructions(agent: &Agent, user_name: &str) -> String {
     let mut parts = vec![crate::collaboration_mcp::PROGRESS_INSTRUCTIONS.to_string()];
     if agent.collaboration_enabled {
         parts.push(crate::collaboration_mcp::QUESTION_INSTRUCTIONS.to_string());
+        parts.push(crate::collaboration_mcp::OPENUI_INSTRUCTIONS.to_string());
     }
     if !agent.description.trim().is_empty() {
         parts.push(format!("Purpose: {}", agent.description.trim()));
@@ -1241,6 +1242,8 @@ pub struct Settings {
     pub sidebar_view: String,
     #[serde(default = "default_show_active_pane_border")]
     pub show_active_pane_border: bool,
+    #[serde(default = "default_active_pane_border_width")]
+    pub active_pane_border_width: u8,
     #[serde(default = "default_dim_inactive_panes")]
     pub dim_inactive_panes: bool,
     #[serde(default = "default_inactive_pane_opacity")]
@@ -1431,6 +1434,9 @@ fn default_sidebar_view() -> String {
 }
 fn default_show_active_pane_border() -> bool {
     true
+}
+fn default_active_pane_border_width() -> u8 {
+    1
 }
 fn default_dim_inactive_panes() -> bool {
     true
@@ -1979,6 +1985,7 @@ pub fn default_snapshot() -> Snapshot {
             send_with_enter: false,
             sidebar_view: default_sidebar_view(),
             show_active_pane_border: default_show_active_pane_border(),
+            active_pane_border_width: default_active_pane_border_width(),
             dim_inactive_panes: default_dim_inactive_panes(),
             inactive_pane_opacity: default_inactive_pane_opacity(),
             focus_follows_mouse: false,
@@ -2052,6 +2059,7 @@ mod tests {
         assert!(!settings.compress_tool_calls);
         assert_eq!(settings.sidebar_view, "standard");
         assert!(settings.show_active_pane_border);
+        assert_eq!(settings.active_pane_border_width, 1);
         assert_eq!(settings.shortcut_mode, "standard");
         assert!(settings.show_tab_close_buttons);
         assert_eq!(settings.tab_style, "classic");
@@ -2076,6 +2084,7 @@ mod tests {
         assert_eq!(value["compressToolCalls"], false);
         assert_eq!(value["sidebarView"], "standard");
         assert_eq!(value["showActivePaneBorder"], true);
+        assert_eq!(value["activePaneBorderWidth"], 1);
         assert_eq!(value["shortcutMode"], "standard");
         assert_eq!(value["showTabCloseButtons"], true);
         assert_eq!(value["tabStyle"], "classic");
@@ -2211,6 +2220,7 @@ mod task_migration_tests {
         assert!(snapshot.projects.is_empty());
         assert_eq!(snapshot.settings.sidebar_view, "standard");
         assert!(snapshot.settings.show_active_pane_border);
+        assert_eq!(snapshot.settings.active_pane_border_width, 1);
         assert!(snapshot.settings.dim_inactive_panes);
         assert_eq!(snapshot.settings.inactive_pane_opacity, 0.6);
         assert!(!snapshot.settings.focus_follows_mouse);

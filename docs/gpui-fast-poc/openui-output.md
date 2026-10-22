@@ -2,19 +2,22 @@
 
 Fast supports an explicit `openui` Markdown fence in assistant messages. Ordinary prose and Markdown may surround the fence. Older clients show readable source. The adapter uses the official pinned OpenUI Lang parser/evaluator and a fixed NSH renderer; model-provided JavaScript, HTML, TSX and module paths are never loaded.
 
+Agents discover the bundled guide through read-only `openui_help({})`. Its source
+is [the native OpenUI skill guide](../../desktop-gpui/openui/SKILL.md), compiled
+into the backend without a shared-skill installation.
+
 Example:
 
 ````markdown
 ```openui
 $name = "Alex"
-root = Root([
-  Heading("Delivery preferences"),
-  Text("Review the details before preparing a response."),
-  Form("reply", [
-    Input("name", "Name", $name, "Enter a name"),
-    Select("delivery", "Delivery", ["Pickup", "Shipping"], "Pickup"),
-    Checkbox("confirmed", "Details checked", false)
-  ], "Prepare response")
+root = Stack([
+  Card([CardHeader("Delivery preferences"), TextContent("Review your choices before preparing a response.")]),
+  Form("reply", Buttons([Button("Prepare response")]), [
+    FormControl("Name", Input("name", "Enter a name", "text", {}, $name)),
+    FormControl("Delivery", Select("delivery", [SelectItem("pickup", "Pickup"), SelectItem("ship", "Shipping")], "Choose delivery"))
+  ]),
+  Table([Col("Item", ["Sample"]), Col("Quantity", [2], "number")])
 ])
 ```
 ````

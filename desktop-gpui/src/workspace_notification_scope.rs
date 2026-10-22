@@ -4,6 +4,26 @@ use crate::notifications::NotificationEntry;
 use serde_json::Value;
 use std::collections::HashSet;
 
+/// Return the task IDs represented by chat and git panes in this saved
+/// workspace. Multiple panes for the same task collapse to one active owner.
+pub(super) fn task_ids_for_layout(layout: Option<&Value>) -> HashSet<String> {
+    let Some(layout) = layout else {
+        return HashSet::new();
+    };
+    let Ok(pane_ids) = crate::docking::DockWorkspace::saved_ids(layout) else {
+        return HashSet::new();
+    };
+
+    pane_ids
+        .iter()
+        .filter_map(|id| {
+            id.strip_prefix("chat:")
+                .or_else(|| crate::git_workspace::task_id(id))
+        })
+        .map(str::to_owned)
+        .collect()
+}
+
 /// Return notifications owned by tasks represented in this saved workspace.
 /// Channel notifications stay in the global feed because they have no native
 /// workspace association.
@@ -11,20 +31,7 @@ pub(super) fn entries_for_layout(
     entries: &[NotificationEntry],
     layout: Option<&Value>,
 ) -> Vec<NotificationEntry> {
-    let Some(layout) = layout else {
-        return Vec::new();
-    };
-    let Ok(pane_ids) = crate::docking::DockWorkspace::saved_ids(layout) else {
-        return Vec::new();
-    };
-
-    let task_ids: HashSet<&str> = pane_ids
-        .iter()
-        .filter_map(|id| {
-            id.strip_prefix("chat:")
-                .or_else(|| crate::git_workspace::task_id(id))
-        })
-        .collect();
+    let task_ids = task_ids_for_layout(layout);
 
     entries
         .iter()
@@ -113,6 +120,14 @@ mod tests {
             &projected[2].kind,
             NotificationKind::Approval { .. }
         ));
+        assert_eq!(
+            task_ids_for_layout(Some(&layout(&[
+                "chat:chat-task",
+                "git:git-task:1",
+                "git:git-task:2",
+            ]))),
+            HashSet::from(["chat-task".to_owned(), "git-task".to_owned()])
+        );
     }
 
     #[test]

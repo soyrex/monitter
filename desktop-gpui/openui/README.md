@@ -21,6 +21,11 @@ The native registry covers the components in the pinned OpenUI Lang standard lib
 
 Some components are intentionally simplified by available native primitives: `TextArea` uses native multiline editing; `DatePicker` uses a month calendar with single/range selection and serialized ISO date values; `Slider` changes by step buttons; `Carousel` uses page buttons without swipe navigation; `Modal` uses NSH’s native dialog layer with close, Escape and backdrop dismissal; and `Callout` remains visible until its bound state changes. `MarkDownRenderer` displays its source as selectable text. Remote image URLs remain placeholders. Charts draw native Canvas geometry for grouped/stacked bars, lines/areas, pie/donut, radial, radar and scatter/bubbles. Natural curves use smooth Bézier interpolation, dense point markers are sampled, and category legends show the first eight entries. Pie/radial charts use absolute magnitudes for signed values and preserve signed legend text. Chart recording is bounded to 8192 encoded values per canvas (the tested maximum is 2954). Form submission enforces required, email, URL, numeric, range, and length rules. Regex `pattern` rules accept only anchored expressions with at most one repetition operator; groups, alternation, and other constructs are rejected to keep untrusted validation bounded. Non-password `Input` types use a plain text control. These components preserve their OpenUI wire schemas and state values where practical, but they do not claim visual or interaction parity with React.
 
+Agent-facing instructions live in `SKILL.md` beside this renderer and are embedded
+by the backend for `openui_help({})`. Update that guide when native syntax or limits
+change. The outer surface is transparent with no padding. Card fills are 50% black
+(equivalent to black Multiply at 50%); clear cards remain transparent.
+
 ## Examples
 
 ```openui

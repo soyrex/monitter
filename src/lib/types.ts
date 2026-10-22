@@ -378,7 +378,7 @@ export interface Settings {
   windowSurface?: 'opaque' | 'translucent' | 'glass';
   /** Background transparency percentage, from 0 to 100 inclusive. */
   windowTransparency?: number;
-  showActivePaneBorder?: boolean; dimInactivePanes?: boolean; inactivePaneOpacity?: number; focusFollowsMouse?: boolean;
+  showActivePaneBorder?: boolean; activePaneBorderWidth?: number; dimInactivePanes?: boolean; inactivePaneOpacity?: number; focusFollowsMouse?: boolean;
   /** Decorative effect shown while an agent is working. */
   activityAnimation?: 'sparkles' | 'liquid' | 'grid' | 'matrix';
   /** Native macOS voice mode; absent settings retain Whisper. Remote voice remains on desktop Whisper. */

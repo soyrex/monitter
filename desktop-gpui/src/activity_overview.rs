@@ -156,6 +156,9 @@ fn workspace_identity(task: &Value) -> (String, String, String) {
 #[derive(Clone, Default)]
 struct OverviewModel {
     cards: Vec<Card>,
+    search_text: Vec<String>,
+    filter_counts: [usize; 5],
+    group_counts: [usize; 2],
 }
 impl OverviewModel {
     #[cfg(test)]
@@ -386,7 +389,15 @@ impl OverviewModel {
                 .then_with(|| b.updated_at.cmp(&a.updated_at))
                 .then_with(|| a.task_id.cmp(&b.task_id))
         });
-        Self { cards }
+        let search_text = cards.iter().map(|card| format!("{} {} {} {} {} {}",
+            card.title, card.agent, card.model, card.project_name, card.workspace_name, card.workspace_path,
+        ).to_lowercase()).collect();
+        let filter_counts = std::array::from_fn(|index| cards.iter()
+            .filter(|card| Filter::ALL[index].matches(card.state)).count());
+        let group_counts = [NativeActivityGrouping::Project, NativeActivityGrouping::Workspace]
+            .map(|grouping| cards.iter().map(|card| card.group_id(grouping))
+                .filter(|id| !id.is_empty()).collect::<HashSet<_>>().len());
+        Self { cards, search_text, filter_counts, group_counts }
     }
     fn visible(
         &self,
@@ -405,33 +416,26 @@ impl OverviewModel {
         };
         self.cards
             .iter()
-            .filter(|card| {
+            .enumerate()
+            .filter(|(index, card)| {
                 (if filter == Filter::Working {
                     working_groups.contains(card.group_id(grouping))
                 } else {
                     filter.matches(card.state)
                 })
-                    && (query.is_empty()
-                        || format!(
-                            "{} {} {} {} {} {}",
-                            card.title,
-                            card.agent,
-                            card.model,
-                            card.project_name,
-                            card.workspace_name,
-                            card.workspace_path,
-                        )
-                        .to_lowercase()
-                        .contains(&query))
+                    && (query.is_empty() || self.search_text[*index].contains(&query))
             })
-            .cloned()
+            .map(|(_, card)| card.clone())
             .collect()
     }
     fn count(&self, filter: Filter) -> usize {
-        self.cards
-            .iter()
-            .filter(|card| filter.matches(card.state))
-            .count()
+        self.filter_counts[Filter::ALL.iter().position(|candidate| *candidate == filter).unwrap()]
+    }
+    fn group_count(&self, grouping: NativeActivityGrouping) -> usize {
+        self.group_counts[match grouping {
+            NativeActivityGrouping::Project => 0,
+            NativeActivityGrouping::Workspace => 1,
+        }]
     }
 }
 fn child_counts(snapshot: &Value) -> HashMap<String, usize> {
@@ -891,21 +895,26 @@ impl Default for RetainedLayout {
     }
 }
 impl RetainedLayout {
-    fn sync(
+    #[cfg(test)]
+    fn sync(&mut self, cards: Vec<Card>, available_width: f32, available_height: f32,
+        grouping: NativeActivityGrouping) {
+        self.sync_groups(&grouped(cards, grouping), available_width, available_height, grouping);
+    }
+    fn sync_groups(
         &mut self,
-        cards: Vec<Card>,
+        groups: &[(String, Vec<Card>)],
         available_width: f32,
         available_height: f32,
         grouping: NativeActivityGrouping,
     ) {
-        let groups = grouped(cards, grouping);
         let mut view_changed = false;
         let mut group_sizes = Vec::with_capacity(groups.len());
-        for (_, cards) in &groups {
+        for (_, cards) in groups {
             let key = cards[0].group_id(grouping).to_owned();
             let project = self.projects.entry(key.clone()).or_default();
-            let view_cards: Vec<_> = cards.iter().map(|card| card.task_id.clone()).collect();
-            if project.view_cards != view_cards {
+            if !project.view_cards.iter().map(String::as_str)
+                .eq(cards.iter().map(|card| card.task_id.as_str())) {
+                let view_cards: Vec<_> = cards.iter().map(|card| card.task_id.clone()).collect();
                 if project.hub.is_none() {
                     let (placements, _, _) = cluster_layout(cards.len());
                     project.hub = Some(placements[0]);
@@ -926,7 +935,9 @@ impl RetainedLayout {
                 view_changed = true;
             }
             for id in &project.view_cards {
-                project.followers.entry(id.clone()).or_insert(project.target);
+                if !project.followers.contains_key(id) {
+                    project.followers.insert(id.clone(), project.target);
+                }
             }
             let w = project
                 .view_cards
@@ -972,12 +983,38 @@ pub enum ActivityOverviewEvent {
     Close,
 }
 impl EventEmitter<ActivityOverviewEvent> for ActivityOverview {}
+// Filtering, normalization and grouping depend on publications and controls, not animation ticks.
+struct PreparedActivityView {
+    revision: u64,
+    filter: Filter,
+    query: String,
+    grouping: NativeActivityGrouping,
+    cards: Rc<Vec<Card>>,
+    groups: Rc<Vec<(String, Vec<Card>)>>,
+    list_rows: Rc<Vec<(usize, Option<usize>)>>,
+    row_keys: Vec<String>,
+}
+#[derive(Clone, Copy)]
+struct PaintedMapViewport {
+    origin: Point<Pixels>,
+    clip: Bounds<Pixels>,
+    pan: Placement,
+    scale: f32,
+}
+
 pub struct ActivityOverview {
     focus: FocusHandle,
     search: Entity<InputState>,
     snapshot: Rc<Value>,
     palette: Palette,
     model: OverviewModel,
+    model_revision: u64,
+    prepared_view: Option<PreparedActivityView>,
+    list_state: ListState,
+    list_metrics: Option<(Pixels, u16, SharedString)>,
+    layout_input: Option<(u64, f32, f32)>,
+    view_revision: u64,
+    painted_map: Rc<Cell<Option<PaintedMapViewport>>>,
     child_counts: HashMap<String, usize>,
     grouping: NativeActivityGrouping,
     filter: Filter,
@@ -1012,6 +1049,7 @@ impl ActivityOverview {
                     .await;
                 if overview
                     .update(cx, |overview, cx| {
+                        overview.model_revision = overview.model_revision.wrapping_add(1);
                         overview.model = OverviewModel::from_indexed_snapshot(
                             &overview.snapshot,
                             &overview.child_counts,
@@ -1044,6 +1082,13 @@ impl ActivityOverview {
             snapshot: Rc::new(Value::Null),
             palette: design::palette(&Value::Null, window.appearance()),
             model: OverviewModel::default(),
+            model_revision: 0,
+            prepared_view: None,
+            list_state: ListState::new(0, ListAlignment::Top, px(300.)),
+            list_metrics: None,
+            layout_input: None,
+            view_revision: 0,
+            painted_map: Rc::new(Cell::new(None)),
             child_counts: HashMap::new(),
             grouping,
             filter: Filter::All,
@@ -1071,6 +1116,8 @@ impl ActivityOverview {
         }
         self.grouping = grouping;
         self.layout = RetainedLayout::default();
+        self.layout_input = None;
+        self.painted_map.set(None);
         self.dragging = None;
         self.canvas_pan = Placement { x: 0., y: 0. };
         self.canvas_pan_drag = None;
@@ -1089,6 +1136,7 @@ impl ActivityOverview {
                 if child_inputs_changed(&self.snapshot, &snapshot) {
                     self.child_counts = child_counts(&snapshot);
                 }
+                self.model_revision = self.model_revision.wrapping_add(1);
                 self.model = OverviewModel::from_indexed_snapshot(&snapshot, &self.child_counts);
                 changed = true;
             }
@@ -1476,7 +1524,7 @@ impl ActivityOverview {
             body.w(scaled(CARD_W)).h(scaled(CARD_H)).into_any_element()
         }
     }
-    fn communication_layer(&self, endpoints: HashMap<String, MapRect>, scale: f32, cx: &mut Context<Self>) -> AnyElement {
+    fn communication_layer(&self, endpoints: HashMap<String, MapRect>, scale: f32, viewport: MapRect, cx: &mut Context<Self>) -> AnyElement {
         let hubs: Vec<_> = self.layout.projects.values().filter_map(|project| {
             let mut hub = project.hub?; let bounds = project.bounds?;
             hub.x += bounds.x + project.target.x; hub.y += bounds.y + project.target.y;
@@ -1484,6 +1532,7 @@ impl ActivityOverview {
         }).collect();
         let links: Vec<_> = self.communications.borrow().links.values().filter_map(|link| {
             let a=*endpoints.get(&link.pair.0)?; let b=*endpoints.get(&link.pair.1)?;
+            if !a.overlaps(viewport, 0.) || !b.overlaps(viewport, 0.) { return None; }
             let mut obstacles=hubs.clone();
             obstacles.extend(endpoints.iter().filter(|(id,_)| **id!=link.pair.0 && **id!=link.pair.1).map(|(_,r)| *r));
             let curves=communications::Curve::directed(a,b,&obstacles,link.forward,link.reverse);
@@ -1526,7 +1575,8 @@ impl ActivityOverview {
         &self,
         index: usize,
         name: String,
-        cards: Vec<Card>,
+        cards: &[Card],
+        viewport: MapRect,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let p = self.palette;
@@ -1568,8 +1618,16 @@ impl ActivityOverview {
         let edges: Vec<_> = cards
             .iter()
             .enumerate()
-            .map(|(index, card)| (placements[index + 1], card.state))
-            .collect();
+            .filter_map(|(index, card)| {
+                let placement = placements[index + 1];
+                let end_x = placement.x + CARD_W / 2.;
+                let end_y = placement.y + CARD_H / 2.;
+                let line = MapRect { x: bounds.x + retained.target.x + hub.x.min(end_x),
+                    y: bounds.y + retained.target.y + hub.y.min(end_y),
+                    w: (hub.x - end_x).abs().max(1.), h: (hub.y - end_y).abs().max(1.) };
+                line.overlaps(viewport, 0.).then_some((placement, card.state))
+            }).collect();
+        let animate_links = edges.iter().any(|(_, state)| *state == State::Working);
         let has_working = cards.iter().any(|card| card.state == State::Working);
         let motion = !cx.reduce_motion() && crate::native_motion::motion_allowed();
         let phase = Rc::new(Cell::new(0.));
@@ -1623,7 +1681,7 @@ impl ActivityOverview {
                 )
                 .absolute()
                 .size_full());
-        let links = if has_working && motion {
+        let links = if animate_links && motion {
             links.with_animation("activity-working-links", Animation::new(Duration::from_millis(900))
                 .repeat_synced().with_max_fps(30.), move |links, progress| { phase.set(progress); links }).into_any_element()
         } else { links.into_any_element() };
@@ -1632,6 +1690,11 @@ impl ActivityOverview {
             .relative().w(scaled(width)).h(scaled(height)).flex_shrink_0().child(links);
         for (index, card) in cards.iter().enumerate() {
             let placement = placements[index + 1];
+            let rect = MapRect { x: bounds.x + retained.target.x + placement.x,
+                y: bounds.y + retained.target.y + placement.y, w: CARD_W, h: CARD_H };
+            let dragged = self.dragging.as_ref().is_some_and(|drag| matches!(&drag.target,
+                DragTarget::Card(_, id) if id == &card.task_id));
+            if !dragged && !rect.overlaps(viewport, 0.) { continue; }
             cluster = cluster.child(
                 div()
                     .absolute()
@@ -1640,6 +1703,9 @@ impl ActivityOverview {
                     .child(self.card(card, false, cx)),
             );
         }
+        let hub_rect = MapRect { x: bounds.x + retained.target.x + hub.x - HUB_W / 2.,
+            y: bounds.y + retained.target.y + hub.y - HUB_H / 2., w: HUB_W, h: HUB_H };
+        if !hub_rect.overlaps(viewport, 0.) { return cluster.into_any_element(); }
         let working = cards.iter().filter(|c| c.state == State::Working).count();
         let needs = cards.iter().filter(|c| c.state == State::NeedsYou).count();
         let failed = cards.iter().filter(|c| c.state == State::Failed).count();
@@ -1720,23 +1786,60 @@ impl Render for ActivityOverview {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = self.palette;
         let font = cx.theme().font_size;
-        let query = self.search.read(cx).value().to_string();
-        let visible = self.model.visible(self.filter, &query, self.grouping);
+        let list_metrics = (font, design::interface_scale(), cx.theme().font_family.clone());
+        if self.list_metrics.as_ref() != Some(&list_metrics) {
+            self.list_state.remeasure();
+            self.list_metrics = Some(list_metrics);
+        }
+        let query = self.search.read(cx).value().trim().to_lowercase();
+        let membership_changed = self.prepared_view.as_ref().is_none_or(|view| {
+            view.revision != self.model_revision || view.filter != self.filter
+                || view.query != query || view.grouping != self.grouping
+        });
+        if membership_changed {
+            let cards = self.model.visible(self.filter, &query, self.grouping);
+            let groups = grouped(cards.clone(), self.grouping);
+            let mut list_rows = Vec::new();
+            let mut row_keys = Vec::new();
+            for (group, (_, cards)) in groups.iter().enumerate() {
+                list_rows.push((group, None));
+                row_keys.push(format!("group:{}", cards[0].group_id(self.grouping)));
+                list_rows.extend((0..cards.len()).map(|card| (group, Some(card))));
+                row_keys.extend(cards.iter().map(|card| format!("card:{}", card.task_id)));
+            }
+            let old_offset = self.list_state.logical_scroll_top();
+            let old_view = self.prepared_view.as_ref().filter(|view| {
+                view.filter == self.filter && view.query == query && view.grouping == self.grouping
+            });
+            if old_view.is_some_and(|view| view.row_keys == row_keys) {
+                self.list_state.remeasure();
+            } else {
+                let anchor = old_view.and_then(|view| view.row_keys.get(old_offset.item_ix))
+                    .and_then(|key| row_keys.iter().position(|candidate| candidate == key));
+                self.list_state.reset(list_rows.len());
+                if let Some(item_ix) = anchor {
+                    self.list_state.scroll_to(ListOffset { item_ix, offset_in_item: old_offset.offset_in_item });
+                }
+            }
+            self.view_revision = self.view_revision.wrapping_add(1);
+            self.prepared_view = Some(PreparedActivityView {
+                revision: self.model_revision, filter: self.filter, query, grouping: self.grouping,
+                cards: Rc::new(cards), groups: Rc::new(groups), list_rows: Rc::new(list_rows), row_keys,
+            });
+        }
+        let view = self.prepared_view.as_ref().unwrap();
+        let visible = view.cards.clone();
+        let groups = view.groups.clone();
+        let list_rows = view.list_rows.clone();
         let map_scale = self.zoom * interface_font_ratio(font);
-        self.layout.sync(
-            visible.clone(),
-            ((f32::from(window.viewport_size().width) - 64.) / map_scale).max(CARD_W + 24.),
-            ((f32::from(window.viewport_size().height) - 190.) / map_scale).max(CARD_H + 24.),
-            self.grouping,
-        );
-        let group_count = self
-            .model
-            .cards
-            .iter()
-            .map(|card| card.group_id(self.grouping))
-            .filter(|id| !id.is_empty())
-            .collect::<HashSet<_>>()
-            .len();
+        let available_width = ((f32::from(window.viewport_size().width) - 64.) / map_scale).max(CARD_W + 24.);
+        let available_height = ((f32::from(window.viewport_size().height) - 190.) / map_scale).max(CARD_H + 24.);
+        let layout_input = (self.view_revision, available_width, available_height);
+        if self.layout_input != Some(layout_input) || self.dragging.is_some() || self.motion_task.is_some() {
+            self.layout.sync_groups(&groups, available_width, available_height, self.grouping);
+            self.layout_input = Some(layout_input);
+        }
+        let group_count = self.model.group_count(self.grouping);
         let group_label = match self.grouping {
             NativeActivityGrouping::Project => "projects",
             NativeActivityGrouping::Workspace => "workspaces",
@@ -1902,23 +2005,23 @@ impl Render for ActivityOverview {
                 },
             ));
         } else if self.list {
-            let mut list = div().flex().flex_col().gap(px(15.)).w_full();
-            for (name, cards) in grouped(visible, self.grouping) {
-                let mut group = div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(6.))
-                    .w_full()
-                    .child(div().font_weight(FontWeight::MEDIUM).px(px(4.)).child(name));
-                for card in cards {
-                    group = group.child(self.card(&card, true, cx));
+            let owner = cx.weak_entity();
+            let rows = gpui_kit::list(self.list_state.clone(), move |index, _, cx| {
+                let (group, card) = list_rows[index];
+                let (name, cards) = &groups[group];
+                match card {
+                    None => div().font_weight(FontWeight::MEDIUM).px(px(4.))
+                        .pt(px(if group == 0 { 0. } else { 15. })).pb(px(6.))
+                        .child(name.clone()).into_any_element(),
+                    Some(index) => owner.update(cx, |overview, cx| {
+                        div().w_full().pb(px(6.)).child(overview.card(&cards[index], true, cx)).into_any_element()
+                    }).unwrap_or_else(|_| div().into_any_element()),
                 }
-                list = list.child(group);
-            }
-            content = content.child(list);
+            }).size_full();
+            content = content.overflow_hidden().child(rows);
         } else {
             let mut endpoints = HashMap::new();
-            for card in &visible {
+            for card in visible.iter() {
                 let project = &self.layout.projects[card.group_id(self.grouping)];
                 let bounds = project.bounds.unwrap();
                 let mut rect = project.card_rect(&card.task_id);
@@ -1927,7 +2030,6 @@ impl Render for ActivityOverview {
                 rect.y += bounds.y + follower.y;
                 endpoints.insert(card.task_id.clone(), rect);
             }
-            let groups = grouped(visible, self.grouping);
             let scale = map_scale;
             let width = self.layout.canvas_width.max(self
                 .layout
@@ -1943,6 +2045,30 @@ impl Render for ActivityOverview {
                 .filter_map(|p| p.bounds.map(|r| r.y + r.h + p.target.y.max(0.)))
                 .fold(0., f32::max)
                 + 24.);
+            // Use the previous frame's measured graph origin and clip; account for the
+            // current pan immediately. Overscan covers shadows and geometry changes.
+            let graph_width = px(width * scale);
+            let graph_height = px(height * scale);
+            let viewport = self.painted_map.get().filter(|painted| (painted.scale - scale).abs() < 0.001);
+            let (origin, clip) = viewport.map(|painted| (
+                painted.origin + point(gpui_kit::px(self.canvas_pan.x - painted.pan.x), gpui_kit::px(self.canvas_pan.y - painted.pan.y)),
+                painted.clip,
+            )).unwrap_or_else(|| (
+                point((window.viewport_size().width - graph_width) / 2. + gpui_kit::px(self.canvas_pan.x),
+                    (window.viewport_size().height - graph_height) / 2. + gpui_kit::px(self.canvas_pan.y)),
+                Bounds::new(point(gpui_kit::px(0.), gpui_kit::px(0.)), window.viewport_size()),
+            ));
+            let unit = px(scale).as_f32();
+            let overscan = 256. / unit;
+            let map_viewport = MapRect {
+                x: (clip.origin.x - origin.x).as_f32() / unit - overscan,
+                y: (clip.origin.y - origin.y).as_f32() / unit - overscan,
+                w: clip.size.width.as_f32() / unit + overscan * 2.,
+                h: clip.size.height.as_f32() / unit + overscan * 2.,
+            };
+            let geometry = self.painted_map.clone();
+            let pan = self.canvas_pan;
+            let owner = cx.weak_entity();
             let mut graph = div()
                 .id("activity-responsive-map")
                 .debug_selector(|| "activity-responsive-map".into())
@@ -1952,8 +2078,18 @@ impl Render for ActivityOverview {
                 .w(px(width * scale))
                 .h(px(height * scale))
                 .flex_shrink_0()
-                .child(self.communication_layer(endpoints, scale, cx));
-            for (index, (name, cards)) in groups.into_iter().enumerate() {
+                .child(canvas(move |bounds, window, cx| {
+                    let clip = window.content_mask().bounds;
+                    let old = geometry.get();
+                    let changed = old.is_none_or(|old| old.origin != bounds.origin || old.clip != clip || old.scale != scale);
+                    geometry.set(Some(PaintedMapViewport { origin: bounds.origin, clip, pan, scale }));
+                    if changed {
+                        let owner = owner.clone();
+                        cx.defer(move |cx| { let _ = owner.update(cx, |_, cx| cx.notify()); });
+                    }
+                }, |_, _, _, _| ()).absolute().inset_0())
+                .child(self.communication_layer(endpoints, scale, map_viewport, cx));
+            for (index, (name, cards)) in groups.iter().enumerate() {
                 let project = &self.layout.projects[cards[0].group_id(self.grouping)];
                 let position = project.bounds.unwrap();
                 graph = graph.child(
@@ -1961,7 +2097,7 @@ impl Render for ActivityOverview {
                         .absolute()
                         .left(px((position.x + project.target.x) * scale))
                         .top(px((position.y + project.target.y) * scale))
-                        .child(self.cluster(index, name, cards, cx)),
+                        .child(self.cluster(index, name.clone(), cards, map_viewport, cx)),
                 );
             }
             let cursor = if self.canvas_pan_drag.is_some() {

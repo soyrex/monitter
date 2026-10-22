@@ -60,6 +60,64 @@ fn media_name(candidate: &str) -> Option<&str> {
     Some(candidate)
 }
 
+/// Parse immutable media identities without touching the filesystem. Text and
+/// palette changes that retain these identities reuse the resolved media map.
+fn media_names(source: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    for (start, _) in source.match_indices("media:") {
+        let rest = &source[start + "media:".len()..];
+        let end = rest
+            .find(|character: char| {
+                !character.is_ascii_lowercase() && !character.is_ascii_digit() && character != '.'
+            })
+            .unwrap_or(rest.len());
+        let name = &rest[..end];
+        if media_name(name).is_some() && !names.iter().any(|known| known == name) {
+            names.push(name.to_owned());
+        }
+    }
+    names
+}
+
+#[derive(Clone)]
+struct MediaDimensions {
+    length: u64,
+    modified: Option<std::time::SystemTime>,
+    created: Option<std::time::SystemTime>,
+    dimensions: (u32, u32),
+}
+/// Called only on a worker. A bounded header cache also avoids decoding the
+/// same approved immutable preview independently for every mounted block.
+fn media_dimensions(path: &Path, metadata: &std::fs::Metadata) -> Option<(u32, u32)> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, MediaDimensions>>> =
+        std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    let modified = metadata.modified().ok();
+    let created = metadata.created().ok();
+    if let Some(entry) = cache.lock().ok()?.get(path).cloned() {
+        if entry.length == metadata.len() && entry.modified == modified && entry.created == created
+        {
+            return Some(entry.dimensions);
+        }
+    }
+    let dimensions = image::image_dimensions(path).ok()?;
+    if let Ok(mut cache) = cache.lock() {
+        if cache.len() >= 256 {
+            cache.clear();
+        }
+        cache.insert(
+            path.to_owned(),
+            MediaDimensions {
+                length: metadata.len(),
+                modified,
+                created,
+                dimensions,
+            },
+        );
+    }
+    Some(dimensions)
+}
+
 // Only host-validated, public preview files are exposed to the NSH Image
 // primitive. Model text never supplies a filesystem path or network URL.
 fn approved_media(source: &str, directory: &Path) -> Map<String, Value> {
@@ -98,7 +156,7 @@ fn approved_media(source: &str, directory: &Path) -> Map<String, Value> {
         if canonical.parent() != Some(root.as_path()) {
             continue;
         }
-        let Ok((width, height)) = image::image_dimensions(&canonical) else {
+        let Some((width, height)) = media_dimensions(&canonical, &metadata) else {
             continue;
         };
         if width == 0
@@ -523,6 +581,11 @@ struct OutputBlock {
     revision: u64,
     error_task: Option<Task<()>>,
     generation: u64,
+    media_names: Vec<String>,
+    media: Map<String, Value>,
+    media_generation: u64,
+    media_task: Option<Task<()>>,
+    media_retry_after: Option<Instant>,
 }
 impl OutputBlock {
     fn new(
@@ -561,6 +624,11 @@ impl OutputBlock {
             revision: 0,
             error_task: None,
             generation: 0,
+            media_names: Vec::new(),
+            media: Map::new(),
+            media_generation: 0,
+            media_task: None,
+            media_retry_after: None,
         }
     }
     fn set_document(
@@ -579,6 +647,7 @@ impl OutputBlock {
         self.original = original;
         if changed {
             self.source = source;
+            self.refresh_media(cx);
             self.complete = complete;
             self.palette = palette;
             self.pending = None;
@@ -604,15 +673,63 @@ impl OutputBlock {
             });
         });
     }
+    fn refresh_media(&mut self, cx: &mut Context<Self>) {
+        let names = media_names(&self.source);
+        let same_names = self.media_names == names;
+        if same_names
+            && (self.media_task.is_some()
+                || self.media.len() >= names.len().min(MAX_MEDIA_FILES)
+                || self
+                    .media_retry_after
+                    .is_some_and(|until| Instant::now() < until))
+        {
+            return;
+        }
+        self.media_names = names;
+        self.media_generation = self.media_generation.wrapping_add(1);
+        let generation = self.media_generation;
+        self.media_task = None;
+        if !same_names {
+            self.media.clear();
+        }
+        if self.media_names.is_empty() {
+            return;
+        }
+        // Missing previews may appear after a streamed document. Retry only
+        // on a later document update or remount, never with a polling task.
+        self.media_retry_after = Some(Instant::now() + Duration::from_secs(1));
+        let source = self.source.clone();
+        let worker = cx.background_executor().spawn(async move {
+            media_directory()
+                .map(|directory| approved_media(&source, &directory))
+                .unwrap_or_default()
+        });
+        self.media_task = Some(cx.spawn(async move |owner, cx| {
+            let media = worker.await;
+            let _ = owner.update(cx, |block, cx| {
+                if block.media_generation != generation {
+                    return;
+                }
+                block.media = media;
+                block.media_task = None;
+                block.push_update();
+                block.invalidate(cx);
+                cx.notify();
+            });
+        }));
+    }
     fn push_update(&self) {
         if let Some(bridge) = &self.bridge {
             let theme = self.palette.map(|p| json!({"dark":p.dark,"accent":format!("#{:06x}",p.accent),
                 "paper":format!("#{:06x}",p.paper),"panel":format!("#{:06x}",p.panel),
                 "ink":format!("#{:06x}",p.ink),"muted":format!("#{:06x}",p.muted),"line":format!("#{:06x}",p.line),
                 "fontFamily":design::FONT_SANS,"monoFontFamily":design::FONT_MONO,"fontSize":13}));
-            bridge.emit("Update", json!({"source":self.source,"complete":self.complete,"state":self.state,
-                "theme":theme,"media":media_directory().map(|dir| approved_media(&self.source, &dir)).unwrap_or_default(),
-                "messageId":self.message,"blockId":self.ordinal,"revision":self.revision}));
+            bridge.emit(
+                "Update",
+                json!({"source":self.source,"complete":self.complete,"state":self.state,
+                "theme":theme,"media":self.media,
+                "messageId":self.message,"blockId":self.ordinal,"revision":self.revision}),
+            );
         }
     }
     fn hydrate(&mut self, cx: &mut Context<Self>) -> bool {
@@ -666,6 +783,7 @@ impl OutputBlock {
         if self.lease.borrow().view.is_some() || !self.hydrate(cx) {
             return;
         }
+        self.refresh_media(cx);
         if !reserve(&self.lease, cx) {
             self.render_notice =
                 Some("Interactive output limit reached; source is available below.".into());
@@ -718,6 +836,11 @@ impl OutputBlock {
                 window,
                 cx,
             );
+            // Embedded output must reveal the transcript beneath it, including
+            // from the first frame before the renderer receives its palette.
+            let mut theme = nsh_base::Theme::default();
+            theme.set_color("background", nsh_core::Color(0).into());
+            view.set_theme(Some(theme), cx);
             view.register_component(
                 BRIDGE,
                 Rc::new(move |context| {

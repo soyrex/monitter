@@ -10,6 +10,23 @@ use gpui_kit::{
 #[path = "interaction_input.rs"]
 mod input;
 
+fn interaction_rows<'a>(value: &'a Value, key: &str) -> &'a [Value] {
+    value.get(key).and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[])
+}
+
+fn pending_question_refs<'a>(
+    snapshot: &'a Value,
+    task_id: &'a str,
+    resolved: &'a HashSet<String>,
+) -> impl Iterator<Item = &'a Value> {
+    interaction_rows(snapshot, "approvalRequests").iter().filter(move |request| {
+        request["taskId"].as_str() == Some(task_id)
+            && request["status"] == "pending"
+            && chat::ChatPane::user_question_request(request)
+            && !resolved.contains(request["id"].as_str().unwrap_or_default())
+    })
+}
+
 fn bounded_request_detail(detail: &str) -> (String, bool) {
     const DETAIL_LIMIT: usize = 4_096;
     let structured = serde_json::from_str::<Value>(detail.trim()).is_ok();
@@ -105,22 +122,18 @@ impl chat::ChatPane {
             && crate::approval_prompt::mcp_approval_choices(request).is_empty()
     }
 
-    pub(super) fn pending_user_questions(&self) -> Vec<Value> {
-        let mut requests: Vec<_> = rows(&self.snapshot, "approvalRequests")
-            .into_iter()
-            .filter(|request| {
-                field(request, "taskId") == self.task_id()
-                    && request["status"] == "pending"
-                    && Self::user_question_request(request)
-                    && !self.resolved_user_questions.contains(&field(request, "id"))
-            })
-            .collect();
+    pub(super) fn pending_user_questions(&self) -> Vec<&Value> {
+        let mut requests: Vec<_> = pending_question_refs(
+            &self.snapshot, self.selected.as_deref().unwrap_or_default(), &self.resolved_user_questions,
+        ).collect();
         requests.sort_by_key(|request| request["createdAt"].as_i64().unwrap_or_default());
         requests
     }
 
     pub(super) fn has_pending_user_question(&self) -> bool {
-        !self.pending_user_questions().is_empty()
+        pending_question_refs(
+            &self.snapshot, self.selected.as_deref().unwrap_or_default(), &self.resolved_user_questions,
+        ).next().is_some()
     }
 
     fn user_question_is_current(&self, request: &Value) -> bool {
@@ -190,7 +203,14 @@ impl chat::ChatPane {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let form = self.render_interaction_surface(true, window, cx);
-        let requests = self.pending_user_questions();
+        let snapshot = self.snapshot.clone();
+        let task_id = self.task_id();
+        let mut requests: Vec<_> = interaction_rows(&snapshot, "approvalRequests").iter()
+            .filter(|request| request["taskId"].as_str() == Some(task_id.as_str())
+                && request["status"] == "pending" && Self::user_question_request(request)
+                && !self.resolved_user_questions.contains(request["id"].as_str().unwrap_or_default()))
+            .collect();
+        requests.sort_by_key(|request| request["createdAt"].as_i64().unwrap_or_default());
         let next = self
             .interaction_request_id
             .as_ref()
@@ -263,7 +283,8 @@ impl chat::ChatPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let palette = settings::palette(&self.snapshot["settings"], window.appearance());
+        let snapshot = self.snapshot.clone();
+        let palette = settings::palette(&snapshot["settings"], window.appearance());
         let Some(task_id) = self.selected.clone() else {
             return div().into_any_element();
         };
@@ -287,13 +308,13 @@ impl chat::ChatPane {
             .flex()
             .flex_col()
             .gap(px(6.));
-        let mut requests: Vec<_> = rows(&self.snapshot, "approvalRequests")
+        let mut requests: Vec<_> = interaction_rows(&snapshot, "approvalRequests")
             .into_iter()
             .filter(|request| {
-                field(request, "taskId") == task_id
-                    && field(request, "status") == "pending"
+                request["taskId"].as_str() == Some(task_id.as_str())
+                    && request["status"] == "pending"
                     && Self::user_question_request(request) == user_questions
-                    && !self.resolved_user_questions.contains(&field(request, "id"))
+                    && !self.resolved_user_questions.contains(request["id"].as_str().unwrap_or_default())
             })
             .collect();
         requests.sort_by_key(|request| request["createdAt"].as_i64().unwrap_or_default());
@@ -469,7 +490,7 @@ impl chat::ChatPane {
             if pending {
                 if let Some(input) = input {
                     if field(input, "kind") == "questions" {
-                        for question in rows(input, "questions") {
+                        for question in interaction_rows(input, "questions") {
                             let question_id = field(&question, "id");
                             let key = (id.clone(), question_id.clone());
                             let secret = question["isSecret"] == true;
@@ -491,7 +512,7 @@ impl chat::ChatPane {
                                 field(&question, "question")
                             ));
                             for (index, option) in
-                                rows(&question, "options").into_iter().enumerate()
+                                interaction_rows(&question, "options").into_iter().enumerate()
                             {
                                 let label = field(&option, "label");
                                 let state = state.clone();
@@ -544,7 +565,7 @@ impl chat::ChatPane {
                             }
                             card = card.child(Input::new(&state).disabled(self.busy));
                         }
-                        let request = request.clone();
+                        let request = (*request).clone();
                         actions = actions.child(
                             Button::new(SharedString::from(format!("submit-{id}")))
                                 .debug_selector({
@@ -659,7 +680,7 @@ impl chat::ChatPane {
                                         card = card.child(Input::new(&state).disabled(self.busy));
                                     }
                                 }
-                                let request = request.clone();
+                                let request = (*request).clone();
                                 actions = actions.child(
                                     Button::new(SharedString::from(format!("submit-form-{id}")))
                                         .debug_selector({
@@ -825,9 +846,9 @@ impl chat::ChatPane {
         }
         // Saved rules are managed in the pane's Approvals view; they are not
         // active requests and must not occupy the conversation/composer area.
-        let queued: Vec<_> = rows(&self.snapshot, "queuedMessages")
+        let queued: Vec<_> = interaction_rows(&snapshot, "queuedMessages")
             .into_iter()
-            .filter(|message| field(message, "taskId") == task_id)
+            .filter(|message| message["taskId"].as_str() == Some(task_id.as_str()))
             .collect();
         if let Some(id) = self.queue_edit.clone() {
             let message = queued.iter().find(|message| field(message, "id") == id);
@@ -836,7 +857,7 @@ impl chat::ChatPane {
                     && field(message, "origin") != "channel-agent-mention"
             });
             let has_attachments =
-                message.is_some_and(|message| !rows(message, "attachmentIds").is_empty());
+                message.is_some_and(|message| !interaction_rows(message, "attachmentIds").is_empty());
             let text = self.queue_editor.read(cx).value().to_string();
             let mut editor = div()
                 .px(px(10.))
@@ -915,7 +936,7 @@ impl chat::ChatPane {
             let row_selector = format!("queued-message-{id}");
             let edit_selector = format!("edit-queue-{id}");
             let remove_selector = format!("remove-queue-{id}");
-            let attachments = rows(&message, "attachmentIds").len();
+            let attachments = interaction_rows(&message, "attachmentIds").len();
             let error = field(&message, "error");
             let status = if sending && field(&message, "origin") == "steering" {
                 "Steering".to_owned()

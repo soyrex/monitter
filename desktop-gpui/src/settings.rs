@@ -199,6 +199,7 @@ pub(super) struct NativeSettings {
     window_transparency: Entity<SliderState>,
     wallpaper_strength: Entity<SliderState>,
     interface_density: Entity<SliderState>,
+    active_pane_border_width: Entity<SliderState>,
     inactive_pane_opacity: Entity<SliderState>,
     _slider_subscriptions: Vec<Subscription>,
     board_guidance: Entity<TextareaState>,
@@ -216,7 +217,8 @@ impl NativeSettings {
         let mut ids = vec![
             self.chat_line_height.entity_id(), self.terminal_line_height.entity_id(),
             self.window_transparency.entity_id(), self.wallpaper_strength.entity_id(),
-            self.interface_density.entity_id(), self.inactive_pane_opacity.entity_id(),
+            self.interface_density.entity_id(), self.active_pane_border_width.entity_id(),
+            self.inactive_pane_opacity.entity_id(),
         ];
         for font in &self.fonts { ids.extend([font.family.entity_id(), font.weight.entity_id()]); }
         ids.extend(self.lan.iter().map(Entity::entity_id));
@@ -332,6 +334,11 @@ impl NativeSettings {
                     },
                 )
             }),
+            active_pane_border_width: cx.new(|_| {
+                SliderState::new().min(1.).max(8.).step(1.).default_value(
+                    settings["activePaneBorderWidth"].as_f64().unwrap_or(1.) as f32,
+                )
+            }),
             inactive_pane_opacity: cx.new(|_| {
                 SliderState::new().min(10.).max(90.).step(5.).default_value(
                     (settings["inactivePaneOpacity"].as_f64().unwrap_or(0.6) * 100.) as f32,
@@ -440,6 +447,19 @@ impl NativeSettings {
                     let density =
                         ["tight", "normal", "spacious"][value.end().round().clamp(0., 2.) as usize];
                     view.patch_settings(json!({"interfaceDensity": density}), cx);
+                } else {
+                    cx.notify();
+                }
+            },
+        ));
+        state._slider_subscriptions.push(cx.subscribe_workspace(
+            &state.active_pane_border_width, window,
+            |view, _, event: &SliderEvent, _, cx| {
+                if let SliderEvent::Release(value) = event {
+                    view.patch_settings(
+                        json!({"activePaneBorderWidth": value.end().round() as u8}),
+                        cx,
+                    );
                 } else {
                     cx.notify();
                 }

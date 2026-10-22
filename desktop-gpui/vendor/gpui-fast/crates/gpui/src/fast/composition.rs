@@ -1192,6 +1192,17 @@ fn surface_handle(
 }
 
 impl Window {
+    /// Whether this window presents GPUI base and overlay scenes on separate
+    /// composition surfaces.
+    ///
+    /// Native-view integrations can use this to retire legacy AppKit masking:
+    /// deferred GPUI popups already render on the overlay surface, above the
+    /// native content. Masking the host's child views in that mode would also
+    /// cut the popup out of GPUI's own overlay surface.
+    pub fn window_composition_enabled(&self) -> bool {
+        self.fast_composition.0.borrow().enabled
+    }
+
     /// Enables native window composition and returns its controller.
     ///
     /// GPUI's root scene is rendered below surfaces created by the controller,
@@ -1622,6 +1633,17 @@ mod tests {
     };
     use anyhow::Result;
     use std::{any::Any, cell::Cell, rc::Rc};
+
+    #[crate::test]
+    fn window_reports_when_ordered_composition_is_active(cx: &mut TestAppContext) {
+        let handle = cx.add_window(|_, _| div());
+        cx.update_window(handle.into(), |_, window, _| {
+            assert!(!window.window_composition_enabled());
+            window.fast_composition.0.borrow_mut().enabled = true;
+            assert!(window.window_composition_enabled());
+        })
+        .unwrap();
+    }
 
     #[test]
     fn composition_surfaces_have_stable_identity_and_explicit_order() -> Result<()> {

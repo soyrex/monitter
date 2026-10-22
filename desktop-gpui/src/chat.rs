@@ -29,6 +29,8 @@ pub(crate) mod run_activity;
 use super::transcript::TimelineRow;
 #[path = "chat_minimap.rs"]
 mod minimap;
+#[path = "transcript_minimap_preference.rs"]
+pub(crate) mod minimap_preference;
 #[path = "chat_transcript_view.rs"]
 mod transcript_view;
 #[path = "chat_watcher.rs"]
@@ -122,9 +124,8 @@ fn transcript_column(content: impl IntoElement) -> gpui_kit::AnyElement {
     div()
         .w_full()
         .min_w_0()
-        // Give the minimap breathing room in narrow panes. Once the column
-        // reaches its width cap, centering absorbs this inset on wide panes.
-        .px(px(5.))
+        // Only reserve overview breathing room when the minimap is enabled.
+        .px(px(if minimap_preference::enabled() { 5. } else { 0. }))
         .flex()
         .justify_center()
         .child(
@@ -617,12 +618,12 @@ fn approval_history_label(
 
 pub(crate) fn open_markdown_link(owner: Option<WeakEntity<ChatPane>>, link: &str, cx: &mut App) {
     let path = link.split(['?', '#']).next().unwrap_or(link);
-    let html = std::path::Path::new(path).is_absolute()
+    let local_document = std::path::Path::new(path).is_absolute()
         && std::path::Path::new(path)
             .extension()
             .and_then(|e| e.to_str())
-            .is_some_and(|e| e.eq_ignore_ascii_case("html") || e.eq_ignore_ascii_case("htm"));
-    if html || url::Url::parse(link).is_ok_and(|u| matches!(u.scheme(), "http" | "https" | "file"))
+            .is_some_and(|e| ["html", "htm", "md", "markdown", "mdown"].iter().any(|extension| e.eq_ignore_ascii_case(extension)));
+    if local_document || url::Url::parse(link).is_ok_and(|u| matches!(u.scheme(), "http" | "https" | "file"))
     {
         if let Some(owner) = owner {
             let _ = owner.update(cx, |pane, cx| {
@@ -720,7 +721,7 @@ pub struct ChatPane {
     pub(super) composer: Entity<TextareaState>,
     composer_git: Entity<crate::composer_git::ComposerGitStrip>,
     _composer_git_change: Subscription,
-    composer_footer: Entity<crate::composer_footer::ComposerFooterPane>,
+    pub(super) composer_footer: Entity<crate::composer_footer::ComposerFooterPane>,
     composer_context_bar: Entity<crate::composer_footer::ComposerContextBar>,
     _composer_footer_change: Subscription,
     voice: Entity<crate::chat_voice::VoiceComposer>,
@@ -767,6 +768,11 @@ pub struct ChatPane {
     pub(super) latest_history_loaded: bool,
     /// Suppresses duplicate bootstrap reads while the page result is in flight.
     pub(super) latest_history_inflight: bool,
+    /// IDs owned only by the bounded startup presentation, never NativeState.
+    pub(super) startup_seed_ids: HashSet<String>,
+    /// A workspace-wide background preload owns the current latest-history
+    /// request for this pane. Visibility must not start a duplicate IPC read.
+    pub(super) history_warmup_pending: bool,
     /// Full resets clear TranscriptState.loading, so keep request ownership
     /// separately until the corresponding HistoryPage event arrives.
     pub(super) history_page_inflight: bool,
@@ -852,6 +858,20 @@ impl ChatPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        cx.observe_global::<minimap_preference::Selection>(|pane, cx| {
+            let enabled = cx.try_global::<minimap_preference::Selection>()
+                .is_some_and(|selection| selection.enabled);
+            if pane.transcript_preparation_key.as_ref().is_some_and(|key| key.minimap_enabled == enabled) {
+                return;
+            }
+            pane.transcript_preparation_key = None;
+            if !enabled {
+                if let Some(viewport) = &pane.transcript_viewport {
+                    viewport.update(cx, |view, cx| view.disable_minimap(cx));
+                }
+            }
+            cx.notify();
+        }).detach();
         // A GUI-only update can reconnect to an older resident backend.
         // Probe capabilities without interrupting any resident agent.
         let capability_service = service.clone();
@@ -1282,6 +1302,8 @@ impl ChatPane {
             transcripts,
             latest_history_loaded: false,
             latest_history_inflight: false,
+            startup_seed_ids: HashSet::new(),
+            history_warmup_pending: false,
             history_page_inflight: false,
             dock_visible: true,
             answers: HashMap::new(),
@@ -2273,6 +2295,7 @@ impl ChatPane {
         }
         let state = self.transcripts.entry(self.task_id()).or_default();
         if state.defer_stream_body_patches(patches) {
+            for patch in patches { self.startup_seed_ids.remove(&field(patch, "id")); }
             self.activity_refresh_pending = false;
             return true;
         }
@@ -2282,6 +2305,7 @@ impl ChatPane {
         else {
             return false;
         };
+        for patch in patches { self.startup_seed_ids.remove(&field(patch, "id")); }
         self.activity_refresh_pending = false;
         if let Some(key) = &mut self.transcript_preparation_key {
             key.advance_stream_rows(&previous_rows, &state.rows);
@@ -2306,7 +2330,22 @@ impl ChatPane {
     }
     /// Authoritative cache integration: pass all known task messages, including
     /// loaded older pages. Never use this with a bounded compact snapshot tail.
-    pub fn reconcile_history(&mut self, messages: Vec<Value>, reset: bool, cx: &mut Context<Self>) {
+    pub fn reconcile_history(&mut self, mut messages: Vec<Value>, reset: bool, cx: &mut Context<Self>) {
+        if reset {
+            // Explicit authoritative resets may remove data. Cached text must
+            // never resurrect those IDs or survive into a new journal epoch.
+            self.startup_seed_ids.clear();
+        } else if !self.startup_seed_ids.is_empty() {
+            // A metadata/stream publication has no coverage of the older page.
+            // Retain only presentation-owned IDs until that page arrives;
+            // canonical rows immediately replace the matching cached IDs.
+            for message in &messages { self.startup_seed_ids.remove(&field(message, "id")); }
+            if let Some(state) = self.transcripts.get(&self.task_id()) {
+                messages.extend(state.messages.iter()
+                    .filter(|message| self.startup_seed_ids.contains(&field(message, "id")))
+                    .map(|message| message.as_ref().clone()));
+            }
+        }
         let task_id = self.task_id();
         let context_unchanged = std::mem::take(&mut self.transcript_context_unchanged);
         if context_unchanged && !reset {
@@ -2409,11 +2448,14 @@ impl ChatPane {
         let latest_request = self.latest_history_inflight;
         self.latest_history_inflight = false;
         self.history_page_inflight = false;
+        let startup_ids = if latest_request && result.is_ok() {
+            std::mem::take(&mut self.startup_seed_ids)
+        } else { HashSet::new() };
         let state = self.transcripts.entry(self.task_id()).or_default();
         state.loading = false;
         match result {
             Ok(page) => {
-                state.merge_page(&page);
+                state.merge_startup_page(&page, &startup_ids);
                 if latest_request {
                     self.latest_history_loaded = true;
                 }
@@ -2884,7 +2926,7 @@ impl ChatPane {
     }
     /// ListState carries geometry, not entity invalidation. Programmatic
     /// scroll/remeasure must invalidate its retained native render owner.
-    fn invalidate_transcript_list(&self, cx: &mut Context<Self>) {
+    pub(super) fn invalidate_transcript_list(&self, cx: &mut Context<Self>) {
         if let Some(list) = &self.detail_transcript_cache {
             list.update(cx, |_, cx| cx.notify());
         }
@@ -3528,7 +3570,11 @@ impl Render for ChatPane {
                         item.leaves().into_iter().map(move |leaf| (index, leaf))
                     })
                     .collect();
-                let minimap_markers = Rc::new(minimap::prepare(timeline_rows.iter(), palette));
+                let minimap_markers = if minimap_preference::enabled() {
+                    Rc::new(minimap::prepare(timeline_rows.iter(), palette))
+                } else {
+                    Rc::default()
+                };
                 #[cfg(any(test, feature = "performance-profiling"))]
                 TRANSCRIPT_PREPARED_ROWS.fetch_add(
                     timeline_rows.len() as u64,
@@ -5495,10 +5541,12 @@ impl Render for ChatPane {
             composer_height,
             !crate::native_motion::motion_allowed(),
         );
-        if let Some(viewport) = &self.transcript_viewport {
-            viewport.update(cx, |viewport, cx| {
-                viewport.set_composer_hidden(composer_hidden, cx)
-            });
+        if minimap_preference::enabled() {
+            if let Some(viewport) = &self.transcript_viewport {
+                viewport.update(cx, |viewport, cx| {
+                    viewport.set_composer_hidden(composer_hidden, cx)
+                });
+            }
         }
         let away_from_bottom = self
             .transcripts

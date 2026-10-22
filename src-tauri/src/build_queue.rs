@@ -47,6 +47,40 @@ fn queue(s: &Snapshot, p: &str) -> Value {
     )
 }
 
+// MCP callers need the complete coordination state, not the archived build log.
+// Never trim pending work or running reservations, including expired leases.
+fn coordination_queue(s: &Snapshot, p: &str) -> Value {
+    let mut requests: Vec<_> = s.build_requests.iter().filter(|r| r.project_id == p).collect();
+    requests.sort_by_key(|r| std::cmp::Reverse(r.updated_at));
+    let request_count = requests.len();
+    let mut history = 0;
+    requests.retain(|r| {
+        if matches!(r.status.as_str(), "planned" | "ready" | "running") {
+            true
+        } else {
+            history += 1;
+            history <= 8
+        }
+    });
+    let mut runs: Vec<_> = s.build_runs.iter().filter(|r| r.project_id == p).collect();
+    runs.sort_by_key(|r| std::cmp::Reverse(r.updated_at));
+    let run_count = runs.len();
+    history = 0;
+    runs.retain(|r| {
+        if r.status == "running" {
+            true
+        } else {
+            history += 1;
+            history <= 4
+        }
+    });
+    json!({"projectId": p,
+        "enabled": s.projects.iter().any(|x| x.id == p && x.build_management_enabled),
+        "omittedRequests": request_count - requests.len(),
+        "omittedRuns": run_count - runs.len(),
+        "requests": requests, "runs": runs})
+}
+
 impl Service {
     pub(crate) fn read_project_build_queue(&self, p: &str) -> Result<Value, String> {
         let d = self.data.lock().map_err(|_| "State lock failed.")?;
@@ -71,7 +105,7 @@ impl Service {
 
             let p = project(&d.snapshot, task, false)?;
 
-            return Ok(queue(&d.snapshot, &p));
+            return Ok(coordination_queue(&d.snapshot, &p));
         }
 
         validate_args(tool, &Value::Object(a.clone()))?;
@@ -136,7 +170,7 @@ fn apply(
     )?;
 
     match tool {
-        "build_queue_list" => Ok(queue(s, &p)),
+        "build_queue_list" => Ok(coordination_queue(s, &p)),
         "build_request" => {
             let request_id = text(a, "request_id", 128)?;
             let title = text(a, "title", 240)?;
@@ -470,6 +504,44 @@ mod tests {
     use super::*;
 
     use crate::model::{CreateTaskInput, Project};
+
+    #[test]
+    fn coordination_queue_bounds_history_but_keeps_old_pending_work_and_expired_reservations() {
+        let dir = std::env::temp_dir().join(format!("monitter-queue-view-{}", id()));
+        let service = Service::open(None, dir.clone()).unwrap();
+        let mut snapshot = service.snapshot().unwrap();
+        for n in 0..40 {
+            snapshot.build_requests.push(BuildRequest {
+                id: format!("request-{n}"), project_id: "p".into(), task_id: "task".into(),
+                agent_id: "agent".into(), host_id: "host".into(), request_id: format!("key-{n}"),
+                title: "build".into(), command: "cargo check".into(), cwd: "/repo".into(),
+                target_key: "/cache".into(), status: match n {
+                    0 => "planned", 1 => "ready", 2 => "running", _ => "succeeded",
+                }.into(), build_run_id: None, created_at: n, updated_at: n,
+            });
+            snapshot.build_runs.push(BuildRun {
+                id: format!("run-{n}"), project_id: "p".into(), owner_task_id: "task".into(),
+                host_id: "host".into(), request_ids: vec![], command: "cargo check".into(),
+                cwd: "/repo".into(), target_key: "/cache".into(),
+                status: if n == 0 { "running" } else { "succeeded" }.into(),
+                summary: String::new(), exit_code: None, created_at: n, updated_at: n,
+                lease_expires_at: 0,
+            });
+        }
+        let view = coordination_queue(&snapshot, "p");
+        assert_eq!(view["requests"].as_array().unwrap().len(), 11);
+        assert_eq!(view["runs"].as_array().unwrap().len(), 5);
+        assert_eq!(view["omittedRequests"], 29);
+        assert_eq!(view["omittedRuns"], 35);
+        for old in ["request-0", "request-1", "request-2"] {
+            assert!(view["requests"].as_array().unwrap().iter().any(|r| r["id"] == old));
+        }
+        assert!(view["runs"].as_array().unwrap().iter().any(|r| r["id"] == "run-0"));
+        assert!(coordination_queue(&snapshot, "other")["requests"].as_array().unwrap().is_empty());
+        assert_eq!(queue(&snapshot, "p")["requests"].as_array().unwrap().len(), 40);
+        drop(service);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn clear_context_reinjects_older_session_build_intent_after_reopen() {

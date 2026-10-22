@@ -87,13 +87,10 @@
 //!   footer is short and folding rows mid-widget would clip the brand
 //!   actions; this is documented as a deliberate divergence in the
 //!   `render_rings_row` method.
-//! - **Inline detail popover**: the Svelte `ProviderUsageModal` opens as a
-//!   dialog. The native widget renders a retained inline detail block
-//!   (`render_detail`) under the rings row when a provider is clicked.
-//!   The data shown is the same `windows` / `balances` / `accountLabel`
-//!   set the modal exposes; the layout is the lower-sidebar geometry
-//!   rather than a centred dialog because no GPUI modal primitive is
-//!   available without extending the parent.
+//! - **Anchored usage menu**: clicking a provider ring opens a native
+//!   dropdown anchored directly beneath that ring. The data shown is the
+//!   same `windows` / `balances` / `accountLabel` set the legacy modal
+//!   exposed, without interrupting the workspace with a centred dialog.
 //! - **No `Browser` wrapper**: rendering goes through the native GPUI
 //!   image stack. There is no `<img>` to an HTTP URL, no `WebView`, and no
 //!   scripted host. The widget holds no `serde_json::Value` strings in
@@ -132,8 +129,9 @@ use gpui_kit::{
     Image, ImageFormat,
     assets::__private as icons_assets,
     component::{
-        ActiveTheme as _, Icon, Sizable, WindowExt as _,
+        Icon, Sizable,
         button::{Button, ButtonVariants},
+        popover::Popover,
         tooltip::Tooltip,
     },
     *,
@@ -1703,8 +1701,8 @@ impl SidebarUsageWidget {
             );
         }
         let selected_window = selected_account.clone();
-        let dialog_ring = ring.clone();
-        let dialog_provider = provider;
+        let menu_ring = ring.clone();
+        let menu_provider = provider;
         let face_content = div()
             .w(px(ring_size))
             .h(px(ring_size))
@@ -1743,7 +1741,6 @@ impl SidebarUsageWidget {
                             .unwrap_or_else(|| div().size_0().into_any_element()),
                     ),
             );
-        let click_title = format!("{} usage", provider.label());
         let click_label = format!("Show {} usage details", provider.label());
         let ring_face = Button::new(SharedString::from(click_id))
             .ghost()
@@ -1754,24 +1751,39 @@ impl SidebarUsageWidget {
             .accessibility_label(click_label)
             .w(px(ring_size))
             .h(px(ring_size))
-            .on_click(cx.listener(move |_, _, window, cx| {
-                let title = click_title.clone();
-                let ring = dialog_ring.clone();
-                let account = selected_window.clone();
-                window.open_dialog(cx, move |dialog, _, _| {
-                    dialog
-                        .title(title.clone())
-                        .width(px(420.))
-                        .child(provider_dialog_content(
-                            dialog_provider,
-                            &ring,
-                            account.as_ref(),
-                            palette,
-                        ))
-                });
-            }))
             .child(face_content);
-        ring_container = ring_container.child(ring_face);
+        let menu_title = format!("{} usage", provider.label());
+        ring_container = ring_container.child(
+            Popover::new(SharedString::from(format!(
+                "sidebar-usage-menu-{}",
+                provider.id()
+            )))
+            .anchor(Anchor::TopCenter)
+            .offset(px(6.))
+            .overlay_closable(true)
+            .trigger(ring_face)
+            .header(menu_title, "Allowance and reset windows")
+            .content(move |_, _, _| {
+                div()
+                    .id(SharedString::from(format!(
+                        "sidebar-usage-menu-content-{}",
+                        menu_provider.id()
+                    )))
+                    .debug_selector(move || {
+                        format!("sidebar-usage-menu-content-{}", menu_provider.id())
+                    })
+                    .w(px(320.))
+                    .max_w(px(360.))
+                    .max_h(px(520.))
+                    .overflow_y_scroll()
+                    .child(provider_usage_menu_content(
+                        menu_provider,
+                        &menu_ring,
+                        selected_window.as_ref(),
+                        palette,
+                    ))
+            }),
+        );
         if provider == SidebarUsageProvider::Codex && ring.accounts.len() > 1 {
             ring_container = ring_container.child(
                 Button::new("sidebar-usage-account-next")
@@ -2106,7 +2118,7 @@ fn merge_rings(cached: SidebarUsageRing, next: SidebarUsageRing) -> SidebarUsage
     }
 }
 
-fn provider_dialog_content(
+fn provider_usage_menu_content(
     provider: SidebarUsageProvider,
     ring: &SidebarUsageRing,
     account: Option<&SidebarUsageAccount>,
@@ -2132,7 +2144,7 @@ fn provider_dialog_content(
         .and_then(|account| account.weekly.as_ref())
         .or(ring.weekly.as_ref());
     let mut body = div()
-        .id(format!("sidebar-usage-dialog-{}", provider.id()))
+        .id(format!("sidebar-usage-menu-details-{}", provider.id()))
         .flex()
         .flex_col()
         .gap_2()

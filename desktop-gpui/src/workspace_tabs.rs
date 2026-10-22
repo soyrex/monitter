@@ -14,6 +14,7 @@ use gpui_kit::{
         popover::Popover,
         menu::{ContextMenuExt as _, PopupMenuItem},
         color_picker::{ColorPicker, ColorPickerState, ColorPickerEvent},
+        spinner::Spinner,
     },
     prelude::*,
     *,
@@ -599,12 +600,15 @@ impl Desktop {
         self.switch_named_workspace(id, window, cx);
     }
     pub(super) fn switch_named_workspace(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        // Include panes added since the last preference load in the shared
+        // history warmup. Duplicate task IDs are ignored by the warmup queue.
         self.close_activity_overview(window, cx);
         // An explicit workspace choice supersedes any queued sidebar click.
         self.window.pending_pane_focus = None;
         self.window.pending_sidebar_task = None;
         self.window.pending_notification_read = None;
         self.begin_named_workspace_switch(id, window, cx);
+        self.prewarm_workspace_history(cx);
     }
     fn begin_named_workspace_switch(
         &mut self,
@@ -622,13 +626,18 @@ impl Desktop {
         if self.focus_workspace_owner(&id, cx) {
             return;
         }
-        if !self.workspace_ready()
-            || self.window.active_workspace_id.as_deref() == Some(id.as_str())
-        {
+        if self.window.active_workspace_id.as_deref() == Some(id.as_str()) {
+            self.pending_workspace_activation = None;
+            return;
+        }
+        if !self.workspace_controls_available() { return; }
+        if !self.workspace_ready() {
+            self.pending_workspace_activation = Some((self.current_workspace_window.clone(), id));
+            self.schedule_saved_workspace_interface_tick(window, cx);
             return;
         }
         match self.activate_retained_workspace(&id, window, cx) {
-            Ok(true) => return,
+            Ok(true) => { self.pending_workspace_activation = None; return; },
             Ok(false) => {}
             Err(error) => {
                 self.preferences_error = Some(error);
@@ -636,41 +645,15 @@ impl Desktop {
                 return;
             }
         }
-        self.capture_native_drafts(cx);
-        match self.window.dock.read(cx).serialize(cx) {
-            Ok(mut layout) => {
-                let focused = self
-                    .window
-                    .dock
-                    .read(cx)
-                    .focused_pane_id(window, cx)
-                    .or_else(|| self.window.dock_current.clone());
-                crate::workspace_visibility::remember_focus(&mut layout, focused.as_deref());
-                self.capture_workspace_layout(layout);
-            }
-            Err(error) => {
-                self.preferences_error = Some(error);
-                cx.notify();
-                return;
-            }
-        }
-        if let Err(error) = self.prepare_uncached_workspace(&id, window, cx) {
-            self.preferences_error = Some(error);
-            cx.notify();
-            return;
-        }
-        self.workspaces_dirty = true;
-        self.preferences_dirty = true;
-        self.window.workspace_switch = Some(id);
-        self.window.workspace_editor = None;
-        self.window.selected = None;
-        self.window.dock_current = None;
-        self.window.sidebar = Sidebar::Chats;
-        self.window.route_touched = true;
-        self.window.preferences_restore = true;
-        self.restore_preferences(window, cx);
-        cx.notify();
+        // Keep the current dock on screen until the retained target is ready.
+        // Startup preloading normally makes this path an immediate cache hit.
+        self.pending_workspace_activation = Some((self.current_workspace_window.clone(), id.clone()));
+        self.prioritize_workspace_interface(&id);
+        self.workspace_interface_preload_queue.retain(|queued| queued != &id);
+        self.workspace_interface_preload_queue.push_front(id);
+        self.schedule_saved_workspace_interface_tick(window, cx);
     }
+
     fn add_named_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.workspace_ready() {
             return;
@@ -1366,9 +1349,23 @@ impl Desktop {
             usage.update(cx, |usage, cx| usage.set_composed_palette(palette, usage_width, cx));
         }
         let notification_pills = self.workspace_notification_pills(window, cx);
+        let running_task_ids = self.snapshot["tasks"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|task| task["status"] == "running" && task["archived"] != true)
+            .filter_map(|task| task["id"].as_str().map(str::to_owned))
+            .collect::<std::collections::HashSet<_>>();
         let ready = self.workspace_ready();
         let controls_available = self.workspace_controls_available();
         let tab_metrics = design::workspace_tab_metrics(cx.theme().font_size);
+        let available_tabs_width = (window.viewport_size().width - px(440.)).max(px(120.));
+        let workspace_count = self.window_named_workspaces().map_or(0, |set| set.items.len());
+        // Keep labels while the centered strip can comfortably fit a useful
+        // width per workspace. Once it cannot, retain each workspace icon and
+        // its notification pill instead of letting labels crowd the controls.
+        let icon_only_tabs = workspace_count > 0
+            && px(workspace_count as f32 * 132. + 40.) > available_tabs_width;
         let tern =
             design::tile_theme() == monitter_lib::experimental_desktop::NativeTileTheme::Tern;
         let mut tabs = div()
@@ -1380,6 +1377,7 @@ impl Desktop {
             .justify_center()
             .gap(px(5.))
             .min_w_0()
+            .max_w(available_tabs_width)
             .overflow_x_scroll()
             .on_drop(cx.workspace_listener(|desktop,drag:&WorkspaceTabDrag,_,cx| {
                 desktop.queue_workspace_tab_drop(drag.id.clone(),None,cx);cx.stop_propagation();
@@ -1387,7 +1385,13 @@ impl Desktop {
         if let Some(set) = self.window_named_workspaces() {
             for (index, item) in set.items.iter().enumerate() {
                 let active = !self.window.activity_overview_open && item.id == set.active_id;
+                let active_agent = crate::workspace_notification_scope::task_ids_for_layout(
+                    item.layout.as_ref(),
+                )
+                .iter()
+                .any(|task_id| running_task_ids.contains(task_id));
                 let id = item.id.clone();
+                let spinner_debug_id = id.clone();
                 let edit_id = id.clone();
                 let menu_id = id.clone();
                 let is_open = self.window.workspace_editor
@@ -1428,6 +1432,21 @@ impl Desktop {
                     .child(div().relative().size(tab_metrics.icon_size)
                         .debug_selector(move || format!("workspace-edit-icon-{icon_debug_id}"))
                         .child(workspace_favicon(&id, item.url.as_deref(), icon(&item.icon), color, window, cx))
+                        .when(active_agent, |icon| icon.child(
+                            div()
+                                .absolute()
+                                .top(gpui_kit::px(-3.))
+                                .right(gpui_kit::px(-3.))
+                                .size(gpui_kit::px(10.))
+                                .debug_selector(move || {
+                                    format!("workspace-active-spinner-{spinner_debug_id}")
+                                })
+                                .child(
+                                    Spinner::new()
+                                        .with_size(gpui_kit::px(10.))
+                                        .color(color.into()),
+                                ),
+                        ))
                         .when(index < 9, |icon| icon.child(workspace_number_hint(
                             &id, index + 1, self.window.workspace_number_hints, palette, window, cx,
                         ))))
@@ -1522,15 +1541,16 @@ impl Desktop {
                         .role(Role::Tab)
                         .aria_selected(active)
                         .aria_label(format!(
-                            "{} workspace{}",
+                            "{} workspace{}{}",
                             item.name,
-                            if active { ", selected" } else { "" }
+                            if active { ", selected" } else { "" },
+                            if active_agent { ", active agent" } else { "" }
                         ))
                         .child(div().absolute().inset_0().child(selection_chrome))
                         .child(menu)
-                        .child(div().min_w_0().truncate()
+                        .when(!icon_only_tabs, |tab| tab.child(div().min_w_0().truncate()
                             .text_size(tab_metrics.text_size)
-                            .child(item.name.clone()))
+                            .child(item.name.clone())))
                         .child(div().flex_shrink_0()
                             .size(crate::design::ui_scaled_px(16.))
                             .children(notification_pills.get(&id).cloned()))
@@ -1608,11 +1628,13 @@ impl Desktop {
             .map(|controls| {
                 let label = if self.sidebar_is_hidden() { "Show sidebar" } else { "Hide sidebar" };
                 controls.child(Button::new("cycle-main-sidebar")
+                    .debug_selector(|| "cycle-main-sidebar".into())
                     .track_focus(&self.window.sidebar_toggle_focus)
                     .ghost().compact().flex_shrink_0().toggled(!self.sidebar_is_hidden())
                     .icon(Icon::new(IconName::PanelLeft)
                         .text_color(rgb(if self.sidebar_is_hidden() { palette.ink } else { palette.accent }).opacity(0.5)))
                     .accessibility_label(label).tooltip(label)
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(cx.workspace_listener(|view, _, window, cx| view.toggle_sidebar(window, cx))))
             })
             .child(div().id("activity-overview-toggle-hit").debug_selector(|| "activity-overview-toggle".into()).flex().flex_shrink_0()
@@ -1625,6 +1647,7 @@ impl Desktop {
                 .on_click(cx.workspace_listener(|view, _, window, cx| view.toggle_activity_overview(window, cx)))))
             .child(div().flex_shrink_0().w(px(1.)).h(px(18.)).mx(px(5.)).bg(rgb(palette.ink).opacity(0.24)))
             .children(self.window.workspace_clock.clone())
+            .when(!self.window.activity_overview_open, |controls| controls
             .child(div().flex_shrink_0().w(px(1.)).h(px(18.)).mx(px(5.)).bg(rgb(palette.ink).opacity(0.24)))
             .child(Button::new("split-workspace-vertical")
                     .debug_selector(|| "split-workspace-vertical".into())
@@ -1668,7 +1691,7 @@ impl Desktop {
                                 }
                             });
                         });
-                    })));
+                    }))));
         let right_controls = div()
             .id("workspace-bar-right-controls")
             .debug_selector(|| "workspace-bar-right-controls".into())

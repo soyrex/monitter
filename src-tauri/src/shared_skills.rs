@@ -3,6 +3,14 @@
 use crate::{extensions::ManagedSkill, skill_install::DownloadedSkill, Service};
 use serde_json::{json, Value};
 
+/// Compile the guide into the backend; no install, network or private config access.
+pub(crate) fn openui_help() -> Value {
+    json!({
+        "format": "markdown",
+        "instructions": include_str!("../../desktop-gpui/openui/SKILL.md")
+    })
+}
+
 pub(crate) fn help() -> Value {
     json!({
         "tools": ["skills_help", "list_shared_skills", "install_shared_skill"],

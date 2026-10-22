@@ -1,0 +1,46 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "interface-cleanup",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "--prefix",
+        "/Users/alex/code/monitter-interface-cleanup-20260924",
+        "run",
+        "dev:web",
+        "--",
+        "--port",
+        "18466"
+      ],
+      "port": 18466,
+      "url": "http://127.0.0.1:18466"
+    },
+    {
+      "name": "interface-cleanup-fixture",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "--prefix",
+        "/Users/alex/code/monitter-interface-cleanup-20260924",
+        "run",
+        "dev",
+        "--",
+        "--port",
+        "18467"
+      ],
+      "port": 18467
+    },
+    {
+      "name": "monitter-design",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "run",
+        "dev",
+        "--",
+        "--port",
+        "18470"
+      ],
+      "port": 18470
+    }
+  ]
+}
