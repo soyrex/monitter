@@ -150,7 +150,14 @@ pub fn background(area: Area, color: u32) -> Background {
 
 /// Tint pane RGB without changing transparency or adding another surface layer.
 pub fn tinted_pane_background(color: u32, dark: bool, amount: f32) -> Background {
-    background(Area::Pane, pane_tint(color, dark, amount))
+    let mut fill = background(Area::Pane, pane_tint(color, dark, amount));
+    // A fully opaque pane has no backdrop to blend with. Multiply makes a
+    // dark theme's paper nearly black, while Screen washes out light themes.
+    // Keep the saved blend preference for translucent and glass surfaces.
+    if fill.as_solid().is_some_and(|color| color.a >= 0.999) {
+        fill.blend_mode = Mode::Normal.shader();
+    }
+    fill
 }
 
 fn pane_tint(color: u32, dark: bool, amount: f32) -> u32 {
