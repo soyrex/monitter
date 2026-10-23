@@ -541,6 +541,11 @@ fn updated_label(updated_at: i64, now: i64) -> String {
         format!("updated {}d", minutes / 1440)
     }
 }
+fn elapsed_label(created_at: i64, now: i64) -> String {
+    if created_at <= 0 { return String::new(); }
+    let minutes = now.saturating_sub(created_at).max(0) / 60_000;
+    if minutes < 60 { format!("{minutes}m") } else { format!("{}h {}m", minutes / 60, minutes % 60) }
+}
 #[derive(Clone, Copy, Debug)]
 struct Placement {
     x: f32,
@@ -1005,6 +1010,7 @@ struct PaintedMapViewport {
 pub struct ActivityOverview {
     focus: FocusHandle,
     search: Entity<InputState>,
+    watch_panel: Option<(String, Entity<crate::workspace_tabs::ActivityWatchModal>)>,
     snapshot: Rc<Value>,
     palette: Palette,
     model: OverviewModel,
@@ -1079,6 +1085,7 @@ impl ActivityOverview {
         Self {
             focus: cx.focus_handle(),
             search,
+            watch_panel: None,
             snapshot: Rc::new(Value::Null),
             palette: design::palette(&Value::Null, window.appearance()),
             model: OverviewModel::default(),
@@ -1105,6 +1112,18 @@ impl ActivityOverview {
             _subscription: subscription,
             _refresh: refresh,
         }
+    }
+    pub(crate) fn set_watch_panel(
+        &mut self,
+        task_id: String,
+        panel: Entity<crate::workspace_tabs::ActivityWatchModal>,
+        cx: &mut Context<Self>,
+    ) {
+        self.watch_panel = Some((task_id, panel));
+        cx.notify();
+    }
+    pub(crate) fn clear_watch_panel(&mut self, cx: &mut Context<Self>) {
+        if self.watch_panel.take().is_some() { cx.notify(); }
     }
     fn set_grouping(
         &mut self,
@@ -1303,6 +1322,8 @@ impl ActivityOverview {
     }
     fn card(&self, card: &Card, list: bool, cx: &mut Context<Self>) -> AnyElement {
         let quiet = card.state == State::Idle;
+        let panel_open = self.watch_panel.is_some();
+        let panel_selected = self.watch_panel.as_ref().is_some_and(|(id, _)| id == &card.task_id);
         let tone = |color: u32| {
             if !quiet { return color; }
             let color = rgb(color);
@@ -1328,12 +1349,12 @@ impl ActivityOverview {
             .iter()
             .filter(|state| **state == State::Done)
             .count();
-        let outline = match card.state {
+        let outline = if panel_selected { rgb(p.accent) } else { match card.state {
             State::Idle => rgb(p.hairline(0)),
             State::Done => rgb(p.hairline(1)),
             State::Working => rgb(p.glow()),
             State::NeedsYou | State::Failed => rgb(color).opacity(0.42),
-        };
+        }};
         let mut progress = div()
             .flex()
             .gap(scaled(3.))
@@ -1445,13 +1466,17 @@ impl ActivityOverview {
             .border_1()
             .border_color(outline)
             .bg(background)
-            .when(quiet, |body| body.opacity(0.72))
+            .when(quiet && !panel_selected, |body| body.opacity(0.72))
             .when(self.filter == Filter::Working && matches!(card.state, State::Idle | State::Done),
                 |body| body.opacity(if quiet { 0.72 * 0.6 } else { 0.6 }))
+            .when(panel_open && !panel_selected, |body| body.opacity(0.32))
             .shadow({
                 let mut shadows = vec![BoxShadow::new(px(0.), scaled(6.), rgb(0x000000).opacity(if p.dark { 0.28 } else { 0.12 }).into())
                     .blur_radius(scaled(18.))];
-                if card.state == State::Working {
+                if panel_selected {
+                    shadows.push(BoxShadow::new(px(0.), px(0.), rgb(p.accent).opacity(0.28).into())
+                        .blur_radius(scaled(36.)).spread_radius(scaled(3.)));
+                } else if card.state == State::Working {
                     shadows.push(BoxShadow::new(px(0.), px(0.), rgb(color).opacity(0.08).into())
                         .blur_radius(scaled(24.)));
                 }
@@ -1583,6 +1608,7 @@ impl ActivityOverview {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let p = self.palette;
+        let panel_open = self.watch_panel.is_some();
         let zoom = self.zoom;
         let ratio = interface_font_ratio(cx.theme().font_size);
         let scaled = move |value: f32| px(value * zoom * ratio);
@@ -1690,7 +1716,8 @@ impl ActivityOverview {
         } else { links.into_any_element() };
         let mut cluster = div()
             .id(SharedString::from(format!("activity-project-{index}")))
-            .relative().w(scaled(width)).h(scaled(height)).flex_shrink_0().child(links);
+            .relative().w(scaled(width)).h(scaled(height)).flex_shrink_0()
+            .child(div().absolute().size_full().when(panel_open, |layer| layer.opacity(0.32)).child(links));
         for (index, card) in cards.iter().enumerate() {
             let placement = placements[index + 1];
             let rect = MapRect { x: bounds.x + retained.target.x + placement.x,
@@ -1754,6 +1781,7 @@ impl ActivityOverview {
                     .border_1()
                     .border_color(rgb(project_color).opacity(0.40))
                     .bg(rgb(design::mix_rgb(p.paper, project_color, 0.10)))
+                    .when(panel_open, |hub| hub.opacity(0.32))
                     .shadow(vec![BoxShadow::new(px(0.), scaled(3.), rgb(0x000000).opacity(if p.dark { 0.24 } else { 0.10 }).into())
                         .blur_radius(scaled(10.))])
                     .flex().flex_col().items_start().justify_center()
@@ -2158,8 +2186,10 @@ impl Render for ActivityOverview {
                         cx.defer(move |cx| { let _ = owner.update(cx, |_, cx| cx.notify()); });
                     }
                 }, |_, _, _, _| ()).absolute().inset_0())
-                .child(washes)
-                .child(self.communication_layer(endpoints, scale, map_viewport, cx));
+                .child(washes.when(self.watch_panel.is_some(), |layer| layer.opacity(0.32)))
+                .child(div().absolute().inset_0()
+                    .when(self.watch_panel.is_some(), |layer| layer.opacity(0.32))
+                    .child(self.communication_layer(endpoints, scale, map_viewport, cx)));
             for (index, (name, cards)) in groups.iter().enumerate() {
                 let project = &self.layout.projects[cards[0].group_id(self.grouping)];
                 let position = project.bounds.unwrap();
@@ -2233,9 +2263,26 @@ impl Render for ActivityOverview {
         legend = legend
             .child(div().child("Dashed line = agent is working · Dotted line = communication"))
             .child(div().flex_1())
-            .child(div().child("Click a card to open Watch"));
-        div()
+            .child(div().child(if self.watch_panel.is_some() {
+                "Esc closes the panel · click another tile to switch"
+            } else { "Click a card to inspect its activity" }));
+        let selected_panel = self.watch_panel.as_ref().map(|(task_id, panel)| {
+            let card = self.model.cards.iter().find(|card| &card.task_id == task_id);
+            let name = card.map_or("Agent", |card| card.agent.as_str()).to_owned();
+            let status = card.map_or(State::Idle, |card| card.state);
+            let project_name = card.map_or("Project", |card| card.project_name.as_str()).to_owned();
+            let project_color = card.and_then(|card| rows(&self.snapshot, "projects").iter()
+                .find(|project| text(project, "id") == card.project_id))
+                .map_or(p.accent, |project| design::parse_color(text(project, "color"), p.accent));
+            let created_at = rows(&self.snapshot, "tasks").iter()
+                .find(|task| text(task, "id") == task_id)
+                .and_then(|task| task["createdAt"].as_i64()).unwrap_or(0);
+            let elapsed = elapsed_label(created_at, chrono::Utc::now().timestamp_millis());
+            (name, status, project_name, project_color, elapsed, panel.clone())
+        });
+        let mut root = div()
             .id("activity-overview")
+            .relative()
             .child(
                 canvas(|_, _, _| (), {
                     let entity = cx.entity().downgrade();
@@ -2277,7 +2324,11 @@ impl Render for ActivityOverview {
                     window.focus(&overview.search.read(cx).focus_handle(cx), cx);
                     cx.stop_propagation();
                 } else if event.keystroke.key == "escape" && !search_focused {
-                    cx.emit(ActivityOverviewEvent::Close);
+                    if overview.watch_panel.is_some() {
+                        overview.clear_watch_panel(cx);
+                    } else {
+                        cx.emit(ActivityOverviewEvent::Close);
+                    }
                     cx.stop_propagation();
                 }
             }))
@@ -2299,7 +2350,50 @@ impl Render for ActivityOverview {
                         }
                     }).absolute().size_full()))
                 .child(content.size_full()))
-            .child(legend)
+            .child(legend);
+        if let Some((name, status, project_name, project_color, elapsed, panel)) = selected_panel {
+            root = root.child(div()
+                .id("activity-agent-panel")
+                .debug_selector(|| "activity-agent-panel".into())
+                .absolute().right_0().top_0().h_full().w(px(460.)).max_w_full()
+                .flex().flex_col().min_h_0()
+                .border_l_1().border_color(rgb(p.glow()))
+                .bg(crate::pane_appearance::pane_wash_background(rgb(p.panel).into(), p.tint()))
+                .shadow(vec![BoxShadow::new(px(-24.), px(0.), rgb(0x000000).opacity(0.35).into())
+                    .blur_radius(px(48.))])
+                .child(div().h(px(48.)).flex_shrink_0().px(px(16.))
+                    .flex().items_center().gap(px(10.))
+                    .border_b_1().border_color(rgb(p.hairline(0)))
+                    .child(div().size(px(20.)).rounded(px(5.))
+                        .bg(rgb(p.agent()).opacity(0.14))
+                        .text_color(rgb(p.agent())).text_size(px(12.))
+                        .flex().items_center().justify_center()
+                        .child(name.chars().next().unwrap_or('A').to_string()))
+                    .child(div().flex_1().min_w_0().truncate()
+                        .font_weight(FontWeight::SEMIBOLD).text_size(px(13.)).child(name))
+                    .child(div().px(px(8.)).h(px(22.)).rounded_full()
+                        .border_1().border_color(rgb(status.color(p)).opacity(0.38))
+                        .bg(rgb(status.color(p)).opacity(0.14))
+                        .text_color(rgb(status.color(p))).text_size(px(11.))
+                        .flex().items_center().child(status.label()))
+                    .when(!elapsed.is_empty() && window.viewport_size().width > px(850.), |header| header.child(
+                        div().font_family(design::FONT_MONO).text_size(px(11.))
+                            .text_color(rgb(p.text(2))).child(elapsed)))
+                    .when(window.viewport_size().width > px(1000.), |header| header.child(
+                        div().px(px(6.)).h(px(22.)).max_w(px(105.))
+                            .flex().items_center().gap(px(5.)).rounded(px(6.))
+                            .border_1().border_color(rgb(project_color).opacity(0.40))
+                            .bg(rgb(project_color).opacity(0.12))
+                            .child(div().size(px(7.)).rounded(px(2.)).bg(rgb(project_color)))
+                            .child(div().min_w_0().truncate().text_size(px(11.))
+                                .text_color(rgb(p.text(1))).child(project_name))))
+                    .child(Button::new("activity-agent-panel-close").ghost().compact()
+                        .debug_selector(|| "activity-agent-panel-close".into())
+                        .label("×").accessibility_label("Close activity panel")
+                        .on_click(cx.listener(|overview, _, _, cx| overview.clear_watch_panel(cx)))))
+                .child(div().flex_1().min_h_0().overflow_hidden().child(panel)));
+        }
+        root
     }
 }
 

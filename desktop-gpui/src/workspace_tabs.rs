@@ -25,7 +25,7 @@ use rand_core::{OsRng, RngCore};
 use crate::workspace_favicon::workspace_favicon;
 use serde_json::{Value, json};
 
-struct ActivityWatchModal {
+pub(crate) struct ActivityWatchModal {
     pane: Entity<crate::chat::ChatPane>,
     _subscription: Subscription,
 }
@@ -306,6 +306,9 @@ impl Desktop {
     pub(super) fn close_activity_overview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.window.activity_overview_open { return; }
         self.window.activity_overview_open = false;
+        if let Some(overview) = &self.window.activity_overview {
+            overview.update(cx, |overview, cx| overview.clear_watch_panel(cx));
+        }
         if let Some(focus) = self.window.activity_overview_previous_focus.take() {
             window.focus(&focus, cx);
         }
@@ -373,21 +376,9 @@ impl Desktop {
             }).detach();
             ActivityWatchModal { pane: pane.clone(), _subscription: subscription }
         });
-        let previous_focus = window.focused(cx);
-        window.open_dialog(cx, move |dialog, window, _| {
-            let pane = pane.clone();
-            let previous_focus = previous_focus.clone();
-            dialog.title("Watch")
-                .width((window.viewport_size().width - px(48.)).min(px(880.)))
-                .keyboard(true).close_button(true).overlay_closable(true)
-                .on_close(move |_, window, cx| {
-                    pane.update(cx, |pane, cx| pane.release_activity_watch_modal(generation, cx));
-                    if let Some(focus) = &previous_focus { window.focus(focus, cx); }
-                })
-                .child(div().id("activity-watch-modal").debug_selector(|| "activity-watch-modal".into())
-                    .w_full().h((window.viewport_size().height - px(180.)).min(px(440.)).max(px(180.)))
-                    .child(watch.clone()))
-        });
+        let overview = self.ensure_activity_overview(window, cx);
+        overview.update(cx, |overview, cx| overview.set_watch_panel(task_id, watch, cx));
+        window.focus(&overview.focus_handle(cx), cx);
     }
 
     fn window_named_workspaces(&self) -> Option<NativeWorkspaceSet> {

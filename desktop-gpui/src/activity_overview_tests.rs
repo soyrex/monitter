@@ -212,7 +212,7 @@ fn activity_overview_keeps_sidebar_toggle_and_hides_split_controls_at_supported_
 }
 
 #[gpui_kit::test]
-fn activity_overview_card_opens_live_watch_modal_without_workspace_navigation(
+fn activity_overview_card_opens_live_watch_panel_without_workspace_navigation(
     cx: &mut TestAppContext,
 ) {
     let (desktop, visual) = fixture(cx, "light", NativeTileTheme::Monitter, 14);
@@ -259,11 +259,19 @@ fn activity_overview_card_opens_live_watch_modal_without_workspace_navigation(
         let card = visual.debug_bounds("activity-card-overview-task").unwrap();
         visual.simulate_click(card.center(), Default::default());
         draw(visual);
-        assert!(visual.debug_bounds("activity-watch-modal").is_some());
+        assert!(visual.debug_bounds("activity-agent-panel").is_some());
         assert!(visual.debug_bounds("chat-watcher").is_some());
-        let modal = visual.debug_bounds("activity-watch-modal").unwrap();
-        assert!(modal.size.width <= px(880.) && modal.size.height <= px(440.), "compact modal bounds: {modal:?}");
-        assert!(visual.debug_bounds("watcher-now").unwrap().size.height < px(78.), "modal status uses intrinsic height");
+        let panel = visual.debug_bounds("activity-agent-panel").unwrap();
+        assert!(panel.size.width <= px(460.) && panel.size.height > px(440.), "docked panel bounds: {panel:?}");
+        visual.simulate_resize(size(px(540.), px(700.)));
+        draw(visual);
+        let narrow_panel = visual.debug_bounds("activity-agent-panel").expect("panel remains mounted at narrow width");
+        let narrow_overview = visual.debug_bounds("activity-overview").unwrap();
+        assert!(narrow_panel.left() >= narrow_overview.left() && narrow_panel.right() <= narrow_overview.right(),
+            "narrow panel stays inside Activity: {narrow_panel:?} / {narrow_overview:?}");
+        visual.simulate_resize(size(px(1160.), px(780.)));
+        draw(visual);
+        assert!(visual.debug_bounds("watcher-now").unwrap().size.height < px(78.), "panel status uses intrinsic height");
         assert!(visual.debug_bounds("watcher-agents").is_none(), "empty subagent section is omitted");
         if iteration == 0 {
             assert!(visual.debug_bounds("activity-watch-active-glow").is_some());
@@ -278,12 +286,12 @@ fn activity_overview_card_opens_live_watch_modal_without_workspace_navigation(
             );
             assert!(
                 !pane.read(cx).watcher_is_open(),
-                "modal must preserve docked Chat mode"
+                "panel must preserve docked Chat mode"
             );
             assert!(pane.read(cx).user_questions_in_watch());
             assert!(
                 pane.read(cx).wants_history_publication(),
-                "modal keeps live history subscribed"
+                "panel keeps live history subscribed"
             );
             assert!(!pane.read(cx).can_trim_hidden_history());
         });
@@ -297,8 +305,8 @@ fn activity_overview_card_opens_live_watch_modal_without_workspace_navigation(
             pane.update(cx, |pane, cx| {
                 let mut next = (*pane.snapshot).clone();
                 next["tasks"][0]["status"] = json!("completed");
-                next["events"] = json!([{"taskId":"overview-task","title":"Modal live update","createdAt":chrono::Utc::now().timestamp_millis()}]);
-                pane.sync(Rc::new(next), Some("modal-live-update".into()), cx);
+                next["events"] = json!([{"taskId":"overview-task","title":"Panel live update","createdAt":chrono::Utc::now().timestamp_millis()}]);
+                pane.sync(Rc::new(next), Some("panel-live-update".into()), cx);
             });
         });
         draw(visual);
@@ -308,19 +316,25 @@ fn activity_overview_card_opens_live_watch_modal_without_workspace_navigation(
         );
         assert!(visual.debug_bounds("activity-watch-active-glow").is_none(), "completed task stops pulsing");
         assert!(visual.debug_bounds("activity-watch-sparkles").is_none(), "completed task drops its animation field");
-        // First Escape dismisses the native steer popover; next dismisses Watch.
+        // First Escape dismisses the native steer popover; the panel then
+        // supports both keyboard and pointer dismissal.
         visual.simulate_keystrokes("escape");
         draw(visual);
-        visual.simulate_keystrokes("escape");
+        if iteration == 0 {
+            visual.simulate_keystrokes("escape");
+        } else {
+            let close = visual.debug_bounds("activity-agent-panel-close").unwrap();
+            visual.simulate_click(close.center(), Default::default());
+        }
         draw(visual);
-        assert!(visual.debug_bounds("activity-watch-modal").is_none());
+        assert!(visual.debug_bounds("activity-agent-panel").is_none());
         assert!(visual.debug_bounds("activity-card-overview-task").is_some());
         desktop.read_with(visual, |desktop, cx| {
             assert!(desktop.window.activity_overview_open);
             assert_eq!(desktop.window.selected, selected);
             assert!(
                 !pane.read(cx).user_questions_in_watch(),
-                "close cleans up modal mode"
+                "close cleans up panel mode"
             );
         });
     }
@@ -330,7 +344,9 @@ fn activity_overview_card_opens_live_watch_modal_without_workspace_navigation(
         });
     });
     draw(visual);
-    visual.update(|window, cx| window.close_dialog(cx));
+    visual.update(|window, cx| {
+        desktop.update(cx, |desktop, cx| desktop.close_activity_overview(window, cx));
+    });
     draw(visual);
     pane.read_with(visual, |pane, _| {
         assert!(

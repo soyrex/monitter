@@ -1,5 +1,18 @@
 # Design alignment handoff
 
+## Finishing audit, 2026-10-23
+
+The older numbered audits contain 49 original observations, not 49 outstanding tasks. The branch now changes more than 30 project files and has completed the palette, main preferences/composer/work-plan/diff/queue/Ideas/Watch token pass, activity card and hub tones, dot grid, filters, cluster washes, legend, segmented controls, and search/zoom chrome. The segmented controls and search/zoom lines in the older “Still open” paragraph below are superseded by commits `a20a989` and `6078fa3`.
+
+The remaining required work is organized into four reviewable batches:
+
+1. Complete the activity agent panel and verify card switching and a visual frame. The embedded 460px panel now hosts the retained live Watch view, dims the surrounding map, has a theme-derived surface, agent/status/project/elapsed header, and closes by Escape or its button. Isolated desktop `cargo check` passed in run `bbec8972-8de0-47bc-919a-e1e53926198d`. The real Desktop fixture passed with the 32/32 focused Activity suite in run `cd350233-a288-40e0-83db-46cf2c010698`; it covers narrow width, retained updates, dismissal and cleanup. Switching to a different tile and a visual frame are still unverified.
+2. Finish the pane shell effect: theme-derived glow edge/running field and a visual fixture containing an actual docked chat pane. Keep the user-selected tile style, the topbarless chat pane, and the 15px pane radius being introduced on canonical main.
+3. Resolve the remaining board details in shared form controls and the Watch/Ideas/activity surfaces. Keep application-specific controls and backend behavior where the boards only suggest a different feature. Update the audit entries with done/deferred evidence as each batch closes.
+4. Reconcile the branch against moving `main`, compile and review dark/light visuals across several presets, and validate the installed app only after integration. The branch has no release package or installation; existing synthetic frames are not live-app proof.
+
+The goal is active. This list is a scoped finishing plan, not a claim that every old audit line still applies. The initial 03:45–07:00 deadline below expired and should not be used as a completion estimate.
+
 ## Takeover, 2026-10-23
 
 Implementation moved to the isolated worktree `/Users/alex/code/monitter-design-20261023` on branch `feature/design-alignment-20261023`. The shared `main` checkout remains untouched. Commits `cae8d68` through `ce58834` apply theme-derived fill, hairline, text, glow and status tokens to shared controls, preferences, composer, work plan, diff rows, build queue, Ideas, Watch and agent activity. The dock strip now includes Work Plan beside Build Queue. The activity map keeps the Done success tone, uses the reference's finer dot grid, and has lighter state borders, hub fill and card shadows. The isolated desktop `cargo check` passed with exit 0 after copying generated web resources and matching OpenUI dependencies into ignored worktree directories. These changes are not installed. The older audit and task list below describe the state at handoff time, before these commits.
@@ -40,7 +53,7 @@ Written 2026-10-23 15:50. Goal set at ~03:45: bring the GPUI desktop in line wit
 - Memory saved: `design-alignment-constraints.md`.
 
 ## Still open after the takeover commits
-The design branch has passed desktop checks, focused activity tests and synthetic visual review. The pane wash needs a fixture or installed-app visual check; its glow edge and running field, the complete activity side panel, segmented activity controls and several shared control details remain open. The source audit below is a work list, not a verified completion report.
+The design branch has passed desktop checks, focused activity tests and synthetic visual review. The pane wash needs a fixture or installed-app visual check; its glow edge and running field, the complete activity side panel and several shared control details remain open. The source audit below is a work list, not a verified completion report. See the newer finishing audit above for current status.
 `composer_footer.rs:1505` `0x3f9d6a` is the usage-ring green (status), leave it. `draft_creation.rs` has ~10 hardcoded colours and font "Montserrat"; unaudited.
 
 ## Suggested order
