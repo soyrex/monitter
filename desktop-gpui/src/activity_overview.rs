@@ -1891,60 +1891,62 @@ impl Render for ActivityOverview {
             .gap(px(5.))
             .flex_wrap()
             .child(div().w(px(205.)).child(Input::new(&self.search)))
-            .child(
-                Button::new("activity-group-projects")
+            .child(div().flex().items_center().gap(px(2.))
+                .rounded(px(8.)).border_1().border_color(rgb(p.hairline(0)))
+                .p(px(2.))
+                .child(Button::new("activity-group-projects")
                     .debug_selector(|| "activity-group-projects".into())
                     .compact()
                     .ghost()
+                    .rounded(px(6.))
                     .label("Projects")
                     .text_size(font - px(1.))
                     .when(self.grouping == NativeActivityGrouping::Project, |el| {
-                        el.bg(design::surface_color(p.soft))
+                        el.bg(design::surface_color(p.fill(1)))
                     })
                     .on_click(cx.listener(|overview, _, _, cx| {
                         overview.set_grouping(NativeActivityGrouping::Project, cx);
-                    })),
-            )
-            .child(
-                Button::new("activity-group-workspaces")
+                    })))
+                .child(Button::new("activity-group-workspaces")
                     .debug_selector(|| "activity-group-workspaces".into())
                     .compact()
                     .ghost()
+                    .rounded(px(6.))
                     .label("Workspaces")
                     .text_size(font - px(1.))
                     .when(self.grouping == NativeActivityGrouping::Workspace, |el| {
-                        el.bg(design::surface_color(p.soft))
+                        el.bg(design::surface_color(p.fill(1)))
                     })
                     .on_click(cx.listener(|overview, _, _, cx| {
                         overview.set_grouping(NativeActivityGrouping::Workspace, cx);
-                    })),
-            )
-            .child(
-                Button::new("activity-clusters")
+                    }))))
+            .child(div().flex().items_center().gap(px(2.))
+                .rounded(px(8.)).border_1().border_color(rgb(p.hairline(0)))
+                .p(px(2.))
+                .child(Button::new("activity-clusters")
                     .debug_selector(|| "activity-clusters".into())
                     .compact()
                     .ghost()
+                    .rounded(px(6.))
                     .label("Clusters")
                     .text_size(font - px(1.))
-                    .when(!self.list, |el| el.bg(design::surface_color(p.soft)))
+                    .when(!self.list, |el| el.bg(design::surface_color(p.fill(1))))
                     .on_click(cx.listener(|overview, _, _, cx| {
                         overview.list = false;
                         cx.notify();
-                    })),
-            )
-            .child(
-                Button::new("activity-list")
+                    })))
+                .child(Button::new("activity-list")
                     .debug_selector(|| "activity-list".into())
                     .compact()
                     .ghost()
+                    .rounded(px(6.))
                     .label("List")
                     .text_size(font - px(1.))
-                    .when(self.list, |el| el.bg(design::surface_color(p.soft)))
+                    .when(self.list, |el| el.bg(design::surface_color(p.fill(1))))
                     .on_click(cx.listener(|overview, _, _, cx| {
                         overview.list = true;
                         cx.notify();
-                    })),
-            )
+                    }))))
             .when(!self.list, |el| {
                 el.child(
                     Button::new("activity-zoom-out")
