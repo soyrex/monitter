@@ -1,5 +1,13 @@
 # Design alignment handoff
 
+## Main integration, 2026-10-23
+
+Alex requested integration and a build. Canonical `main` fast-forwarded to design commit `9882187` after the overlapping uncommitted UI files were merged against their common base; other agents' dirty edits remain uncommitted. A rollback copy of affected paths and a hash manifest are under `/Users/alex/code/monitter-gpui/artifacts/design-merge-backup-20261023-9882187`. The clean design worktree remains at the same commit.
+
+The canonical GPUI release build completed with observed exit 0 in build run `3cbcdc76-1e6a-4062-bcb4-0630f5b47040`. Its final GUI and server bundles are in `artifacts/gpui/release/build-1792789678680`. Both passed strict deep code-signature verification, and the GUI SHA-256 matches `artifacts/gpui/release/latest.json`. The build metadata records `sourceCommit=9882187` and `sourceDirty=true` because the canonical checkout includes preserved peer work. This was a package build; the new bundle has not been installed or checked in the running app.
+
+The older statements below that the branch was isolated and had no canonical integration describe the state before this section.
+
 ## Finishing audit, 2026-10-23
 
 The older numbered audits contain 49 original observations, not 49 outstanding tasks. This isolated branch completes the required design alignment pass. It changes more than 30 project files: palette and status tokens, shared controls, preferences, composer, work plan, diff and queue panes, Ideas, Watch, the pane shell, and the Activity map and agent panel. The segmented controls and search/zoom lines in the older “Still open” paragraph below are superseded by commits `a20a989` and `6078fa3`.
