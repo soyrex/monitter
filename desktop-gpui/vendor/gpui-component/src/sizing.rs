@@ -269,7 +269,9 @@ impl<T: Styled> StyleSized<T> for T {
     fn input_h(self, size: Size) -> Self {
         match size {
             Size::Large => self.h_11(),
-            Size::Medium => self.h_8(),
+            // The native form field is 36px tall at the default size. Keep
+            // Input, Select and numeric fields on one shared control rhythm.
+            Size::Medium => self.h_9(),
             Size::Small => self.h_6(),
             Size::XSmall => self.h_5(),
             _ => self.h_6(),

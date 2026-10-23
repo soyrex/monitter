@@ -2403,14 +2403,19 @@ pub(super) fn open_preview_if_requested(cx: &mut App) -> bool {
     use serde_json::json;
     use gpui_kit::component::{Theme, ThemeMode};
     let Ok(mode) = std::env::var("MONITTER_GPUI_ACTIVITY_COMMUNICATION_PREVIEW") else { return false; };
-    let light = mode == "light" || mode == "panel-light";
-    let panel_preview = mode == "panel-light" || mode == "panel-dark";
+    let (layout, preset) = mode.split_once(':').unwrap_or((&mode, "monitter"));
+    let light = layout == "light" || layout == "panel-light";
+    let panel_preview = layout == "panel-light" || layout == "panel-dark";
     let _ = monitter_gpui_desktop::fonts::register(cx);
     crate::surface_blend::initialize_for_ui_fixture();
     crate::native_motion::initialize_for_ui_fixture(cx);
     Theme::change(if light { ThemeMode::Light } else { ThemeMode::Dark }, None, cx);
     let preview_settings = json!({"theme":if light {"light"} else {"dark"}});
-    let preview_palette = design::palette(&preview_settings, if light {WindowAppearance::Light} else {WindowAppearance::Dark});
+    let preview_palette = if preset == "reference" {
+        design::palette_for(&preview_settings, if light {WindowAppearance::Light} else {WindowAppearance::Dark}, preset)
+    } else {
+        crate::settings::native_appearance::palette(preset, !light, None, 0, 0)
+    };
     Theme::update(cx, |theme| {
         theme.font_family = "IBM Plex Sans".into();
         theme.font_size = px(14.);
@@ -2449,13 +2454,16 @@ pub(super) fn open_preview_if_requested(cx: &mut App) -> bool {
                 "collaborations":[{"id":"synthetic-send","kind":"message","status":"completed","fromTaskId":"a","toTaskId":"b","createdAt":now},
                     {"id":"synthetic-reply","kind":"message","status":"completed","fromTaskId":"b","toTaskId":"a","createdAt":now}]
             }));
-            view.palette = design::palette(&snapshot["settings"],if light {WindowAppearance::Light} else {WindowAppearance::Dark});
+            view.palette = preview_palette;
             view.set_snapshot(snapshot.clone(),view.palette,cx);
             if panel_preview {
                 let pane = cx.new(|cx| crate::chat::ChatPane::performance_fixture(
                     "a".into(), snapshot, window, cx,
                 ));
-                let generation = pane.update(cx, |pane, cx| pane.begin_activity_watch_modal(cx));
+                let generation = pane.update(cx, |pane, cx| {
+                    pane.set_composed_palette(preview_palette, cx);
+                    pane.begin_activity_watch_modal(cx)
+                });
                 let panel = cx.new(|cx| crate::workspace_tabs::ActivityWatchModal::new(pane, generation, cx));
                 view.set_watch_panel("a".into(), panel, cx);
             }
