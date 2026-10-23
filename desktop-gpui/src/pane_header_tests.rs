@@ -56,6 +56,9 @@ fn native_panel(
             lifecycle: None,
             closable: true,
         },
+        lazy_factory: None,
+        saved_watch_mode: None,
+        active: false,
         paint: Rc::new(RefCell::new(PaintState {
             shown: true,
             ..Default::default()
