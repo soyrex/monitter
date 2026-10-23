@@ -2,7 +2,7 @@
 
 ## Takeover, 2026-10-23
 
-Implementation moved to the isolated worktree `/Users/alex/code/monitter-design-20261023` on branch `feature/design-alignment-20261023`. The shared `main` checkout remains untouched. Commits `cae8d68` and `80ec32f` apply theme-derived fill, hairline, text, glow and status tokens to shared controls, preferences, composer, work plan, diff rows, build queue, Ideas, Watch and agent activity. These edits are awaiting a queued desktop compile check; they are not installed or visually verified. The older audit and task list below describe the state at handoff time, before these commits.
+Implementation moved to the isolated worktree `/Users/alex/code/monitter-design-20261023` on branch `feature/design-alignment-20261023`. The shared `main` checkout remains untouched. Commits `cae8d68` and `80ec32f` apply theme-derived fill, hairline, text, glow and status tokens to shared controls, preferences, composer, work plan, diff rows, build queue, Ideas, Watch and agent activity. A later batch also aligns the dock strip and puts Work Plan beside Build Queue. These edits are awaiting a queued desktop compile check; they are not installed or visually verified. The older audit and task list below describe the state at handoff time, before these commits.
 
 Current build request: `dcbde34d-04cb-4490-a0b0-0ca7819af025`, target `/Users/alex/code/monitter-gpui/.cargo-target/gpui`. The first request was cancelled before running because its command omitted the local Rust toolchain from `PATH`. The project allows one running build at a time; claim the current request before compiling. Do not infer a successful build from readiness.
 
