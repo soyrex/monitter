@@ -398,14 +398,15 @@ pub(crate) fn render_group(
 }
 /// The group owns the rail so member gaps and nested tool turns cannot break it.
 /// Its 12px marker column also centers the native Turn icon on the same axis.
-pub(crate) fn timeline(id: &str) -> Div {
-    timeline_ending_at(id, None)
+pub(crate) fn timeline(id: &str, palette: Palette) -> Div {
+    timeline_ending_at(id, None, palette)
 }
 
 /// A terminal Turn ends the rail at its icon, even when its details expand.
 pub(crate) fn timeline_ending_at(
     id: &str,
     endpoint: Option<crate::activity_sparkles::PaintBounds>,
+    palette: Palette,
 ) -> Div {
     let timeline_selector = format!("exchange-timeline-{id}");
     let rail_selector = format!("exchange-rail-{id}");

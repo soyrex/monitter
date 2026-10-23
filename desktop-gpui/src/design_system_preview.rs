@@ -59,7 +59,7 @@ impl Render for Preview {
             for (index, initially_open) in [(0, true), (1, false)] {
                 let open = window.use_keyed_state(SharedString::from(format!("preview-exchange-group-open-{index}")), cx, |_, _| initially_open);
                 let expanded = *open.read(cx);
-                let mut details = crate::chat::agent_exchange::timeline(&format!("preview-group-{index}"));
+                let mut details = crate::chat::agent_exchange::timeline(&format!("preview-group-{index}"), palette);
                 for (member, direction, status, body) in [
                     (0, crate::chat::agent_exchange::Direction::Incoming, "completed", "Asked: review native widget shapes. Synthetic example only."),
                     (1, crate::chat::agent_exchange::Direction::Outgoing, "completed", "Replied: checked control and card geometry. Synthetic example only."),

@@ -5249,7 +5249,7 @@ impl Render for ChatPane {
                                 .and_then(|member| grouped.get(&member.stable_key()))
                                 .and_then(|row| row.read(cx).header_icon_bounds());
                             let mut details =
-                                agent_exchange::timeline_ending_at(&disclosure, terminal_icon);
+                                agent_exchange::timeline_ending_at(&disclosure, terminal_icon, palette);
                             let mut exchanges = Vec::new();
                             for member in members {
                                 let (row, is_event) = match member {
