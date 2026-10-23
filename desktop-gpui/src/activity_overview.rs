@@ -1714,7 +1714,7 @@ impl ActivityOverview {
         let failed = cards.iter().filter(|c| c.state == State::Failed).count();
         let summary = [
             (working, "working"),
-            (needs, "need you"),
+            (needs, "needs you"),
             (failed, "failed"),
             (
                 cards
@@ -1749,17 +1749,17 @@ impl ActivityOverview {
                     .top(scaled(hub.y - 30.))
                     .w(scaled(144.))
                     .min_h(scaled(60.))
-                    .rounded(scaled(10.))
+                    .rounded(scaled(12.))
                     .p(scaled(8.))
-                    .border_2()
-                    .border_color(rgb(project_color).opacity(0.9))
-                    .bg(rgb(project_color).opacity(0.2))
+                    .border_1()
+                    .border_color(rgb(project_color).opacity(0.40))
+                    .bg(rgb(project_color).opacity(0.10))
                     .shadow(vec![BoxShadow::new(px(0.), scaled(3.), rgb(0x000000).opacity(0.32).into())
                         .blur_radius(scaled(10.))])
-                    .flex().flex_col().items_center().justify_center().text_center()
+                    .flex().flex_col().items_start().justify_center()
                     .child(
                         div()
-                            .flex().items_center().justify_center().gap(scaled(5.)).min_w_0().w_full()
+                            .flex().items_center().gap(scaled(5.)).min_w_0().w_full()
                             .font_weight(FontWeight::MEDIUM)
                             .text_size(cx.theme().font_size * zoom)
                             .child(div().flex_shrink_0()
