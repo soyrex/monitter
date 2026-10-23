@@ -12,6 +12,7 @@ pub struct PaneAppearance {
     pub tile_theme: NativeTileTheme,
     pub tile_backdrop_color: u32,
     pub paper_color: u32,
+    pub pane_wash_tint: u32,
     pub dark: bool,
     pub border_opacity: u16,
     pub show_active_border: bool,
@@ -32,6 +33,7 @@ impl PaneAppearance {
             tile_theme: crate::design::tile_theme(),
             tile_backdrop_color: tile_backdrop(palette),
             paper_color: palette.paper,
+            pane_wash_tint: palette.tint(),
             dark: palette.dark,
             border_opacity: crate::design::border_opacity(),
             show_active_border: settings["showActivePaneBorder"].as_bool().unwrap_or(true),
@@ -130,10 +132,33 @@ fn emphasized_background(fill: Background, appearance: Option<PaneAppearance>, e
     } else { fill.opacity(opacity) }
 }
 
+/// Resolve the reference pane's quiet top wash into a single background.
+/// Call only for originally opaque panes. The resulting stops retain the
+/// current inactive emphasis alpha without adding another paint layer.
+pub(crate) fn pane_wash_background(fill: Background, tint: u32) -> Background {
+    let Some(solid) = fill.as_solid() else { return fill; };
+    let base: Rgba = solid.into();
+    let tint: Rgba = rgb(tint).into();
+    let top = Rgba {
+        r: base.r * 0.86 + tint.r * 0.14,
+        g: base.g * 0.86 + tint.g * 0.14,
+        b: base.b * 0.86 + tint.b * 0.14,
+        a: base.a,
+    };
+    let mut wash = linear_gradient(
+        180.,
+        linear_color_stop(top, 0.),
+        linear_color_stop(base, 0.65),
+    );
+    wash.blend_mode = fill.blend_mode;
+    wash
+}
+
 pub(crate) struct PaneBackground {
     emphasis: BackgroundEmphasis,
     clock: crate::chat::feedback::Clock,
     fill: Background,
+    wash: bool,
     appearance: Option<PaneAppearance>,
     active: bool,
     hovered: bool,
@@ -142,12 +167,13 @@ pub(crate) struct PaneBackground {
 impl PaneBackground {
     pub(crate) fn new() -> Self {
         Self { emphasis: Default::default(), clock: crate::chat::feedback::FeedbackClock::new(),
-            fill: rgba(0x00000000).into(), appearance: None, active: false, hovered: false, visible: false }
+            fill: rgba(0x00000000).into(), wash: false, appearance: None, active: false, hovered: false, visible: false }
     }
-    pub(crate) fn set_appearance(&mut self, appearance: PaneAppearance, fill: Background, active: bool, cx: &mut Context<Self>) {
-        let changed = self.appearance != Some(appearance) || self.fill != fill;
+    pub(crate) fn set_appearance(&mut self, appearance: PaneAppearance, fill: Background, wash: bool, active: bool, cx: &mut Context<Self>) {
+        let changed = self.appearance != Some(appearance) || self.fill != fill || self.wash != wash;
         self.appearance = Some(appearance);
         self.fill = fill;
+        self.wash = wash;
         self.active = active;
         self.retarget(cx);
         if changed { cx.notify(); }
@@ -181,6 +207,9 @@ impl Render for PaneBackground {
         let progress = self.clock.borrow_mut().progress(cx.reduce_motion() || !crate::native_motion::motion_allowed());
         let emphasis = self.emphasis.sample(progress);
         let fill = emphasized_background(self.fill, self.appearance, emphasis);
+        let fill = if self.wash && self.fill.as_solid().is_some_and(|color| color.a >= 0.999) {
+            pane_wash_background(fill, self.appearance.map_or(0, |appearance| appearance.pane_wash_tint))
+        } else { fill };
         crate::chat::feedback::painted(div().size_full().bg(fill), self.clock.clone())
     }
 }

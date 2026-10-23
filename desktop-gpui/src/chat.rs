@@ -6599,11 +6599,14 @@ impl Render for ChatPane {
             .flex_col()
             // The retained dock background paints the focus/hover surface.
             .when(self.dock_group.is_none(), |this| {
-                this.bg(crate::surface_blend::tinted_pane_background(
+                let fill = crate::surface_blend::tinted_pane_background(
                     palette.paper,
                     palette.dark,
                     0.15,
-                ))
+                );
+                this.bg(if fill.as_solid().is_some_and(|color| color.a >= 0.999) {
+                    crate::pane_appearance::pane_wash_background(fill, palette.tint())
+                } else { fill })
             })
             .text_color(rgb(palette.ink))
             .child(measurement)

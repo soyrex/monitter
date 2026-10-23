@@ -526,7 +526,8 @@ impl Render for NativePanel {
         let active = pane_visual_active(&self.spec.focus, window, cx);
         let background = self.background.get_or_insert_with(|| cx.new(|_| crate::pane_appearance::PaneBackground::new())).clone();
         if let Some(appearance) = appearance {
-            let fill = if self.spec.id.starts_with("browser:") || self.spec.id == "browser" || self.spec.id == "route:browser" {
+            let browser = self.spec.id.starts_with("browser:") || self.spec.id == "browser" || self.spec.id == "route:browser";
+            let fill = if browser {
                 (*cx.theme().tokens.tab_active).into()
             } else {
                 let tint = if self.spec.id == "terminal" || self.spec.id.starts_with("terminal:") || self.spec.id == "route:terminal" { 0.25 } else { 0.15 };
@@ -537,7 +538,7 @@ impl Render for NativePanel {
             let has_dialog = window.root::<gpui_kit::base::Root>().flatten().is_some()
                 && window.has_active_dialog(cx);
             background.update(cx, |background, cx| {
-                background.set_appearance(appearance, fill, active, cx);
+                background.set_appearance(appearance, fill, !browser, active, cx);
                 background.set_visible(self.paint.borrow().shown && !has_dialog, cx);
             });
         }
