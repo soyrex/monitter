@@ -2,7 +2,7 @@
 
 ## Takeover, 2026-10-23
 
-Implementation moved to the isolated worktree `/Users/alex/code/monitter-design-20261023` on branch `feature/design-alignment-20261023`. The shared `main` checkout remains untouched. The first batch applies the theme-derived fill, hairline, text, glow and status tokens to shared controls, preferences, composer, work plan, diff rows, build queue and agent activity. These edits are awaiting a queued desktop compile check; they are not installed or visually verified. The older audit and task list below describe the state at handoff time, before this batch.
+Implementation moved to the isolated worktree `/Users/alex/code/monitter-design-20261023` on branch `feature/design-alignment-20261023`. The shared `main` checkout remains untouched. Commits `cae8d68` and `80ec32f` apply theme-derived fill, hairline, text, glow and status tokens to shared controls, preferences, composer, work plan, diff rows, build queue, Ideas, Watch and agent activity. These edits are awaiting a queued desktop compile check; they are not installed or visually verified. The older audit and task list below describe the state at handoff time, before these commits.
 
 Current build request: `dcbde34d-04cb-4490-a0b0-0ca7819af025`, target `/Users/alex/code/monitter-gpui/.cargo-target/gpui`. The first request was cancelled before running because its command omitted the local Rust toolchain from `PATH`. The project allows one running build at a time; claim the current request before compiling. Do not infer a successful build from readiness.
 
@@ -18,13 +18,13 @@ Written 2026-10-23 15:50. Goal set at ~03:45: bring the GPUI desktop in line wit
 2. The new topbarless chat panes stay topbarless. Ignore pane headers on chat panes in the boards.
 3. Build in batches, not per fix. Queue builds through the build queue (target key `/Users/alex/code/monitter-gpui/.cargo-target/gpui`); ~45 GiB free at last look.
 
-## Done so far (uncommitted, uncompiled)
+## Original handoff snapshot (superseded by takeover above)
 - `desktop-gpui/src/design.rs`: added `Palette::fill(0..3)`, `tint()`, `hairline(0..1)`, `glow()`, `wash(base)`, `text(0..3)` and `mix_rgb()`. Alphas follow the board ladders (dark/light variants). Nothing calls them yet. Not built; run `cargo check` before relying on it.
 - Audits written (this folder): `audit-core-boards.md`, `audit-pane-diff-queue.md`, `audit-watcher-ideas-activity.md`.
 - Memory saved: `design-alignment-constraints.md`.
 
-## Not done
-No component has been changed to use the new helpers. No build has been requested or run.
+## Still open after the takeover commits
+The design branch has not passed a desktop compile check or visual verification. The pane surface gradient, dock strip, full activity overview and several shared control details remain open. The source audit below is a work list, not a verified completion report.
 `composer_footer.rs:1505` `0x3f9d6a` is the usage-ring green (status), leave it. `draft_creation.rs` has ~10 hardcoded colours and font "Montserrat"; unaudited.
 
 ## Suggested order
