@@ -521,8 +521,8 @@ fn working_indicator(size: Pixels, color: u32, motion: bool) -> AnyElement {
 
 const CARD_W: f32 = 199.;
 const CARD_H: f32 = 104.;
-const HUB_W: f32 = 144.;
-const HUB_H: f32 = 60.;
+const HUB_W: f32 = 170.;
+const HUB_H: f32 = 46.;
 fn interface_font_ratio(font: Pixels) -> f32 {
     (f32::from(font) / f32::from(px(design::INTERFACE_FONT_SIZE))).max(0.5)
 }
@@ -1449,8 +1449,8 @@ impl ActivityOverview {
             .when(self.filter == Filter::Working && matches!(card.state, State::Idle | State::Done),
                 |body| body.opacity(0.6))
             .shadow({
-                let mut shadows = vec![BoxShadow::new(px(0.), scaled(3.), rgb(0x000000).opacity(0.32).into())
-                    .blur_radius(scaled(10.))];
+                let mut shadows = vec![BoxShadow::new(px(0.), scaled(6.), rgb(0x000000).opacity(if p.dark { 0.28 } else { 0.12 }).into())
+                    .blur_radius(scaled(18.))];
                 if card.state == State::Working {
                     shadows.push(BoxShadow::new(px(0.), px(0.), rgb(color).opacity(0.08).into())
                         .blur_radius(scaled(24.)));
@@ -1745,16 +1745,16 @@ impl ActivityOverview {
                         }),
                     )
                     .absolute()
-                    .left(scaled(hub.x - 72.))
-                    .top(scaled(hub.y - 30.))
-                    .w(scaled(144.))
-                    .min_h(scaled(60.))
+                    .left(scaled(hub.x - HUB_W / 2.))
+                    .top(scaled(hub.y - HUB_H / 2.))
+                    .w(scaled(HUB_W))
+                    .min_h(scaled(HUB_H))
                     .rounded(scaled(12.))
                     .p(scaled(8.))
                     .border_1()
                     .border_color(rgb(project_color).opacity(0.40))
-                    .bg(rgb(project_color).opacity(0.10))
-                    .shadow(vec![BoxShadow::new(px(0.), scaled(3.), rgb(0x000000).opacity(0.32).into())
+                    .bg(rgb(design::mix_rgb(p.paper, project_color, 0.10)))
+                    .shadow(vec![BoxShadow::new(px(0.), scaled(3.), rgb(0x000000).opacity(if p.dark { 0.24 } else { 0.10 }).into())
                         .blur_radius(scaled(10.))])
                     .flex().flex_col().items_start().justify_center()
                     .child(
