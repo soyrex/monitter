@@ -1564,7 +1564,6 @@ impl ChatPane {
                     .on_click(cx.listener(|pane, _, window, cx| pane.toggle_watcher(window, cx))),
             );
         }
-        let build_pill_palette = design::palette(&Value::Null, WindowAppearance::Dark);
         let mut build_pill = None;
         let running_build = watcher_running_build(&self.snapshot, &self.task_id());
         if let Some(build) = running_build.or_else(|| watcher_pending_build(&self.snapshot, &self.task_id())) {
@@ -1580,11 +1579,11 @@ impl ChatPane {
                 else if build["status"] == "ready" { "Waiting for build claim" } else { "Preparing build" };
             let mut indicator = div().id("watcher-build")
                 .debug_selector(|| "watcher-build".into())
-                .max_w_full().min_w_0().h(px(26. * ratio)).px(px(10. * ratio))
+                .max_w_full().min_w_0().h(px(22. * ratio)).px(px(10. * ratio))
                 .flex().items_center().gap(px(6.)).rounded_full().border_1()
-                .border_color(rgb(build_pill_palette.line))
-                .bg(crate::surface_blend::floating_control_background(build_pill_palette.panel, true))
-                .text_size(px(11. * ratio)).line_height(px(14. * ratio)).text_color(rgb(palette.accent));
+                .border_color(rgb(if running { palette.glow() } else { palette.hairline(1) }))
+                .bg(crate::surface_blend::floating_control_background(palette.panel, palette.dark))
+                .text_size(px(12. * ratio)).line_height(px(14. * ratio)).text_color(rgb(palette.accent));
             if running && !stale && !cx.reduce_motion() {
                 indicator = indicator.child(gpui_kit::component::spinner::Spinner::new()
                     .xsmall().color(rgb(palette.accent).into()));
@@ -1902,11 +1901,10 @@ impl ChatPane {
         let interject_width = (window.viewport_size().width - px(24.)).min(px(390.));
         let interject_open = self.watcher.interject_open && question_count == 0;
         let interject_focus = self.composer.read(cx).focus_handle(cx);
-        let interject_palette = design::palette(&Value::Null, WindowAppearance::Dark);
         let owner = cx.weak_entity();
         let content_owner = owner.clone();
         let chat_button = watcher_mode_button(
-            "chat-mode-chat", if self.watcher.modal_open { "Close" } else { "Chat" }, true, interject_palette, ratio, window, cx,
+            "chat-mode-chat", if self.watcher.modal_open { "Close" } else { "Chat" }, true, palette, ratio, window, cx,
         )
             .debug_selector(|| "chat-mode-chat".into())
             .accessibility_label(if self.watcher.modal_open { "Close Watch" } else { "Show chat" })
@@ -1924,7 +1922,7 @@ impl ChatPane {
             .trigger(
                 watcher_mode_button(
                     "watcher-back", "Steer", question_count == 0,
-                    interject_palette, ratio, window, cx,
+                    palette, ratio, window, cx,
                 )
                     .debug_selector(|| "watcher-back".into())
                     .accessibility_label("Steer without leaving Watch")
@@ -1978,10 +1976,10 @@ impl ChatPane {
                     .items_center()
                     .rounded_full()
                     .border_1()
-                    .border_color(rgb(interject_palette.line))
+                    .border_color(rgb(palette.hairline(1)))
                     .bg(crate::surface_blend::floating_control_background(
-                        interject_palette.panel,
-                        true,
+                        palette.panel,
+                        palette.dark,
                     ))
                     .child(chat_button)
                     .child(
@@ -1991,7 +1989,7 @@ impl ChatPane {
                             .w(px(1.))
                             .h(px(16.))
                             .flex_shrink_0()
-                            .bg(rgb(interject_palette.line)),
+                            .bg(rgb(palette.hairline(0))),
                     )
                     .child(interject),
             );

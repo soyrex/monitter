@@ -199,12 +199,12 @@ impl AdminActivity {
         let mut list = div().id("admin-activity-list").debug_selector(|| "admin-activity-list".into())
             .w_full().max_h(max_height).overflow_y_scroll().flex().flex_col()
             .font_family(theme.font_family.clone()).text_size(font);
-        let header = div().w_full().px(px(13.)).py(px(11.)).border_b_1().border_color(theme.border)
+        let header = div().w_full().px(px(16.)).pt(px(16.)).pb(px(14.)).border_b_1().border_color(theme.border)
             .flex().items_center().justify_between()
             .child(div().flex().flex_col().gap(px(2.))
-                .child(div().font_weight(FontWeight::SEMIBOLD).child("Admin activity"))
-                .child(div().text_size(font * 0.82).text_color(theme.muted_foreground).child("Recent log · current session only")))
-            .child(if self.loading { "Updating…".into_any_element() } else { Button::new("admin-activity-refresh").icon(IconName::RefreshCw).ghost().compact().tooltip("Refresh activity").on_click(cx.listener(|view,_,_,cx|view.refresh(cx))).into_any_element() });
+                .child(div().font_weight(FontWeight::SEMIBOLD).text_size(px(15.)).child("Admin activity"))
+                .child(div().text_size(px(12.)).text_color(theme.muted_foreground).child("Recent log · current session only")))
+            .child(if self.loading { "Updating…".into_any_element() } else { Button::new("admin-activity-refresh").icon(IconName::RefreshCw).ghost().compact().size(px(32.)).rounded(px(8.)).tooltip("Refresh activity").on_click(cx.listener(|view,_,_,cx|view.refresh(cx))).into_any_element() });
         list = list.child(header);
         if let Some(error) = &self.error {
             list = list.child(div().px(px(14.)).py(px(13.)).text_color(theme.danger).child(error.clone()));
@@ -219,28 +219,28 @@ impl AdminActivity {
                 let row_id = id.clone();
                 let expanded = self.expanded.contains(&entry.id);
                 let tint = entry.tint(theme);
-                let mut dot_bg = tint; dot_bg.a = 0.10;
-                let mut row_bg = tint; row_bg.a = 0.025;
-                let mut row_hover = tint; row_hover.a = 0.055;
+                let mut dot_bg = tint; dot_bg.a = 0.14;
+                let mut dot_border = tint; dot_border.a = 0.38;
+                let hover_bg = theme.button_hover;
                 let line = div().id(SharedString::from(format!("admin-activity-row-{}", entry.id)))
                     .debug_selector({let selector=format!("admin-activity-row-{}",entry.id);move || selector.clone()})
-                    .w_full().flex().items_stretch().gap(px(10.)).px(px(12.)).py(px(10.))
-                    .border_b_1().border_color(theme.border).bg(row_bg).hover(move |style| style.bg(row_hover))
+                    .w_full().flex().items_stretch().gap(px(12.)).px(px(16.)).pt(px(14.)).pb(px(12.))
+                    .border_b_1().border_color(theme.border).hover(move |style| style.bg(hover_bg))
                     .cursor_pointer()
                     .on_click(cx.listener(move |view,_,_,cx|view.toggle_expanded(&row_id,cx)))
-                    .child(div().relative().w(px(23.)).flex_shrink_0().self_stretch().flex().justify_center()
+                    .child(div().relative().w(px(20.)).flex_shrink_0().self_stretch().flex().justify_center()
                         .when(index + 1 < self.entries.len(), |rail| rail.child(div().absolute().top(px(11.)).bottom(px(-10.)).w(px(1.)).bg(theme.border)))
-                        .child(div().self_start().w(px(21.)).h(px(21.)).rounded_full().bg(dot_bg).flex().items_center().justify_center()
+                        .child(div().self_start().w(px(20.)).h(px(20.)).rounded_full().border_1().border_color(dot_border).bg(dot_bg).flex().items_center().justify_center()
                             .child(Icon::new(entry.status_icon()).with_size(px(12.)).text_color(tint))))
                     .child(div().flex_1().min_w_0().flex().flex_col().gap(px(4.))
                         .child(div().flex().items_center().justify_between().gap(px(6.))
-                            .child(div().font_weight(FontWeight::SEMIBOLD).text_size(font).truncate().child(entry.purpose_title()))
-                            .child(div().flex_shrink_0().text_size(font * 0.8).text_color(theme.muted_foreground).child(entry.time_label())))
-                        .child(div().flex().items_center().gap(px(6.)).text_size(font * 0.82).text_color(tint)
+                            .child(div().font_weight(FontWeight::SEMIBOLD).text_size(px(14.)).truncate().child(entry.purpose_title()))
+                            .child(div().flex_shrink_0().font_family(crate::design::FONT_MONO).text_size(px(12.)).text_color(theme.muted_foreground).child(entry.time_label())))
+                        .child(div().flex().items_center().gap(px(6.)).text_size(px(12.)).text_color(tint)
                             .child(entry.status.clone())
                             .when_some(entry.model.clone(), |row, model| row.child(div().text_color(theme.muted_foreground).child(format!("· {model}")))))
-                        .when_some(entry.pane_title.clone(), |row, title| row.child(div().text_size(font * 0.84).text_color(theme.muted_foreground).truncate().child(title)))
-                        .when(!expanded && !entry.detail.is_empty(), |row| row.child(div().text_size(font * 0.9).text_color(theme.foreground).child(intro(&entry.detail, 180))))
+                        .when_some(entry.pane_title.clone(), |row, title| row.child(div().text_size(px(12.)).text_color(theme.muted_foreground).truncate().child(title)))
+                        .when(!expanded && !entry.detail.is_empty(), |row| row.child(div().text_size(px(13.)).line_height(relative(1.5)).text_color(theme.foreground).child(intro(&entry.detail, 180))))
                         .when(expanded, |row| row.child(div().mt(px(4.)).flex().flex_col().gap(px(3.)).text_size(font * 0.82).text_color(theme.muted_foreground)
                             .child(format!("Purpose: {}", entry.purpose_title()))
                             .child(format!("Created: {}", timestamp_label(entry.created_at)))
@@ -261,7 +261,7 @@ impl AdminActivity {
                 list = list.child(line);
             }
         }
-        div().debug_selector(|| "admin-activity-surface".into()).w(px(400.)).popover_style(cx).overflow_hidden()
+        div().debug_selector(|| "admin-activity-surface".into()).w(px(440.)).popover_style(cx).overflow_hidden()
             .font_family(theme.font_family.clone()).text_size(font).child(list).into_any_element()
     }
 }

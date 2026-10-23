@@ -637,6 +637,10 @@ impl Desktop {
                 theme.colors.tab_active_foreground = rgb(palette.ink).into();
                 theme.colors.muted = design::surface_color(palette.fill(0)).into();
                 theme.colors.muted_foreground = rgb(palette.text(2)).into();
+                theme.colors.success = rgb(palette.ok()).into();
+                theme.colors.warning = rgb(palette.warn()).into();
+                theme.colors.danger = rgb(palette.err()).into();
+                theme.colors.info = rgb(palette.agent()).into();
                 theme.colors.button = design::surface_color(palette.fill(1)).into();
                 theme.colors.button_hover = design::surface_color(palette.fill(2)).into();
                 theme.colors.button_active = design::surface_color(palette.fill(3)).into();

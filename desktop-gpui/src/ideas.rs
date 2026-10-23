@@ -1022,16 +1022,21 @@ impl Render for IdeasPane {
             body = body.child(
                 div().px_3().py_2().child(
                     Input::new(&self.capture)
-                        .h(px(36.))
-                        .bg(rgb(p.soft))
+                        .h(px(40.))
+                        .bg(rgb(p.fill(0)))
                         .border_1()
-                        .border_color(rgb(p.line))
-                        .rounded(px(8.))
-                        .prefix(div().text_color(rgb(p.muted)).child("＋"))
+                        .border_color(rgb(p.hairline(1)))
+                        .rounded(px(10.))
+                        .prefix(div().text_color(rgb(p.text(2))).child("+"))
                         .suffix(
                             div()
-                                .text_size(gpui_kit::px(10. * font_scale))
-                                .text_color(rgb(p.muted))
+                                .px(gpui_kit::px(5.))
+                                .rounded(gpui_kit::px(4.))
+                                .border_1()
+                                .border_color(rgb(p.hairline(0)))
+                                .font_family(crate::design::FONT_MONO)
+                                .text_size(gpui_kit::px(11. * font_scale))
+                                .text_color(rgb(p.text(2)))
                                 .child("↵"),
                         )
                         .disabled(self.busy || self.project.is_none()),
@@ -1073,11 +1078,13 @@ impl Render for IdeasPane {
                         .compact()
                         .small()
                         .ghost()
-                        .h(px(23.))
+                        .h(px(24.))
                         .rounded_full()
                         .px_2()
-                        .text_size(gpui_kit::px(10. * font_scale))
-                        .when(self.filter == filter, |b| b.outline().bg(rgb(p.soft)))
+                        .text_size(gpui_kit::px(12. * font_scale))
+                        .border_1()
+                        .border_color(rgb(p.hairline(0)))
+                        .when(self.filter == filter, |b| b.bg(rgb(p.fill(1))).border_color(rgb(p.hairline(1))))
                         .label(label)
                         .on_click(cx.listener(move |v, _, _, cx| {
                             v.filter = filter;
@@ -1088,8 +1095,8 @@ impl Render for IdeasPane {
             body = body.child(
                 filters.child(div().flex_1()).child(
                     div()
-                        .text_color(rgb(p.muted))
-                        .text_size(gpui_kit::px(10. * font_scale))
+                        .text_color(rgb(p.text(2)))
+                        .text_size(gpui_kit::px(12. * font_scale))
                         .child("Newest ↓"),
                 ),
             );
@@ -1113,10 +1120,12 @@ impl Render for IdeasPane {
                 if section != previous {
                     list = list.child(
                         div()
-                            .px_3()
-                            .py_2()
-                            .text_size(gpui_kit::px(9. * font_scale))
-                            .text_color(rgb(p.muted))
+                            .px(gpui_kit::px(16.))
+                            .pt(gpui_kit::px(8.))
+                            .pb(gpui_kit::px(4.))
+                            .font_family(crate::design::FONT_MONO)
+                            .text_size(gpui_kit::px(11. * font_scale))
+                            .text_color(rgb(p.text(2)))
                             .child(section.to_uppercase()),
                     );
                     previous = section;
@@ -1128,6 +1137,12 @@ impl Render for IdeasPane {
                     Some("inPlan") => "⊙",
                     Some("dropped") => "◌",
                     _ => "○",
+                };
+                let icon_color = match idea["status"].as_str() {
+                    Some("done") => p.ok(),
+                    Some("inPlan") => p.accent,
+                    Some("dropped") => p.text(3),
+                    _ => p.text(2),
                 };
                 let dropped = idea["status"] == "dropped";
                 let is_agent = idea["authorKind"] == "agent";
@@ -1143,12 +1158,13 @@ impl Render for IdeasPane {
                     "?".into()
                 };
                 let avatar = div()
-                    .w(px(16.))
-                    .h(px(16.))
+                    .w(px(18.))
+                    .h(px(18.))
                     .flex()
                     .items_center()
                     .justify_center()
-                    .bg(rgb(if is_agent { p.accent } else { p.soft }))
+                    .bg(rgb(if is_agent { p.agent() } else { p.fill(3) }))
+                    .when(dropped, |s| s.opacity(0.6))
                     .when(is_agent, |s| s.rounded_sm())
                     .when(!is_agent, |s| s.rounded_full())
                     .child(initial);
@@ -1160,21 +1176,22 @@ impl Render for IdeasPane {
                             move || format!("idea-{id}")
                         })
                         .cursor_pointer()
-                        .when(dropped, |s| s.opacity(0.55))
                         .border_b_1()
-                        .border_color(rgb(p.line))
-                        .px_3()
-                        .py_3()
-                        .hover(move |s| s.bg(rgb(p.soft)))
+                        .border_color(rgb(p.hairline(0)))
+                        .px(gpui_kit::px(16.))
+                        .py(gpui_kit::px(12.))
+                        .hover(move |s| s.bg(rgb(p.fill(1))))
                         .on_click(cx.listener(move |v, _, w, cx| v.open(clicked.clone(), w, cx)))
                         .child(
                             div()
                                 .flex()
-                                .gap_2()
-                                .child(div().text_color(rgb(p.accent)).child(icon))
+                                .gap(gpui_kit::px(12.))
+                                .child(div().text_color(rgb(icon_color)).child(icon))
                                 .child(
                                     div()
-                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_size(gpui_kit::px(14. * font_scale))
+                                        .text_color(rgb(if dropped { p.text(2) } else { p.text(0) }))
                                         .min_w_0()
                                         .truncate()
                                         .when(dropped, |s| s.line_through())
@@ -1183,21 +1200,22 @@ impl Render for IdeasPane {
                         )
                         .child(
                             div()
-                                .pl_5()
+                                .pl(gpui_kit::px(24.))
                                 .mt_1()
-                                .text_color(rgb(p.muted))
+                                .text_size(gpui_kit::px(12. * font_scale))
+                                .text_color(rgb(p.text(2)))
                                 .truncate()
                                 .child(excerpt(&idea)),
                         )
                         .child(
                             div()
-                                .pl_5()
+                                .pl(gpui_kit::px(24.))
                                 .mt_1()
                                 .flex()
                                 .items_center()
                                 .gap_1()
-                                .text_size(gpui_kit::px(10. * font_scale))
-                                .text_color(rgb(p.muted))
+                                .text_size(gpui_kit::px(12. * font_scale))
+                                .text_color(rgb(p.text(1)))
                                 .child(avatar)
                                 .child(div().min_w_0().truncate().child(author(&idea)))
                                 .children(
@@ -1209,14 +1227,15 @@ impl Render for IdeasPane {
                                             div()
                                                 .px_1()
                                                 .rounded_sm()
-                                                .bg(rgb(p.soft))
+                                                .bg(rgb(p.fill(0)))
                                                 .child(tag.to_owned())
                                         })
                                         .collect::<Vec<_>>(),
                                 )
                                 .child(div().flex_1())
-                                .child(
-                                    crate::timestamps::local_datetime(
+                                .child(div().font_family(crate::design::FONT_MONO)
+                                    .text_size(gpui_kit::px(11. * font_scale))
+                                    .text_color(rgb(p.text(3))).child(crate::timestamps::local_datetime(
                                         idea["createdAt"].as_i64().unwrap_or(0),
                                     )
                                     .map(|d| {
@@ -1226,8 +1245,7 @@ impl Render for IdeasPane {
                                             d.format("%b %-d").to_string()
                                         }
                                     })
-                                    .unwrap_or_default(),
-                                ),
+                                    .unwrap_or_default())),
                         ),
                 );
             }
@@ -1235,8 +1253,8 @@ impl Render for IdeasPane {
                 div()
                     .p_3()
                     .border_t_1()
-                    .border_color(rgb(p.line))
-                    .text_color(rgb(p.muted))
+                    .border_color(rgb(p.hairline(0)))
+                    .text_color(rgb(p.text(2)))
                     .child("Stored in this project · Enter captures an idea"),
             );
         }

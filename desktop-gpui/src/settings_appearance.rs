@@ -52,7 +52,7 @@ pub(super) fn font_choices(families: Vec<SharedString>) -> Vec<FontChoice> {
 #[derive(Clone)]
 pub(super) struct PaletteChoice {
     pub(super) label: SharedString,
-    colors: [u32; 3],
+    colors: [u32; 2],
 }
 impl PaletteChoice {
     fn preview(&self) -> Div {
@@ -63,12 +63,12 @@ impl PaletteChoice {
             .child(
                 div()
                     .flex()
-                    .rounded(px(4.))
+                    .rounded(px(3.))
                     .overflow_hidden()
                     .border_1()
                     .children(
                         self.colors
-                            .map(|color| div().w(px(12.)).h(px(24.)).bg(rgb(color))),
+                            .map(|color| div().w(px(26.)).h(px(16.)).bg(rgb(color))),
                     ),
             )
             .child(
@@ -100,7 +100,7 @@ pub(super) fn palette_choices(dark: bool) -> Vec<PaletteChoice> {
             let p = native_appearance::palette(id, dark, None, 0, 0);
             PaletteChoice {
                 label: SharedString::from(*label),
-                colors: [p.paper, p.panel, p.accent],
+                colors: [p.paper, p.accent],
             }
         })
         .collect()
