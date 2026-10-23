@@ -1969,20 +1969,22 @@ impl Render for ActivityOverview {
             .items_center()
             .flex_wrap()
             .gap(px(10.))
-            .px(px(15.))
+            .min_h(px(56.))
+            .px(px(20.))
             .py(px(10.))
             .border_b_1()
-            .border_color(design::surface_color(p.line))
+            .border_color(rgb(p.hairline(0)))
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap(px(10.))
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child("Activity"))
+                    .child(div().font_weight(FontWeight::SEMIBOLD).text_size(px(15.)).child("Activity"))
                     .child(
                         div()
-                            .text_size(font - px(2.))
-                            .text_color(rgb(p.muted))
+                            .font_family(design::FONT_MONO)
+                            .text_size(px(11.))
+                            .text_color(rgb(p.text(2)))
                             .child(format!(
                                 "{} chats · {group_count} {group_label} · last 12h",
                                 self.model.cards.len(),
