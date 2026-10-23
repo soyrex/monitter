@@ -1,5 +1,9 @@
 # Design alignment handoff
 
+## GUI installation, 2026-10-23
+
+After the main integration, the latest signed GUI package `artifacts/gpui/release/build-1792790153973/Monitter GPUI.app` was installed at `/Applications/Monitter.app`. Its installed executable SHA-256 is `57d2806cd5107c8939cc07a013cd0fec91693f67834d2d08a55662b5f1ddac59`, matching the package metadata; strict deep signature verification passed. The prior app is preserved at `/Users/alex/code/monitter-gpui/artifacts/install-backups/Monitter-before-design-20261023-1792790627.app`. The GUI quit cleanly and relaunched as PID 44439; the persistent server stayed on PID 77783. This confirms installation and process launch, not a visual or interaction check of the design in the running app.
+
 ## Main integration, 2026-10-23
 
 Alex requested integration and a build. Canonical `main` fast-forwarded to design commit `9882187` after the overlapping uncommitted UI files were merged against their common base; other agents' dirty edits remain uncommitted. A rollback copy of affected paths and a hash manifest are under `/Users/alex/code/monitter-gpui/artifacts/design-merge-backup-20261023-9882187`. The clean design worktree remains at the same commit.
