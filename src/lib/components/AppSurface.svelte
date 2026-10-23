@@ -5383,12 +5383,11 @@
     {#if !globalOverview || mobileSidebar}<header class="topbar" class:overview-nav-only={globalOverview} data-tauri-drag-region>
       {#if mobileSidebar}
         <button class="icon mobile-back" type="button" aria-label="Open chats menu" title="Open chats menu" onclick={()=>{tabPickerOpen=false;backToChats();}}><Menu size={20}/></button>
-        {#if companionAvailable}<button class="icon mobile-back" type="button" aria-label="Open Companion Mode" title="Companion Mode" onclick={openCompanion}><Bot size={20}/></button>{/if}
       {:else}
         {#if activeWorkspaceKey.startsWith('project:')}{@render workspaceContext()}{/if}
       {/if}
       {#if pane === 'task' && selectedTask && !currentDraftId}
-        <button class="task-watch-toggle" aria-label={watchingTask ? 'Open chat' : 'Watch task'} aria-pressed={watchingTask} onclick={toggleTaskWatch}><Activity size={15}/><span>{watchingTask ? 'Chat' : 'Watch'}</span></button>
+        <button class="task-watch-toggle" class:mobile-icon-only={mobileSidebar} aria-label={watchingTask ? 'Open chat' : 'Watch task'} title={watchingTask ? 'Open chat' : 'Watch task'} aria-pressed={watchingTask} onclick={toggleTaskWatch}><Activity size={mobileSidebar ? 20 : 15}/>{#if !mobileSidebar}<span>{watchingTask ? 'Chat' : 'Watch'}</span>{/if}</button>
       {/if}
       {#if !globalOverview}
       <nav class="tabs tab-picker" use:tabStripFade data-tauri-drag-region class:tab-picker-open={tabPickerOpen} class:hide-tab-close={snapshot?.settings.showTabCloseButtons === false} class:show-tab-index={tabIndexModifier && (embedded ? active : activePaneId === 'main')} aria-label="Open tasks" ondragover={tabBarOver} ondrop={tabBarDrop}>
@@ -8006,6 +8005,7 @@
   .idea-list-surface{flex:1;min-height:0;min-width:0;overflow:hidden}
   .project-ideas-action{min-width:44px;min-height:44px}
   .task-watch-toggle{display:flex;align-items:center;gap:5px;min-height:44px;border:0;background:transparent;color:var(--muted);padding:8px;flex:none}
+  .task-watch-toggle.mobile-icon-only{min-width:44px;justify-content:center}
   .task-watch-toggle[aria-pressed=true]{color:var(--accent)}
   .task-watch{grid-column:1;grid-row:1 / -1;position:relative;min-width:0;min-height:0;display:flex;flex-direction:column;overflow:hidden}
   .watch-scroll{flex:1;min-height:0;overflow:auto;padding-bottom:80px;overscroll-behavior:contain}
