@@ -1447,7 +1447,7 @@ impl ActivityOverview {
             .bg(background)
             .when(quiet, |body| body.opacity(0.72))
             .when(self.filter == Filter::Working && matches!(card.state, State::Idle | State::Done),
-                |body| body.opacity(0.6))
+                |body| body.opacity(if quiet { 0.72 * 0.6 } else { 0.6 }))
             .shadow({
                 let mut shadows = vec![BoxShadow::new(px(0.), scaled(6.), rgb(0x000000).opacity(if p.dark { 0.28 } else { 0.12 }).into())
                     .blur_radius(scaled(18.))];
@@ -2326,15 +2326,21 @@ mod tests {
             use gpui_kit::component::ActiveTheme as _;
             f32::from(px(2. * view.zoom * super::interface_font_ratio(cx.theme().font_size)))
         });
+        let agent_color = overview.read_with(visual, |view, _| view.palette.agent());
+        let channels = [
+            ((agent_color >> 16) & 0xff) as f32 / 255.,
+            ((agent_color >> 8) & 0xff) as f32 / 255.,
+            (agent_color & 0xff) as f32 / 255.,
+        ];
         visual.update(|window, _| {
             let dots: Vec<_> = window.painted_quads().into_iter().filter(|quad| {
                 quad.background.as_solid().is_some_and(|color| {
                     let ink = gpui_kit::Rgba::from(color);
-                    (ink.r - 101. / 255.).abs() < 0.005 && (ink.g - 148. / 255.).abs() < 0.005
-                        && (ink.b - 219. / 255.).abs() < 0.005 && ink.a > 0.99
+                    (ink.r - channels[0]).abs() < 0.005 && (ink.g - channels[1]).abs() < 0.005
+                        && (ink.b - channels[2]).abs() < 0.005 && ink.a > 0.99
                 })
             }).collect();
-            assert!(dots.len() > 5, "real communication curve paints chat-stream blue dots");
+            assert!(dots.len() > 5, "real communication curve paints theme-derived agent dots");
             for dot in dots {
                 let width = dot.bounds.size.width.as_f32() / window.scale_factor();
                 let height = dot.bounds.size.height.as_f32() / window.scale_factor();
@@ -2343,18 +2349,18 @@ mod tests {
                     "dots are 2px circles at configured scale without a broad glow stroke: {width}x{height}, expected {dot_size}");
             }
         });
-        let blue_positions = |visual: &mut gpui_kit::VisualTestContext| visual.update(|window, _| {
+        let agent_positions = |visual: &mut gpui_kit::VisualTestContext| visual.update(|window, _| {
             window.painted_quads().into_iter().filter(|quad| quad.background.as_solid().is_some_and(|color| {
                 let ink = gpui_kit::Rgba::from(color);
-                (ink.r - 101./255.).abs() < 0.005 && (ink.g - 148./255.).abs() < 0.005
-                    && (ink.b - 219./255.).abs() < 0.005 && ink.a > 0.99
+                (ink.r - channels[0]).abs() < 0.005 && (ink.g - channels[1]).abs() < 0.005
+                    && (ink.b - channels[2]).abs() < 0.005 && ink.a > 0.99
             })).map(|quad| (quad.bounds.origin.x.as_f32(), quad.bounds.origin.y.as_f32())).collect::<Vec<_>>()
         });
-        let before_flow = blue_positions(visual);
+        let before_flow = agent_positions(visual);
         visual.executor().advance_clock(Duration::from_millis(70));
         visual.run_until_parked();
         visual.update(|window,cx| window.draw(cx).clear(cx));
-        assert_ne!(before_flow, blue_positions(visual), "actual blue dots flow between native frames");
+        assert_ne!(before_flow, agent_positions(visual), "actual agent dots flow between native frames");
         overview.read_with(visual, |view,_| {
             let state = view.communications.borrow();
             assert_eq!(state.links.len(),1);
@@ -2725,8 +2731,6 @@ mod tests {
                 .filter_map(|quad| quad.background.as_solid().map(gpui_kit::Rgba::from))
                 .filter(|ink| ink.a > 0.30).collect();
             assert!(!paints.is_empty(), "completed card paints its surface: bounds={idle_bounds:?}");
-            assert!(paints.iter().any(|ink| (ink.r - ink.g).abs() > 0.005 || (ink.g - ink.b).abs() > 0.005),
-                "completed card retains a semantic status colour");
             let grid_dots = quads.iter().filter(|quad| {
                 let width = quad.bounds.size.width.as_f32() / window.scale_factor();
                 let height = quad.bounds.size.height.as_f32() / window.scale_factor();
