@@ -171,26 +171,54 @@ fn attributes(mut value: &str) -> Vec<(String, String)> {
     }
     result
 }
-pub(super) struct WorkspaceFavicon { key: Option<(String, Rgba)>, image: Option<Arc<Image>>, fallback: IconName, color: Rgba }
+pub(super) struct WorkspaceFavicon { id: String, key: Option<(String, Rgba)>, image: Option<Arc<Image>>, fallback: IconName, color: Rgba, spinning: bool }
 impl Render for WorkspaceFavicon {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let size = crate::design::workspace_tab_metrics(cx.theme().font_size).icon_size;
-        match &self.image {
-            Some(image) => img(image.clone()).size(size).into_any_element(),
-            None => Icon::new(self.fallback.clone()).with_size(size).text_color(self.color).into_any_element(),
-        }
+        let spinning = self.spinning && !cx.reduce_motion() && crate::native_motion::motion_allowed();
+        let mark = match &self.image {
+            Some(image) => {
+                let image = img(image.clone()).size(size);
+                if spinning {
+                    image.with_animation(
+                        "workspace-active-image-spin",
+                        Animation::new(std::time::Duration::from_millis(1500)).repeat().with_easing(ease_in_out),
+                        |image, progress| image.with_transformation(Transformation::rotate(percentage(progress))),
+                    ).into_any_element()
+                } else {
+                    image.into_any_element()
+                }
+            }
+            None => {
+                let icon = Icon::new(self.fallback.clone()).with_size(size).text_color(self.color);
+                if spinning {
+                    icon.with_animation(
+                        "workspace-active-icon-spin",
+                        Animation::new(std::time::Duration::from_millis(1500)).repeat().with_easing(ease_in_out),
+                        |icon, progress| icon.rotate(radians(progress * std::f32::consts::TAU)),
+                    ).into_any_element()
+                } else {
+                    icon.into_any_element()
+                }
+            }
+        };
+        let id = self.id.clone();
+        let mark = div().size(size).flex().items_center().justify_center()
+            .debug_selector(move || format!("workspace-active-icon-{id}"))
+            .child(mark);
+        mark.into_any_element()
     }
 }
 pub(super) fn workspace_favicon(id: &str, url: Option<&str>, fallback: IconName, color: Rgba,
-    window: &mut Window, cx: &mut App) -> Entity<WorkspaceFavicon> {
+    spinning: bool, window: &mut Window, cx: &mut App) -> Entity<WorkspaceFavicon> {
     let holder = window.use_keyed_state(SharedString::from(format!("workspace-favicon-{id}")), cx,
-        |_, cx| cx.new(|_| WorkspaceFavicon { key: None, image: None, fallback: fallback.clone(), color }));
+        |_, cx| cx.new(|_| WorkspaceFavicon { id: id.to_owned(), key: None, image: None, fallback: fallback.clone(), color, spinning }));
     let entity = holder.read(cx).clone();
     let key = url.filter(|url| monitter_lib::experimental_desktop::validate_native_workspace_url(url).is_ok())
         .map(|url| (url.to_owned(), color));
     entity.update(cx, |view, cx| {
-        if view.fallback != fallback || view.color != color { cx.notify(); }
-        view.fallback = fallback; view.color = color;
+        if view.fallback != fallback || view.color != color || view.spinning != spinning { cx.notify(); }
+        view.fallback = fallback; view.color = color; view.spinning = spinning;
         if view.key == key { return; }
         view.key = key.clone(); view.image = None;
         if let Some((url, color)) = key {

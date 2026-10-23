@@ -81,15 +81,12 @@ fn mounted(cx: &mut TestAppContext, light: bool) {
         assert!(visual.debug_bounds("workspace-notifications-current").is_some(),
             "selected workspace keeps its nonzero notification pill visible");
         assert!(visual.debug_bounds("workspace-notifications-empty").is_none());
-        let spinner = visual.debug_bounds("workspace-active-spinner-other")
-            .expect("inactive workspace with a running task has an activity spinner");
-        assert_eq!(spinner.size, size(px(10.), px(10.)), "activity spinner is 10x10");
         let icon = visual.debug_bounds("workspace-edit-icon-other")
-            .expect("workspace icon anchors the activity spinner");
-        assert!(spinner.center().x > icon.center().x && spinner.center().y < icon.center().y,
-            "activity spinner stays on the icon's top-right corner: icon={icon:?}, spinner={spinner:?}");
-        assert!(visual.debug_bounds("workspace-active-spinner-current").is_none());
-        assert!(visual.debug_bounds("workspace-active-spinner-empty").is_none());
+            .expect("workspace icon remains visible during activity");
+        assert_eq!(icon.size, size(crate::design::workspace_tab_metrics(px(font)).icon_size,
+            crate::design::workspace_tab_metrics(px(font)).icon_size));
+        assert!(visual.debug_bounds("workspace-active-spinner-other").is_none(),
+            "activity uses the workspace icon instead of a spinner");
         if width == 1000. {
             let tabs = visual.debug_bounds("named-workspace-tabs").expect("centered workspace tabs");
             assert!((tabs.center().x - px(width / 2.)).abs() <= px(1.),
@@ -123,7 +120,7 @@ fn mounted(cx: &mut TestAppContext, light: bool) {
     }));
     visual.run_until_parked();visual.update(|window,cx|window.draw(cx).clear(cx));
     assert!(visual.debug_bounds("workspace-active-spinner-other").is_none(),
-        "spinner disappears when the workspace task stops running");
+        "workspace activity does not add a separate spinner");
     assert_eq!(visual.debug_bounds("workspace-tab-other").unwrap(),tab_before,
         "removing the spinner preserves tab bounds");
     assert_eq!(visual.debug_bounds("workspace-tab-empty").unwrap(),following_before,

@@ -14,7 +14,6 @@ use gpui_kit::{
         popover::Popover,
         menu::{ContextMenuExt as _, PopupMenuItem},
         color_picker::{ColorPicker, ColorPickerState, ColorPickerEvent},
-        spinner::Spinner,
     },
     prelude::*,
     *,
@@ -1391,7 +1390,6 @@ impl Desktop {
                 .iter()
                 .any(|task_id| running_task_ids.contains(task_id));
                 let id = item.id.clone();
-                let spinner_debug_id = id.clone();
                 let edit_id = id.clone();
                 let menu_id = id.clone();
                 let is_open = self.window.workspace_editor
@@ -1431,22 +1429,7 @@ impl Desktop {
                     .p_0()
                     .child(div().relative().size(tab_metrics.icon_size)
                         .debug_selector(move || format!("workspace-edit-icon-{icon_debug_id}"))
-                        .child(workspace_favicon(&id, item.url.as_deref(), icon(&item.icon), color, window, cx))
-                        .when(active_agent, |icon| icon.child(
-                            div()
-                                .absolute()
-                                .top(gpui_kit::px(-3.))
-                                .right(gpui_kit::px(-3.))
-                                .size(gpui_kit::px(10.))
-                                .debug_selector(move || {
-                                    format!("workspace-active-spinner-{spinner_debug_id}")
-                                })
-                                .child(
-                                    Spinner::new()
-                                        .with_size(gpui_kit::px(10.))
-                                        .color(color.into()),
-                                ),
-                        ))
+                        .child(workspace_favicon(&id, item.url.as_deref(), icon(&item.icon), color, active_agent, window, cx))
                         .when(index < 9, |icon| icon.child(workspace_number_hint(
                             &id, index + 1, self.window.workspace_number_hints, palette, window, cx,
                         ))))
