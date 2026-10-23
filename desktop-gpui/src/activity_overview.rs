@@ -1302,7 +1302,7 @@ impl ActivityOverview {
         }));
     }
     fn card(&self, card: &Card, list: bool, cx: &mut Context<Self>) -> AnyElement {
-        let quiet = matches!(card.state, State::Idle | State::Done);
+        let quiet = card.state == State::Idle;
         let tone = |color: u32| {
             if !quiet { return color; }
             let color = rgb(color);
@@ -1443,6 +1443,7 @@ impl ActivityOverview {
             .border_1()
             .border_color(outline)
             .bg(background)
+            .when(quiet, |body| body.opacity(0.72))
             .when(self.filter == Filter::Working && matches!(card.state, State::Idle | State::Done),
                 |body| body.opacity(0.6))
             .shadow({
@@ -2213,9 +2214,9 @@ impl Render for ActivityOverview {
             .child(div().relative().flex_1().min_h_0().overflow_hidden()
                 .child(div().debug_selector(|| "activity-dot-grid".into()).absolute().size_full()
                     .child(canvas(|_, _, _| (), move |bounds, _, window, _| {
-                        let spacing = px(40.);
-                        let diameter = px(1.5);
-                        let color = rgb(p.muted).opacity(if p.dark { 0.22 } else { 0.26 });
+                        let spacing = px(28.);
+                        let diameter = px(1.);
+                        let color = rgb(p.tint()).opacity(0.10);
                         let columns = (f32::from(bounds.size.width) / f32::from(spacing)).ceil() as usize;
                         let rows = (f32::from(bounds.size.height) / f32::from(spacing)).ceil() as usize;
                         for row in 0..rows {
