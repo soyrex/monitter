@@ -14,6 +14,8 @@ The next pane shell batch gives originally opaque chat and retained non-browser 
 
 The activity header now uses 28px rounded filter chips, theme hairlines and fills, semantic state dots, mono counts and a divider beside the title. Its feature-enabled preview build passed with observed exit 0 (`af0a1049-7195-4ba1-a03f-2db753aa3d64`, Cargo 1m39s). Captured light and dark synthetic activity frames are `artifacts/gpui/visual/gpui-frame-1792775832969228000.png` and `artifacts/gpui/visual/gpui-frame-1792775846132049000.png`; both were inspected and the header remained readable without clipping. Neither frame proves installed-app behavior. No focused activity test was rerun after this presentation-only header edit.
 
+The activity map now paints a theme-derived project wash beneath links and cards with four low-opacity circles per group. Its preview build passed with observed exit 0 (`72a911c9-3361-44b2-8375-1a27ff3d8772`, Cargo 1m35s). Light and dark synthetic frames `artifacts/gpui/visual/gpui-frame-1792776223644103000.png` and `artifacts/gpui/visual/gpui-frame-1792776246346255000.png` were inspected: project tint remains subtle and labels, links and cards remain legible. The circles are an approximation of the board's radial gradient; slight rings are visible in the light frame.
+
 Written 2026-10-23 15:50. Goal set at ~03:45: bring the GPUI desktop in line with the Claude design boards by 07:00. That deadline passed with the session idle; the goal is still open.
 
 ## Source of truth
@@ -32,7 +34,7 @@ Written 2026-10-23 15:50. Goal set at ~03:45: bring the GPUI desktop in line wit
 - Memory saved: `design-alignment-constraints.md`.
 
 ## Still open after the takeover commits
-The design branch has passed desktop checks, focused activity tests and synthetic visual review. The pane wash needs a fixture or installed-app visual check; its glow edge and running field, the complete activity side panel, cluster washes, segmented activity controls and several shared control details remain open. The source audit below is a work list, not a verified completion report.
+The design branch has passed desktop checks, focused activity tests and synthetic visual review. The pane wash needs a fixture or installed-app visual check; its glow edge and running field, the complete activity side panel, segmented activity controls and several shared control details remain open. The source audit below is a work list, not a verified completion report.
 `composer_footer.rs:1505` `0x3f9d6a` is the usage-ring green (status), leave it. `draft_creation.rs` has ~10 hardcoded colours and font "Montserrat"; unaudited.
 
 ## Suggested order

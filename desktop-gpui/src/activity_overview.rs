@@ -2091,6 +2091,31 @@ impl Render for ActivityOverview {
             let geometry = self.painted_map.clone();
             let pan = self.canvas_pan;
             let owner = cx.weak_entity();
+            // Four quiet, theme-coloured discs approximate the reference's
+            // radial project wash without another animated or offscreen layer.
+            // Paint them below links and cards so the map remains legible.
+            let mut washes = div().absolute().inset_0();
+            for (_, cards) in groups.iter() {
+                let key = cards[0].group_id(self.grouping);
+                let project = &self.layout.projects[key];
+                let bounds = project.bounds.unwrap();
+                let hub = project.hub.unwrap();
+                let center_x = (bounds.x + project.target.x + hub.x + hub.w / 2.) * scale;
+                let center_y = (bounds.y + project.target.y + hub.y + hub.h / 2.) * scale;
+                let color = if self.grouping == NativeActivityGrouping::Project {
+                    rows(&self.snapshot, "projects").iter()
+                        .find(|row| text(row, "id") == key)
+                        .map_or(p.accent, |row| design::parse_color(text(row, "color"), p.accent))
+                } else { p.accent };
+                for (diameter, opacity) in [(660., 0.012), (530., 0.015), (400., 0.020), (260., 0.030)] {
+                    let diameter = px(diameter * scale);
+                    washes = washes.child(div().absolute()
+                        .left(px(center_x) - diameter / 2.)
+                        .top(px(center_y) - diameter / 2.)
+                        .size(diameter).rounded_full()
+                        .bg(rgb(color).opacity(opacity)));
+                }
+            }
             let mut graph = div()
                 .id("activity-responsive-map")
                 .debug_selector(|| "activity-responsive-map".into())
@@ -2110,6 +2135,7 @@ impl Render for ActivityOverview {
                         cx.defer(move |cx| { let _ = owner.update(cx, |_, cx| cx.notify()); });
                     }
                 }, |_, _, _, _| ()).absolute().inset_0())
+                .child(washes)
                 .child(self.communication_layer(endpoints, scale, map_viewport, cx));
             for (index, (name, cards)) in groups.iter().enumerate() {
                 let project = &self.layout.projects[cards[0].group_id(self.grouping)];
