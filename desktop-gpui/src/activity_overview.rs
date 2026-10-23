@@ -1328,17 +1328,17 @@ impl ActivityOverview {
             .iter()
             .filter(|state| **state == State::Done)
             .count();
-        let mut outline = rgb(color);
-        outline.a = if card.state == State::Idle {
-            0.20
-        } else {
-            0.52
+        let outline = match card.state {
+            State::Idle => rgb(p.hairline(0)),
+            State::Done => rgb(p.hairline(1)),
+            State::Working => rgb(p.glow()),
+            State::NeedsYou | State::Failed => rgb(color).opacity(0.42),
         };
         let mut progress = div()
             .flex()
             .gap(scaled(3.))
             .w_full()
-            .h(scaled(3.))
+            .h(scaled(4.))
             .flex_shrink_0();
         // Coalesce very large plans while preserving the true count in the label.
         if !card.steps.is_empty() {
@@ -1354,10 +1354,11 @@ impl ActivityOverview {
                 } else {
                     State::Idle
                 };
-                let mut fill = rgb(tone(state.color(p)));
-                if state == State::Idle {
-                    fill.a = 0.28;
-                }
+                let fill = if state == State::Idle {
+                    rgb(p.tint()).opacity(0.22)
+                } else {
+                    rgb(tone(state.color(p)))
+                };
                 progress = progress.child(div().flex_1().h_full().rounded_full().bg(fill));
             }
         }
@@ -1438,8 +1439,9 @@ impl ActivityOverview {
             .min_w_0()
             .relative()
             .overflow_hidden()
-            .p(scaled(9.))
-            .rounded(scaled(10.))
+            .px(scaled(12.))
+            .py(scaled(10.))
+            .rounded(scaled(12.))
             .border_1()
             .border_color(outline)
             .bg(background)
@@ -1450,8 +1452,8 @@ impl ActivityOverview {
                 let mut shadows = vec![BoxShadow::new(px(0.), scaled(3.), rgb(0x000000).opacity(0.32).into())
                     .blur_radius(scaled(10.))];
                 if card.state == State::Working {
-                    shadows.push(BoxShadow::new(px(0.), px(0.), rgb(color).opacity(0.30).into())
-                        .blur_radius(scaled(14.)).spread_radius(scaled(2.)));
+                    shadows.push(BoxShadow::new(px(0.), px(0.), rgb(color).opacity(0.08).into())
+                        .blur_radius(scaled(24.)));
                 }
                 shadows
             })
