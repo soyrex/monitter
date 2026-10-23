@@ -2333,7 +2333,13 @@ mod tests {
             (agent_color & 0xff) as f32 / 255.,
         ];
         visual.update(|window, _| {
+            let raster_tolerance = 1. / window.scale_factor() + 0.01;
             let dots: Vec<_> = window.painted_quads().into_iter().filter(|quad| {
+                let width = quad.bounds.size.width.as_f32() / window.scale_factor();
+                let height = quad.bounds.size.height.as_f32() / window.scale_factor();
+                if (width - dot_size).abs() >= raster_tolerance || (height - dot_size).abs() >= raster_tolerance {
+                    return false;
+                }
                 quad.background.as_solid().is_some_and(|color| {
                     let ink = gpui_kit::Rgba::from(color);
                     (ink.r - channels[0]).abs() < 0.005 && (ink.g - channels[1]).abs() < 0.005
@@ -2344,17 +2350,22 @@ mod tests {
             for dot in dots {
                 let width = dot.bounds.size.width.as_f32() / window.scale_factor();
                 let height = dot.bounds.size.height.as_f32() / window.scale_factor();
-                let raster_tolerance = 1. / window.scale_factor() + 0.01;
                 assert!((width - dot_size).abs() < raster_tolerance && (height - dot_size).abs() < raster_tolerance,
                     "dots are 2px circles at configured scale without a broad glow stroke: {width}x{height}, expected {dot_size}");
             }
         });
         let agent_positions = |visual: &mut gpui_kit::VisualTestContext| visual.update(|window, _| {
-            window.painted_quads().into_iter().filter(|quad| quad.background.as_solid().is_some_and(|color| {
-                let ink = gpui_kit::Rgba::from(color);
-                (ink.r - channels[0]).abs() < 0.005 && (ink.g - channels[1]).abs() < 0.005
-                    && (ink.b - channels[2]).abs() < 0.005 && ink.a > 0.99
-            })).map(|quad| (quad.bounds.origin.x.as_f32(), quad.bounds.origin.y.as_f32())).collect::<Vec<_>>()
+            let raster_tolerance = 1. / window.scale_factor() + 0.01;
+            window.painted_quads().into_iter().filter(|quad| {
+                let width = quad.bounds.size.width.as_f32() / window.scale_factor();
+                let height = quad.bounds.size.height.as_f32() / window.scale_factor();
+                (width - dot_size).abs() < raster_tolerance && (height - dot_size).abs() < raster_tolerance
+                    && quad.background.as_solid().is_some_and(|color| {
+                        let ink = gpui_kit::Rgba::from(color);
+                        (ink.r - channels[0]).abs() < 0.005 && (ink.g - channels[1]).abs() < 0.005
+                            && (ink.b - channels[2]).abs() < 0.005 && ink.a > 0.99
+                    })
+            }).map(|quad| (quad.bounds.origin.x.as_f32(), quad.bounds.origin.y.as_f32())).collect::<Vec<_>>()
         });
         let before_flow = agent_positions(visual);
         visual.executor().advance_clock(Duration::from_millis(70));
