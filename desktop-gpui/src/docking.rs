@@ -386,22 +386,15 @@ impl Panel for NativePanel {
         let border_width = px(appearance.active_border_width);
         let pane_id = self.spec.id.clone();
         let mut color = rgb(appearance.active_border_color);
-        if !focused {
-            color = cx.theme().primary.into();
-            color.a = if working { 0.38 } else { 0. };
-        }
+        if !focused { color.a = 0.; }
         let mut glow_color: Rgba = cx.theme().primary.into();
-        glow_color.a = if working { 0.44 } else { 0. };
+        if !working { glow_color.a = 0.; }
         if appearance.tile_theme == NativeTileTheme::Tern {
             let mut color = rgb(appearance.resolved_active_border_color());
-            if focused { color.a = appearance.resolved_active_border_opacity(); }
-            else {
-                color = cx.theme().primary.into();
-                color.a = if working { 0.38 } else { 0. };
-            }
+            color.a = if focused { appearance.resolved_active_border_opacity() } else { 0. };
             return Some(canvas(|_, _, _| (), move |bounds, _, window, cx| {
                 if crate::preferences_modal::workspace_blocked(cx) { return; }
-                let contour = crate::pane_appearance::rounded_contour(bounds, px(crate::pane_appearance::PANE_RADIUS), border_width);
+                let contour = crate::pane_appearance::rounded_contour(bounds, px(8.), border_width);
                 // Native and GPUI strokes must not stack their alpha.
                 if !crate::native_pane_highlight::paint(
                     &pane_id,
@@ -414,7 +407,7 @@ impl Panel for NativePanel {
                 ) {
                     if working { crate::pane_highlight_geometry::paint_outward_glow(&contour, glow_color, window); }
                     let mut outline = gpui::outline(bounds, color, gpui::BorderStyle::Solid)
-                        .corner_radii(px(crate::pane_appearance::PANE_RADIUS));
+                        .corner_radii(px(8.));
                     outline.border_widths = border_width.into();
                     window.paint_quad(outline);
                 }
@@ -433,13 +426,13 @@ impl Panel for NativePanel {
                 window,
             ) {
                 if working { crate::pane_highlight_geometry::paint_outward_glow(&contour, glow_color, window); }
-                let mut path = gpui::PathBuilder::stroke(border_width);
-                if let Some(first) = contour.first() {
-                    path.move_to(*first);
-                    for point in &contour[1..] { path.line_to(*point); }
-                    path.close();
-                    if let Ok(path) = path.build() { window.paint_path(path, color); }
-                }
+            }
+            let mut path = gpui::PathBuilder::stroke(border_width);
+            if let Some(first) = contour.first() {
+                path.move_to(*first);
+                for point in &contour[1..] { path.line_to(*point); }
+                path.close();
+                if let Ok(path) = path.build() { window.paint_path(path, color); }
             }
         }).absolute().inset_0().into_any_element())
     }
@@ -533,8 +526,7 @@ impl Render for NativePanel {
         let active = pane_visual_active(&self.spec.focus, window, cx);
         let background = self.background.get_or_insert_with(|| cx.new(|_| crate::pane_appearance::PaneBackground::new())).clone();
         if let Some(appearance) = appearance {
-            let browser = self.spec.id.starts_with("browser:") || self.spec.id == "browser" || self.spec.id == "route:browser";
-            let fill = if browser {
+            let fill = if self.spec.id.starts_with("browser:") || self.spec.id == "browser" || self.spec.id == "route:browser" {
                 (*cx.theme().tokens.tab_active).into()
             } else {
                 let tint = if self.spec.id == "terminal" || self.spec.id.starts_with("terminal:") || self.spec.id == "route:terminal" { 0.25 } else { 0.15 };
@@ -545,7 +537,7 @@ impl Render for NativePanel {
             let has_dialog = window.root::<gpui_kit::base::Root>().flatten().is_some()
                 && window.has_active_dialog(cx);
             background.update(cx, |background, cx| {
-                background.set_appearance(appearance, fill, !browser, active, cx);
+                background.set_appearance(appearance, fill, active, cx);
                 background.set_visible(self.paint.borrow().shown && !has_dialog, cx);
             });
         }
@@ -958,7 +950,7 @@ impl DockWorkspace {
             NativeTileTheme::Monitter => DockTileStyle::Contiguous,
             NativeTileTheme::Tern => DockTileStyle::Rounded {
                 gutter: px(crate::design::tern_spacing(settings).gutter),
-                radius: px(crate::pane_appearance::PANE_RADIUS),
+                radius: px(8.),
                 // Expose the same native window finish as the workspace bar.
                 backdrop: rgba(0x00000000).into(),
                 border_color: crate::design::tile_border_color(palette).into(),

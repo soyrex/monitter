@@ -934,11 +934,6 @@ pub fn open_if_requested(cx: &mut App) -> bool {
     )
     .expect("open isolated GPUI performance fixture");
     crate::performance_metrics::schedule(handle, cx);
-    #[cfg(feature = "visual-export")]
-    {
-        crate::visual_export::install(cx);
-        crate::visual_export::schedule(handle, cx);
-    }
     cx.activate(true);
     true
 }

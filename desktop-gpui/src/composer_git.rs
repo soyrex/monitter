@@ -812,7 +812,11 @@ impl Render for ComposerGitStrip {
         } else {
             background
         };
-        let hover_background = palette.fill(2);
+        let hover_background = if self.working {
+            mix_rgb(background, palette.accent, 0.10)
+        } else {
+            mix_rgb(palette.panel, palette.accent, 0.18)
+        };
         let accessible_label = format!(
             "Open Git changes: {branch}, {summary}{}",
             if status["worktree"] == true {
@@ -829,8 +833,8 @@ impl Render for ComposerGitStrip {
             div()
                 .w_full()
                 .border_1()
-                .border_color(rgb(palette.hairline(0)))
-                .rounded(px(10.))
+                .border_color(crate::design::composer_border_color(palette))
+                .rounded(px(7.))
                 .rounded_bl(px(0.))
                 .rounded_br(px(0.))
                 .mb(-px(1.))
@@ -840,11 +844,11 @@ impl Render for ComposerGitStrip {
                         .debug_selector(|| "composer-git-open".into())
                         .w_full()
                         .h_auto()
-                        .min_h(px(32.))
+                        .min_h(px(0.))
                         .px(px(0.))
                         .py(px(0.))
                         .border_0()
-                        .rounded(px(10.))
+                        .rounded(px(6.))
                         .rounded_bl(px(0.))
                         .rounded_br(px(0.))
                         .line_height(relative(1.2))
@@ -853,7 +857,7 @@ impl Render for ComposerGitStrip {
                         .custom(
                             ButtonCustomVariant::new(cx)
                                 .color(crate::surface_blend::git_surface_color(background).into())
-                                .foreground(rgb(palette.text(1)).into())
+                                .foreground(rgb(palette.muted).into())
                                 .hover(
                                     crate::surface_blend::git_surface_color(hover_background)
                                         .into(),
@@ -901,7 +905,7 @@ impl Render for ComposerGitStrip {
                     .px_2()
                     .pt_1()
                     .text_size(px(10.))
-                    .text_color(rgb(palette.err()))
+                    .text_color(rgb(0xdc2626))
                     .child(format!("Git status refresh failed: {error}")),
             );
         }

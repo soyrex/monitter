@@ -638,6 +638,7 @@ pub(crate) fn open_markdown_link(owner: Option<WeakEntity<ChatPane>>, link: &str
     cx.open_url(link);
 }
 
+const FINAL_ANSWER_GREEN: u32 = 0x4f9d69;
 
 #[derive(Clone)]
 pub enum ChatEvent {
@@ -4910,14 +4911,18 @@ impl Render for ChatPane {
                                     body = body.p(px(space::INSET));
                                     bubble = bubble
                                         .border(gpui_kit::px(scale))
-                                        .border_color(rgb(palette.hairline(0)))
+                                        .border_color(design::surface_color(mix_rgb(
+                                            palette.line,
+                                            FINAL_ANSWER_GREEN,
+                                            0.18,
+                                        )))
                                         .rounded_tl(px(radius::CARD))
                                         .rounded_tr(px(radius::CARD))
                                         .rounded_bl(px(3.))
                                         .rounded_br(px(radius::CARD))
                                         .bg(crate::surface_blend::raised_background(
                                             crate::surface_blend::Area::Bubbles,
-                                            palette.fill(1),
+                                            mix_rgb(palette.panel, FINAL_ANSWER_GREEN, 0.07),
                                         ));
                                 }
                                 let attachments = message_attachment_rows
@@ -5249,7 +5254,7 @@ impl Render for ChatPane {
                                 .and_then(|member| grouped.get(&member.stable_key()))
                                 .and_then(|row| row.read(cx).header_icon_bounds());
                             let mut details =
-                                agent_exchange::timeline_ending_at(&disclosure, terminal_icon, palette);
+                                agent_exchange::timeline_ending_at(&disclosure, terminal_icon);
                             let mut exchanges = Vec::new();
                             for member in members {
                                 let (row, is_event) = match member {
@@ -5687,8 +5692,8 @@ impl Render for ChatPane {
                                             })
                                             .p(px(space::INSET))
                                             .border_1()
-                                            .border_color(rgb(if composer_active { palette.glow() } else { palette.hairline(1) }))
-                                            .rounded(px(10.))
+                                            .border_color(design::composer_border_color(palette))
+                                            .rounded(px(radius::CONTROL))
                                             .when(git_docked, |this| {
                                                 this.rounded_tl(px(0.)).rounded_tr(px(0.))
                                             })
@@ -5706,10 +5711,6 @@ impl Render for ChatPane {
                                                     .child(
                                                         Button::new("choose-chat-attachments")
                                                             .compact()
-                                                            .bg(design::surface_color(palette.fill(1)))
-                                                            .border_1()
-                                                            .border_color(rgb(palette.hairline(0)))
-                                                            .rounded(px(8.))
                                                             .w(px(design::COMPOSER_CONTROL_SIZE))
                                                             .h(px(design::COMPOSER_CONTROL_SIZE))
                                                             .icon(Icon::new(IconName::Paperclip))
@@ -5780,9 +5781,7 @@ impl Render for ChatPane {
                                                             .outline()
                                                             .w(px(design::COMPOSER_CONTROL_SIZE))
                                                             .h(px(design::COMPOSER_CONTROL_SIZE))
-                                                            .border_color(rgb(palette.glow()))
-                                                            .bg(rgb(mix_rgb(palette.paper, palette.accent, 0.08)))
-                                                            .rounded(px(8.))
+                                                            .border_color(rgb(palette.accent))
                                                             .text_color(rgb(palette.accent))
                                                             .compact()
                                                             .icon(Icon::new(if self.busy {
@@ -5818,7 +5817,7 @@ impl Render for ChatPane {
                                                         .bottom_0()
                                                         .left_0()
                                                         .right_0()
-                                                        .h(px(4.)),
+                                                        .h(px(3.)),
                                                 ),
                                             ),
                                     )
@@ -6599,14 +6598,11 @@ impl Render for ChatPane {
             .flex_col()
             // The retained dock background paints the focus/hover surface.
             .when(self.dock_group.is_none(), |this| {
-                let fill = crate::surface_blend::tinted_pane_background(
+                this.bg(crate::surface_blend::tinted_pane_background(
                     palette.paper,
                     palette.dark,
                     0.15,
-                );
-                this.bg(if fill.as_solid().is_some_and(|color| color.a >= 0.999) {
-                    crate::pane_appearance::pane_wash_background(fill, palette.tint())
-                } else { fill })
+                ))
             })
             .text_color(rgb(palette.ink))
             .child(measurement)

@@ -45,6 +45,15 @@ use model_save_queue::{ModelSaveQueue, SaveOutcome};
 mod usage_refresh;
 use usage_refresh::UsageRefresh;
 
+fn mix_rgb(base: u32, color: u32, amount: f32) -> u32 {
+    let channel = |shift: u32| {
+        let base = ((base >> shift) & 0xff) as f32;
+        let color = ((color >> shift) & 0xff) as f32;
+        (base * (1.0 - amount) + color * amount).round() as u32
+    };
+    (channel(16) << 16) | (channel(8) << 8) | channel(0)
+}
+
 #[derive(Clone, Debug)]
 pub enum ComposerFooterEvent {
     SnapshotUpdated { task_id: String, snapshot: Value },
@@ -910,15 +919,15 @@ impl ComposerFooterPane {
         let footer = div()
             .id("composer-footer-controls")
             .w_full()
-            .min_h(px(40.))
             .flex()
             .items_center()
             .justify_between()
             .gap(px(design::space::INSET))
-            .px(px(if compact_footer { 8. } else { 16. }))
+            .px(px(design::space::TIGHT))
+            .pt(px(design::space::TIGHT))
             .font_family(cx.theme().font_family.clone())
-            .text_size(design::ui_scaled_px(12.0 * interface_font_ratio))
-            .text_color(rgb(palette.text(1)));
+            .text_size(design::ui_scaled_px(10.0 * interface_font_ratio))
+            .text_color(rgb(palette.muted));
         let access_content = div()
             .min_w_0()
             .flex()
@@ -940,7 +949,7 @@ impl ComposerFooterPane {
                         .flex_shrink_0()
                         .debug_selector(|| "composer-permission-state-label".into())
                         .font_family(cx.theme().font_family.clone())
-                        .text_size(design::ui_scaled_px(12.0 * interface_font_ratio))
+                        .text_size(design::ui_scaled_px(11.0 * interface_font_ratio))
                         .whitespace_nowrap()
                         .child(permission_label(selected)),
                 )
@@ -973,9 +982,9 @@ impl ComposerFooterPane {
             .custom(
                 ButtonCustomVariant::new(cx)
                     .color(rgba(0x00000000).into())
-                    .foreground(rgb(palette.text(1)).into())
-                    .hover(crate::design::surface_color(palette.fill(2)).into())
-                    .active(crate::design::surface_color(palette.fill(3)).into()),
+                    .foreground(rgb(palette.muted).into())
+                    .hover(crate::design::surface_color(palette.soft).into())
+                    .active(crate::design::surface_color(palette.soft).into()),
             )
             .accessibility_label(format!(
                 "Access Permissions: {}",
@@ -999,7 +1008,7 @@ impl ComposerFooterPane {
             .gap(px(design::space::TIGHT))
             .child(access);
         if let Some(error) = save_error {
-            left = left.child(div().text_color(rgb(palette.err())).child(error));
+            left = left.child(div().text_color(rgb(0xc44c79)).child(error));
         }
         if let Some(status) = self.model_pending_status() {
             left = left.child(
@@ -1074,9 +1083,9 @@ impl ComposerFooterPane {
             .custom(
                 ButtonCustomVariant::new(cx)
                     .color(rgba(0x00000000).into())
-                    .foreground(rgb(palette.text(1)).into())
-                    .hover(crate::design::surface_color(palette.fill(2)).into())
-                    .active(crate::design::surface_color(palette.fill(3)).into()),
+                    .foreground(rgb(palette.muted).into())
+                    .hover(crate::design::surface_color(palette.soft).into())
+                    .active(crate::design::surface_color(palette.soft).into()),
             )
             .accessibility_label(format!(
                 "{}Model: {}",
@@ -1100,10 +1109,10 @@ impl ComposerFooterPane {
                                 .py(px(2.))
                                 .rounded_full()
                                 .border_1()
-                                .border_color(rgb(palette.glow()))
+                                .border_color(rgb(mix_rgb(palette.accent, palette.line, 0.55)))
                                 .text_color(rgb(palette.accent))
-                                .font_family(design::FONT_MONO)
-                                .text_size(design::ui_scaled_px(10. * interface_font_ratio))
+                                .font_family(cx.theme().font_family.clone())
+                                .text_size(design::ui_scaled_px(8. * interface_font_ratio))
                                 .child("SYS-1"),
                         )
                     })
@@ -1141,7 +1150,8 @@ impl ComposerFooterPane {
                         this.child(
                             div()
                                 .text_size(design::ui_scaled_px(11.0 * interface_font_ratio))
-                                .text_color(rgb(palette.text(2)))
+                                .text_color(rgb(palette.muted))
+                                .opacity(0.5)
                                 .child(effort.unwrap_or_default().to_owned()),
                         )
                     }),
@@ -1157,7 +1167,7 @@ impl ComposerFooterPane {
         let model_button = composer_popup::model_menu(self, model_button, palette, window, cx);
         let mut right = div().flex().items_center().gap(px(design::space::TIGHT));
         if let Some(error) = catalog_error {
-            right = right.child(div().text_color(rgb(palette.err())).child(error));
+            right = right.child(div().text_color(rgb(0xc44c79)).child(error));
         }
         right = right.child(model_button);
         footer.child(left).child(right).into_any_element()
@@ -1394,7 +1404,7 @@ fn render_context_bar(usage: &ContextUsage, palette: crate::design::Palette) -> 
         ContextUsage::Unavailable(reason) => (0.0, reason.clone(), reason.clone(), true),
     };
     let percent = percent.clamp(0.0, 100.0);
-    let color = context_color(percent, palette);
+    let color = context_color(percent);
     // Div overflow clips rectangular bounds only. Paint the intersection of
     // this bottom stripe with the composer's rounded inner outline, then mask
     // the filled portion by the percentage; it cannot leak through a corner.
@@ -1429,7 +1439,7 @@ fn render_context_bar(usage: &ContextUsage, palette: crate::design::Palette) -> 
             }
             shape.close();
             if let Ok(path) = shape.build() {
-                window.paint_path(path.clone(), design::surface_color(palette.wash(palette.paper)));
+                window.paint_path(path.clone(), design::surface_color(palette.line));
                 let mask = ContentMask::new(Bounds::new(
                     bounds.origin,
                     size(
@@ -1448,7 +1458,7 @@ fn render_context_bar(usage: &ContextUsage, palette: crate::design::Palette) -> 
         .bottom_0()
         .left_0()
         .right_0()
-        .h(px(4.))
+        .h(px(3.))
         .overflow_hidden()
         .aria_label(label.clone())
         .managed_tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx));
@@ -1481,13 +1491,30 @@ fn format_token_count(value: f64) -> String {
     output
 }
 
-fn context_color(percent: f64, palette: design::Palette) -> u32 {
+fn context_color(percent: f64) -> u32 {
+    let blend = |a: [f64; 3], b: [f64; 3], t: f64| -> u32 {
+        let t = t.clamp(0.0, 1.0);
+        let channels = a
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (*v + (b[i] - *v) * t).round() as u32)
+            .collect::<Vec<_>>();
+        (channels[0] << 16) | (channels[1] << 8) | channels[2]
+    };
     if percent <= 60.0 {
-        palette.ok()
+        0x3f9d6a
     } else if percent <= 90.0 {
-        design::mix_rgb(palette.ok(), palette.warn(), ((percent - 60.0) / 30.0) as f32)
+        blend(
+            [63.0, 157.0, 106.0],
+            [224.0, 133.0, 51.0],
+            (percent - 60.0) / 30.0,
+        )
     } else {
-        design::mix_rgb(palette.warn(), palette.err(), ((percent - 90.0) / 10.0) as f32)
+        blend(
+            [224.0, 133.0, 51.0],
+            [205.0, 76.0, 76.0],
+            (percent - 90.0) / 10.0,
+        )
     }
 }
 

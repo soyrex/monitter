@@ -1251,28 +1251,32 @@ impl SubagentPane {
         let pill = |id: &'static str, button: Button, selected: bool| {
             div()
                 .id(id)
-                .h(px(28.))
-                .flex()
-                .items_center()
-                .rounded(px(8.))
+                .rounded(px(4.))
                 .border_1()
-                .border_color(rgb(palette.hairline(if selected { 1 } else { 0 })))
-                .bg(rgb(palette.fill(if selected { 3 } else { 0 })))
+                .border_color(
+                    rgb(if selected {
+                        palette.accent
+                    } else {
+                        palette.line
+                    })
+                    .opacity(if selected { 1. } else { 0. }),
+                )
+                .bg(rgb(palette.accent).opacity(if selected { 0.10 } else { 0. }))
                 .hover(|style| {
                     style
-                        .border_color(rgb(palette.hairline(1)))
-                        .bg(rgb(palette.fill(3)))
+                        .border_color(rgb(palette.accent))
+                        .bg(rgb(palette.accent).opacity(0.10))
                 })
                 .child(
                     button
                         .compact()
                         .text()
-                        .rounded(px(8.))
+                        .rounded(px(4.))
                         .px(px(8.))
-                        .py(px(3.))
-                        .bg(rgb(palette.fill(0)))
-                        .text_color(rgb(palette.text(if selected { 1 } else { 2 })))
-                        .text_size(px(13.)),
+                        .py(px(4.))
+                        .bg(rgb(palette.accent).opacity(0.))
+                        .text_color(rgb(if selected { palette.ink } else { palette.muted }))
+                        .text_size((cx.theme().font_size - px(4.)).max(px(8.))),
                 )
         };
         let mut bar = div()
@@ -1282,8 +1286,8 @@ impl SubagentPane {
             .items_center()
             .gap(px(5.))
             .border_t_1()
-            .border_color(rgb(palette.hairline(0)))
-            .px(px(12.))
+            .border_color(rgb(palette.line))
+            .px(px(10.))
             .bg(crate::surface_blend::background(
                 crate::surface_blend::Area::Pane,
                 palette.paper,
@@ -1300,23 +1304,9 @@ impl SubagentPane {
                 self.menus.subagents,
             ));
         }
-        if has_plan || build_project.is_some() {
-            bar = bar.child(div().flex_1());
-        }
-        if has_plan {
-            bar = bar.child(pill(
-                "work-plan-menu-pill",
-                action_button("work-plan-menu-toggle", "Work Plan".into(), gpui_kit::assets::IconName::List)
-                    .toggled(self.menus.plan)
-                    .on_click(cx.listener(|pane, _, _, cx| {
-                        pane.menus.toggle_plan();
-                        cx.notify();
-                    })),
-                self.menus.plan,
-            ));
-        }
         if let Some(project_id) = &build_project {
             let count = build_queue::pending_count(&self.snapshot, project_id);
+            bar = bar.child(div().flex_1());
             bar = bar.child(pill(
                 "build-queue-menu-pill",
                 action_button("build-queue-menu-toggle", if count > 0 {

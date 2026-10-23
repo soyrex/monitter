@@ -1,9 +1,8 @@
 //! A project shelf: capture and browse ideas without leaving the agent workspace.
 use crate::design::{self, ui_scaled_px as px};
 use gpui_kit::{
-    assets::IconName,
     component::{
-        ActiveTheme as _, Disableable, Icon, Sizable,
+        ActiveTheme as _, Disableable, Sizable,
         button::*,
         input::{Input, InputEvent, InputState, Textarea, TextareaState},
         menu::{DropdownMenu as _, PopupMenuItem},
@@ -36,13 +35,6 @@ fn status(v: &Value) -> &'static str {
         Some("done") => "Done",
         Some("dropped") => "Dropped",
         _ => "Open",
-    }
-}
-fn status_icon(value: &str) -> IconName {
-    match value {
-        "done" => IconName::CircleCheck,
-        "inPlan" => IconName::CircleDot,
-        _ => IconName::Circle,
     }
 }
 fn excerpt(v: &Value) -> String {
@@ -424,20 +416,11 @@ impl Render for IdeasPane {
             .h_full()
             .flex()
             .items_center()
-            .gap(px(6.))
             .child(
                 div()
                     .truncate()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_size(gpui_kit::px(13. * font_scale))
-                    .child("Ideas"),
-            )
-            .child(div()
-                .flex_shrink_0()
-                .font_family(design::FONT_MONO)
-                .text_size(gpui_kit::px(11. * font_scale))
-                .text_color(rgb(p.text(2)))
-                .child(rows(&project, "ideas").len().to_string()));
+                    .child(format!("Ideas · {}", rows(&project, "ideas").len())),
+            );
         let context = self
             .dock_group
             .as_ref()
@@ -451,7 +434,7 @@ impl Render for IdeasPane {
         let mut header = div()
             .id("ideas-header")
             .debug_selector(|| "ideas-header".into())
-            .h(px(48.))
+            .h(px(36.))
             .flex_shrink_0()
             .min_w_0()
             .flex()
@@ -478,8 +461,8 @@ impl Render for IdeasPane {
                         .small()
                         .ghost()
                         .label("⋯")
-                        .w(px(28.))
-                        .h(px(28.))
+                        .w(px(24.))
+                        .h(px(24.))
                         .p_0()
                         .debug_selector(|| "ideas-pane-menu".into())
                         .tooltip("Split and manage pane")
@@ -620,16 +603,12 @@ impl Render for IdeasPane {
                         .gap_2()
                         .child(
                             div()
-                                .w(px(84.))
+                                .w(px(68.))
                                 .flex_shrink_0()
-                                .text_color(rgb(p.text(2)))
+                                .text_color(rgb(p.muted))
                                 .child(label.to_owned()),
                         )
-                        .child(div().flex_1().min_w_0()
-                            .font_family(design::FONT_MONO)
-                            .text_size(gpui_kit::px(12. * font_scale))
-                            .text_color(rgb(p.text(1)))
-                            .child(value))
+                        .child(div().flex_1().min_w_0().child(value))
                 };
                 let mut detail = div()
                     .id("idea-detail")
@@ -640,14 +619,14 @@ impl Render for IdeasPane {
                     .flex()
                     .flex_col()
                     .gap_2()
-                    .p(px(16.))
+                    .p_3()
                     .child(
                         Input::new(&self.title)
                             .appearance(false)
                             .bordered(false)
                             .h(px(36.))
-                            .text_size(gpui_kit::px(20. * font_scale))
-                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_size(gpui_kit::px(18. * font_scale))
+                            .font_weight(FontWeight::BOLD)
                             .disabled(self.busy),
                     )
                     .child(
@@ -657,9 +636,9 @@ impl Render for IdeasPane {
                             .gap_2()
                             .child(
                                 div()
-                                    .w(px(84.))
+                                    .w(px(68.))
                                     .flex_shrink_0()
-                                    .text_color(rgb(p.text(2)))
+                                    .text_color(rgb(p.muted))
                                     .child("Author"),
                             )
                             .child(
@@ -669,36 +648,28 @@ impl Render for IdeasPane {
                                     .gap_1()
                                     .child(
                                         div()
-                                            .w(px(18.))
-                                            .h(px(18.))
+                                            .w(px(16.))
+                                            .h(px(16.))
                                             .flex()
                                             .items_center()
                                             .justify_center()
-                                            .when(idea["authorKind"] == "agent", |d| d.rounded_sm()
-                                                .text_color(rgb(p.paper))
-                                                .bg(linear_gradient(135.,
-                                                    linear_color_stop(rgb(p.agent()), 0.),
-                                                    linear_color_stop(rgb(design::mix_rgb(p.agent(), p.paper, 0.3)), 1.),
-                                                ))
-                                                .child(Icon::new(IconName::Terminal).size(px(10.))))
-                                            .when(idea["authorKind"] != "agent", |d| d.rounded_full()
-                                                .bg(rgb(p.fill(3)))
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .text_size(gpui_kit::px(10. * font_scale))
-                                                .text_color(rgb(p.text(0)))
-                                                .child(author(&idea)
+                                            .text_size(gpui_kit::px(10. * font_scale))
+                                            .bg(rgb(p.soft))
+                                            .when(idea["authorKind"] == "agent", |d| d.rounded_sm())
+                                            .when(idea["authorKind"] != "agent", |d| {
+                                                d.rounded_full()
+                                            })
+                                            .child(if idea["authorKind"] == "agent" {
+                                                "↗".into()
+                                            } else {
+                                                author(&idea)
                                                     .chars()
                                                     .next()
                                                     .map(|c| c.to_string())
-                                                    .unwrap_or_default())),
+                                                    .unwrap_or_default()
+                                            }),
                                     )
-                                    .child(author(&idea))
-                                    .when(idea["authorKind"] == "agent", |row| row.child(
-                                        div().font_family(design::FONT_MONO)
-                                            .text_size(gpui_kit::px(11. * font_scale))
-                                            .text_color(rgb(p.agent()))
-                                            .child("agent"),
-                                    )),
+                                    .child(author(&idea)),
                             ),
                     )
                     .child(metadata(
@@ -727,13 +698,12 @@ impl Render for IdeasPane {
                         .flex()
                         .items_center()
                         .gap_2()
-                        .child(div().w(px(84.)).text_color(rgb(p.text(2))).child("Status"))
+                        .child(div().w(px(68.)).text_color(rgb(p.muted)).child("Status"))
                         .child(
                             Button::new("idea-status-selector")
                                 .compact()
                                 .small()
                                 .outline()
-                                .icon(status_icon(&self.edit_status))
                                 .h(px(24.))
                                 .rounded(px(6.))
                                 .bg(rgb(p.soft))
@@ -775,9 +745,9 @@ impl Render for IdeasPane {
                             .items_center()
                             .child(
                                 div()
-                                    .w(px(84.))
+                                    .w(px(68.))
                                     .flex_shrink_0()
-                                    .text_color(rgb(p.text(2)))
+                                    .text_color(rgb(p.muted))
                                     .child("Source"),
                             )
                             .child(
@@ -786,13 +756,8 @@ impl Render for IdeasPane {
                                     .overflow_hidden()
                                     .compact()
                                     .small()
-                                    .outline()
-                                    .h(px(24.))
-                                    .rounded(px(6.))
-                                    .icon(IconName::ArrowUpRight)
-                                    .border_color(rgb(design::mix_rgb(p.panel, p.agent(), 0.38)))
-                                    .bg(rgb(design::mix_rgb(p.panel, p.agent(), 0.10)))
-                                    .text_color(rgb(p.agent()))
+                                    .ghost()
+                                    .text_color(rgb(p.accent))
                                     .label(name)
                                     .on_click(cx.listener(move |_, _, _, cx| {
                                         cx.emit(IdeasEvent::OpenSource(source.clone()))
@@ -814,11 +779,10 @@ impl Render for IdeasPane {
                     for tag in tags.split(',').map(str::trim).filter(|s| !s.is_empty()) {
                         tag_values = tag_values.child(
                             div()
-                                .px(px(6.))
-                                .rounded(px(4.))
-                                .bg(rgb(p.fill(0)))
-                                .text_size(gpui_kit::px(11. * font_scale))
-                                .text_color(rgb(p.text(2)))
+                                .px_1()
+                                .rounded_sm()
+                                .bg(rgb(p.soft))
+                                .text_size(gpui_kit::px(10. * font_scale))
                                 .child(tag.to_owned()),
                         );
                     }
@@ -842,9 +806,9 @@ impl Render for IdeasPane {
                         .gap_2()
                         .child(
                             div()
-                                .w(px(84.))
+                                .w(px(68.))
                                 .flex_shrink_0()
-                                .text_color(rgb(p.text(2)))
+                                .text_color(rgb(p.muted))
                                 .child("Tags"),
                         )
                         .child(tag_values),
@@ -856,9 +820,7 @@ impl Render for IdeasPane {
                     .mt_2()
                     .flex()
                     .gap_1()
-                    .child(div().flex_1().font_family(design::FONT_MONO)
-                        .text_size(gpui_kit::px(11. * font_scale))
-                        .text_color(rgb(p.text(3))).child("NOTE"));
+                    .child(div().flex_1().text_color(rgb(p.muted)).child("NOTE"));
                 tabs = tabs.child(
                     Button::new("idea-save")
                         .compact()
@@ -1006,25 +968,19 @@ impl Render for IdeasPane {
                 body = body.child(
                     div()
                         .flex()
-                        .items_center()
                         .flex_wrap()
                         .gap_1()
-                        .min_h(px(52.))
-                        .px(px(16.))
-                        .py(px(10.))
+                        .p_3()
                         .border_t_1()
-                        .border_color(rgb(p.hairline(0)))
-                        .bg(rgb(p.fill(0)))
+                        .border_color(rgb(p.line))
                         .child(
                             Button::new("idea-send")
                                 .compact()
                                 .small()
                                 .outline()
-                                .h(px(30.))
-                                .icon(IconName::ArrowUpRight)
+                                .h(px(28.))
                                 .text_color(rgb(p.accent))
-                                .border_color(rgb(p.glow()))
-                                .bg(rgb(design::mix_rgb(p.panel, p.accent, 0.14)))
+                                .bg(rgb(p.soft))
                                 .debug_selector(|| "idea-send".into())
                                 .label("Send to agent")
                                 .on_click(cx.listener(|v, _, _, cx| {
@@ -1037,7 +993,7 @@ impl Render for IdeasPane {
                                 .compact()
                                 .small()
                                 .outline()
-                                .h(px(30.))
+                                .h(px(28.))
                                 .debug_selector(|| "idea-plan".into())
                                 .label("Make work plan")
                                 .on_click(cx.listener(|v, _, _, cx| {
@@ -1051,7 +1007,7 @@ impl Render for IdeasPane {
                                 .compact()
                                 .small()
                                 .ghost()
-                                .h(px(30.))
+                                .h(px(26.))
                                 .text_color(rgb(p.muted))
                                 .debug_selector(|| "idea-drop".into())
                                 .label("Drop")
@@ -1066,21 +1022,16 @@ impl Render for IdeasPane {
             body = body.child(
                 div().px_3().py_2().child(
                     Input::new(&self.capture)
-                        .h(px(40.))
-                        .bg(rgb(p.fill(0)))
+                        .h(px(36.))
+                        .bg(rgb(p.soft))
                         .border_1()
-                        .border_color(rgb(p.hairline(1)))
-                        .rounded(px(10.))
-                        .prefix(div().text_color(rgb(p.text(2))).child("+"))
+                        .border_color(rgb(p.line))
+                        .rounded(px(8.))
+                        .prefix(div().text_color(rgb(p.muted)).child("＋"))
                         .suffix(
                             div()
-                                .px(gpui_kit::px(5.))
-                                .rounded(gpui_kit::px(4.))
-                                .border_1()
-                                .border_color(rgb(p.hairline(0)))
-                                .font_family(crate::design::FONT_MONO)
-                                .text_size(gpui_kit::px(11. * font_scale))
-                                .text_color(rgb(p.text(2)))
+                                .text_size(gpui_kit::px(10. * font_scale))
+                                .text_color(rgb(p.muted))
                                 .child("↵"),
                         )
                         .disabled(self.busy || self.project.is_none()),
@@ -1122,13 +1073,11 @@ impl Render for IdeasPane {
                         .compact()
                         .small()
                         .ghost()
-                        .h(px(24.))
+                        .h(px(23.))
                         .rounded_full()
                         .px_2()
-                        .text_size(gpui_kit::px(12. * font_scale))
-                        .border_1()
-                        .border_color(rgb(p.hairline(0)))
-                        .when(self.filter == filter, |b| b.bg(rgb(p.fill(1))).border_color(rgb(p.hairline(1))))
+                        .text_size(gpui_kit::px(10. * font_scale))
+                        .when(self.filter == filter, |b| b.outline().bg(rgb(p.soft)))
                         .label(label)
                         .on_click(cx.listener(move |v, _, _, cx| {
                             v.filter = filter;
@@ -1139,8 +1088,8 @@ impl Render for IdeasPane {
             body = body.child(
                 filters.child(div().flex_1()).child(
                     div()
-                        .text_color(rgb(p.text(2)))
-                        .text_size(gpui_kit::px(12. * font_scale))
+                        .text_color(rgb(p.muted))
+                        .text_size(gpui_kit::px(10. * font_scale))
                         .child("Newest ↓"),
                 ),
             );
@@ -1164,28 +1113,27 @@ impl Render for IdeasPane {
                 if section != previous {
                     list = list.child(
                         div()
-                            .px(gpui_kit::px(16.))
-                            .pt(gpui_kit::px(8.))
-                            .pb(gpui_kit::px(4.))
-                            .font_family(crate::design::FONT_MONO)
-                            .text_size(gpui_kit::px(11. * font_scale))
-                            .text_color(rgb(p.text(2)))
+                            .px_3()
+                            .py_2()
+                            .text_size(gpui_kit::px(9. * font_scale))
+                            .text_color(rgb(p.muted))
                             .child(section.to_uppercase()),
                     );
                     previous = section;
                 }
                 let id = text(&idea, "id");
                 let clicked = idea.clone();
-                let icon = status_icon(idea["status"].as_str().unwrap_or_default());
-                let icon_color = match idea["status"].as_str() {
-                    Some("done") => p.ok(),
-                    Some("inPlan") => p.accent,
-                    Some("dropped") => p.text(3),
-                    _ => p.text(2),
+                let icon = match idea["status"].as_str() {
+                    Some("done") => "✓",
+                    Some("inPlan") => "⊙",
+                    Some("dropped") => "◌",
+                    _ => "○",
                 };
                 let dropped = idea["status"] == "dropped";
                 let is_agent = idea["authorKind"] == "agent";
-                let initial = if idea["authorKind"] == "person" {
+                let initial = if is_agent {
+                    "↗".into()
+                } else if idea["authorKind"] == "person" {
                     author(&idea)
                         .chars()
                         .next()
@@ -1195,25 +1143,15 @@ impl Render for IdeasPane {
                     "?".into()
                 };
                 let avatar = div()
-                    .w(px(18.))
-                    .h(px(18.))
+                    .w(px(16.))
+                    .h(px(16.))
                     .flex()
                     .items_center()
                     .justify_center()
-                    .when(dropped, |s| s.opacity(0.6))
-                    .when(is_agent, |s| s.rounded_sm()
-                        .text_color(rgb(p.paper))
-                        .bg(linear_gradient(135.,
-                            linear_color_stop(rgb(p.agent()), 0.),
-                            linear_color_stop(rgb(design::mix_rgb(p.agent(), p.paper, 0.3)), 1.),
-                        ))
-                        .child(Icon::new(IconName::Terminal).size(px(10.))))
-                    .when(!is_agent, |s| s.rounded_full()
-                        .bg(rgb(p.fill(3)))
-                        .text_size(px(10.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(p.text(0)))
-                        .child(initial));
+                    .bg(rgb(if is_agent { p.accent } else { p.soft }))
+                    .when(is_agent, |s| s.rounded_sm())
+                    .when(!is_agent, |s| s.rounded_full())
+                    .child(initial);
                 list = list.child(
                     div()
                         .id(SharedString::from(format!("idea-{id}")))
@@ -1222,23 +1160,21 @@ impl Render for IdeasPane {
                             move || format!("idea-{id}")
                         })
                         .cursor_pointer()
+                        .when(dropped, |s| s.opacity(0.55))
                         .border_b_1()
-                        .border_color(rgb(p.hairline(0)))
-                        .px(gpui_kit::px(16.))
-                        .py(gpui_kit::px(12.))
-                        .hover(move |s| s.bg(rgb(p.fill(1))))
+                        .border_color(rgb(p.line))
+                        .px_3()
+                        .py_3()
+                        .hover(move |s| s.bg(rgb(p.soft)))
                         .on_click(cx.listener(move |v, _, w, cx| v.open(clicked.clone(), w, cx)))
                         .child(
                             div()
                                 .flex()
-                                .gap(gpui_kit::px(12.))
-                                .child(div().text_color(rgb(icon_color))
-                                    .child(Icon::new(icon).size(gpui_kit::px(14. * font_scale))))
+                                .gap_2()
+                                .child(div().text_color(rgb(p.accent)).child(icon))
                                 .child(
                                     div()
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .text_size(gpui_kit::px(14. * font_scale))
-                                        .text_color(rgb(if dropped { p.text(2) } else { p.text(0) }))
+                                        .font_weight(FontWeight::SEMIBOLD)
                                         .min_w_0()
                                         .truncate()
                                         .when(dropped, |s| s.line_through())
@@ -1247,22 +1183,21 @@ impl Render for IdeasPane {
                         )
                         .child(
                             div()
-                                .pl(gpui_kit::px(24.))
+                                .pl_5()
                                 .mt_1()
-                                .text_size(gpui_kit::px(12. * font_scale))
-                                .text_color(rgb(p.text(2)))
+                                .text_color(rgb(p.muted))
                                 .truncate()
                                 .child(excerpt(&idea)),
                         )
                         .child(
                             div()
-                                .pl(gpui_kit::px(24.))
+                                .pl_5()
                                 .mt_1()
                                 .flex()
                                 .items_center()
                                 .gap_1()
-                                .text_size(gpui_kit::px(12. * font_scale))
-                                .text_color(rgb(p.text(1)))
+                                .text_size(gpui_kit::px(10. * font_scale))
+                                .text_color(rgb(p.muted))
                                 .child(avatar)
                                 .child(div().min_w_0().truncate().child(author(&idea)))
                                 .children(
@@ -1274,15 +1209,14 @@ impl Render for IdeasPane {
                                             div()
                                                 .px_1()
                                                 .rounded_sm()
-                                                .bg(rgb(p.fill(0)))
+                                                .bg(rgb(p.soft))
                                                 .child(tag.to_owned())
                                         })
                                         .collect::<Vec<_>>(),
                                 )
                                 .child(div().flex_1())
-                                .child(div().font_family(crate::design::FONT_MONO)
-                                    .text_size(gpui_kit::px(11. * font_scale))
-                                    .text_color(rgb(p.text(3))).child(crate::timestamps::local_datetime(
+                                .child(
+                                    crate::timestamps::local_datetime(
                                         idea["createdAt"].as_i64().unwrap_or(0),
                                     )
                                     .map(|d| {
@@ -1292,7 +1226,8 @@ impl Render for IdeasPane {
                                             d.format("%b %-d").to_string()
                                         }
                                     })
-                                    .unwrap_or_default())),
+                                    .unwrap_or_default(),
+                                ),
                         ),
                 );
             }
@@ -1300,8 +1235,8 @@ impl Render for IdeasPane {
                 div()
                     .p_3()
                     .border_t_1()
-                    .border_color(rgb(p.hairline(0)))
-                    .text_color(rgb(p.text(2)))
+                    .border_color(rgb(p.line))
+                    .text_color(rgb(p.muted))
                     .child("Stored in this project · Enter captures an idea"),
             );
         }

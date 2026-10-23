@@ -41,7 +41,6 @@ fn session_lock_escape_stays_inside_dialog_and_pin_is_masked(cx: &mut TestAppCon
                 focus: cx.focus_handle(),
                 locked: true,
                 configured: Some(true),
-                initialized: true,
                 busy: false,
                 locking: false,
                 pin,

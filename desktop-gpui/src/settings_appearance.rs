@@ -52,7 +52,7 @@ pub(super) fn font_choices(families: Vec<SharedString>) -> Vec<FontChoice> {
 #[derive(Clone)]
 pub(super) struct PaletteChoice {
     pub(super) label: SharedString,
-    colors: [u32; 2],
+    colors: [u32; 3],
 }
 impl PaletteChoice {
     fn preview(&self) -> Div {
@@ -63,12 +63,12 @@ impl PaletteChoice {
             .child(
                 div()
                     .flex()
-                    .rounded(px(3.))
+                    .rounded(px(4.))
                     .overflow_hidden()
                     .border_1()
                     .children(
                         self.colors
-                            .map(|color| div().w(px(26.)).h(px(16.)).bg(rgb(color))),
+                            .map(|color| div().w(px(12.)).h(px(24.)).bg(rgb(color))),
                     ),
             )
             .child(
@@ -100,7 +100,7 @@ pub(super) fn palette_choices(dark: bool) -> Vec<PaletteChoice> {
             let p = native_appearance::palette(id, dark, None, 0, 0);
             PaletteChoice {
                 label: SharedString::from(*label),
-                colors: [p.paper, p.accent],
+                colors: [p.paper, p.panel, p.accent],
             }
         })
         .collect()
@@ -110,7 +110,7 @@ fn range_footer(left: &str, right: &str, palette: Palette) -> Div {
         .flex()
         .justify_between()
         .text_size(crate::settings::settings_text_size(0.8))
-        .text_color(rgb(palette.text(2)))
+        .text_color(rgb(palette.muted))
         .child(left.to_owned())
         .child(right.to_owned())
 }
@@ -170,13 +170,10 @@ pub(super) fn render(
         )
         .flex_row().flex_wrap().items_center().justify_between()
         .child(div().flex_shrink_0().flex().gap(px(2.)).p(px(3.))
-            .rounded(px(10.)).border_1().border_color(rgb(palette.hairline(0)))
-            .bg(design::surface_color(palette.fill(0))).children(
+            .rounded(px(design::radius::CONTROL)).bg(design::surface_color(palette.code)).children(
             ["system", "light", "dark"].map(|mode| {
                 Button::new(SharedString::from(format!("theme-{mode}")))
                     .compact().selected(theme == mode)
-                    .h(px(28.)).rounded(px(7.))
-                    .when(theme == mode, |button| button.bg(rgb(palette.fill(3))).border_1().border_color(rgb(palette.hairline(1))))
                     .label(if theme == mode {
                         format!("✓ {}", mode)
                     } else {
@@ -193,14 +190,11 @@ pub(super) fn render(
         .child("Window surface")
         .child(
             div().flex().flex_wrap().gap(px(2.)).p(px(3.))
-                .rounded(px(10.)).border_1().border_color(rgb(palette.hairline(0)))
-                .bg(design::surface_color(palette.fill(0))).children(
+                .rounded(px(design::radius::CONTROL)).bg(design::surface_color(palette.code)).children(
                 ["opaque", "translucent", "glass"].map(|value| {
                     let selected = surface == value || (surface.is_empty() && value == "opaque");
                     Button::new(SharedString::from(format!("surface-{value}")))
                         .compact().selected(selected)
-                        .h(px(28.)).rounded(px(7.))
-                        .when(selected, |button| button.bg(rgb(palette.fill(3))).border_1().border_color(rgb(palette.hairline(1))))
                         .label(if selected {
                             format!("✓ {}", value)
                         } else {
@@ -213,7 +207,7 @@ pub(super) fn render(
                 }),
             ),
         )
-        .child(div().text_size(crate::settings::settings_text_size(0.8)).text_color(rgb(palette.text(2))).child(
+        .child(div().text_size(crate::settings::settings_text_size(0.8)).text_color(rgb(palette.muted)).child(
             "Glass uses the platform blur material where supported; it does not enable Apple's newer Liquid Glass effect.",
         ));
     let transparency = state.window_transparency.read(cx).value().end().round() as u16;

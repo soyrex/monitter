@@ -71,10 +71,9 @@ pub(crate) fn paint_outward_glow(
         .map(|(a, b)| a.0 * b.1 - b.0 * a.1)
         .sum();
     let direction = if area >= 0. { -1. } else { 1. };
-    let strength = color.a;
     for band in 0..20 {
         let distance = band as f32 + 0.5;
-        color.a = strength * 0.18 * (1. - distance / 20.).powi(2);
+        color.a = 0.18 * (1. - distance / 20.).powi(2);
         let mut path = gpui::PathBuilder::stroke(gpui::px(1.));
         for i in 0..points.len() {
             let previous = points[(i + points.len() - 1) % points.len()];

@@ -36,8 +36,7 @@ fn surface_stars(id: &SharedString, layout: SparkleLayout) -> Stars {
     let template = match layout {
         SparkleLayout::Compact => &COMPACT_STARS[..],
         SparkleLayout::DockWash | SparkleLayout::HeaderWash => &[][..],
-        SparkleLayout::Pane => &PANE_STARS[..],
-        _ => &TAB_STARS[..],
+        _ => &PANE_STARS[..],
     };
     template.iter().map(|&(_, _, size, delay)| {
         let x = 3. + random() * 94.;
@@ -48,15 +47,7 @@ fn surface_stars(id: &SharedString, layout: SparkleLayout) -> Stars {
 
 const CYCLE: f32 = 3.4;
 const VISIBILITY_FADE: Duration = Duration::from_millis(500);
-const PANE_STARS: [(f32, f32, f32, f32); 6] = [
-    (6., 40., 6., 0.),
-    (78., 55., 10., 0.55),
-    (30., 70., 14., 1.1),
-    (72., 185., 18., 1.65),
-    (48., 150., 22., 2.2),
-    (15., 95., 26., 2.75),
-];
-const TAB_STARS: [(f32, f32, f32, f32); 21] = [
+const PANE_STARS: [(f32, f32, f32, f32); 21] = [
     (6., 40., 11., 0.),
     (92., 90., 9., 0.5),
     (18., 20., 7., 1.4),
@@ -610,8 +601,8 @@ impl RenderOnce for SparkleCanvas {
                 if layout == SparkleLayout::Pane {
                     // Focus and lifecycle opacity apply once to the whole field.
                     window.paint_quad(fill(bounds, linear_gradient(
-                        180., linear_color_stop(wash, 0.), linear_color_stop(
-                            clear, 0.65),
+                        180., linear_color_stop(clear, 0.), linear_color_stop(
+                            wash, 1.),
                     )));
                 }
                 if layout == SparkleLayout::Compact {
@@ -678,7 +669,7 @@ impl RenderOnce for SparkleCanvas {
                 };
                 for &(x, source_y, source_size, delay) in stars.iter() {
                     let local = effective_phase.map(|time| (time - delay / CYCLE).rem_euclid(1.0));
-                    let (opacity, rise, scale) = local.map_or((0.2, 0., 1.), sparkle_frame);
+                    let (opacity, rise, scale) = local.map_or((0.55, 0., 1.), sparkle_frame);
                     if opacity <= 0. {
                         continue;
                     }
@@ -812,7 +803,7 @@ fn readable_accent(palette: Palette) -> u32 {
 fn sparkle_frame(phase: f32) -> (f32, f32, f32) {
     if phase < 0.15 {
         let t = ease_in(phase / 0.15);
-        (t, -14. * (1. - t), 0.75 + 0.25 * t)
+        (t, -14. * (1. - t), 0.5 + 0.5 * t)
     } else if phase < 0.45 {
         let t = ease_in((phase - 0.15) / 0.30);
         (1. - 0.15 * t, 4. * t, 1.)
@@ -936,7 +927,7 @@ fn star_is_visible(
 #[cfg(test)]
 mod tests {
     use super::{
-        COMPACT_STARS, CYCLE, PANE_STARS, TAB_STARS, SparkleField, VisibilityFade, retained_phase,
+        COMPACT_STARS, CYCLE, PANE_STARS, SparkleField, VisibilityFade, retained_phase,
         sparkle_frame, star_is_visible, star_path,
     };
     use std::time::{Duration, Instant};
@@ -1177,21 +1168,20 @@ mod tests {
 
     #[::core::prelude::v1::test]
     fn source_geometry_and_stagger_are_bounded() {
-        assert_eq!(PANE_STARS.len(), 6);
-        assert_eq!(TAB_STARS.len(), 21);
+        assert_eq!(PANE_STARS.len(), 21);
         assert_eq!(COMPACT_STARS.len(), 5);
         assert!(PANE_STARS.iter().all(|(x, y, size, delay)| {
             (0. ..=100.).contains(x)
                 && (0. ..=215.).contains(y)
-                && (6. ..=26.).contains(size)
-                && (0. ..=CYCLE).contains(delay)
+                && (7. ..=13.).contains(size)
+                && (0. ..=CYCLE * 1.5).contains(delay)
         }));
-        assert_eq!(PANE_STARS[5].3, 2.75);
+        assert_eq!(PANE_STARS[20].3, 4.8);
     }
 
     #[::core::prelude::v1::test]
     fn star_cycle_has_source_fade_and_static_endpoint_values() {
-        assert_eq!(sparkle_frame(0.), (0., -14., 0.75));
+        assert_eq!(sparkle_frame(0.), (0., -14., 0.5));
         assert_eq!(sparkle_frame(0.15), (1., 0., 1.));
         assert_eq!(sparkle_frame(0.70), (0., 18., 0.6));
     }

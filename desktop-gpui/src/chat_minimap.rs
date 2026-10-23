@@ -150,7 +150,7 @@ pub(super) fn prepare<'a>(
                 color: if role == "user" {
                     palette.accent
                 } else if bubbled {
-                    palette.ok()
+                    FINAL_ANSWER_GREEN
                 } else {
                     palette.ink
                 },
@@ -484,7 +484,7 @@ mod tests {
         );
         assert!(markers[0].bubbled && !markers[1].bubbled && markers[2].bubbled);
         assert_eq!(markers[0].color, palette().accent);
-        assert_eq!(markers[2].color, palette().ok());
+        assert_eq!(markers[2].color, FINAL_ANSWER_GREEN);
         assert!(markers.windows(2).all(|m| m[0].position < m[1].position));
     }
     #[::core::prelude::v1::test]

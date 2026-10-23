@@ -59,7 +59,7 @@ impl Render for Preview {
             for (index, initially_open) in [(0, true), (1, false)] {
                 let open = window.use_keyed_state(SharedString::from(format!("preview-exchange-group-open-{index}")), cx, |_, _| initially_open);
                 let expanded = *open.read(cx);
-                let mut details = crate::chat::agent_exchange::timeline(&format!("preview-group-{index}"), palette);
+                let mut details = crate::chat::agent_exchange::timeline(&format!("preview-group-{index}"));
                 for (member, direction, status, body) in [
                     (0, crate::chat::agent_exchange::Direction::Incoming, "completed", "Asked: review native widget shapes. Synthetic example only."),
                     (1, crate::chat::agent_exchange::Direction::Outgoing, "completed", "Replied: checked control and card geometry. Synthetic example only."),
@@ -108,27 +108,10 @@ pub(super) fn open_if_requested(cx: &mut App) -> bool {
         theme.font_family = "IBM Plex Sans".into();
         theme.font_size = design::ui_scaled_px(14.);
         theme.colors.primary = rgb(palette.accent).into();
-        theme.colors.primary_hover = rgb(palette.accent).into();
-        theme.colors.primary_active = rgb(palette.accent).into();
-        theme.colors.background = design::surface_color(palette.paper).into();
+        theme.colors.background = rgb(palette.paper).into();
         theme.colors.foreground = rgb(palette.ink).into();
-        theme.colors.selection = design::text_selection_color(palette).into();
-        theme.colors.border = rgb(palette.hairline(1)).into();
-        theme.colors.input = design::surface_color(palette.fill(1)).into();
-        theme.colors.ring = rgb(palette.glow()).into();
-        theme.colors.muted = design::surface_color(palette.fill(0)).into();
-        theme.colors.muted_foreground = rgb(palette.text(2)).into();
-        theme.colors.success = rgb(palette.ok()).into();
-        theme.colors.warning = rgb(palette.warn()).into();
-        theme.colors.danger = rgb(palette.err()).into();
-        theme.colors.info = rgb(palette.agent()).into();
-        theme.colors.button = design::surface_color(palette.fill(1)).into();
-        theme.colors.button_hover = design::surface_color(palette.fill(2)).into();
-        theme.colors.button_active = design::surface_color(palette.fill(3)).into();
-        theme.colors.button_secondary_hover = design::surface_color(palette.fill(2)).into();
-        theme.colors.button_secondary_active = design::surface_color(palette.fill(3)).into();
-        theme.colors.popover = design::menu_surface_color(palette).into();
-        theme.colors.popover_foreground = rgb(palette.ink).into();
+        theme.colors.muted_foreground = rgb(palette.muted).into();
+        theme.colors.input = rgb(palette.line).into();
     });
     let (window, _) = gpui_kit::open_window(WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(1200.), px(820.)), cx))),

@@ -14,17 +14,16 @@ pub(super) struct DiffColors {
     pub signal: u32,
     pub ink: u32,
     pub muted: u32,
-    pub context: u32,
 }
 impl DiffColors {
     pub fn new(p: Palette) -> Self {
+        let light = ((p.paper >> 16) & 255) + ((p.paper >> 8) & 255) + (p.paper & 255) > 384;
         Self {
-            add: p.ok(),
-            del: p.err(),
+            add: if light { 0x087f5b } else { 0x34d399 },
+            del: if light { 0xc73545 } else { 0xff5c6c },
             signal: p.accent,
             ink: p.ink,
-            muted: p.text(2),
-            context: p.text(1),
+            muted: p.muted,
         }
     }
 }
@@ -162,7 +161,7 @@ fn gutter(number: Option<usize>, width: f32, color: u32, tint: Option<u32>) -> D
         .w(px(width))
         .h_full()
         .flex_shrink_0()
-        .pr(px(10.))
+        .pr(px(4.))
         .text_right()
         .text_color(rgb(color))
         .when_some(tint, |d, c| d.bg(rgb(c).opacity(0.16)))
@@ -191,19 +190,19 @@ fn side(
     let mut row = div()
         .flex_1()
         .min_w_0()
-        .min_h(px(20. * ratio))
+        .min_h(px(16. * ratio))
         .flex()
         .items_start()
         .when_some(tint, |d, c| d.bg(rgb(c).opacity(0.10)))
         .child(gutter(
             cell.and_then(|c| c.number),
-            36. * ratio,
+            30. * ratio,
             c.muted,
             tint,
         ))
         .child(
             div()
-                .w(px(20. * ratio))
+                .w(px(14. * ratio))
                 .flex_shrink_0()
                 .text_center()
                 .text_color(rgb(tint.unwrap_or(c.muted)))
@@ -215,7 +214,7 @@ fn side(
             id,
             order,
             if kind == LineKind::Context {
-                c.context
+                c.muted
             } else {
                 c.ink
             },
@@ -254,8 +253,8 @@ pub(super) fn render_code(
             .w_full()
             .flex()
             .font_family(design::FONT_MONO)
-            .text_size(px(12. * ratio))
-            .line_height(px(20. * ratio))
+            .text_size(px(10. * ratio))
+            .line_height(px(14. * ratio))
             .child(side(
                 old.as_ref(),
                 old_kind,
@@ -296,28 +295,28 @@ pub(super) fn render_code(
         };
         let mut line = div()
             .w_full()
-            .min_h(px(20. * ratio))
+            .min_h(px(16. * ratio))
             .flex()
             .items_start()
             .font_family(design::FONT_MONO)
-            .text_size(px(12. * ratio))
-            .line_height(px(20. * ratio))
+            .text_size(px(10. * ratio))
+            .line_height(px(14. * ratio))
             .when_some(tint, |d, c| d.bg(rgb(c).opacity(0.10)))
             .child(gutter(
                 old.as_ref().and_then(|c| c.number),
-                44. * ratio,
+                30. * ratio,
                 c.muted,
                 tint,
             ))
             .child(gutter(
                 new.as_ref().and_then(|c| c.number),
-                44. * ratio,
+                30. * ratio,
                 c.muted,
                 tint,
             ))
             .child(
                 div()
-                    .w(px(20. * ratio))
+                    .w(px(14. * ratio))
                     .flex_shrink_0()
                     .text_center()
                     .text_color(rgb(tint.unwrap_or(c.muted)))
@@ -329,7 +328,7 @@ pub(super) fn render_code(
                 format!("{id}-unified-{index}"),
                 index as u64,
                 if *kind == LineKind::Context {
-                    c.context
+                    c.muted
                 } else {
                     c.ink
                 },

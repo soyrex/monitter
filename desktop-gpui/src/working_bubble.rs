@@ -207,12 +207,12 @@ impl Render for WorkingBubble {
             .gap(px(0.))
             .rounded_full()
             .border_1()
-            .border_color(rgb(p.hairline(1)))
+            .border_color(rgb(p.line))
             .bg(crate::surface_blend::floating_control_background(
                 p.panel, p.dark,
             ))
-            .text_color(rgb(p.text(1)))
-            .text_size(px(12. * self.font_ratio))
+            .text_color(rgb(p.ink))
+            .text_size(px(11. * self.font_ratio))
             .line_height(px(16. * self.font_ratio));
         if let Some(plan) = self
             .active_plan
@@ -289,7 +289,7 @@ impl Render for WorkingBubble {
                         })
                         .content(move |_, _, _| plan_popup(&plan, p, width, height, font_ratio)),
                 )
-                .child(div().flex_shrink_0().w(px(1.)).h(px(16.)).bg(rgb(p.hairline(0))));
+                .child(div().flex_shrink_0().w(px(1.)).h(px(16.)).bg(rgb(p.line)));
         }
         let pill = pill.child(
             div()
@@ -297,8 +297,8 @@ impl Render for WorkingBubble {
                 .flex()
                 .items_center()
                 .gap(px(5.))
-                .px(px(10.))
-                .h(px(26. * self.font_ratio))
+                .px(px(7.))
+                .py(px(3.))
                 .child(
                     div()
                         .flex_shrink_0()
@@ -326,8 +326,8 @@ impl Render for WorkingBubble {
                                 .ghost()
                                 .w(px(18.))
                                 .h(px(18.))
-                                .text_color(rgb(p.text(2)))
-                                .icon(Icon::new(IconName::Square).size(px(9.)))
+                                .opacity(0.5)
+                                .icon(Icon::new(IconName::Square))
                                 .tooltip(if self.stop_requested {
                                     "Stop requested"
                                 } else {
