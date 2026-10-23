@@ -230,25 +230,29 @@ fn mix_rgb(base: u32, color: u32, amount: f32) -> u32 {
 }
 fn event_time(event: &Value) -> String {
     crate::timestamps::local_datetime(at(event, "createdAt"))
-        .map(|time| time.format("%H:%M:%S").to_string())
+        .map(|time| time.format("%H:%M").to_string())
         .unwrap_or_default()
 }
 
-fn watcher_activity_icon(kind: &str) -> IconName {
-    match kind.to_ascii_lowercase().as_str() {
-        "tool" => IconName::Wrench,
-        "computer" | "computer_image" => IconName::Monitor,
-        "usage" => IconName::Activity,
-        "reasoning" | "jevdecision" => IconName::Brain,
-        "subagent" => IconName::Bot,
-        "output" => IconName::FileText,
-        "agent_progress" | "message" | "collaboration" => IconName::MessageSquare,
-        "mail" => IconName::Mail,
-        "goal" => IconName::Goal,
-        "error" | "warning" => IconName::TriangleAlert,
-        "status" => IconName::CircleDot,
-        "schedule" => IconName::Clock,
-        _ => IconName::Activity,
+fn watcher_activity_label(event: &Value) -> &'static str {
+    match field(event, "kind").to_ascii_lowercase().as_str() {
+        "tool" => {
+            let title = field(event, "title").to_ascii_lowercase();
+            if title.contains("read") || title.contains("open_file") { "Read" }
+            else if title.contains("edit") || title.contains("patch") || title.contains("write") { "Edit" }
+            else if title.contains("search") || title.contains("find") || title.contains("rg ") { "Search" }
+            else { "Command" }
+        }
+        "subagent" | "agent_progress" | "collaboration" => "Peer",
+        "computer" | "computer_image" => "Computer",
+        "reasoning" | "jevdecision" => "Reasoning",
+        "output" => "Output",
+        "error" | "warning" => "Warning",
+        "goal" => "Goal",
+        "message" | "mail" => "Message",
+        "usage" => "Usage",
+        "schedule" => "Schedule",
+        _ => "Activity",
     }
 }
 
@@ -520,6 +524,21 @@ fn watcher_activity_text(event: &Value) -> String {
         .unwrap_or_else(|| "Activity update".to_owned())
 }
 
+fn watcher_activity_target(event: &Value) -> String {
+    let text = watcher_activity_text(event);
+    let prefix = match watcher_activity_label(event) {
+        "Read" => "Read ",
+        "Edit" => "Edited ",
+        "Search" => "Searched for ",
+        "Command" => "Ran ",
+        _ => "",
+    };
+    text.strip_prefix(prefix)
+        .filter(|target| !target.is_empty())
+        .unwrap_or(&text)
+        .to_owned()
+}
+
 fn agent_duration(record: &Value) -> String {
     let started = at(record, "createdAt");
     let ended = if active(&field(record, "status")) {
@@ -769,7 +788,7 @@ impl ChatPane {
         cx.notify();
     }
     pub(crate) fn render_activity_watch_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let palette = design::palette(&self.snapshot, window.appearance());
+        let palette = design::palette(&self.snapshot["settings"], window.appearance());
         let ratio = self.snapshot["settings"]["interfaceFontSize"].as_f64().unwrap_or(14.).clamp(8., 32.) as f32 / 14.;
         let inset = match field(&self.snapshot["settings"], "interfaceDensity").as_str() {
             "tight" => space::TIGHT, "spacious" => space::SECTION, _ => space::INSET,
@@ -1353,16 +1372,18 @@ impl ChatPane {
             .debug_selector(move || format!("watcher-agent-row-{index}").into())
             .w_full()
             .min_w_0()
+            .min_h(px(30. * ratio))
             .flex()
             .items_center()
-            .gap(px(8.))
-            .py(px(5.))
-            .child(div().size(px(6.)).rounded_full().bg(rgb(color)))
+            .gap(px(10. * ratio))
+            .py(px(4. * ratio))
+            .child(div().size(px(6. * ratio)).flex_shrink_0().rounded_full().bg(rgb(color)))
             .child(
-                div().min_w_0().max_w(relative(0.55)).child(
+                div().min_w_0().max_w(relative(0.5)).child(
                     div()
-                        .text_size(px(11. * ratio))
+                        .text_size(px(13. * ratio))
                         .font_weight(FontWeight::MEDIUM)
+                        .text_color(rgb(palette.text(0)))
                         .truncate()
                         .child(if title.is_empty() { name.clone() } else { title.clone() }),
                 ),
@@ -1372,8 +1393,8 @@ impl ChatPane {
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .text_size(px(10. * ratio))
-                    .text_color(rgb(palette.muted))
+                    .text_size(px(12. * ratio))
+                    .text_color(rgb(palette.text(2)))
                     .child(if activity.is_empty() {
                         status_label(&status).to_owned()
                     } else {
@@ -1384,8 +1405,8 @@ impl ChatPane {
                 div()
                     .flex_shrink_0()
                     .font_family(design::FONT_MONO)
-                    .text_size(px(9. * ratio))
-                    .text_color(rgb(palette.muted))
+                    .text_size(px(11. * ratio))
+                    .text_color(rgb(palette.text(3)))
                     .child(duration),
             );
         if can_open {
@@ -1513,9 +1534,9 @@ impl ChatPane {
         let label = |text: String| {
             div()
                 .min_w_0()
+                .font_family(design::FONT_MONO)
                 .text_size(px(11. * ratio))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(rgb(palette.muted))
+                .text_color(rgb(palette.text(2)))
                 .child(text)
         };
         let mut body = div()
@@ -1685,20 +1706,12 @@ impl ChatPane {
                 .min_w_0()
                 .min_h(if modal { px(0.) } else { watcher_plan_height(window) })
                 .flex_shrink_0()
-                .rounded(px(12.))
+                .rounded(px(14.))
                 .border_1()
                 .border_color(rgb(if state.plan_active {
-                    mix_rgb(palette.panel, palette.accent, 0.45)
-                } else { palette.line }))
+                    palette.glow()
+                } else { palette.hairline(1) }))
                 .bg(design::surface_color(palette.panel))
-                .shadow(vec![
-                    gpui_kit::BoxShadow::new(
-                        px(0.),
-                        px(2.),
-                        rgba(if palette.dark { 0x00000024 } else { 0x00000018 }).into(),
-                    )
-                    .blur_radius(px(8.)),
-                ])
                 .child({
                     let owner = cx.weak_entity();
                     div().relative().w_full().min_w_0().flex_shrink_0()
@@ -1712,18 +1725,11 @@ impl ChatPane {
         let plan: AnyElement = if working {
             let glow = div().id("activity-watch-active-glow")
                 .debug_selector(|| "activity-watch-active-glow".into())
-                .w_full().min_w_0().rounded(px(12.)).border_1()
-                .border_color(rgb(palette.accent).opacity(0.8)).child(plan);
-            if motion {
-                glow.with_animation("activity-watch-work-glow",
-                    Animation::new(Duration::from_millis(2200)).repeat_synced().with_max_fps(30.),
-                    move |view, phase| {
-                        let pulse = (phase * std::f32::consts::TAU).sin() * 0.5 + 0.5;
-                        view.shadow(vec![gpui_kit::BoxShadow::new(px(0.), px(0.),
-                            rgb(palette.accent).opacity(0.12 + pulse * 0.14).into())
-                            .blur_radius(px(10. + pulse * 8.))])
-                    }).into_any_element()
-            } else { glow.into_any_element() }
+                .w_full().min_w_0().rounded(px(14.))
+                .shadow(vec![gpui_kit::BoxShadow::new(px(0.), px(0.),
+                    rgb(palette.accent).opacity(0.08).into()).blur_radius(px(32.))])
+                .child(plan);
+            glow.into_any_element()
         } else { plan.into_any_element() };
         let mut card_slot = div().id("watcher-card-slot")
             .debug_selector(|| "watcher-card-slot".into())
@@ -1836,7 +1842,14 @@ impl ChatPane {
                 div()
                     .flex()
                     .items_center()
-                    .child(label("ACTIVITY".into())),
+                    .justify_between()
+                    .child(label("ACTIVITY".into()))
+                    .when(state.status == "running", |header| header.child(
+                        div().flex().items_center().gap(px(6. * ratio))
+                            .child(div().size(px(6. * ratio)).rounded_full().bg(rgb(palette.accent)))
+                            .child(div().text_size(px(12. * ratio)).text_color(rgb(palette.text(2)))
+                                .child("Following live")),
+                    )),
             );
         if state.activity.is_empty() {
             activity_feed = activity_feed.child(
@@ -1850,30 +1863,34 @@ impl ChatPane {
         let terminal_font = if terminal_font.trim().is_empty() { "Menlo".to_owned() } else { terminal_font };
         for (index, event) in state.activity.iter().enumerate() {
             let kind = field(event, "kind");
-            let description = watcher_activity_text(event);
-            let icon_color = if matches!(kind.as_str(), "tool" | "computer" | "computer_image") {
+            let description = watcher_activity_target(event);
+            let label = watcher_activity_label(event);
+            let peer = matches!(kind.as_str(), "subagent" | "agent_progress" | "collaboration");
+            let label_color = if peer {
+                palette.agent()
+            } else if index == 0 {
                 palette.accent
             } else {
-                palette.muted
+                palette.text(1)
             };
             activity_feed = activity_feed.child(
                 div().id(("watcher-activity-row", index)).w_full().min_w_0()
-                    .flex().items_center().gap(px(7.))
+                    .h(px(26. * ratio)).flex().items_center().gap(px(10. * ratio))
                     .child(div().id(("watcher-activity-meta", index))
                         .debug_selector(move || format!("watcher-activity-meta-{index}"))
-                        .flex_shrink_0().flex().items_center().gap(px(4.))
-                        .font_family(design::FONT_MONO).text_size(px(7.6 * ratio)).line_height(px(11. * ratio))
-                        .child(div().debug_selector(move || format!("watcher-activity-type-{index}"))
-                            .w(px(10. * ratio)).h(px(10. * ratio)).flex_shrink_0()
-                            .text_color(rgb(icon_color))
-                            .child(Icon::new(watcher_activity_icon(&kind)).size(px(9. * ratio))))
+                        .w(px(34. * ratio)).flex_shrink_0()
+                        .font_family(design::FONT_MONO).text_size(px(11. * ratio))
+                        .text_color(rgb(palette.text(3)))
                         .child(div().debug_selector(move || format!("watcher-activity-time-{index}"))
-                            .whitespace_nowrap().text_color(rgb(palette.muted)).child(event_time(event))))
+                            .whitespace_nowrap().child(event_time(event))))
+                    .child(div().debug_selector(move || format!("watcher-activity-type-{index}"))
+                        .w(px(64. * ratio)).flex_shrink_0().truncate()
+                        .text_size(px(12. * ratio)).text_color(rgb(label_color)).child(label))
                     .child(div().id(("watcher-activity-description", index))
                         .debug_selector(move || format!("watcher-activity-description-{index}"))
                         .flex_1().min_w_0().font_family(SharedString::from(terminal_font.clone()))
-                        .text_size(px(8. * ratio)).line_height(px(12. * ratio))
-                        .text_color(rgb(palette.ink)).truncate()
+                        .text_size(px(11. * ratio)).line_height(px(16. * ratio))
+                        .text_color(rgb(if index == 0 { palette.text(0) } else { palette.text(2) })).truncate()
                         .child(description))
             );
         }
@@ -2195,9 +2212,19 @@ mod tests {
     }
 
     #[::core::prelude::v1::test]
-    fn watcher_activity_time_includes_seconds() {
+    fn watcher_activity_time_uses_compact_hour_and_minute() {
         let rendered = event_time(&json!({"createdAt": 1_700_000_000_000_i64}));
-        assert_eq!(rendered.matches(':').count(), 2, "{rendered}");
+        assert_eq!(rendered.matches(':').count(), 1, "{rendered}");
+    }
+
+    #[::core::prelude::v1::test]
+    fn watcher_activity_labels_distinguish_tools_and_peer_updates() {
+        assert_eq!(watcher_activity_label(&json!({"kind":"tool","title":"read_file"})), "Read");
+        assert_eq!(watcher_activity_label(&json!({"kind":"tool","title":"apply_patch"})), "Edit");
+        assert_eq!(watcher_activity_label(&json!({"kind":"tool","title":"web_search"})), "Search");
+        assert_eq!(watcher_activity_label(&json!({"kind":"tool","title":"exec_command"})), "Command");
+        assert_eq!(watcher_activity_label(&json!({"kind":"subagent"})), "Peer");
+        assert_eq!(watcher_activity_target(&json!({"kind":"tool","title":"read_file","detail":"src/app.rs"})), "src/app.rs");
     }
 
     #[::core::prelude::v1::test]
@@ -2420,12 +2447,12 @@ mod native_tests {
                 let kind = visual.debug_bounds("watcher-activity-type-0").unwrap();
                 let time = visual.debug_bounds("watcher-activity-time-0").unwrap();
                 let description = visual.debug_bounds("watcher-activity-description-0").unwrap();
-                assert!((time.center().y - kind.center().y).abs() <= px(1.), "icon and timestamp share one line");
-                assert!(time.left() >= kind.right() && description.left() > time.right());
+                assert!((time.center().y - kind.center().y).abs() <= px(2.), "type and timestamp share one line");
+                assert!(kind.left() >= time.right() && description.left() > kind.right());
                 assert!((description.center().y - time.center().y).abs() <= px(2.), "description shares the activity line");
                 assert!(description.right() <= visual.debug_bounds("watcher-activity").unwrap().right() + px(1.));
-                assert!(description.size.height <= px(12.1), "long multiline activity stays on one smaller text line: {description:?}");
-                assert!(kind.size.height <= px(10.5) && time.size.height <= px(11.5), "compact icon and timestamp stay subordinate");
+                assert!(description.size.height <= px(16.1), "long multiline activity stays on one line: {description:?}");
+                assert!(kind.size.height <= px(18.) && time.size.height <= px(16.), "type and timestamp fit the activity row");
                 pane.update(visual, |pane, cx| pane.activity.update(cx, |view, cx| {
                     view.set_watch_goal_fixture(Some(json!({"status":"paused","objective":"Goal objective","tokensUsed":125000,"tokenBudget":2000000,"createdAt":1,"updatedAt":50})), cx);
                 }));

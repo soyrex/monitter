@@ -29,6 +29,24 @@ pub(crate) struct ActivityWatchModal {
     pane: Entity<crate::chat::ChatPane>,
     _subscription: Subscription,
 }
+impl ActivityWatchModal {
+    pub(crate) fn new(
+        pane: Entity<crate::chat::ChatPane>,
+        generation: u64,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let subscription = cx.observe(&pane, |_, _, cx| cx.notify());
+        let release_pane = pane.downgrade();
+        cx.on_release(move |_, cx| {
+            // Defer entity access until the panel subtree has finished releasing.
+            // A generation guard protects a newer panel opened in the meantime.
+            cx.defer(move |cx| {
+                let _ = release_pane.update(cx, |pane, cx| pane.release_activity_watch_modal(generation, cx));
+            });
+        }).detach();
+        Self { pane, _subscription: subscription }
+    }
+}
 impl Render for ActivityWatchModal {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.pane.update(cx, |pane, cx| pane.render_activity_watch_modal(window, cx))
@@ -364,18 +382,7 @@ impl Desktop {
         let pane = retained.or_else(|| self.service.clone().map(|service| self.ensure_chat_pane(&task_id, service, window, cx)));
         let Some(pane) = pane else { return; };
         let generation = pane.update(cx, |pane, cx| pane.begin_activity_watch_modal(cx));
-        let watch = cx.new(|cx| {
-            let subscription = cx.observe(&pane, |_, _, cx| cx.notify());
-            let release_pane = pane.downgrade();
-            cx.on_release(move |_, cx| {
-                // Defer entity access until the dialog subtree has finished releasing.
-                // A generation guard protects a newer modal opened in the meantime.
-                cx.defer(move |cx| {
-                    let _ = release_pane.update(cx, |pane, cx| pane.release_activity_watch_modal(generation, cx));
-                });
-            }).detach();
-            ActivityWatchModal { pane: pane.clone(), _subscription: subscription }
-        });
+        let watch = cx.new(|cx| ActivityWatchModal::new(pane, generation, cx));
         let overview = self.ensure_activity_overview(window, cx);
         overview.update(cx, |overview, cx| overview.set_watch_panel(task_id, watch, cx));
         window.focus(&overview.focus_handle(cx), cx);

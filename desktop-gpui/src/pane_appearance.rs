@@ -4,6 +4,9 @@ use gpui_kit::{prelude::*, *};
 use monitter_lib::experimental_desktop::NativeTileTheme;
 use serde_json::Value;
 
+/// Shared corner radius for pane clipping, borders and active glow.
+pub(crate) const PANE_RADIUS: f32 = 15.;
+
 /// The small subset of workspace settings that affects pane rendering and
 /// pointer focus. Construct once from the current settings snapshot and pass
 /// it to the dock renderer; it has no persistence or global state of its own.

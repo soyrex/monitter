@@ -217,8 +217,20 @@ fn activity_overview_card_opens_live_watch_panel_without_workspace_navigation(
 ) {
     let (desktop, visual) = fixture(cx, "light", NativeTileTheme::Monitter, 14);
     let mut retained_chat = None;
+    let mut other_chat = None;
     visual.update(|window, cx| {
         desktop.update(cx, |desktop, cx| {
+            let mut snapshot = (*desktop.snapshot).clone();
+            snapshot["tasks"].as_array_mut().unwrap().push(json!({
+                "id":"overview-task-two","title":"Review second agent",
+                "agentId":"overview-agent-two","projectId":"overview-project",
+                "status":"running","updatedAt":chrono::Utc::now().timestamp_millis(),
+                "queue":[]
+            }));
+            snapshot["agents"].as_array_mut().unwrap().push(json!({
+                "id":"overview-agent-two","name":"Claude","provider":"claude"
+            }));
+            desktop.snapshot = Rc::new(snapshot);
             let pane = cx.new(|cx| {
                 chat::ChatPane::performance_fixture(
                     "overview-task".into(),
@@ -232,6 +244,16 @@ fn activity_overview_card_opens_live_watch_panel_without_workspace_navigation(
                 .borrow_mut()
                 .insert("overview-task".into(), pane.clone());
             retained_chat = Some(pane.clone());
+            let second = cx.new(|cx| {
+                chat::ChatPane::performance_fixture(
+                    "overview-task-two".into(),
+                    desktop.snapshot.clone(),
+                    window,
+                    cx,
+                )
+            });
+            desktop.chat_panes.borrow_mut().insert("overview-task-two".into(), second.clone());
+            other_chat = Some(second);
             desktop.window.dock.update(cx, |dock, cx| {
                 dock.add(
                     docking::PaneSpec {
@@ -255,6 +277,7 @@ fn activity_overview_card_opens_live_watch_panel_without_workspace_navigation(
     draw(visual);
     let selected = desktop.read_with(visual, |desktop, _| desktop.window.selected.clone());
     let pane = retained_chat.unwrap();
+    let second = other_chat.unwrap();
     for iteration in 0..2 {
         let card = visual.debug_bounds("activity-card-overview-task").unwrap();
         visual.simulate_click(card.center(), Default::default());
@@ -338,6 +361,20 @@ fn activity_overview_card_opens_live_watch_panel_without_workspace_navigation(
             );
         });
     }
+    let first = visual.debug_bounds("activity-card-overview-task").unwrap();
+    visual.simulate_click(first.center(), Default::default());
+    draw(visual);
+    assert!(pane.read_with(visual, |pane, _| pane.user_questions_in_watch()));
+    let next = visual.debug_bounds("activity-card-overview-task-two").unwrap();
+    let panel = visual.debug_bounds("activity-agent-panel").unwrap();
+    assert!(next.center().x < panel.left(), "second card stays accessible beside panel: {next:?} / {panel:?}");
+    visual.simulate_click(next.center(), Default::default());
+    draw(visual);
+    assert!(visual.debug_bounds("activity-agent-panel").is_some());
+    assert!(second.read_with(visual, |pane, _| pane.user_questions_in_watch()));
+    assert!(!pane.read_with(visual, |pane, _| pane.user_questions_in_watch()),
+        "switching cards releases the previous Watch view");
+    desktop.read_with(visual, |desktop, _| assert_eq!(desktop.window.selected, selected));
     visual.update(|window, cx| {
         desktop.update(cx, |desktop, cx| {
             desktop.open_activity_overview_task("overview-task".into(), window, cx);
@@ -353,6 +390,9 @@ fn activity_overview_card_opens_live_watch_panel_without_workspace_navigation(
             !pane.user_questions_in_watch(),
             "programmatic dismissal must release Watch polling and modal state"
         )
+    });
+    second.read_with(visual, |pane, _| {
+        assert!(!pane.user_questions_in_watch(), "switch target also releases on overview close")
     });
 }
 
