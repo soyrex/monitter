@@ -459,8 +459,7 @@ impl<E: IntoElement + 'static> Element for AnimationElement<E> {
                             window
                                 .spawn(cx, async move |cx| {
                                     cx.background_executor().timer(interval).await;
-                                    delayed_frame_pending.set(false);
-                                    cx.update(move |_, cx| cx.notify(view)).ok();
+                                    crate::fast::animation::notify_on_frame(cx, view, delayed_frame_pending);
                                 })
                                 .detach();
                         }

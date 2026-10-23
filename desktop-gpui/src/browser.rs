@@ -2523,7 +2523,7 @@ pub(crate) fn open_html_smoke_if_requested(cx: &mut App) -> bool {
             tab.show(cx);
             cx.spawn_in(window, async move |tab, cx| {
                 cx.background_executor().timer(Duration::from_secs(2)).await;
-                let (sender, receiver) = mpsc::channel();
+                let (sender, receiver) = std::sync::mpsc::channel();
                 let _ = tab.update_in(cx, |tab, _, cx| {
                     tab.webview.as_ref().expect("native view").read(cx).raw()
                         .evaluate_script_with_callback(

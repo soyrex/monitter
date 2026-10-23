@@ -2947,8 +2947,6 @@ impl Desktop {
         }));
     }
     fn save_preferences(&mut self, cx: &mut Context<Self>, generation: u64) {
-        self.capture_native_drafts(cx);
-        if let Err(error)=self.capture_window_layouts(cx) {self.preferences_error=Some(error);self.preferences_blocked=true;return;}
         if self.startup_pending || self.preferences_busy
             || self.preferences_blocked
             || self.window.preferences_restore
@@ -2959,6 +2957,8 @@ impl Desktop {
         {
             return;
         }
+        self.capture_native_drafts(cx);
+        if let Err(error)=self.capture_window_layouts(cx) {self.preferences_error=Some(error);self.preferences_blocked=true;return;}
         let (Some(service), Some(preferences)) = (self.service.clone(), self.preferences.clone())
         else {
             return;
@@ -3033,6 +3033,7 @@ impl Desktop {
         cx.spawn(async move |view, cx| {
             let (workspace_revision, result) = worker.await;
             let _ = view.update(cx, |view, cx| {
+                let status_changed = view.preferences_error.is_some() || result.is_err();
                 view.preferences_busy = false;
                 if let Some(revision) = workspace_revision {
                     view.workspace_store_revision = revision;
@@ -3072,7 +3073,9 @@ impl Desktop {
                         view.preferences_dirty = true;
                     }
                 }
-                cx.notify();
+                if status_changed {
+                    cx.notify();
+                }
             });
         })
         .detach();
