@@ -20,6 +20,8 @@ The activity footer now uses the board's 40px minimum height, 20px spacing and i
 
 The activity grouping and Clusters/List view controls now share compact outlined segmented containers with theme-derived selected fills. The feature-enabled preview build passed with observed exit 0 (`8eeadd87-fde1-4abe-8994-9d0d103a983f`, Cargo 3m13s). Light and dark synthetic frames `artifacts/gpui/visual/gpui-frame-1792777137918972000.png` and `artifacts/gpui/visual/gpui-frame-1792777185153445000.png` were inspected: both groups fit in the 1160px preview header with readable selected states. Search and zoom controls still need the board's pill and icon treatment. This is not installed-app verification.
 
+The next small control batch places search in a theme-lined 200px pill with a search icon and gives the three zoom actions 28px outlined controls. Its feature-enabled build passed with observed exit 0 (`5976e89b-5808-4b36-82c9-a4b3785deb03`, Cargo 1m36s). Light and dark synthetic frames `artifacts/gpui/visual/gpui-frame-1792777481595116000.png` and `artifacts/gpui/visual/gpui-frame-1792777524996311000.png` were inspected: the search placeholder and controls remain legible, and the header fits at 1160px. This does not verify keyboard focus, interaction or the installed app.
+
 Written 2026-10-23 15:50. Goal set at ~03:45: bring the GPUI desktop in line with the Claude design boards by 07:00. That deadline passed with the session idle; the goal is still open.
 
 ## Source of truth
