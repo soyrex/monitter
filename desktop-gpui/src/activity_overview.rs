@@ -2722,15 +2722,15 @@ mod tests {
             let paints: Vec<_> = quads.iter().filter(|quad| card.contains(&quad.bounds.center()))
                 .filter_map(|quad| quad.background.as_solid().map(gpui_kit::Rgba::from))
                 .filter(|ink| ink.a > 0.30).collect();
-            assert!(!paints.is_empty(), "quiet card paints its grayscale surface: bounds={idle_bounds:?}");
-            assert!(paints.iter().all(|ink| (ink.r - ink.g).abs() < 0.005 && (ink.g - ink.b).abs() < 0.005),
-                "completed card surface, badge and semantic status are grayscale");
+            assert!(!paints.is_empty(), "completed card paints its surface: bounds={idle_bounds:?}");
+            assert!(paints.iter().any(|ink| (ink.r - ink.g).abs() > 0.005 || (ink.g - ink.b).abs() > 0.005),
+                "completed card retains a semantic status colour");
             let grid_dots = quads.iter().filter(|quad| {
                 let width = quad.bounds.size.width.as_f32() / window.scale_factor();
                 let height = quad.bounds.size.height.as_f32() / window.scale_factor();
                 width > 0.5 && width < 3. && height > 0.5 && height < 3.
                     && quad.background.as_solid().is_some_and(|color| {
-                        let ink = gpui_kit::Rgba::from(color); ink.a > 0.15 && ink.a < 0.30
+                        let ink = gpui_kit::Rgba::from(color); ink.a > 0.08 && ink.a < 0.12
                     })
             }).count();
             assert!(grid_dots > 100, "native background paints the reference dot grid");
@@ -3025,7 +3025,7 @@ mod tests {
         for font in [14., 18., 24., 32.] {
             for zoom in [0.5, 1., 1.5] {
                 let scale = interface_font_ratio(px(font)) * zoom;
-                assert!(CARD_H * scale >= (14. + 3. + 3. * 12. + 4. * 5. + 18.) * scale);
+                assert!(CARD_H * scale >= (14. + 4. + 3. * 12. + 4. * 5. + 20.) * scale);
             }
         }
     }
