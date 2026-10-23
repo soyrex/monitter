@@ -2,9 +2,11 @@
 
 ## Takeover, 2026-10-23
 
-Implementation moved to the isolated worktree `/Users/alex/code/monitter-design-20261023` on branch `feature/design-alignment-20261023`. The shared `main` checkout remains untouched. Commits `cae8d68`, `80ec32f`, `4d73a40` and `7dd9065` apply theme-derived fill, hairline, text, glow and status tokens to shared controls, preferences, composer, work plan, diff rows, build queue, Ideas, Watch and agent activity. The dock strip now includes Work Plan beside Build Queue. The isolated desktop `cargo check` passed with exit 0 after copying generated web resources and matching OpenUI dependencies into ignored worktree directories. These changes are not installed or visually verified. The older audit and task list below describe the state at handoff time, before these commits.
+Implementation moved to the isolated worktree `/Users/alex/code/monitter-design-20261023` on branch `feature/design-alignment-20261023`. The shared `main` checkout remains untouched. Commits `cae8d68` through `775b5e7` apply theme-derived fill, hairline, text, glow and status tokens to shared controls, preferences, composer, work plan, diff rows, build queue, Ideas, Watch and agent activity. The dock strip now includes Work Plan beside Build Queue. The activity map keeps the Done success tone and uses the reference's finer dot grid and lighter state borders. The isolated desktop `cargo check` passed with exit 0 after copying generated web resources and matching OpenUI dependencies into ignored worktree directories. These changes are not installed. The older audit and task list below describe the state at handoff time, before these commits.
 
 Completed compile-check run: `3991c502-a79d-4193-9e46-39bf3a2fe449`, target `/Users/alex/code/monitter-gpui/.cargo-target/gpui`. It ended with observed wrapper exit 0 and Cargo `Finished` in 23.63 seconds. Earlier checks exposed missing worktree web resources, missing OpenUI dependencies, and three source errors; all were resolved before this pass. The project allows one running build at a time; register and claim any further compilation.
+
+The feature-enabled synthetic preview binary built with observed exit 0 (run `8a29ddc7-3784-4fd2-beed-e0bc8947e2e5`). Dark and light overview frames were exported and inspected. The upper viewport showed the controls, exchange cards, work plan and build queue without visible clipping. Inputs appeared flat gray because the synthetic fixture did not mirror all live theme fields; `dc7c545` corrects that fixture. A second feature build and light/dark export are queued to verify the correction and the later activity-map edits. These are synthetic frames, not proof of the installed app's appearance.
 
 Written 2026-10-23 15:50. Goal set at ~03:45: bring the GPUI desktop in line with the Claude design boards by 07:00. That deadline passed with the session idle; the goal is still open.
 
@@ -24,7 +26,7 @@ Written 2026-10-23 15:50. Goal set at ~03:45: bring the GPUI desktop in line wit
 - Memory saved: `design-alignment-constraints.md`.
 
 ## Still open after the takeover commits
-The design branch has passed a desktop compile check, but not visual verification. The pane surface gradient, full activity overview and several shared control details remain open. The source audit below is a work list, not a verified completion report.
+The design branch has passed a desktop compile check and limited synthetic visual review. The pane surface gradient, full activity overview and several shared control details remain open. The source audit below is a work list, not a verified completion report.
 `composer_footer.rs:1505` `0x3f9d6a` is the usage-ring green (status), leave it. `draft_creation.rs` has ~10 hardcoded colours and font "Montserrat"; unaudited.
 
 ## Suggested order
