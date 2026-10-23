@@ -220,6 +220,9 @@ fn read_from_child(child: &mut Child) -> Result<ModelCatalog, String> {
             return Err("Codex app-server model/list exceeded the 32-page safety limit.".into());
         }
     }
+    // Keep the app-server order within each group while listing local open
+    // models after the Codex models in both native and web pickers.
+    models.sort_by_key(|model| model.id.starts_with("magnitude-local/"));
     let current = config
         .pointer("/result/config")
         .ok_or("Codex app-server config/read omitted result.config.")?;
