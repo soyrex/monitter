@@ -2,9 +2,9 @@
 
 ## Takeover, 2026-10-23
 
-Implementation moved to the isolated worktree `/Users/alex/code/monitter-design-20261023` on branch `feature/design-alignment-20261023`. The shared `main` checkout remains untouched. Commits `cae8d68` and `80ec32f` apply theme-derived fill, hairline, text, glow and status tokens to shared controls, preferences, composer, work plan, diff rows, build queue, Ideas, Watch and agent activity. A later batch also aligns the dock strip and puts Work Plan beside Build Queue. These edits are awaiting a queued desktop compile check; they are not installed or visually verified. The older audit and task list below describe the state at handoff time, before these commits.
+Implementation moved to the isolated worktree `/Users/alex/code/monitter-design-20261023` on branch `feature/design-alignment-20261023`. The shared `main` checkout remains untouched. Commits `cae8d68`, `80ec32f`, `4d73a40` and `7dd9065` apply theme-derived fill, hairline, text, glow and status tokens to shared controls, preferences, composer, work plan, diff rows, build queue, Ideas, Watch and agent activity. The dock strip now includes Work Plan beside Build Queue. The isolated desktop `cargo check` passed with exit 0 after copying generated web resources and matching OpenUI dependencies into ignored worktree directories. These changes are not installed or visually verified. The older audit and task list below describe the state at handoff time, before these commits.
 
-Current build request: `dcbde34d-04cb-4490-a0b0-0ca7819af025`, target `/Users/alex/code/monitter-gpui/.cargo-target/gpui`. The first request was cancelled before running because its command omitted the local Rust toolchain from `PATH`. The project allows one running build at a time; claim the current request before compiling. Do not infer a successful build from readiness.
+Completed compile-check run: `3991c502-a79d-4193-9e46-39bf3a2fe449`, target `/Users/alex/code/monitter-gpui/.cargo-target/gpui`. It ended with observed wrapper exit 0 and Cargo `Finished` in 23.63 seconds. Earlier checks exposed missing worktree web resources, missing OpenUI dependencies, and three source errors; all were resolved before this pass. The project allows one running build at a time; register and claim any further compilation.
 
 Written 2026-10-23 15:50. Goal set at ~03:45: bring the GPUI desktop in line with the Claude design boards by 07:00. That deadline passed with the session idle; the goal is still open.
 
@@ -24,7 +24,7 @@ Written 2026-10-23 15:50. Goal set at ~03:45: bring the GPUI desktop in line wit
 - Memory saved: `design-alignment-constraints.md`.
 
 ## Still open after the takeover commits
-The design branch has not passed a desktop compile check or visual verification. The pane surface gradient, dock strip, full activity overview and several shared control details remain open. The source audit below is a work list, not a verified completion report.
+The design branch has passed a desktop compile check, but not visual verification. The pane surface gradient, full activity overview and several shared control details remain open. The source audit below is a work list, not a verified completion report.
 `composer_footer.rs:1505` `0x3f9d6a` is the usage-ring green (status), leave it. `draft_creation.rs` has ~10 hardcoded colours and font "Montserrat"; unaudited.
 
 ## Suggested order
