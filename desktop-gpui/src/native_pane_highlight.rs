@@ -1,4 +1,4 @@
-//! A noninteractive AppKit outline and outward glow above GPUI/browser child views.
+//! A noninteractive AppKit outline and outward glow above native content and below GPUI overlays.
 //! Active-pane painting keeps the view visible; a frame finalizer hides it only
 //! after a rendered workspace observes that no active pane owns it.
 use gpui_kit::{App, Bounds, Pixels, Point, Rgba, Window};
@@ -172,6 +172,44 @@ mod macos {
         match handle.as_raw() {
             RawWindowHandle::AppKit(handle) => Some(handle.ns_view.as_ptr().cast()),
             _ => None,
+        }
+    }
+
+    /// Keep the native glow above the pane's native content while placing it
+    /// below GPUI's composition overlays, where deferred menus and popovers paint.
+    unsafe fn place_overlay_view(host: &NSView, view: &PaneHighlightView, window: &Window) {
+        let subviews: *mut AnyObject = unsafe { msg_send![host, subviews] };
+        let count: usize = unsafe { msg_send![subviews, count] };
+        if window.window_composition_enabled() {
+            let overlay_class = class!(GPUIOverlayView);
+            let view_ptr = view as *const PaneHighlightView as *const AnyObject;
+            for index in 0..count {
+                let sibling: *mut AnyObject = unsafe { msg_send![subviews, objectAtIndex: index] };
+                let is_overlay: bool = unsafe { msg_send![sibling, isKindOfClass: overlay_class] };
+                if !is_overlay {
+                    continue;
+                }
+                let view_index = (0..count).position(|candidate_index| {
+                    let candidate: *mut AnyObject =
+                        unsafe { msg_send![subviews, objectAtIndex: candidate_index] };
+                    candidate as *const AnyObject == view_ptr
+                });
+                if view_index.is_some_and(|current| current + 1 == index) {
+                    return;
+                }
+                unsafe {
+                    let _: () =
+                        msg_send![host, addSubview: &*view positioned: -1isize relativeTo: sibling];
+                }
+                return;
+            }
+        }
+        let last: *mut AnyObject = unsafe { msg_send![subviews, lastObject] };
+        if last as *const AnyObject != view as *const PaneHighlightView as *const AnyObject {
+            unsafe {
+                let _: () = msg_send![host, addSubview: &*view
+                    positioned: 1isize relativeTo: ptr::null::<NSView>()];
+            }
         }
     }
 
@@ -534,14 +572,9 @@ mod macos {
                         overlay.glow_color = Some(glow_color);
                     }
                 }
-                // Above every sibling, including browser views created later.
-                // The expanded frame reserves room for the outward halo.
-                let subviews: *mut AnyObject = msg_send![host, subviews];
-                let last: *mut AnyObject = msg_send![subviews, lastObject];
-                if last.cast_const() != Retained::as_ptr(&view).cast::<AnyObject>() {
-                    let _: () = msg_send![host, addSubview: &*view
-                        positioned: 1isize relativeTo: ptr::null::<NSView>()];
-                }
+                // The expanded frame reserves room for the outward halo. In
+                // Fast composition, keep GPUI menu/popover surfaces above it.
+                place_overlay_view(host, &view, window);
                 if should_show {
                     view.setHidden(false);
                 }
