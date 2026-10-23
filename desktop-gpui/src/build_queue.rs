@@ -81,8 +81,7 @@ fn status_label(status: &str) -> &str {
         "succeeded" => "Succeeded",
         "failed" => "Failed",
         "cancelled" => "Cancelled",
-        "ready" => "Ready to build",
-        "planned" => "Preparing",
+        "ready" | "planned" => "Queued",
         _ => status,
     }
 }
@@ -95,11 +94,11 @@ struct StatusBadge {
 impl RenderOnce for StatusBadge {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let (color, icon) = match self.status.as_str() {
-            "succeeded" => (rgb(if self.palette.dark {0x34d399} else {0x147d59}).into(), IconName::Check),
-            "failed" => (rgb(if self.palette.dark {0xff5c6c} else {0xb82c3e}).into(), IconName::X),
+            "succeeded" => (rgb(self.palette.ok()).into(), IconName::Check),
+            "failed" => (rgb(self.palette.err()).into(), IconName::X),
             "Needs attention" => (cx.theme().warning, IconName::TriangleAlert),
-            "running" => (cx.theme().primary, IconName::LoaderCircle),
-            "ready" => (cx.theme().primary, IconName::Check),
+            "running" => (rgb(self.palette.accent).into(), IconName::LoaderCircle),
+            "ready" | "planned" => (rgb(self.palette.warn()).into(), IconName::Clock),
             _ => (cx.theme().muted_foreground, IconName::Clock),
         };
         div()
@@ -109,14 +108,15 @@ impl RenderOnce for StatusBadge {
             .gap(px(3.))
             .child(
                 div()
-                    .px(px(6.))
+                    .px(px(8.))
                     .py(px(2.))
                     .rounded_full()
                     .h(px(22.))
                     .flex()
                     .items_center()
-                    .gap(px(4.))
+                    .gap(px(6.))
                     .bg(color.opacity(0.13))
+                    .when(self.status == "running", |badge| badge.border_1().border_color(color.opacity(0.35)))
                     .text_size(px(11.))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(color)

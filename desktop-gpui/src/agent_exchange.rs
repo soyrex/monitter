@@ -76,7 +76,7 @@ pub(crate) fn render(
     toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> Div {
     let hide_status = status_selector.starts_with("exchange-group-status-");
-    let blue = rgb(0x6594db);
+    let blue = rgb(palette.agent());
     let failed = matches!(
         exchange.status.as_str(),
         "error" | "failed" | "interrupted" | "Collaboration error"
@@ -86,7 +86,7 @@ pub(crate) fn render(
         exchange.status.as_str(),
         "completed" | "succeeded" | "Collaboration completed"
     );
-    let ink = if failed { rgb(0xd35e5e) } else { blue };
+    let ink = if failed { rgb(palette.err()) } else { blue };
     let first_dot_selector = format!("exchange-leading-dot-{id}");
     let endpoint = |filled: bool| {
         div()
@@ -153,7 +153,7 @@ pub(crate) fn render(
     let time = exchange
         .timestamp
         .and_then(crate::timestamps::local_datetime)
-        .map(|v| v.format("%H:%M:%S").to_string());
+        .map(|v| v.format("%H:%M").to_string());
     let mut root = div().w_full().min_w_0().flex().flex_col().child(
         div()
             .w_full()
@@ -176,10 +176,10 @@ pub(crate) fn render(
                             .min_w_0()
                             .flex()
                             .items_center()
-                            .gap(px(6.))
-                            .text_size(px(11.))
+                            .gap(px(8.))
+                            .text_size(px(12.))
                             .font_weight(FontWeight::NORMAL)
-                            .text_color(rgb(palette.muted))
+                            .text_color(rgb(palette.text(2)))
                             .child(
                                 div()
                                     .debug_selector(move || direction_selector.clone())
@@ -190,6 +190,8 @@ pub(crate) fn render(
                                     .min_w_0()
                                     .truncate()
                                     .debug_selector(move || peer_selector.clone())
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(rgb(palette.text(1)))
                                     .child(exchange.peer),
                             )
                             .when(!hide_status, |row| {
@@ -199,7 +201,7 @@ pub(crate) fn render(
                                         .max_w(px(160.))
                                         .truncate()
                                         .debug_selector(move || status_selector.clone())
-                                        .text_color(if failed { ink } else { rgb(palette.muted) })
+                                        .text_color(if failed { ink } else { rgb(palette.text(2)) })
                                         .child(exchange.status),
                                 )
                             })
@@ -209,17 +211,19 @@ pub(crate) fn render(
                                     .min_w(px(4.))
                                     .border_t_1()
                                     .border_dashed()
-                                    .border_color(rgb(palette.line)),
+                                    .border_color(blue.opacity(0.28)),
                             )
                             .when_some(time, |row, time| {
                                 row.child(
                                     div()
                                         .flex_shrink_0()
                                         .font_family(design::FONT_MONO)
+                                        .text_size(px(11.))
+                                        .text_color(rgb(palette.text(3)))
                                         .child(time),
                                 )
                             })
-                            .child(Icon::new(IconName::Info).size(px(12.))),
+                            .child(Icon::new(if expanded { IconName::ChevronDown } else { IconName::ChevronRight }).size(px(12.)).text_color(rgb(palette.text(3)))),
                     )
                     .on_click(toggle),
             ),
@@ -232,6 +236,12 @@ pub(crate) fn render(
             .px(px(12.))
             .pt(px(10.))
             .pb(px(12.))
+            .mt(px(6.))
+            .mb(px(10.))
+            .rounded(px(8.))
+            .border_1()
+            .border_color(blue.opacity(0.12))
+            .bg(rgb(crate::design::mix_rgb(palette.paper, palette.agent(), 0.05)))
             .debug_selector(move || content_selector.clone())
             .flex()
             .flex_col()
@@ -250,7 +260,7 @@ pub(crate) fn render(
             let node = if last && failed {
                 ink
             } else if last && completed {
-                rgb(if palette.dark { 0x34d399 } else { 0x147d59 })
+                rgb(palette.ok())
             } else {
                 blue
             };
@@ -274,7 +284,7 @@ pub(crate) fn render(
                                         .top(px(12.))
                                         .bottom(px(-13.))
                                         .w(px(1.))
-                                        .bg(blue.opacity(0.24)),
+                                        .bg(blue.opacity(0.28)),
                                 )
                             })
                             .child(
@@ -282,7 +292,7 @@ pub(crate) fn render(
                                     .absolute()
                                     .left(px(2.))
                                     .top(px(5.))
-                                    .size(px(7.))
+                                    .size(px(9.))
                                     .rounded_full()
                                     .border_1()
                                     .border_color(node)
@@ -294,7 +304,7 @@ pub(crate) fn render(
                             .flex_1()
                             .min_w_0()
                             .whitespace_normal()
-                            .text_color(rgb(palette.muted))
+                            .text_color(rgb(palette.text(1)))
                             .child(label),
                     )
                     .child(
@@ -302,7 +312,7 @@ pub(crate) fn render(
                             .flex_shrink_0()
                             .font_family(design::FONT_MONO)
                             .text_size(px(11.))
-                            .text_color(rgb(palette.muted))
+                            .text_color(rgb(palette.text(3)))
                             .child(time.format("%H:%M:%S").to_string()),
                     ),
             );
@@ -425,7 +435,7 @@ pub(crate) fn timeline_ending_at(
                                     point(bounds.left() + px(5.5), top),
                                     size(px(1.), bottom - top),
                                 ),
-                                rgb(0x6594db).opacity(0.25),
+                                rgb(palette.agent()).opacity(0.25),
                             ));
                         }
                     },
@@ -442,7 +452,7 @@ pub(crate) fn timeline_ending_at(
                     .top(px(9.))
                     .bottom(px(0.))
                     .w(px(1.))
-                    .bg(rgb(0x6594db).opacity(0.25))
+                    .bg(rgb(palette.agent()).opacity(0.25))
                     .debug_selector(move || rail_selector.clone()),
             )
         })
@@ -480,7 +490,7 @@ pub(crate) fn render_step(
                     .top(px(6.))
                     .size(px(6.))
                     .rounded_full()
-                    .bg(rgb(0x6594db))
+                    .bg(rgb(palette.agent()))
                     .debug_selector(move || dot_selector.clone()),
             ),
         )

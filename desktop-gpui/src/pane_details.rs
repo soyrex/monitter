@@ -148,11 +148,11 @@ fn visible_work_plan_count(total: usize, limit: usize, expanded: bool) -> usize 
 
 fn work_plan_segment_color(status: &str, palette: Palette) -> u32 {
     match status {
-        "completed" => 0x3eaa7a,
+        "completed" => palette.ok(),
         "in_progress" => palette.accent,
-        "blocked" => 0xc96058,
+        "blocked" => palette.err(),
         "skipped" => mix_rgb(palette.panel, palette.muted, 0.55),
-        _ => mix_rgb(palette.panel, palette.muted, 0.19),
+        _ => palette.hairline(1),
     }
 }
 
@@ -815,14 +815,14 @@ impl PaneDetails {
             visible_work_plan_count(items.len(), INITIAL_WORK_PLAN_ITEMS, items_expanded);
         let mut card = div()
             .w_full()
-            .p_3()
+            .p(px(20.))
             .border_1()
-            .border_color(rgb(palette.line))
-            .rounded(px(7.))
-            .bg(crate::design::surface_color(palette.panel))
+            .border_color(rgb(if in_progress > 0 { palette.glow() } else { palette.hairline(1) }))
+            .rounded(px(14.))
+            .bg(crate::design::surface_color(palette.wash(palette.panel)))
             .flex()
             .flex_col()
-            .gap_2()
+            .gap(px(12.))
             .child(
                 div()
                     .flex()
@@ -830,17 +830,19 @@ impl PaneDetails {
                     .items_center()
                     .child(
                         div()
-                            .text_size(font_px(&self.snapshot, 10.))
+                            .text_size(font_px(&self.snapshot, 11.))
                             .font_family(crate::design::FONT_MONO)
-                            .text_color(rgb(palette.muted))
+                            .text_color(rgb(palette.text(2)))
                             .child("WORK PLAN"),
                     )
                     .child(
                         div()
-                            .text_size(font_px(&self.snapshot, 10.))
-                            .text_color(rgb(palette.accent))
+                            .text_size(font_px(&self.snapshot, 13.))
+                            .text_color(rgb(if completed == items.len() { palette.ok() } else { palette.accent }))
                             .child(if text(plan, "status") == "active" {
                                 "Active"
+                            } else if completed == items.len() {
+                                "Complete"
                             } else {
                                 "Closed"
                             }),
@@ -848,14 +850,14 @@ impl PaneDetails {
             )
             .child(
                 div()
-                    .text_size(font_px(&self.snapshot, 13.))
+                    .text_size(font_px(&self.snapshot, 17.))
                     .text_color(rgb(palette.ink))
                     .child(text(plan, "title")),
             )
             .child(
                 div()
-                    .text_size(font_px(&self.snapshot, 10.))
-                    .text_color(rgb(palette.muted))
+                    .text_size(font_px(&self.snapshot, 12.))
+                    .text_color(rgb(palette.text(2)))
                     .child(format!(
                         "{completed} of {} done{}{}{}",
                         items.len(),
@@ -884,9 +886,7 @@ impl PaneDetails {
             .mb(px(4.))
             .overflow_hidden()
             .flex()
-            .gap(px(2.))
-            .rounded_full()
-            .bg(crate::design::surface_color(mix_rgb(palette.panel, palette.muted, 0.15)))
+            .gap(px(4.))
             .role(gpui_kit::accesskit::Role::ProgressIndicator)
             .aria_label("Completed work-plan items")
             .aria_min_numeric_value(0.0)
@@ -900,7 +900,7 @@ impl PaneDetails {
                     .flex_1()
                     .min_w(px(0.))
                     .h(px(5.))
-                    .rounded_full()
+                    .rounded(px(3.))
                     .bg(rgb(work_plan_segment_color(&status, palette)))
                     .aria_label(format!("{}: {}", text(item, "title"), status)),
             );
@@ -921,16 +921,19 @@ impl PaneDetails {
                 "in_progress" => IconName::CircleDot, "skipped" => IconName::Minus, _ => IconName::Circle,
             };
             let mut body = div().w_full().flex().flex_col().gap(px(4.))
-                .border_t_1().border_color(rgb(palette.line)).py(px(6.))
-                .child(div().flex().items_start().gap(px(7.))
-                    .child(Icon::new(icon).with_size(px(13.)).text_color(rgb(color)))
+                .border_t_1().border_color(rgb(palette.hairline(0))).py(px(12.))
+                .child(div().flex().items_start().gap(px(12.))
+                    .child(Icon::new(icon).with_size(px(16.)).text_color(rgb(color)))
                     .child(div().flex_1().min_w_0().whitespace_normal()
-                        .text_size(font_px(&self.snapshot, 11.)).text_color(rgb(palette.ink)).child(text(item, "title")))
-                    .child(div().flex_shrink_0().text_size(font_px(&self.snapshot, 9.))
-                        .text_color(rgb(color)).child(status_label)));
+                        .text_size(font_px(&self.snapshot, 14.))
+                        .text_color(rgb(if status == "pending" { palette.text(1) } else { palette.text(0) }))
+                        .child(text(item, "title")))
+                    .child(div().flex_shrink_0().text_size(font_px(&self.snapshot, 12.))
+                        .text_color(rgb(if status == "completed" || status == "blocked" { color } else { palette.text(2) }))
+                        .child(status_label)));
             if expanded && !note.is_empty() {
                 body = body.child(div().ml(px(20.)).whitespace_normal()
-                    .text_size(font_px(&self.snapshot, 10.)).text_color(rgb(palette.muted)).child(note.clone()));
+                    .text_size(font_px(&self.snapshot, 12.)).text_color(rgb(palette.text(2))).child(note.clone()));
             }
             if note.is_empty() {
                 card = card.child(body);
@@ -954,7 +957,7 @@ impl PaneDetails {
                     .text()
                     .compact()
                     .xsmall()
-                    .text_size(font_px(&self.snapshot, 9.))
+                    .text_size(font_px(&self.snapshot, 12.))
                     .label(if items_expanded {
                         "Show fewer work-plan items".into()
                     } else {
@@ -978,9 +981,9 @@ impl PaneDetails {
             card = card.child(
                 div()
                     .p_2()
-                    .rounded(px(5.))
-                    .bg(crate::design::surface_color(palette.soft))
-                    .text_size(font_px(&self.snapshot, 10.))
+                    .rounded(px(8.))
+                    .bg(crate::design::surface_color(palette.fill(1)))
+                    .text_size(font_px(&self.snapshot, 12.))
                     .text_color(rgb(palette.ink))
                     .child(summary),
             );
@@ -993,10 +996,10 @@ impl PaneDetails {
                 self.expanded_work_history,
             );
             card = card.child(
-                Button::new("work-plan-history-toggle").text().compact().w_full().justify_start()
-                    .border_t_1().border_color(rgb(palette.line)).pt_2()
-                    .text_size(font_px(&self.snapshot, 10.))
-                    .icon(Icon::new(if self.expanded_work_history { IconName::ChevronDown } else { IconName::ChevronRight }).with_size(px(12.)))
+                Button::new("work-plan-history-toggle").text().compact().w_full().justify_center().h(px(40.))
+                    .border_t_1().border_color(rgb(palette.hairline(0)))
+                    .text_size(font_px(&self.snapshot, 13.))
+                    .icon(Icon::new(if self.expanded_work_history { IconName::ChevronDown } else { IconName::ChevronRight }).with_size(px(16.)))
                     .label(format!("Earlier plans · {earlier_count}"))
                     .accessibility_label(if self.expanded_work_history { "Collapse earlier plans" } else { "Expand earlier plans" })
                     .on_click(cx.listener(|pane, _, _, cx| {

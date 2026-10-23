@@ -1595,11 +1595,13 @@ impl RunActivityRow {
             .text()
             .compact()
             .xsmall()
-            .opacity(0.6)
+            .h(px(28.))
+            .rounded(px(8.))
+            .text_color(cx.theme().muted_foreground)
             .w_full()
             .min_w_0()
             .justify_start()
-            .px(px(0.))
+            .px(px(8.))
             .child(fixture_bounds(
                 div()
                     .relative()
@@ -1627,7 +1629,7 @@ impl RunActivityRow {
                     .max_w_full()
                     .overflow_hidden()
                     .truncate()
-                    .text_size(px(10.))
+                    .text_size(px(12.))
                     .child(summary.clone()),
             );
         if let Some(time) = self

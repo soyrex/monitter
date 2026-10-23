@@ -34,20 +34,20 @@ pub(crate) fn settings_text_size(ratio: f32) -> Pixels {
 }
 pub(super) fn settings_hint(text: impl Into<SharedString>, palette: Palette) -> Div {
     div().min_w_0().whitespace_normal().text_size(crate::settings::settings_text_size(0.8)).line_height(gpui_kit::relative(1.5))
-        .text_color(rgb(palette.muted)).child(text.into())
+        .text_color(rgb(palette.text(2))).child(text.into())
 }
 pub(super) fn settings_card(title: &str, description: &str, palette: Palette) -> Div {
     let selector = format!("settings-card-{title}");
     div().debug_selector(move || selector).w_full().min_w_0().flex_shrink_0().flex().flex_col().gap(design::ui_scaled_px(14.))
-        .p(design::ui_scaled_px(18.)).border_1().border_color(rgb(palette.line))
-        .rounded(design::ui_scaled_px(design::radius::CARD)).bg(design::surface_color(palette.panel))
+        .p(design::ui_scaled_px(20.)).border_1().border_color(rgb(palette.hairline(0)))
+        .rounded(design::ui_scaled_px(12.)).bg(design::surface_color(palette.fill(0)))
         .child(div().flex().flex_col().gap(design::ui_scaled_px(4.))
             .child(div().text_size(crate::settings::settings_text_size(1.)).font_weight(FontWeight::SEMIBOLD).child(title.to_owned()))
             .child(settings_hint(description.to_owned(), palette)))
 }
 pub(super) fn settings_toggle(label: &str, detail: &str, _: bool, palette: Palette) -> Div {
     div().w_full().min_w_0().flex().items_center().justify_between().gap(design::ui_scaled_px(16.))
-        .py(design::ui_scaled_px(5.))
+        .py(design::ui_scaled_px(12.))
         .child(div().flex_1().min_w_0().flex().flex_col().gap(design::ui_scaled_px(3.))
             .child(div().text_size(crate::settings::settings_text_size(0.86)).font_weight(FontWeight::SEMIBOLD).child(label.to_owned()))
             .child(settings_hint(detail.to_owned(), palette)))
@@ -627,16 +627,21 @@ impl Desktop {
                 theme.colors.foreground = rgb(palette.ink).into();
                 // Shared by native Input/Textarea and selectable transcript TextViews.
                 theme.colors.selection = design::text_selection_color(palette).into();
-                theme.colors.border = rgb(palette.line).into();
-                theme.colors.input = design::surface_color(palette.card).into();
+                theme.colors.border = rgb(palette.hairline(1)).into();
+                theme.colors.input = design::surface_color(palette.fill(1)).into();
+                theme.colors.ring = rgb(palette.glow()).into();
                 theme.colors.sidebar = design::surface_color(palette.sidebar).into();
                 theme.colors.tab_bar = design::surface_color(palette.panel).into();
                 theme.colors.tab_active = design::surface_color(palette.paper).into();
                 theme.colors.tab_foreground = rgb(palette.muted).into();
                 theme.colors.tab_active_foreground = rgb(palette.ink).into();
-                theme.colors.muted = design::surface_color(palette.soft).into();
-                theme.colors.muted_foreground = rgb(palette.muted).into();
-                theme.colors.button = design::surface_color(palette.card).into();
+                theme.colors.muted = design::surface_color(palette.fill(0)).into();
+                theme.colors.muted_foreground = rgb(palette.text(2)).into();
+                theme.colors.button = design::surface_color(palette.fill(1)).into();
+                theme.colors.button_hover = design::surface_color(palette.fill(2)).into();
+                theme.colors.button_active = design::surface_color(palette.fill(3)).into();
+                theme.colors.button_secondary_hover = design::surface_color(palette.fill(2)).into();
+                theme.colors.button_secondary_active = design::surface_color(palette.fill(3)).into();
                 theme.colors.popover = design::menu_surface_color(palette).into();
                 theme.colors.popover_foreground = rgb(palette.ink).into();
                 theme.colors.accent = design::surface_color(palette.soft).into();
@@ -951,7 +956,7 @@ impl Desktop {
         {
             panel = panel.child(
                 div()
-                    .text_color(rgb(0xbd655b))
+                    .text_color(rgb(palette.err()))
                     .child(format!("Catalog error: {error}")),
             );
         }
@@ -1294,9 +1299,9 @@ impl Desktop {
             if item.group != previous_group {
                 rows.push(div().mt(design::ui_scaled_px(if previous_group.is_empty() { 0. } else { 10. }))
                     .when(!compact, |this| this.px(design::ui_scaled_px(9.)).pb(design::ui_scaled_px(6.))
-                        .text_size(settings_text_size(0.71)).font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(palette.muted)).child(item.group))
-                    .when(compact && !previous_group.is_empty(), |this| this.border_t_1().border_color(rgb(palette.line)).pt(design::ui_scaled_px(8.)))
+                        .text_size(design::ui_scaled_px(10.)).font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(palette.text(2))).child(item.group))
+                    .when(compact && !previous_group.is_empty(), |this| this.border_t_1().border_color(rgb(palette.hairline(0))).pt(design::ui_scaled_px(8.)))
                     .into_any_element());
                 previous_group = item.group;
             }
@@ -1304,9 +1309,9 @@ impl Desktop {
             let selected = destination.id == id;
             rows.push(Button::new(SharedString::from(format!("settings-category-{id}"))).ghost()
                 .selected(selected)
-                .w_full().h_auto().compact().justify_start().py(design::ui_scaled_px(5.)).px(design::ui_scaled_px(8.))
-                .bg(if selected { rgba((palette.accent << 8) | 0x21) } else { rgba(0) })
-                .text_color(rgb(if selected { palette.accent } else { palette.ink }))
+                .w_full().h_auto().compact().justify_start().py(design::ui_scaled_px(8.)).px(design::ui_scaled_px(8.))
+                .bg(if selected { rgb(palette.fill(3)) } else { rgba(0) })
+                .text_color(rgb(if selected { palette.text(0) } else { palette.text(1) }))
                 .accessibility_label(item.label).tooltip(format!("{} — {}", item.label, item.description))
                 .child(div().debug_selector(move || format!("settings-nav-{id}")).w_full().min_w_0().flex().items_center().gap(design::ui_scaled_px(9.))
                     .child(div().flex_shrink_0().size(design::ui_scaled_px(18.)).flex().items_center().justify_center()
@@ -1322,9 +1327,9 @@ impl Desktop {
                 })).into_any_element());
         }
         let navigation = div().id("preferences-navigation").min_h_0().overflow_y_scroll()
-            .w(design::ui_scaled_px(if compact { 58. } else { 224. })).flex_shrink_0().h_full()
+            .w(design::ui_scaled_px(if compact { 58. } else { 248. })).flex_shrink_0().h_full()
             .flex().flex_col().gap(design::ui_scaled_px(2.)).py(design::ui_scaled_px(14.)).px(design::ui_scaled_px(if compact { 8. } else { 12. }))
-            .border_r_1().border_color(rgb(palette.line)).bg(design::surface_color(palette.paper))
+            .border_r_1().border_color(rgb(palette.hairline(0))).bg(design::surface_color(palette.paper))
             .children(rows);
         let status = if self.preferences_busy {
             "Saving private preferences…"
@@ -1363,7 +1368,7 @@ impl Desktop {
                     .flex()
                     .flex_col()
                     .gap(px(design::space::SECTION))
-                    .p(design::ui_scaled_px(if compact { 16. } else { 28. }))
+                    .p(design::ui_scaled_px(if compact { 16. } else { 32. }))
                     .overflow_y_scroll().track_scroll(&page_scroll)
                     .child(div().w_full().flex_shrink_0().max_w(design::ui_scaled_px(760.)).mx_auto().flex().flex_col().gap(design::ui_scaled_px(8.))
                         .child(div().flex().items_center().flex_wrap().justify_between().gap(design::ui_scaled_px(8.))
@@ -1378,7 +1383,7 @@ impl Desktop {
                                 .flex()
                                 .items_center()
                                 .gap(px(design::space::TIGHT))
-                                .child(div().flex_1().text_color(rgb(0xbd655b)).child(error))
+                                .child(div().flex_1().text_color(rgb(palette.err())).child(error))
                                 .child(
                                     Button::new("dismiss-settings-error")
                                         .compact()
@@ -1405,7 +1410,7 @@ impl Desktop {
                                     .child(
                                         div()
                                             .flex_1()
-                                            .text_color(rgb(0xbd655b))
+                                            .text_color(rgb(palette.err()))
                                             .child(format!("Workspace layout: {error}")),
                                     )
                                     .child(

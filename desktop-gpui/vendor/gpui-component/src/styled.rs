@@ -10,7 +10,7 @@ pub use gpui_base::{FocusableExt, RoleOverride, StyledExt, box_shadow, h_flex, v
 use crate::ActiveTheme as _;
 
 const FOCUS_RING_WIDTH: Pixels = px(3.);
-const FOCUS_RING_OPACITY: f32 = 0.5;
+const FOCUS_RING_OPACITY: f32 = 0.14;
 
 /// Ink every layer of a surface's shadow carries — the `rgb(0 0 0 / 0.1)`
 /// shadcn/ui spends at each elevation.

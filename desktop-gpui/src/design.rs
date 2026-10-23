@@ -129,7 +129,7 @@ pub const FONT_MONO: &str = "IBM Plex Mono";
 pub const INTERFACE_FONT_SIZE: f32 = 14.;
 pub const CHAT_FONT_SIZE: f32 = 13.;
 pub const CHAT_MAX_WIDTH: f32 = 700.;
-pub const COMPOSER_CONTROL_SIZE: f32 = 32.;
+pub const COMPOSER_CONTROL_SIZE: f32 = 40.;
 
 /// Native interface scale is persisted in five-point increments.
 pub const INTERFACE_SCALE_MIN: u16 = 80;
@@ -395,6 +395,86 @@ impl Palette {
     pub fn panel(&self) -> u32 {
         self.card
     }
+
+    /// Ink wash over `paper` (design `--fill-1..4`: pane lift, raised/inputs,
+    /// hover, active). Opaque, so nothing needs a blend mode at paint time.
+    pub fn fill(&self, level: usize) -> u32 {
+        const DARK: [f32; 4] = [0.035, 0.07, 0.10, 0.15];
+        const LIGHT: [f32; 4] = [0.03, 0.06, 0.09, 0.13];
+        let alphas = if self.dark { DARK } else { LIGHT };
+        mix_rgb(self.paper, self.ink, alphas[level.min(3)])
+    }
+
+    /// Subtle theme hue used for hairlines and the pane wash: the ink pulled
+    /// toward the accent, so every preset and custom accent gets its own tint.
+    pub fn tint(&self) -> u32 {
+        mix_rgb(self.ink, self.accent, 0.35)
+    }
+
+    /// Hairline divider (`--line-1`, level 0) and control edge (`--line-2`, level 1).
+    pub fn hairline(&self, level: usize) -> u32 {
+        const DARK: [f32; 2] = [0.10, 0.18];
+        const LIGHT: [f32; 2] = [0.14, 0.24];
+        let alphas = if self.dark { DARK } else { LIGHT };
+        mix_rgb(self.paper, self.tint(), alphas[level.min(1)])
+    }
+
+    /// Accent edge for focus and pane glow (`--line-glow`).
+    pub fn glow(&self) -> u32 {
+        mix_rgb(self.paper, self.accent, if self.dark { 0.38 } else { 0.45 })
+    }
+
+    /// Top of the pane wash (`--wash`); fade it to the pane fill by 65% height.
+    pub fn wash(&self, base: u32) -> u32 {
+        mix_rgb(base, self.tint(), 0.14)
+    }
+
+    /// Status hues, anchored on a fixed semantic hue and pulled toward the
+    /// theme ink so each preset keeps its own contrast (lifted in dark mode,
+    /// deepened in light mode).
+    fn status_hue(&self, hue: u32) -> u32 {
+        if self.dark {
+            mix_rgb(hue, self.ink, 0.12)
+        } else {
+            mix_rgb(hue, self.ink, 0.08)
+        }
+    }
+
+    pub fn ok(&self) -> u32 {
+        self.status_hue(0x4f8f63)
+    }
+
+    pub fn warn(&self) -> u32 {
+        self.status_hue(0xb38b45)
+    }
+
+    pub fn err(&self) -> u32 {
+        self.status_hue(0xbd655b)
+    }
+
+    /// Agent / running identity colour: the configurable accent.
+    pub fn agent(&self) -> u32 {
+        self.accent
+    }
+
+    /// Text ladder (`--tx-1..4`: primary, secondary, meta, disabled) over `paper`.
+    pub fn text(&self, level: usize) -> u32 {
+        const DARK: [f32; 4] = [0.92, 0.66, 0.46, 0.30];
+        const LIGHT: [f32; 4] = [0.92, 0.74, 0.60, 0.36];
+        let alphas = if self.dark { DARK } else { LIGHT };
+        mix_rgb(self.paper, self.ink, alphas[level.min(3)])
+    }
+}
+
+/// Linear blend of two 0xRRGGBB colours; `t` is the weight of `over`.
+pub fn mix_rgb(under: u32, over: u32, t: f32) -> u32 {
+    let t = t.clamp(0., 1.);
+    let channel = |shift: u32| {
+        let a = ((under >> shift) & 0xff) as f32;
+        let b = ((over >> shift) & 0xff) as f32;
+        (a + (b - a) * t).round() as u32
+    };
+    channel(16) << 16 | channel(8) << 8 | channel(0)
 }
 
 /// Selected text shares the resolved theme accent, including custom and
@@ -700,9 +780,9 @@ pub fn parse_color(value: &str, fallback: u32) -> u32 {
 pub fn status_color(status: &str, p: Palette) -> u32 {
     match status {
         "running" => p.accent,
-        "error" => 0xbd655b,
-        "completed" => 0x4f8f63,
-        "interrupted" => 0xb38b45,
+        "error" => p.err(),
+        "completed" => p.ok(),
+        "interrupted" => p.warn(),
         _ => p.muted,
     }
 }

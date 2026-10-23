@@ -75,7 +75,7 @@ impl Desktop {
             // The ordered backdrop filter finishes before the card is painted,
             // so the first modal frame already has its blurred blackout.
             .child(div().id("preferences-backdrop").absolute().inset_0()
-                .bg(Background::from(rgba(0x00000099)).backdrop_blur(20.))
+                .bg(Background::from(rgba((palette.paper << 8) | 0x99)).backdrop_blur(20.))
                 .on_mouse_down(MouseButton::Left, cx.workspace_listener(|view, _, window, cx| {
                     view.close_preferences(window, cx);
                     cx.stop_propagation();
@@ -86,12 +86,13 @@ impl Desktop {
                 .shadow(vec![
                     gpui_kit::BoxShadow::new(px(0.), px(18.), rgba(0x00000066).into()).blur_radius(px(48.)),
                     gpui_kit::BoxShadow::new(px(0.), px(4.), rgba(0x00000033).into()).blur_radius(px(12.)),
+                    gpui_kit::BoxShadow::new(px(0.), px(0.), rgb(palette.accent).opacity(0.08).into()).blur_radius(px(32.)),
                 ])
-                .bg(crate::design::modal_surface_color(palette.paper)).rounded(design::ui_scaled_px(design::radius::MODAL)).border_1().border_color(rgb(palette.line))
+                .bg(crate::design::modal_surface_color(palette.wash(palette.paper))).rounded(design::ui_scaled_px(design::radius::MODAL)).border_1().border_color(rgb(palette.glow()))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .child(div().flex().items_center().justify_between().px(design::ui_scaled_px(design::space::SECTION)).py(design::ui_scaled_px(design::space::INSET)).border_b_1().border_color(rgb(palette.line))
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child("Preferences"))
-                    .child(Button::new("close-preferences").compact().label("Done").accessibility_label("Close preferences")
+                .child(div().h(design::ui_scaled_px(56.)).flex().items_center().justify_between().px(design::ui_scaled_px(design::space::SECTION)).border_b_1().border_color(rgb(palette.hairline(0)))
+                    .child(div().text_size(design::ui_scaled_px(15.)).font_weight(FontWeight::SEMIBOLD).child("Preferences"))
+                    .child(Button::new("close-preferences").compact().primary().outline().label("Done").accessibility_label("Close preferences")
                         .on_click(cx.workspace_listener(|view, _, window, cx| view.close_preferences(window, cx)))))
                 .child(div().flex_1().min_h_0().min_w_0().child(content))
                 .opacity(progress)
@@ -99,6 +100,7 @@ impl Desktop {
                 .shadow(vec![
                     gpui_kit::BoxShadow::new(px(0.), px(18.), rgba(0x00000066).opacity(progress.powi(3)).into()).blur_radius(px(48.)),
                     gpui_kit::BoxShadow::new(px(0.), px(4.), rgba(0x00000033).opacity(progress.powi(3)).into()).blur_radius(px(12.)),
+                    gpui_kit::BoxShadow::new(px(0.), px(0.), rgb(palette.accent).opacity(0.08 * progress.powi(3)).into()).blur_radius(px(32.)),
                 ]), clock))
             .focus_trap("preferences-modal-focus", &self.window.preferences_focus)
             .into_any_element()

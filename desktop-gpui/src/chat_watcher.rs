@@ -930,7 +930,7 @@ impl ChatPane {
             meta.push(state.model.clone());
         }
         let status_color = if matches!(state.status.as_str(), "error" | "failed" | "blocked") {
-            0xe2645a
+            palette.err()
         } else if active(&state.status) {
             palette.accent
         } else {
@@ -1344,7 +1344,7 @@ impl ChatPane {
         let color = if active(&status) {
             palette.accent
         } else if matches!(status.as_str(), "error" | "failed" | "blocked") {
-            0xe2645a
+            palette.err()
         } else {
             palette.muted
         };
@@ -1534,7 +1534,7 @@ impl ChatPane {
             body = body.child(
                 div()
                     .text_size(px(12. * ratio))
-                    .text_color(rgb(0xe2645a))
+                    .text_color(rgb(palette.err()))
                     .child(format!("Connection: {error}")),
             );
         }

@@ -773,7 +773,7 @@ impl RenderOnce for Input {
                 this.bg(bg)
                     .rounded(cx.theme().radius)
                     .when(self.bordered, |this| {
-                        this.border_1().border_color(cx.theme().input)
+                        this.border_1().border_color(cx.theme().border)
                     })
             })
             .items_center()

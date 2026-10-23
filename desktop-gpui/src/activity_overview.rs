@@ -1540,7 +1540,7 @@ impl ActivityOverview {
         }).collect();
         let state = self.communications.clone();
         // Match recorded agent exchanges in the chat stream (agent_exchange.rs).
-        let color = 0x6594db;
+        let color = self.palette.agent();
         let animate = !links.is_empty() && Self::motion_enabled(cx);
         let phase = Rc::new(Cell::new(0.));
         let paint_phase = phase.clone();
