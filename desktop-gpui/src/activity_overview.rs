@@ -1641,7 +1641,7 @@ impl ActivityOverview {
                     |_, _, _| (),
                     move |bounds, _, window, _| {
                         for (placement, state) in &edges {
-                            let mut path = PathBuilder::stroke(scaled(0.8));
+                            let mut path = PathBuilder::stroke(scaled(1.));
                             let start = point(
                                 bounds.origin.x + scaled(hub.x),
                                 bounds.origin.y + scaled(hub.y),
@@ -1672,11 +1672,11 @@ impl ActivityOverview {
                             if let Ok(path) = path.build() {
                                 window.paint_path(
                                     path,
-                                    rgb(state.color(p)).opacity(if *state == State::Idle {
-                                        0.18
+                                    rgb(if *state == State::Working {
+                                        p.accent
                                     } else {
-                                        0.34
-                                    }),
+                                        p.hairline(1)
+                                    }).opacity(if *state == State::Working { 0.34 } else { 0.7 }),
                                 );
                             }
                         }
@@ -2183,11 +2183,12 @@ impl Render for ActivityOverview {
             .flex()
             .items_center()
             .flex_wrap()
-            .gap(px(12.))
-            .px(px(15.))
+            .min_h(px(40.))
+            .gap(px(20.))
+            .px(px(20.))
             .py(px(8.))
             .border_t_1()
-            .border_color(design::surface_color(p.line))
+            .border_color(rgb(p.hairline(0)))
             .text_size(font - px(2.))
             .text_color(rgb(p.muted));
         for state in [
@@ -2202,12 +2203,12 @@ impl Render for ActivityOverview {
                     .flex()
                     .items_center()
                     .gap(px(5.))
-                    .child(div().size(px(5.)).rounded_full().bg(rgb(state.color(p))))
+                    .child(div().size(px(6.)).rounded_full().bg(rgb(state.color(p))))
                     .child(state.label()),
             );
         }
         legend = legend
-            .child(div().child("Dashed line = working · Dotted blue line = communication"))
+            .child(div().child("Dashed line = agent is working · Dotted line = communication"))
             .child(div().flex_1())
             .child(div().child("Click a card to open Watch"));
         div()

@@ -16,6 +16,8 @@ The activity header now uses 28px rounded filter chips, theme hairlines and fill
 
 The activity map now paints a theme-derived project wash beneath links and cards with four low-opacity circles per group. Its preview build passed with observed exit 0 (`72a911c9-3361-44b2-8375-1a27ff3d8772`, Cargo 1m35s). Light and dark synthetic frames `artifacts/gpui/visual/gpui-frame-1792776223644103000.png` and `artifacts/gpui/visual/gpui-frame-1792776246346255000.png` were inspected: project tint remains subtle and labels, links and cards remain legible. The circles are an approximation of the board's radial gradient; slight rings are visible in the light frame.
 
+The activity footer now uses the board's 40px minimum height, 20px spacing and inset, 6px semantic dots and theme hairline. Its legend describes the dashed working links and dotted communication links without assuming a blue theme. Project links now draw a 1px dashed accent when working and a faint theme hairline in other states. The right-side keyboard hint remains open because a card-keyboard action has not been verified. The feature-enabled preview build passed with observed exit 0 (`a1cd3c50-839b-440a-aa7c-c75baf129a6a`, Cargo 1m39s). Light and dark synthetic frames `artifacts/gpui/visual/gpui-frame-1792776677105897000.png` and `artifacts/gpui/visual/gpui-frame-1792776720103796000.png` were inspected: the legend fits on one line at 1160px and the subtle project links remain visible. This does not verify the installed app.
+
 Written 2026-10-23 15:50. Goal set at ~03:45: bring the GPUI desktop in line with the Claude design boards by 07:00. That deadline passed with the session idle; the goal is still open.
 
 ## Source of truth
