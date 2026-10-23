@@ -1847,9 +1847,16 @@ impl Render for ActivityOverview {
             NativeActivityGrouping::Project => "projects",
             NativeActivityGrouping::Workspace => "workspaces",
         };
-        let mut filters = div().flex().items_center().gap(px(5.)).flex_wrap();
+        let mut filters = div().flex().items_center().gap(px(6.)).flex_wrap();
         for filter in Filter::ALL {
             let selected = self.filter == filter;
+            let count = self.model.count(filter);
+            let state_color = match filter {
+                Filter::Working => Some(State::Working.color(p)),
+                Filter::NeedsYou => Some(State::NeedsYou.color(p)),
+                Filter::Failed => Some(State::Failed.color(p)),
+                Filter::All | Filter::Idle => None,
+            };
             filters = filters.child(
                 Button::new(SharedString::from(format!(
                     "activity-filter-{}",
@@ -1858,9 +1865,18 @@ impl Render for ActivityOverview {
                 .debug_selector(move || format!("activity-filter-{}", filter.label()).into())
                 .compact()
                 .ghost()
-                .label(format!("{} {}", filter.label(), self.model.count(filter)))
-                .text_size(font - px(1.))
-                .when(selected, |el| el.bg(design::surface_color(p.soft)))
+                .rounded(px(14.))
+                .h(px(28.))
+                .border_1()
+                .border_color(rgb(p.hairline(if selected { 1 } else { 0 })))
+                .text_color(rgb(p.text(if selected { 0 } else { 1 })))
+                .when(selected, |el| el.bg(design::surface_color(p.fill(0))))
+                .accessibility_label(format!("{} {count}", filter.label()))
+                .when_some(state_color, |el, color| el.child(
+                    div().size(px(6.)).rounded_full().bg(rgb(color))))
+                .child(div().text_size(px(12.)).child(filter.label()))
+                .child(div().font_family(design::FONT_MONO).text_size(px(11.))
+                    .text_color(rgb(p.text(3))).child(count.to_string()))
                 .on_click(cx.listener(move |overview, _, _, cx| {
                     overview.filter = filter;
                     cx.notify();
@@ -1968,7 +1984,7 @@ impl Render for ActivityOverview {
             .flex()
             .items_center()
             .flex_wrap()
-            .gap(px(10.))
+            .gap(px(16.))
             .min_h(px(56.))
             .px(px(20.))
             .py(px(10.))
@@ -1991,6 +2007,7 @@ impl Render for ActivityOverview {
                             )),
                     ),
             )
+            .child(div().w(px(1.)).h(px(20.)).bg(rgb(p.hairline(0))))
             .child(filters)
             .child(div().flex_1())
             .child(controls);

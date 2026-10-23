@@ -10,6 +10,10 @@ The feature-enabled synthetic preview binary built with observed exit 0 (run `8a
 
 Focused `activity_overview` tests passed 32/32 with observed exit 0 (run `4754dd52-b96b-4bd4-b303-3b954e9f0c08`, 902 other tests filtered). Earlier attempts exposed five stale test fixtures and two assertions for fixed blue/grayscale colours; the branch updates those fixtures and assertions. The activity test proves render and interaction behavior in the fixture, not live app behavior. The branch has no release package or installation.
 
+The next pane shell batch gives originally opaque chat and retained non-browser panes a single theme-derived top wash that fades to their existing fill at 65% height. The browser pane and translucent/glass panes retain their previous backgrounds and blend behavior; focus and inactive emphasis still use one background layer. The desktop check passed with observed exit 0 (`33694a3a-4d54-43e0-9105-a70e2c7a5ba5`, Cargo 43.44s), and the feature-enabled preview build passed (`8c3a355d-65f7-4c66-89d0-68f96a384b5c`, Cargo 1m55s). Existing synthetic screens do not host a docked chat pane, so the wash itself has not been visually verified yet.
+
+The activity header now uses 28px rounded filter chips, theme hairlines and fills, semantic state dots, mono counts and a divider beside the title. Its feature-enabled preview build passed with observed exit 0 (`af0a1049-7195-4ba1-a03f-2db753aa3d64`, Cargo 1m39s). Captured light and dark synthetic activity frames are `artifacts/gpui/visual/gpui-frame-1792775832969228000.png` and `artifacts/gpui/visual/gpui-frame-1792775846132049000.png`; both were inspected and the header remained readable without clipping. Neither frame proves installed-app behavior. No focused activity test was rerun after this presentation-only header edit.
+
 Written 2026-10-23 15:50. Goal set at ~03:45: bring the GPUI desktop in line with the Claude design boards by 07:00. That deadline passed with the session idle; the goal is still open.
 
 ## Source of truth
@@ -28,7 +32,7 @@ Written 2026-10-23 15:50. Goal set at ~03:45: bring the GPUI desktop in line wit
 - Memory saved: `design-alignment-constraints.md`.
 
 ## Still open after the takeover commits
-The design branch has passed a desktop compile check, focused activity tests and synthetic visual review. The pane surface gradient, complete activity side panel, cluster washes, filter controls and several shared control details remain open. The source audit below is a work list, not a verified completion report.
+The design branch has passed desktop checks, focused activity tests and synthetic visual review. The pane wash needs a fixture or installed-app visual check; its glow edge and running field, the complete activity side panel, cluster washes, segmented activity controls and several shared control details remain open. The source audit below is a work list, not a verified completion report.
 `composer_footer.rs:1505` `0x3f9d6a` is the usage-ring green (status), leave it. `draft_creation.rs` has ~10 hardcoded colours and font "Montserrat"; unaudited.
 
 ## Suggested order
