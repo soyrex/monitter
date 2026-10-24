@@ -79,6 +79,7 @@ import ArrowRightLeft from "@lucide/svelte/icons/arrow-right-left";
     canShare,
     observers = [],
     showHeader,
+    mobile = false,
     avatarVisual,
     messageAvatar,
     deliveryStatus,
@@ -135,6 +136,7 @@ import ArrowRightLeft from "@lucide/svelte/icons/arrow-right-left";
     canShare: boolean;
     observers?: string[];
     showHeader: boolean;
+    mobile?: boolean;
     avatarVisual: Avatar;
     messageAvatar: Snippet<[Agent | null | undefined]>;
     deliveryStatus: Delivery;
@@ -168,6 +170,18 @@ import ArrowRightLeft from "@lucide/svelte/icons/arrow-right-left";
     onMaximise: () => void;
     getTaskMessages?: (taskId: string, beforeId?: string, limit?: number) => Promise<TaskMessagesPage>;
   } = $props();
+
+  let composerHeight = $state(0);
+  let transcriptTailDistance = $state(0);
+  const composerHidden = $derived(mobile ? Math.min(transcriptTailDistance, composerHeight) : 0);
+
+  function measureComposer(node: HTMLElement) {
+    const measure = () => composerHeight = node.getBoundingClientRect().height;
+    const observer = new ResizeObserver(measure);
+    observer.observe(node);
+    measure();
+    return { destroy: () => observer.disconnect() };
+  }
 
   // The keyed transcript is recreated when the selected task changes.
   setContext('monitter-markdown-task-id', task.id);
@@ -344,7 +358,7 @@ import ArrowRightLeft from "@lucide/svelte/icons/arrow-right-left";
         {#key displayTask.id}<NativeMailInbox taskId={displayTask.id} agentId={displayTask.agentId} inboxes={displayMailInboxes}/>{/key}
       </div>
     {:else}
-      <MessagePane {active} thinking={displayThinking} pendingUpdates={transcriptBuffer.pendingUpdates()} onfollowchange={handleFollowChange} resetKey={`task:${task.id}:${scrollRevision}`} stickyRequest={!!displayLatestUserRequest}>
+      <MessagePane {active} thinking={displayThinking} pendingUpdates={transcriptBuffer.pendingUpdates()} onfollowchange={handleFollowChange} onscrollchange={(distance) => transcriptTailDistance = distance} resetKey={`task:${task.id}:${scrollRevision}`} stickyRequest={!!displayLatestUserRequest}>
       {#snippet header()}
         {#if hasEarlierMessages || historyError}<div class="history-pager">
           {#if hasEarlierMessages}<button type="button" aria-label="Load earlier messages" disabled={historyLoading} onclick={() => void loadEarlierMessages()}>{historyLoading ? 'Loading earlier messages…' : 'Load earlier messages'}</button>{/if}
@@ -440,7 +454,7 @@ import ArrowRightLeft from "@lucide/svelte/icons/arrow-right-left";
         <span>{gitStatus.files.length}{gitStatus.truncated ? '+' : ''} {gitStatus.files.length === 1 ? 'file changed' : 'files changed'}</span>
       </button>
     {/if}
-  <div class="composer-area" class:git-docked={gitStatus?.repository === true}>
+  <div class="composer-area" class:git-docked={gitStatus?.repository === true} class:mobile-auto-hide={mobile} use:measureComposer style:--composer-hidden={`${composerHidden}px`}>
     {#if !inboxView || !nativeDesktopInbox}
       {#if usageExhausted}<div class="handoff-suggestion" role="status"><span>Usage credits exhausted.</span><button type="button" onclick={onHandoff} disabled={busy || task.status === 'running'}><ArrowRightLeft size={14}/>Hand off…</button></div>{/if}
       {@render composer()}
@@ -467,6 +481,9 @@ import ArrowRightLeft from "@lucide/svelte/icons/arrow-right-left";
   .live-transcript-notice { flex:none; margin:0; padding:7px var(--chat-side-padding, clamp(25px,4vw,50px)); border-top:1px solid var(--line); color:#bd655b; background:var(--paper); font-size:calc(11px * var(--interface-font-ratio,1)); }
   .queued-messages-float { position:relative; z-index:2; flex-shrink:0; filter:drop-shadow(0 3px 8px #0002) drop-shadow(0 10px 24px #0004); }
   .composer-area { position:relative; flex-shrink:0; }
+  .composer-area.mobile-auto-hide { margin-bottom:calc(-1 * var(--composer-hidden)); transform:translateY(var(--composer-hidden)); transition:margin-bottom 80ms linear,transform 80ms linear; }
+  .composer-area.mobile-auto-hide:focus-within,
+  .composer-area.mobile-auto-hide:has(:global(.composer.expanded)) { margin-bottom:0; transform:none; }
   .composer-area:has(:global(.composer.expanded)) { position:static; }
   .composer-area :global(.subagent-dock) { width:100%; max-width:100%; min-width:0; }
   .composer-area.git-docked :global(.composer-box) { border-top-left-radius:0; border-top-right-radius:0; }

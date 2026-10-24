@@ -26,25 +26,34 @@
 <section class="watch-pane" class:mobile aria-label={`Watch ${task.title}`}>
   <header class="watch-header"><div><h2>{task.title || 'Untitled chat'}</h2><p>{status} · {task.provider}{task.model ? ` · ${task.model}` : ''}</p></div>{#if onOpenChat}<button onclick={onOpenChat}>Open chat</button>{/if}</header>
   {#if mobile}
-    <div class="watch-pills" aria-label="Current Watch status">
-      {#if goal && goalView}
-        <div class="watch-pill goal-pill" class:active={goal.status === 'active'} data-testid="watch-goal">
-          <span class="pill-label">Goal</span>
-          <strong>{goal.objective}</strong>
-          {#if goalView.current}<span class="pill-detail">{goalView.current}</span>{/if}
-        </div>
-      {:else if goalNote}
-        <div class="watch-pill goal-pill"><span class="pill-label">Goal</span><strong>{goalNote}</strong></div>
-      {/if}
-      {#if build}
+    {#if build}
+      <div class="watch-pills build-status" aria-label="Current build status">
         <div class="watch-pill build-pill" class:attention={build.stale} role="status">
           {#if build.run && !build.stale}<span class="build-spinner" aria-hidden="true"></span>{/if}
           <span class="pill-label">Build</span>
           <strong>{build.label}</strong>
           <span class="pill-detail">{build.title}</span>
         </div>
-      {/if}
-    </div>
+      </div>
+    {/if}
+    {#if view.activePlan}
+      <section class="mobile-plan" aria-label="Current work plan">
+        <WorkPlanPanel plans={[view.activePlan]}/>
+      </section>
+    {/if}
+    {#if goal && goalView}
+      <div class="watch-pills goal-status" aria-label="Current goal">
+        <div class="watch-pill goal-pill" class:active={goal.status === 'active'} data-testid="watch-goal">
+          <span class="pill-label">Goal</span>
+          <strong>{goal.objective}</strong>
+          {#if goalView.current}<span class="pill-detail">{goalView.current}</span>{/if}
+        </div>
+      </div>
+    {:else if goalNote}
+      <div class="watch-pills goal-status" aria-label="Current goal">
+        <div class="watch-pill goal-pill"><span class="pill-label">Goal</span><strong>{goalNote}</strong></div>
+      </div>
+    {/if}
     <section class="mobile-activity" aria-label="Activity stream">
       <div class="section-heading"><h3>Activity</h3><span>{view.activity.length} updates</span></div>
       <div class="activity-stream">

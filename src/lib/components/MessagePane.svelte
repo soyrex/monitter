@@ -4,7 +4,7 @@
   import ArrowDown from "@lucide/svelte/icons/arrow-down";
   import { provideTranscriptScrollController, type TranscriptScrollOwner } from '$lib/transcript-scroll-owner';
 
-  let { resetKey, children, header, stickyRequest = false, active = true, thinking = false, pendingUpdates = false, onfollowchange }: { resetKey: string; children: Snippet; header?: Snippet; stickyRequest?: boolean; active?: boolean; thinking?: boolean; pendingUpdates?: boolean; onfollowchange?: (following: boolean) => void } = $props();
+  let { resetKey, children, header, stickyRequest = false, active = true, thinking = false, pendingUpdates = false, onfollowchange, onscrollchange }: { resetKey: string; children: Snippet; header?: Snippet; stickyRequest?: boolean; active?: boolean; thinking?: boolean; pendingUpdates?: boolean; onfollowchange?: (following: boolean) => void; onscrollchange?: (distanceFromLatest: number) => void } = $props();
   let viewport = $state<HTMLDivElement>();
   let showJump = $state(false);
   let followingLatest = true;
@@ -128,10 +128,12 @@
     if (owner) owner.scrollToLatest(options);
     else pendingLatestRequest = options;
     setFollowing(true);
+    onscrollchange?.(0);
   }
 
   function handleScroll() {
     observeScrollbarMovement();
+    onscrollchange?.(distanceFromLatest());
     if (readerDetached && viewport) {
       const movedTowardLatest = viewport.scrollTop > detachedScrollTop + 0.5;
       detachedScrollTop = viewport.scrollTop;

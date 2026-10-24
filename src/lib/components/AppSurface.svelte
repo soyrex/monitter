@@ -5824,6 +5824,7 @@
           {busy}
           canShare={!isLanBrowser()}
           showHeader={!mobileSidebar}
+          mobile={mobileSidebar}
           {avatarVisual}
           {messageAvatar}
           {deliveryStatus}
