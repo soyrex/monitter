@@ -2,12 +2,14 @@
   import Check from "@lucide/svelte/icons/check";
   import Circle from "@lucide/svelte/icons/circle";
   import CircleDot from "@lucide/svelte/icons/circle-dot";
+  import Info from "@lucide/svelte/icons/info";
   import ListChecks from "@lucide/svelte/icons/list-checks";
   import Minus from "@lucide/svelte/icons/minus";
   import OctagonAlert from "@lucide/svelte/icons/octagon-alert";
   import type { WorkPlan, WorkPlanItem } from '$lib/types';
 
-  let { plans }: { plans: WorkPlan[] } = $props();
+  let { plans, collapseDetails = false }: { plans: WorkPlan[]; collapseDetails?: boolean } = $props();
+  let expandedDetails = $state(new Set<string>());
 
   const ordered = $derived([...plans].sort((left, right) =>
     right.updatedAt - left.updatedAt || right.createdAt - left.createdAt || right.id.localeCompare(left.id)
@@ -32,6 +34,12 @@
 
   function completedCount(plan: WorkPlan): number {
     return plan.items.filter(item => item.status === 'completed').length;
+  }
+
+  function toggleDetails(itemId: string): void {
+    const next = new Set(expandedDetails);
+    if (!next.delete(itemId)) next.add(itemId);
+    expandedDetails = next;
   }
 </script>
 
@@ -59,8 +67,11 @@
             {:else if item.status === 'skipped'}<Minus size={14}/>
             {:else}<Circle size={13}/>{/if}
           </span>
-          <span class="item-body"><span class="item-title">{item.title}</span>{#if item.note}<span class="item-note">{item.note}</span>{/if}</span>
+          <span class="item-body"><span class="item-title">{item.title}</span>{#if item.note && (!collapseDetails || expandedDetails.has(item.id))}<span class="item-note">{item.note}</span>{/if}</span>
           <small>{statusLabel[item.status]}</small>
+          {#if collapseDetails && item.note}
+            <button class="item-info" type="button" aria-label={`${expandedDetails.has(item.id) ? 'Hide' : 'Show'} details for ${item.title}`} aria-expanded={expandedDetails.has(item.id)} onclick={() => toggleDetails(item.id)}><Info size={13} aria-hidden="true"/></button>
+          {/if}
         </li>
       {/each}
     </ol>
@@ -99,6 +110,7 @@
   li[data-status=completed] .item-title,li[data-status=skipped] .item-title{color:var(--muted)}
   .item-note{color:var(--muted);font:calc(10px * var(--interface-font-ratio,1))/1.4 var(--sans,system-ui);white-space:pre-wrap;overflow-wrap:anywhere}
   .plan-items small{flex:none;max-width:65px;margin-top:3px;color:var(--muted);font:calc(9px * var(--interface-font-ratio,1))/1.25 var(--mono);text-align:right}
+  .item-info{display:grid;place-items:center;flex:none;width:28px;height:28px;margin:-4px -5px -4px 0;padding:0;border:0;border-radius:6px;background:transparent;color:var(--muted);cursor:pointer}.item-info:hover,.item-info[aria-expanded=true]{background:color-mix(in srgb,var(--accent) 10%,transparent);color:var(--accent-ink)}.item-info:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
   li[data-status=in_progress] small{color:var(--accent-ink)}li[data-status=blocked] small{color:var(--danger,#c96058)}
   .plan-summary{display:grid;gap:3px;margin:9px 0 0;padding:8px;border-radius:5px;background:color-mix(in srgb,var(--accent) 7%,transparent);color:var(--ink);font:calc(10px * var(--interface-font-ratio,1))/1.45 var(--sans,system-ui);white-space:pre-wrap;overflow-wrap:anywhere}
   .plan-summary b{color:var(--muted);font:600 calc(9px * var(--interface-font-ratio,1))/1 var(--mono);letter-spacing:.05em;text-transform:uppercase}

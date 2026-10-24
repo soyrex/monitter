@@ -38,7 +38,7 @@
     {/if}
     {#if view.activePlan}
       <section class="mobile-plan" aria-label="Current work plan">
-        <WorkPlanPanel plans={[view.activePlan]}/>
+        <WorkPlanPanel plans={[view.activePlan]} collapseDetails/>
       </section>
     {/if}
     {#if goal && goalView}
