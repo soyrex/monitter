@@ -5786,7 +5786,7 @@
         {/snippet}
         {#if watchingTask}
           <div class="task-watch" data-testid="task-watch">
-            <div class="watch-scroll"><WatchPane task={selectedTask} {snapshot} {goal} {goalNote} {goalError} onOpenSubagent={id => { const member=taskSubagents.find(item => item.id===id); if(member)inspectSubagent(member); }}/>
+            <div class="watch-scroll"><WatchPane task={selectedTask} {snapshot} {goal} {goalNote} {goalError} mobile={mobileSidebar} onOpenSubagent={id => { const member=taskSubagents.find(item => item.id===id); if(member)inspectSubagent(member); }}/>
               {#if watchExchange}<section class="watch-delivery" aria-label="Watch interjection exchange"><strong>Interjection</strong><p>{watchExchanges[selectedTask.id].text}</p><p role="status">{watchExchange.status}</p>{#if watchExchange.response}<Markdown text={watchExchange.response.text} taskId={selectedTask.id}/>{/if}</section>{/if}
               {#each taskOptimisticMessages as message (message.id)}<div class="watch-delivery"><p>{message.displayText}</p>{@render deliveryStatus(message)}</div>{/each}
               {@render taskQueuedMessages()}
