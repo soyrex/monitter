@@ -1934,7 +1934,7 @@ impl Render for ActivityOverview {
                     .ghost()
                     .rounded(px(6.))
                     .label("Projects")
-                    .text_size(font - px(1.))
+                    .text_size(px(12.))
                     .when(self.grouping == NativeActivityGrouping::Project, |el| {
                         el.bg(design::surface_color(p.fill(1)))
                     })
@@ -1947,7 +1947,7 @@ impl Render for ActivityOverview {
                     .ghost()
                     .rounded(px(6.))
                     .label("Workspaces")
-                    .text_size(font - px(1.))
+                    .text_size(px(12.))
                     .when(self.grouping == NativeActivityGrouping::Workspace, |el| {
                         el.bg(design::surface_color(p.fill(1)))
                     })
@@ -1963,7 +1963,7 @@ impl Render for ActivityOverview {
                     .ghost()
                     .rounded(px(6.))
                     .label("Clusters")
-                    .text_size(font - px(1.))
+                    .text_size(px(12.))
                     .when(!self.list, |el| el.bg(design::surface_color(p.fill(1))))
                     .on_click(cx.listener(|overview, _, _, cx| {
                         overview.list = false;
@@ -1975,7 +1975,7 @@ impl Render for ActivityOverview {
                     .ghost()
                     .rounded(px(6.))
                     .label("List")
-                    .text_size(font - px(1.))
+                    .text_size(px(12.))
                     .when(self.list, |el| el.bg(design::surface_color(p.fill(1))))
                     .on_click(cx.listener(|overview, _, _, cx| {
                         overview.list = true;
@@ -1992,6 +1992,7 @@ impl Render for ActivityOverview {
                         .border_1()
                         .border_color(rgb(p.hairline(0)))
                         .label("−")
+                        .text_size(px(12.))
                         .on_click(cx.listener(|overview, _, _, cx| {
                             overview.zoom = clamped_zoom(overview.zoom - 0.1);
                             cx.notify();
@@ -2007,7 +2008,7 @@ impl Render for ActivityOverview {
                         .border_1()
                         .border_color(rgb(p.hairline(0)))
                         .label(format!("{:.0}%", self.zoom * 100.))
-                        .text_size(font - px(2.))
+                        .text_size(px(12.))
                         .on_click(cx.listener(|overview, _, _, cx| {
                             overview.zoom = 1.;
                             cx.notify();
@@ -2023,6 +2024,7 @@ impl Render for ActivityOverview {
                         .border_1()
                         .border_color(rgb(p.hairline(0)))
                         .label("+")
+                        .text_size(px(12.))
                         .on_click(cx.listener(|overview, _, _, cx| {
                             overview.zoom = clamped_zoom(overview.zoom + 0.1);
                             cx.notify();
