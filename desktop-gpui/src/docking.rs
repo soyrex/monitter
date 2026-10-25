@@ -394,7 +394,7 @@ impl Panel for NativePanel {
             color.a = if focused { appearance.resolved_active_border_opacity() } else { 0. };
             return Some(canvas(|_, _, _| (), move |bounds, _, window, cx| {
                 if crate::preferences_modal::workspace_blocked(cx) { return; }
-                let contour = crate::pane_appearance::rounded_contour(bounds, px(8.), border_width);
+                let contour = crate::pane_appearance::rounded_contour(bounds, px(15.), border_width);
                 // Native and GPUI strokes must not stack their alpha.
                 if !crate::native_pane_highlight::paint(
                     &pane_id,
@@ -407,7 +407,7 @@ impl Panel for NativePanel {
                 ) {
                     if working { crate::pane_highlight_geometry::paint_outward_glow(&contour, glow_color, window); }
                     let mut outline = gpui::outline(bounds, color, gpui::BorderStyle::Solid)
-                        .corner_radii(px(8.));
+                        .corner_radii(px(15.));
                     outline.border_widths = border_width.into();
                     window.paint_quad(outline);
                 }
@@ -950,7 +950,7 @@ impl DockWorkspace {
             NativeTileTheme::Monitter => DockTileStyle::Contiguous,
             NativeTileTheme::Tern => DockTileStyle::Rounded {
                 gutter: px(crate::design::tern_spacing(settings).gutter),
-                radius: px(8.),
+                radius: px(15.),
                 // Expose the same native window finish as the workspace bar.
                 backdrop: rgba(0x00000000).into(),
                 border_color: crate::design::tile_border_color(palette).into(),
