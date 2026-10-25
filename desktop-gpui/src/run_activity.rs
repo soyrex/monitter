@@ -249,8 +249,17 @@ fn activity_icon(
             Icon::new(fallback).size(px(12.)).into_any_element(),
         ),
     };
+    // Every state owns the same 12px marker column. In particular, keep the
+    // spinner's wrapper from contributing its own intrinsic width so its
+    // painted midpoint stays on the exchange rail and member-dot axis.
     fixture_bounds(
-        div().flex_shrink_0().child(icon),
+        div()
+            .size(px(12.))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(icon),
         format!("run-state-{id}-{name}"),
     )
     .into_any_element()
