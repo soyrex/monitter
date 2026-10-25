@@ -1646,6 +1646,7 @@ impl ChatPane {
             live_line.into_any_element()
         };
         now = now
+            .child(live_line)
             .child(
                 div()
                     .id("watcher-latest-update")
@@ -1664,8 +1665,7 @@ impl ChatPane {
                             "Working on the current request".into()
                         }
                     })),
-            )
-            .child(live_line);
+            );
         let goal = self.activity.read(cx).watch_goal().cloned();
         let goal_pill = goal.as_ref().map(|_| {
             self.activity.read(cx).render_watch_goal_pill(palette, ratio)
@@ -2840,8 +2840,8 @@ mod native_tests {
                     .debug_bounds("watcher-plan")
                     .expect("watch plan slot");
                 assert!(
-                    line.top() >= update.bottom() - gpui_kit::px(1.),
-                    "the pulsing line follows the update: {line:?} after {update:?}"
+                    update.top() >= line.bottom() - gpui_kit::px(1.),
+                    "the pulsing line leads the update: {line:?} before {update:?}"
                 );
                 assert!(
                     plan.top() >= line.bottom(),
