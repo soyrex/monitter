@@ -5605,7 +5605,7 @@ impl Render for ChatPane {
                 window.viewport_size().height * 0.10,
                 px(24.),
             ))
-            .child(transcript_column(self.render_interactions(window, cx)))
+            .child(agent_transcript_column(self.render_interactions(window, cx)))
             .when(slash_open, |content| {
                 content.child(
                     div()
