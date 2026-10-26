@@ -78,6 +78,7 @@ struct PermissionPickerProps {
 }
 
 struct PermissionPopupState {
+    draft: Option<String>,
     props: PermissionPickerProps,
     pane: Entity<ComposerFooterPane>,
     hovered_level: Option<String>,
@@ -92,6 +93,7 @@ impl PermissionPopupState {
         cx: &mut Context<Self>,
     ) -> Self {
         let state = Self {
+            draft: None,
             props,
             pane,
             hovered_level: None,
@@ -130,10 +132,18 @@ impl PermissionPopupState {
         if self.props.disabled {
             return;
         }
+        self.draft = Some(choice.level);
+        self.hovered_level = None;
+        cx.notify();
+    }
+
+    fn apply_draft(&mut self, cx: &mut Context<Self>) {
+        let Some(level) = self.draft.take() else { return; };
+        if level == self.props.selected || self.props.disabled { return; }
+        let Some(choice) = self.props.choices.iter()
+            .find(|choice| choice.level == level && choice.supported).cloned() else { return; };
         if self.props.task_id == "permission-picker-preview" {
-            self.props.selected = choice.level;
-            self.hovered_level = None;
-            cx.notify();
+            self.props.selected = level;
             return;
         }
         let task_id = self.props.task_id.clone();
@@ -178,7 +188,7 @@ impl PermissionPopupState {
         let current = self
             .hovered_level
             .as_deref()
-            .unwrap_or(self.props.selected.as_str());
+            .unwrap_or(self.draft.as_deref().unwrap_or(self.props.selected.as_str()));
         let current = choices
             .iter()
             .position(|choice| choice.level == current)
@@ -195,7 +205,8 @@ impl PermissionPopupState {
 
 impl Render for PermissionPopupState {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let props = self.props.clone();
+        let mut props = self.props.clone();
+        if let Some(draft) = &self.draft { props.selected = draft.clone(); }
         let selected_level = props.selected.clone();
         let caption_level = self
             .hovered_level
@@ -604,6 +615,21 @@ pub(super) fn permissions_menu(
     .appearance(false)
     .trigger(trigger)
     .anchor(Anchor::BottomLeft)
+    .on_open_change({
+        let props = props.clone();
+        let entity = entity.clone();
+        let state_key = state_key.clone();
+        move |open, window, cx| {
+            let factory_props = props.clone();
+            let factory_pane = entity.clone();
+            let panel = window.use_keyed_state(SharedString::from(state_key.clone()), cx,
+                move |window, cx| PermissionPopupState::new(factory_props, factory_pane, window, cx));
+            panel.update(cx, |state, cx| {
+                if *open { state.draft = None; state.hovered_level = None; state.set_props(props.clone(), cx); }
+                else { state.apply_draft(cx); }
+            });
+        }
+    })
     .overlay_closable(true)
     .content(move |_, window, cx| {
         let props = props.clone();
@@ -646,6 +672,7 @@ struct ModelPickerProps {
 }
 
 struct ModelPopupState {
+    draft: Option<Value>,
     props: ModelPickerProps,
     pane: Entity<ComposerFooterPane>,
     search: Entity<InputState>,
@@ -663,6 +690,7 @@ impl ModelPopupState {
     ) -> Self {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Find a model…"));
         let mut state = Self {
+            draft: None,
             props,
             pane,
             search,
@@ -690,6 +718,10 @@ impl ModelPopupState {
                 .as_ref()
                 .and_then(|catalog| catalog["models"].as_array())
                 .is_some_and(|models| models.len() <= 5);
+        if self.props.open_generation != props.open_generation {
+            self.draft = None;
+            self.hovered_choice = None;
+        }
         if hide_search || self.props.open_generation != props.open_generation {
             self.search
                 .update(cx, |search, cx| search.set_value("", window, cx));
@@ -709,7 +741,7 @@ impl ModelPopupState {
     }
 
     fn selected_model(&self) -> Option<Value> {
-        let selected = self.props.settings.get("model")?.as_str()?;
+        let selected = self.settings().get("model")?.as_str()?;
         self.models()
             .into_iter()
             .find(|model| model.get("id").and_then(Value::as_str) == Some(selected))
@@ -717,8 +749,7 @@ impl ModelPopupState {
 
     fn selected_effort_id(&self, levels: &[Value]) -> String {
         let selected_model = self.selected_model();
-        self.props
-            .settings
+        self.settings()
             .get("reasoningEffort")
             .and_then(Value::as_str)
             .map(str::to_owned)
@@ -737,140 +768,63 @@ impl ModelPopupState {
             .unwrap_or_default()
     }
 
+    fn settings(&self) -> &Value {
+        self.draft.as_ref().unwrap_or(&self.props.settings)
+    }
+
     fn choose_model_effort(&mut self, model_id: String, effort_id: String, cx: &mut Context<Self>) {
-        if self.props.task_id == "model-picker-preview" {
-            self.props.settings = json!({"model":model_id,"reasoningEffort":effort_id,"fastMode":self.props.settings["fastMode"]});
-            cx.notify();
-            return;
-        }
-        let pane = self.pane.clone();
-        let task_id = self.props.task_id.clone();
-        pane.update(cx, |pane, cx| {
-            let Some(task) = pane.selected_task() else {
-                return;
-            };
-            let current = pane.selected_settings(&task);
-            let Some(model) = pane
-                .catalog
-                .as_ref()
-                .and_then(|catalog| catalog.get("models"))
-                .and_then(Value::as_array)
-                .and_then(|models| {
-                    models.iter().find(|model| {
-                        model.get("id").and_then(Value::as_str) == Some(model_id.as_str())
-                    })
-                })
-            else {
-                return;
-            };
-            let supported = model
-                .get("reasoningEfforts")
-                .and_then(Value::as_array)
-                .is_some_and(|levels| {
-                    levels.iter().any(|level| {
-                        level.get("id").and_then(Value::as_str) == Some(effort_id.as_str())
-                    })
-                });
-            if pane.task_id != task_id || pane.model_disabled() || !supported {
-                return;
-            }
-            let supports_fast = model
-                .get("supportsFast")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            let fast = if supports_fast {
-                current.get("fastMode").cloned().unwrap_or(Value::Null)
-            } else {
-                Value::Null
-            };
-            pane.save_model(
-                json!({"model":model_id,"reasoningEffort":effort_id,"fastMode":fast}),
-                cx,
-            );
-        });
+        if self.props.disabled { return; }
+        let Some(model) = self.models().into_iter().find(|model| model["id"].as_str() == Some(&model_id)) else { return; };
+        if !model["reasoningEfforts"].as_array().is_some_and(|levels|
+            levels.iter().any(|level| level["id"].as_str() == Some(&effort_id))) { return; }
+        let fast = if model["supportsFast"].as_bool() == Some(true) { self.settings()["fastMode"].clone() } else { Value::Null };
+        self.draft = Some(json!({"model":model_id,"reasoningEffort":effort_id,"fastMode":fast}));
+        self.hovered_choice = None;
+        cx.notify();
     }
 
     fn choose_model_without_effort(&mut self, model_id: String, cx: &mut Context<Self>) {
-        if self.props.task_id == "model-picker-preview" {
-            self.props.settings = json!({"model":model_id,"reasoningEffort":null,"fastMode":self.props.settings["fastMode"]});
-            cx.notify();
-            return;
-        }
-        let pane = self.pane.clone();
-        let task_id = self.props.task_id.clone();
-        pane.update(cx, |pane, cx| {
-            let Some(task) = pane.selected_task() else {
-                return;
-            };
-            let available = pane
-                .catalog
-                .as_ref()
-                .and_then(|catalog| catalog.get("models"))
-                .and_then(Value::as_array)
-                .is_some_and(|models| models.iter().any(|model| {
-                    model.get("id").and_then(Value::as_str) == Some(model_id.as_str())
-                        && model
-                            .get("reasoningEfforts")
-                            .and_then(Value::as_array)
-                            .is_none_or(Vec::is_empty)
-                }));
-            if pane.task_id == task_id && !pane.model_disabled() && available {
-                let fast = pane
-                    .selected_settings(&task)
-                    .get("fastMode")
-                    .cloned()
-                    .unwrap_or(Value::Null);
-                pane.save_model(
-                    json!({"model":model_id,"reasoningEffort":null,"fastMode":fast}),
-                    cx,
-                );
-            }
-        });
+        if self.props.disabled { return; }
+        let Some(model) = self.models().into_iter().find(|model| model["id"].as_str() == Some(&model_id)) else { return; };
+        if model["reasoningEfforts"].as_array().is_some_and(|levels| !levels.is_empty()) { return; }
+        let fast = if model["supportsFast"].as_bool() == Some(true) { self.settings()["fastMode"].clone() } else { Value::Null };
+        self.draft = Some(json!({"model":model_id,"reasoningEffort":null,"fastMode":fast}));
+        self.hovered_choice = None;
+        cx.notify();
     }
 
     fn save_fast_mode(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.props.disabled || !self.selected_model().is_some_and(|model| model["supportsFast"].as_bool() == Some(true)) { return; }
+        let mut next = self.settings().clone();
+        next["fastMode"] = json!(enabled);
+        self.draft = Some(next);
+        cx.notify();
+    }
+
+    fn apply_draft(&mut self, cx: &mut Context<Self>) {
+        let Some(mut next) = self.draft.take() else { return; };
+        if self.props.disabled || next == self.props.settings { return; }
         if self.props.task_id == "model-picker-preview" {
-            self.props.settings["fastMode"] = json!(enabled);
-            cx.notify();
+            self.props.settings = next;
             return;
         }
-        let pane = self.pane.clone();
         let task_id = self.props.task_id.clone();
-        let expected_model = self
-            .props
-            .settings
-            .get("model")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned();
-        pane.update(cx, |pane, cx| {
-            let Some(task) = pane.selected_task() else {
+        self.pane.update(cx, |pane, cx| {
+            if pane.task_id != task_id || pane.model_disabled() { return; }
+            let Some(task) = pane.selected_task() else { return; };
+            if next["model"].as_str() == Some("") {
+                if pane.selected_settings(&task) != next { pane.save_model(next, cx); }
                 return;
-            };
-            let settings = pane.selected_settings(&task);
-            let supported = pane
-                .catalog
-                .as_ref()
-                .and_then(|catalog| catalog.get("models"))
-                .and_then(Value::as_array)
-                .and_then(|models| {
-                    models.iter().find(|model| {
-                        model.get("id").and_then(Value::as_str)
-                            == settings.get("model").and_then(Value::as_str)
-                    })
-                })
-                .and_then(|model| model.get("supportsFast"))
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            if pane.task_id == task_id
-                && !pane.model_disabled()
-                && supported
-                && settings.get("model").and_then(Value::as_str) == Some(expected_model.as_str())
-            {
-                let mut next = settings;
-                next["fastMode"] = json!(enabled);
-                pane.save_model(next, cx);
             }
+            let Some(model) = pane.catalog.as_ref().and_then(|c| c["models"].as_array())
+                .and_then(|models| models.iter().find(|model| model["id"] == next["model"])) else { return; };
+            let levels = model["reasoningEfforts"].as_array();
+            let supported = if let Some(levels) = levels.filter(|levels| !levels.is_empty()) {
+                levels.iter().any(|level| level["id"] == next["reasoningEffort"])
+            } else { next["reasoningEffort"].is_null() };
+            if !supported { return; }
+            if model["supportsFast"].as_bool() != Some(true) { next["fastMode"] = Value::Null; }
+            if pane.selected_settings(&task) != next { pane.save_model(next, cx); }
         });
     }
 
@@ -885,7 +839,7 @@ impl ModelPopupState {
             self.close(cx); return true;
         }
         if key == "f" {
-            self.save_fast_mode(self.props.settings["fastMode"].as_bool() != Some(true), cx);
+            self.save_fast_mode(self.settings()["fastMode"].as_bool() != Some(true), cx);
             return true;
         }
         if !matches!(key, "left" | "right" | "up" | "down") { return false; }
@@ -894,8 +848,8 @@ impl ModelPopupState {
             || ["id", "name", "description"].iter().any(|field| model[*field].as_str().unwrap_or_default().to_lowercase().contains(&query))).collect();
         if models.is_empty() { return true; }
         let selected = self.hovered_choice.clone().unwrap_or_else(|| (
-            self.props.settings["model"].as_str().unwrap_or_default().to_owned(),
-            self.props.settings["reasoningEffort"].as_str().unwrap_or_default().to_owned()));
+            self.settings()["model"].as_str().unwrap_or_default().to_owned(),
+            self.settings()["reasoningEffort"].as_str().unwrap_or_default().to_owned()));
         let mut row = models.iter().position(|model| model["id"].as_str() == Some(&selected.0)).unwrap_or(0);
         if key == "up" { row = row.saturating_sub(1); }
         if key == "down" { row = (row + 1).min(models.len() - 1); }
@@ -911,7 +865,8 @@ impl ModelPopupState {
         cx.notify(); true
     }
 
-    fn close(&self, cx: &mut Context<Self>) {
+    fn close(&mut self, cx: &mut Context<Self>) {
+        self.apply_draft(cx);
         let pane = self.pane.clone();
         let task_id = self.props.task_id.clone();
         pane.update(cx, |pane, cx| {
@@ -925,7 +880,8 @@ impl ModelPopupState {
 
 impl Render for ModelPopupState {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let props = self.props.clone();
+        let mut props = self.props.clone();
+        props.settings = self.settings().clone();
         let selected_id = props.settings["model"].as_str().unwrap_or_default().to_owned();
         let selected_model = self.selected_model();
         let selected_efforts = selected_model.as_ref().and_then(|model| model["reasoningEfforts"].as_array()).cloned().unwrap_or_default();
@@ -944,7 +900,7 @@ impl Render for ModelPopupState {
         let track = cx.theme().muted;
         let edge = cx.theme().border;
         let secondary = cx.theme().muted_foreground;
-        let fast_rail_height = (models.len().min(7) as f32 * 54. - 12.).max(80.);
+        let fast_rail_height = (models.len().min(7) as f32 * 36. - 28.).max(64.);
         let font_ratio = props.font_ratio;
         let popup_state = cx.entity();
         let pane = self.pane.clone();
@@ -978,6 +934,35 @@ impl Render for ModelPopupState {
             "minimal" | "low" => 0, "medium" => 1, "high" => 2,
             "xhigh" | "extra-high" | "extra_high" => 3, "pro" | "max" | "ultra" => 4, _ => index.min(4),
         }];
+        let headers = columns.iter().enumerate().map(|(index, id)| {
+                let label = models
+                    .iter()
+                    .flat_map(|model| {
+                        model
+                            .get("reasoningEfforts")
+                            .and_then(Value::as_array)
+                            .into_iter()
+                            .flatten()
+                    })
+                    .find(|level| level.get("id").and_then(Value::as_str) == Some(id.as_str()))
+                    .and_then(|level| level.get("name").and_then(Value::as_str))
+                    .unwrap_or(id);
+                v_flex().w(popup_px(cell_width))
+                    .items_center()
+                    .gap_y(popup_px(4.))
+                    .child(
+                        div()
+                            .w(popup_px(18.))
+                            .h(popup_px(2.))
+                            .bg(rgb(effort_color(index))),
+                    )
+                    .child(
+                        div()
+                            .text_size(popup_px(10. * font_ratio))
+                            .text_color(if id == caption_effort_id { rgb(effort_color(index)).into() } else { secondary })
+                            .child(label.to_owned()),
+                    )
+            });
         let mut content = v_flex()
             .id("composer-model-picker")
             .track_focus(&self.focus)
@@ -986,7 +971,7 @@ impl Render for ModelPopupState {
             }))
             .debug_selector(|| "composer-model-picker".into())
             .w(popup_px(650.))
-            .h(popup_px(260. + models.len().clamp(4, 7) as f32 * 55.)
+            .h(popup_px(240. + models.len().clamp(4, 7) as f32 * 36. + if self.models().len() > 7 { 46. } else { 0. })
                 .min((window.viewport_size().height - popup_px(64.)).max(popup_px(1.))))
             .flex_shrink_0()
             .relative()
@@ -1002,17 +987,20 @@ impl Render for ModelPopupState {
                     .flex_shrink_0()
                     .items_center()
                     .px(popup_px(22.))
-                    .py(popup_px(16.))
+                    .h(popup_px(60.))
                     .border_b_1()
                     .border_color(edge)
-                    .gap_x(popup_px(8.))
                     .child(
-                        div()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_size(popup_px(14. * font_ratio))
-                            .child("Model"),
+                        v_flex()
+                            .w(popup_px(154.))
+                            .flex_shrink_0()
+                            .gap_y(popup_px(3.))
+                            .child(div().font_weight(FontWeight::SEMIBOLD)
+                                .text_size(popup_px(14. * font_ratio)).child("Model"))
+                            .child(div().text_size(popup_px(10. * font_ratio))
+                                .text_color(secondary).child(harness_label)),
                     )
-                    .child(div().px(popup_px(7.)).py(popup_px(3.)).rounded(popup_px(4.)).bg(cx.theme().muted).text_size(popup_px(10. * font_ratio)).text_color(secondary).child(harness_label))
+                    .child(h_flex().w(popup_px(360.)).flex_shrink_0().children(headers))
                     .child(
                         Button::new("model-picker-refresh")
                             .ml_auto()
@@ -1184,7 +1172,7 @@ impl Render for ModelPopupState {
                 .w_full()
                 .flex_shrink_0()
                 .debug_selector(move || row_selector.clone())
-                .min_h(popup_px(54.))
+                .h(popup_px(36.))
                 .items_center()
                 .child(
                     div().w(popup_px(176.)).pl(popup_px(22.))
@@ -1205,37 +1193,7 @@ impl Render for ModelPopupState {
         } else if !self.models().is_empty() && models.is_empty() {
             content = content.child(model_note("No models match this search.", font_ratio, cx));
         } else if !models.is_empty() {
-            let headers = columns.iter().enumerate().map(|(index, id)| {
-                let label = models
-                    .iter()
-                    .flat_map(|model| {
-                        model
-                            .get("reasoningEfforts")
-                            .and_then(Value::as_array)
-                            .into_iter()
-                            .flatten()
-                    })
-                    .find(|level| level.get("id").and_then(Value::as_str) == Some(id.as_str()))
-                    .and_then(|level| level.get("name").and_then(Value::as_str))
-                    .unwrap_or(id);
-                v_flex().w(popup_px(cell_width))
-                    .items_center()
-                    .gap_y(popup_px(4.))
-                    .child(
-                        div()
-                            .w(popup_px(18.))
-                            .h(popup_px(2.))
-                            .bg(rgb(effort_color(index))),
-                    )
-                    .child(
-                        div()
-                            .text_size(popup_px(10. * font_ratio))
-                            .text_color(if id == caption_effort_id { rgb(effort_color(index)).into() } else { secondary })
-                            .child(label.to_owned()),
-                    )
-            });
             content = content
-                .child(h_flex().w_full().h(popup_px(50.)).flex_shrink_0().items_center().child(div().w(popup_px(176.)).pl(popup_px(22.))).child(h_flex().children(headers)))
                 .child(
                     div()
                         .id("model-picker-model-list")
@@ -1247,7 +1205,7 @@ impl Render for ModelPopupState {
                         .overflow_y_scroll()
                         .flex()
                         .flex_col()
-                        .gap_y(popup_px(1.))
+                        .gap_y(popup_px(0.))
                         .children(model_rows),
                 );
         }
@@ -1271,7 +1229,7 @@ impl Render for ModelPopupState {
                 .w(popup_px(50.)).h(popup_px(fast_rail_height + 46.)).disabled(props.disabled || !supports_fast).accessibility_label("Fast mode").tooltip(fast_description)
                 .child(div().relative().w(popup_px(50.)).h(popup_px(fast_rail_height + 46.)).flex().flex_col().items_center().child(div().text_size(popup_px(10. * font_ratio)).text_color(if fast_on { rgb(0x32c8ff).into() } else { secondary }).child(h_flex().gap_x(popup_px(4.)).child(Icon::default().data(icon_assets::Zap.1).with_size(popup_px(10.))).child("FAST"))).child(div().mt(popup_px(8.)).w(popup_px(50.)).h(popup_px(fast_rail_height)).relative().rounded_full().border_1().border_color(if fast_on { rgb(0x32c8ff).into() } else { edge }).bg(if fast_on { rgb(0x32c8ff).opacity(0.10).into() } else { track }).flex().flex_col().items_center().child(div().absolute().top(popup_px(16.)).bottom(popup_px(16.)).left(popup_px(24.)).w(popup_px(1.)).bg(edge)).when(fast_on, |rail| rail.justify_start()).when(!fast_on, |rail| rail.justify_end()).child(div().m(popup_px(3.)).w(popup_px(34.)).h(popup_px(34.)).rounded_full().border_2().border_color(if fast_on { rgb(0x32c8ff).into() } else { edge }).bg(if fast_on { rgb(0x32c8ff).into() } else { secondary }).flex().items_center().justify_center().text_color(track).child(Icon::default().data(icon_assets::Zap.1).with_size(popup_px(15.))))))
                 .on_click(move |_, _, cx| popup_state.update(cx, |state, state_cx| state.save_fast_mode(!fast_on, state_cx)));
-            content = content.child(h_flex().absolute().right(popup_px(32.)).top(popup_px(if self.models().len() > 7 { 116. } else { 70. })).child(fast_button));
+            content = content.child(h_flex().absolute().right(popup_px(32.)).top(popup_px(if self.models().len() > 7 { 110. } else { 64. })).child(fast_button));
         }
 
         if let Some(model) = caption_model.as_ref() {
@@ -1325,30 +1283,11 @@ impl Render for ModelPopupState {
                             .accessibility_label("Use harness defaults")
                             .on_click(move |_, _, cx| {
                                 popup_state.update(cx, |state, cx| {
-                                    if state.props.task_id == "model-picker-preview" {
-                                        state.props.settings = json!({"model":"gpt-6-sol","reasoningEffort":"high","fastMode":false});
+                                    if !state.props.disabled {
+                                        state.draft = Some(json!({"model":"","reasoningEffort":null,"fastMode":null}));
                                         state.hovered_choice = None;
                                         cx.notify();
-                                        return;
                                     }
-                                    let pane = state.pane.clone();
-                                    let task = state.props.task_id.clone();
-                                    pane.update(cx, |pane, cx| {
-                                        if pane.task_id == task
-                                            && !pane.model_disabled()
-                                            && pane.selected_task().is_some_and(|task| {
-                                                pane.selected_settings(&task)
-                                                    .get("model")
-                                                    .and_then(Value::as_str)
-                                                    .is_some_and(|id| !id.is_empty())
-                                            })
-                                        {
-                                            pane.save_model(
-                                        json!({"model":"","reasoningEffort":null,"fastMode":null}),
-                                        cx,
-                                    );
-                                        }
-                                    });
                                 });
                             }),
                     )
@@ -1435,12 +1374,18 @@ pub(super) fn model_menu(
     .on_open_change({
         let entity = entity.clone();
         let task_id = task_id.clone();
-        move |open, _, cx| {
-            let entity = entity.clone();
+        let props = props.clone();
+        let state_key = state_key.clone();
+        move |open, window, cx| {
+            if !*open {
+                let factory_props = props.clone();
+                let factory_pane = entity.clone();
+                let panel = window.use_keyed_state(SharedString::from(state_key.clone()), cx,
+                    move |window, cx| ModelPopupState::new(factory_props, factory_pane, window, cx));
+                panel.update(cx, |state, cx| state.apply_draft(cx));
+            }
             let _ = entity.update(cx, |pane, cx| {
-                if pane.task_id == task_id {
-                    pane.set_model_picker_open(*open, cx);
-                }
+                if pane.task_id == task_id { pane.set_model_picker_open(*open, cx); }
             });
         }
     })
