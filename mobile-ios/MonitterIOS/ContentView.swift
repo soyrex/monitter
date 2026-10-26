@@ -558,37 +558,6 @@ private struct WebContentView: UIViewRepresentable {
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
             failed(error)
         }
-        private func openExternalURL(_ url: URL) -> Bool {
-            guard let scheme = url.scheme?.lowercased(),
-                  scheme == "http" || scheme == "https" || scheme == "mailto" else { return false }
-            UIApplication.shared.open(url)
-            return true
-        }
-        func webView(
-            _ webView: WKWebView,
-            decidePolicyFor navigationAction: WKNavigationAction,
-            decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
-        ) {
-            if navigationAction.navigationType == .linkActivated,
-               let url = navigationAction.request.url,
-               openExternalURL(url) {
-                decisionHandler(.cancel)
-                return
-            }
-            decisionHandler(.allow)
-        }
-        func webView(
-            _ webView: WKWebView,
-            createWebViewWith configuration: WKWebViewConfiguration,
-            for navigationAction: WKNavigationAction,
-            windowFeatures: WKWindowFeatures
-        ) -> WKWebView? {
-            if navigationAction.targetFrame == nil,
-               let url = navigationAction.request.url {
-                _ = openExternalURL(url)
-            }
-            return nil
-        }
         func webView(
             _ webView: WKWebView,
             requestMediaCapturePermissionFor origin: WKSecurityOrigin,
