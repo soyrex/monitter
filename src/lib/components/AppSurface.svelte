@@ -476,7 +476,10 @@
   onMount(() => {
     if (embedded || !isOwnerRelayBrowser()) return;
     companionAvailable = isCompanionAvailable();
-    return subscribeOwnerRelayConnection(connected => { companionConnected = connected; });
+    return subscribeOwnerRelayConnection(connected => {
+      companionConnected = connected;
+      if (connected) debouncedReload();
+    });
   });
   function openCompanion() {
     if (!companionAvailable || !snapshot) return;
@@ -1772,6 +1775,7 @@
     const wanted = new Map<string, { id: string; hostId: string; cwd: string }>();
     for (const terminal of workspace.terminals) wanted.set(terminal.id, terminal);
     const replacements: Record<string, string> = {};
+    if (!wanted.size) return replacements;
     const live = await bridge.listTerminals();
     await Promise.all([...wanted.values()].map(async terminal => {
       if (!snapshot?.hosts.some(host => host.id === terminal.hostId) || !terminal.cwd.trim()) { unavailableTerminals.add(terminal.id); return; }
@@ -2619,16 +2623,48 @@
     if (remaining.length !== optimisticMessages.length) optimisticMessages = remaining.map(message => ({...message, baselineIds: new Set([...message.baselineIds, ...used]), baselineQueuedIds: new Set([...message.baselineQueuedIds, ...usedQueued])}));
   }
   let workspaceConnected = $state<boolean | null>(null);
+  let restoringInitialWorkspace = false;
+  let snapshotLoadError = '';
+  async function restoreInitialWorkspace() {
+    if (embedded || workspaceReady || restoringInitialWorkspace || !snapshot) return;
+    restoringInitialWorkspace = true;
+    try {
+      workspaceSet = loadWorkspaceSet();
+      if (workspaceSet) {
+        seedSharedComposers(workspaceSet);
+        activeWorkspaceKey = workspaceSet.activeWorkspaceKey;
+        const activeWorkspace = workspaceSet.workspaces[activeWorkspaceKey];
+        const terminalIds = await restoreWorkspaceTerminals(activeWorkspace);
+        await restoreWorkspace(activeWorkspace, terminalIds);
+      }
+    } catch (reason) {
+      // A disconnected read has not corrupted the saved layout. Leave it
+      // untouched and retry after a successful snapshot read. Terminal opens
+      // handle their own errors and are never replayed by this retry.
+      if (isOwnerRelayDisconnectedError(reason)) return;
+      workspacePersistenceDisabled = true;
+      workspacePersistenceError = text(reason);
+      error = `Could not restore workspace state: ${workspacePersistenceError}`;
+    } finally {
+      restoringInitialWorkspace = false;
+    }
+    workspaceReady = true;
+    if (!workspacePersistenceDisabled) persistWorkspace();
+  }
   async function reload() {
     const ticket = ++snapshotIssued;
     try {
       applySnapshot(await bridge.getSnapshot(), ticket);
+      if (snapshotLoadError && error === snapshotLoadError) error = '';
+      snapshotLoadError = '';
       scheduleUsageRefresh();
       workspaceConnected = bridge.available;
+      await restoreInitialWorkspace();
     } catch (reason) {
       if (isOwnerRelayDisconnectedError(reason)) return;
       workspaceConnected = false;
-      error = text(reason);
+      snapshotLoadError = text(reason);
+      error = snapshotLoadError;
     }
   }
   async function run<T>(
@@ -2715,22 +2751,6 @@
         }
         unlisten = stopListening;
         await reload();
-        try {
-          workspaceSet = loadWorkspaceSet();
-          if (workspaceSet) {
-            seedSharedComposers(workspaceSet);
-            activeWorkspaceKey = workspaceSet.activeWorkspaceKey;
-            const activeWorkspace = workspaceSet.workspaces[activeWorkspaceKey];
-            const terminalIds = await restoreWorkspaceTerminals(activeWorkspace);
-            await restoreWorkspace(activeWorkspace, terminalIds);
-          }
-        } catch (reason) {
-          workspacePersistenceDisabled = true;
-          workspacePersistenceError = text(reason);
-          error = `Could not restore workspace state: ${workspacePersistenceError}`;
-        }
-        workspaceReady = true;
-        if (!workspacePersistenceDisabled) persistWorkspace();
         if(nativeRuntime) {
           const stopCloseTab = await listen('monitter-close-tab', () => {
             if (mounted) {

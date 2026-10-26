@@ -4,13 +4,29 @@
   let { children }: { children: Snippet } = $props();
   let ready = $state(!isLanBrowser()), key = $state(''), error = $state(''), pending = $state(false);
   let checking = $state(isLanBrowser());
+  let legacyAccess = $state(false);
+  let pairingPin = $state('');
+  const pairingAvailable = typeof window !== 'undefined' && window.isSecureContext && !!window.crypto?.subtle;
+  function pair() {
+    if (!pairingAvailable || !/^\d{9}$/.test(pairingPin.replace(/[\s-]/g, ''))) return;
+    // Keep the one-time PIN out of URLs, browser history and persistent storage.
+    try {
+      sessionStorage.setItem('monitter-pairing-pin', pairingPin.replace(/[\s-]/g, ''));
+      window.location.assign('/mobile?owner=1');
+    } catch { error = 'Could not carry the PIN to pairing. Open /mobile?owner=1 and enter it there.'; }
+  }
+  async function useLegacyAccess() {
+    legacyAccess = true; error = '';
+    if (!await lanAccessCodeRequired()) ready = true;
+    else if (key) await connect();
+  }
   async function connect() {
     if (pending) return;
     const connectingKey = key.trim();
     pending = true; error = '';
     try {
       setAccessKey(connectingKey);
-      await lanInvoke('get_snapshot');
+      await lanInvoke('get_command_capabilities');
       rememberAccessKey(connectingKey);
       ready = true;
     }
@@ -25,6 +41,11 @@
     const expired = () => { ready = false; key = ''; error = 'Reconnect with the current six-digit code from the desktop app.'; };
     window.addEventListener('monitter-lan-unauthorized', expired);
     let mounted = true;
+    if (pairingAvailable) {
+      checking = false;
+      return () => { mounted = false; window.removeEventListener('monitter-lan-unauthorized', expired); };
+    }
+    legacyAccess = true;
     void lanAccessCodeRequired().then(required => {
       if (!mounted) return;
       checking = false;
@@ -38,12 +59,24 @@
   <main class="lan-login"><p role="status">Connecting to Monitter…</p></main>
 {:else}
   <main class="lan-login">
-    <form onsubmit={event => { event.preventDefault(); void connect(); }}>
+    <form onsubmit={event => { event.preventDefault(); if (legacyAccess) void connect(); else pair(); }}>
       <h1>Monitter</h1>
       <p>Connect to the Monitter app on this Mac.</p>
-      <label>Access code<input type="text" inputmode="numeric" pattern={'[0-9]{6}'} maxlength="6" bind:value={key} autocomplete="one-time-code" placeholder="000000" required /></label>
-      <p class="hint">Enter the six-digit code shown in the desktop app under Settings → LAN access.</p>
+      {#if legacyAccess}
+      <label>LAN access code<input type="text" inputmode="numeric" pattern={'[0-9]{6}'} maxlength="6" bind:value={key} autocomplete="one-time-code" placeholder="000000" required /></label>
+      <p class="hint">Enter the six-digit code from Settings → LAN access.</p>
       <button disabled={pending || !/^[0-9]{6}$/.test(key)}>{pending ? 'Connecting…' : 'Connect'}</button>
+      <button type="button" onclick={()=>legacyAccess=false}>Use pairing PIN</button>
+      {:else}
+      {#if pairingAvailable}
+      <label>Pairing PIN<input inputmode="numeric" autocomplete="one-time-code" maxlength="11" bind:value={pairingPin} placeholder="123 456 789" required /></label>
+      <p class="hint">Use the one-time PIN from Settings → Pair a phone, then approve this device on your desktop. It will reconnect without another code.</p>
+      <button disabled={!/^\d{9}$/.test(pairingPin.replace(/[\s-]/g,''))}>Pair this device</button>
+      {:else}
+      <p class="hint">Pairing needs the iPhone app or a secure HTTPS connection. This plain HTTP LAN address can still use its LAN access code.</p>
+      {/if}
+      <button type="button" onclick={()=>void useLegacyAccess()}>Use LAN access code</button>
+      {/if}
       {#if error}<p role="alert">{error}</p>{/if}
     </form>
   </main>

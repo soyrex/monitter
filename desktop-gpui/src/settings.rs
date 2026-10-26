@@ -1208,6 +1208,9 @@ impl Desktop {
                     div().child("Opening agent settings…").into_any_element()
                 }
             }
+            "pairing" => self.pairing_host.as_ref()
+                .map(|host| host.clone().into_any_element())
+                .unwrap_or_else(|| div().child("Pairing host is waiting for the desktop backend.").into_any_element()),
             "lan" => self.window.native_settings
                 .as_ref()
                 .and_then(|state| state.lan.clone())

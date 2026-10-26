@@ -917,6 +917,12 @@ impl BackendService {
 
     /// Explicit owner-native listener controls; never dispatched via LAN/relay.
     /// All three methods can perform I/O and belong on a background worker.
+    /// Approved pairing host forwarding; intentionally excludes native-only commands
+    /// and preserves LAN snapshot mutation results for remote clients.
+    pub fn pairing_host_invoke(&self, command: &str, args: Value) -> Result<Value, String> {
+        self.ensure_running()?;
+        self.0.service.lan_invoke(command, args)
+    }
     pub fn read_lan_status(&self) -> Result<NativeLanStatus, String> {
         let _control = self
             .0
@@ -1685,6 +1691,9 @@ impl DesktopService {
             "schedule_action",
             serde_json::json!({"id":id,"action":action}),
         )
+    }
+    pub fn pairing_host_invoke(&self, command: &str, args: Value) -> Result<Value, String> {
+        self.0.call("pairing_host_invoke", serde_json::json!({"command":command,"args":args}))
     }
     pub fn read_lan_status(&self) -> Result<NativeLanStatus, String> {
         self.0.call("read_lan_status", Value::Null)

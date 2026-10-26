@@ -3,6 +3,8 @@ import WebKit
 import Network
 import Speech
 import AVFoundation
+import CryptoKit
+import Security
 
 private enum ConnectionMode: Equatable {
     case chooser
@@ -13,6 +15,7 @@ private enum ConnectionMode: Equatable {
 struct ContentView: View {
     @AppStorage("ownerLANBaseURL") private var savedLANAddress = ""
     @AppStorage("lastConnectionMode") private var savedMode = ""
+    @AppStorage("persistentPairingFlowVersion") private var pairingFlowVersion = 0
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var connectionRecovery = WebConnectionRecovery()
     @State private var mode: ConnectionMode = .paired
@@ -93,7 +96,13 @@ struct ContentView: View {
             }
         }
         .task {
-            if savedMode == "lan", !savedLANAddress.isEmpty, let url = LANAddress.parse(savedLANAddress) {
+            // Migrate old manual-network launches to the bundled QR flow once.
+            // Retain the old address in Settings, and respect later explicit choices.
+            if pairingFlowVersion < 1 {
+                pairingFlowVersion = 1
+                savedMode = "paired"
+                mode = .paired
+            } else if savedMode == "lan", !savedLANAddress.isEmpty, let url = LANAddress.parse(savedLANAddress) {
                 mode = .lan(url)
                 webURL = url
             } else {
@@ -111,7 +120,9 @@ struct ContentView: View {
         .fullScreenCover(isPresented: $scannerPresented) {
             QRScannerView(onScan: { invitation in
                 scannerPresented = false
-                deliver(invitation: invitation)
+                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(300)) {
+                    connectionRecovery.deliverPairingInvitation(invitation)
+                }
             }, onCancel: {
                 scannerPresented = false
             })
@@ -193,13 +204,6 @@ struct ContentView: View {
         pairedError = nil
         pageError = nil
         startServerIfNeeded()
-    }
-
-    private func deliver(invitation: String) {
-        guard case .paired = mode,
-              let data = try? JSONEncoder().encode(invitation),
-              let value = String(data: data, encoding: .utf8) else { return }
-        webView?.evaluateJavaScript("window.dispatchEvent(new CustomEvent('monitter:qr', { detail: \(value) }));")
     }
 
     private func startServerIfNeeded() {
@@ -331,6 +335,20 @@ private final class WebConnectionRecovery: ObservableObject {
         queueResume()
     }
 
+    func deliverPairingInvitation(_ invitation: String) {
+        guard let trustedURL, isPairedLoopback(trustedURL), let webView,
+              matchesTrustedOrigin(webView.url, trustedURL),
+              let data = try? JSONEncoder().encode(invitation),
+              let value = String(data: data, encoding: .utf8) else { return }
+        webView.evaluateJavaScript("window.dispatchEvent(new CustomEvent('monitter:qr', { detail: \(value) }));") { _, error in
+            if let error {
+                NSLog("Monitter QR delivery failed: %@", error.localizedDescription)
+            } else {
+                NSLog("Monitter QR invitation delivered to paired web view")
+            }
+        }
+    }
+
     private func networkPathChanged(status: NWPath.Status) {
         // NWPathMonitor reports its initial state immediately. It is not a
         // recovery, and reacting to it would duplicate the launch connection.
@@ -388,6 +406,7 @@ private struct WebContentView: UIViewRepresentable {
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
         configuration.userContentController.add(context.coordinator, name: "scanQR")
         configuration.userContentController.add(context.coordinator, name: "changeConnection")
+        configuration.userContentController.addScriptMessageHandler(PairingKeychainBridge(), contentWorld: .page, name: "monitterPairing")
         configuration.userContentController.add(context.coordinator, name: "monitterSpeech")
         configuration.userContentController.add(context.coordinator, name: "monitterCompanion")
         let view = MonitterWebView(frame: .zero, configuration: configuration)
@@ -421,6 +440,7 @@ private struct WebContentView: UIViewRepresentable {
     }
 
     static func dismantleUIView(_ uiView: WKWebView, coordinator: Coordinator) {
+        uiView.configuration.userContentController.removeScriptMessageHandler(forName: "monitterPairing")
         uiView.configuration.userContentController.removeScriptMessageHandler(forName: "monitterSpeech")
         uiView.configuration.userContentController.removeScriptMessageHandler(forName: "monitterCompanion")
         coordinator.cancelSpeech()
@@ -819,5 +839,98 @@ private struct WebContentView: UIViewRepresentable {
                 emit(sessionId: sessionId, type: "error", error: error.localizedDescription)
             }
         }
+    }
+}
+
+
+/// The bundled, main-frame pairing page is the only caller. Pairing identity and
+/// locator survive WebKit storage eviction and app updates in device-only Keychain.
+private final class PairingKeychainBridge: NSObject, WKScriptMessageHandlerWithReply {
+    private struct Record: Codable {
+        var privateKey: Data
+        var invitation: String?
+        var savedAt: Double?
+    }
+    private let query: [String: Any] = [
+        kSecClass as String: kSecClassGenericPassword,
+        kSecAttrService as String: "com.soyrex.monitter.ios.pairing.v1",
+        kSecAttrAccount as String: "desktop-pairing"
+    ]
+    private func load() throws -> Record? {
+        var request = query
+        request[kSecReturnData as String] = true
+        request[kSecMatchLimit as String] = kSecMatchLimitOne
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(request as CFDictionary, &result)
+        if status == errSecItemNotFound { return nil }
+        guard status == errSecSuccess, let data = result as? Data else {
+            throw NSError(domain: "MonitterPairing", code: Int(status), userInfo: [NSLocalizedDescriptionKey: "Unlock your iPhone to read its saved pairing."])
+        }
+        return try JSONDecoder().decode(Record.self, from: data)
+    }
+    private func save(_ record: Record) throws {
+        let data = try JSONEncoder().encode(record)
+        let attributes: [String: Any] = [kSecValueData as String: data,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly]
+        var status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+        if status == errSecItemNotFound {
+            var insert = query
+            attributes.forEach { insert[$0.key] = $0.value }
+            status = SecItemAdd(insert as CFDictionary, nil)
+        }
+        guard status == errSecSuccess else {
+            throw NSError(domain: "MonitterPairing", code: Int(status), userInfo: [NSLocalizedDescriptionKey: "Could not securely remember this desktop. Retry before closing the app."])
+        }
+    }
+    func userContentController(_ userContentController: WKUserContentController,
+                               didReceive message: WKScriptMessage,
+                               replyHandler: @escaping (Any?, String?) -> Void) {
+        let origin = message.frameInfo.securityOrigin
+        guard message.frameInfo.isMainFrame, origin.protocol == "http",
+              origin.host == "127.0.0.1", origin.port == 31977,
+              let body = message.body as? [String: Any], let action = body["action"] as? String else {
+            replyHandler(nil, "Pairing storage is available only to the bundled Monitter app.")
+            return
+        }
+        do {
+            var record = try load()
+            switch action {
+            case "identity":
+                if record == nil {
+                    record = Record(privateKey: P256.KeyAgreement.PrivateKey().derRepresentation)
+                    try save(record!)
+                }
+                let key = try P256.KeyAgreement.PrivateKey(derRepresentation: record!.privateKey)
+                replyHandler(["privateKeyPkcs8": key.derRepresentation.base64EncodedString(),
+                              "publicKeyRaw": key.publicKey.x963Representation.base64EncodedString()], nil)
+            case "load":
+                if let record, let invitation = record.invitation, let savedAt = record.savedAt {
+                    replyHandler(["invitation": invitation, "savedAt": savedAt], nil)
+                } else { replyHandler(NSNull(), nil) }
+            case "save":
+                guard var existing = record, let invitation = body["invitation"] as? String,
+                      invitation.utf8.count <= 8192,
+                      let data = invitation.data(using: .utf8),
+                      let value = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      value["version"] as? Int == 2,
+                      value["publicKey"] is String, value["room"] is String,
+                      let savedAt = body["savedAt"] as? Double, savedAt.isFinite else {
+                    replyHandler(nil, "Pairing record is invalid or device identity is missing.")
+                    return
+                }
+                existing.invitation = invitation
+                existing.savedAt = savedAt
+                try save(existing)
+                replyHandler(true, nil)
+            case "forget":
+                if var existing = record {
+                    existing.invitation = nil
+                    existing.savedAt = nil
+                    try save(existing)
+                }
+                replyHandler(true, nil)
+            default: replyHandler(nil, "Unknown pairing storage action.")
+            }
+        } catch { replyHandler(nil, error.localizedDescription) }
     }
 }

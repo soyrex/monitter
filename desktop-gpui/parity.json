@@ -373,7 +373,7 @@
         "relay-cloudflare/"
       ],
       "status": "pending",
-      "evidence": "Preserve the existing LAN/mobile command contract and sharing, pairing, remote control, owner relay, and visitor permissions. GPUI parity must not change mobile behavior."
+      "evidence": "Native Rust pairing uses one retained profile-scoped runtime, a fixed nine-digit public locator, explicit device and owner approvals, remembered grants, a private-LAN WebSocket listener, and authenticated Cloudflare relay fallback. Direct-first routing passed a native-compatible P-256/AES-GCM integration path without opening the relay; a failed direct candidate then completed the same encrypted approval flow through the relay. The Durable Object registry tests passed persistent create, refresh, lookup, revoke, replay, and private direct-candidate validation. The current web bundle and signed iOS 0.4.1 (9) app were rebuilt, strict deep codesign passed, and the embedded Web tree exactly matched source. That app was installed over the existing physical iPhone app and relaunched twice; the Keychain-backed phone identity reconnected without rescanning and refreshed both remembered device grants. The live session used the public workers.dev fallback while the desktop retained its LAN listener, with no Tailscale dependency. Sharing parity remains pending."
     },
     {
       "id": "usage_metrics_and_process_inspection",

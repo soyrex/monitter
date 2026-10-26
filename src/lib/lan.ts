@@ -12,7 +12,16 @@ export const isAndroidBundleOrigin = () => typeof window !== 'undefined' &&
   window.location.origin === 'https://appassets.androidplatform.net';
 export const isMobileBundleOrigin = () => isIOSBundleOrigin() || isAndroidBundleOrigin();
 /** The bundled root is always an owner-relay workspace, even if a WebView drops the query. */
-export const isOwnerRelayBrowser = () => isMobileBundleOrigin() && window.location.pathname === '/';
+export const isOwnerRelayBrowser = () => {
+  if (typeof window === 'undefined' || window.location.pathname !== '/') return false;
+  if (isMobileBundleOrigin()) return true;
+  // Web pairing uses the same approved device identity as the phone. Plain
+  // HTTP LAN origins cannot use the Web Crypto handshake; retain their LAN gate.
+  if (!window.isSecureContext || !window.crypto?.subtle) return false;
+  if (new URLSearchParams(window.location.search).get('monitter-owner-relay') === '1') return true;
+  try { return localStorage.getItem('monitter-owner-pairing') === '1'; }
+  catch { return false; }
+};
 
 export const isLanBrowser = () => typeof document !== 'undefined' && (
   (import.meta.env.DEV && (import.meta.env.MODE === 'monitter-web' || import.meta.env.MODE === 'monitter-app-ui')) ||

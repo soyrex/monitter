@@ -1,6 +1,6 @@
 /** Public rendezvous only. Private keys and transport secrets never enter this API. */
-export const DEFAULT_RELAY = 'wss://api.monitter.com/relay';
-export interface PairingRegistration { code: string; expiresAt: number; revocationToken: string; }
+export const DEFAULT_RELAY = 'wss://monitter-opaque-relay.soyrex.workers.dev/relay';
+export interface PairingRegistration { code: string; expiresAt: number | null; revocationToken: string; persistent?: boolean; }
 function endpoint(relayUrl: string): URL {
   const url = new URL(relayUrl);
   if (url.protocol !== 'wss:' && !(url.protocol === 'ws:' && ['localhost','127.0.0.1','[::1]'].includes(url.hostname))) throw new Error('A secure relay is required.');
@@ -52,7 +52,7 @@ export async function redeemPairingCode(code: string, relayUrl = DEFAULT_RELAY):
   if (!/^\d{9}$/.test(clean)) throw new Error('Enter the nine-digit device key shown on your desktop.');
   const url = endpoint(relayUrl); url.pathname += '/' + clean;
   const value = await request(url, {cache:'no-store'}, 15000, payload);
-  if (!value.invitation || value.invitation.version !== 2 || 'secret' in value.invitation || value.invitation.relayUrl !== relayUrl || value.expiresAt <= Date.now()) throw new Error('Invalid or expired device key.');
+  if (!value.invitation || value.invitation.version !== 2 || 'secret' in value.invitation || value.invitation.relayUrl !== relayUrl || !(value.persistent === true && value.expiresAt === null || typeof value.expiresAt === 'number' && value.expiresAt > Date.now())) throw new Error('Invalid or expired device key.');
   return JSON.stringify(value.invitation);
 }
 export async function revokePairingCode(relayUrl: string, registration: PairingRegistration): Promise<void> {
@@ -62,6 +62,25 @@ export async function revokePairingCode(relayUrl: string, registration: PairingR
       if (!response.ok && response.status !== 404 && response.status !== 410) throw new Error('Could not revoke device key.');
     });
   } catch (reason) {
-    throw new Error(`${reason instanceof Error ? reason.message : 'Could not revoke device key.'} Unclaimed device keys expire automatically after five minutes.`);
+    throw new Error(`${reason instanceof Error ? reason.message : 'Could not revoke device key.'} ${registration.persistent ? 'The fixed PIN remains reserved until deletion succeeds.' : 'Unclaimed device keys expire automatically after five minutes.'}`);
   }
+}
+
+/** A stable rendezvous locator. Knowing this PIN never approves a device. */
+export async function registerPersistentPairingCode(invitationJson: string, saved?: PairingRegistration, managementToken?: string): Promise<PairingRegistration> {
+  const invitation = JSON.parse(invitationJson);
+  if (invitation.version !== 2 || 'secret' in invitation) throw new Error('Persistent pairing requires a current desktop identity.');
+  if (!saved && !/^[A-Za-z0-9_-]{43}$/.test(managementToken ?? '')) throw new Error('Save a desktop pairing identity before reserving its PIN.');
+  const url = endpoint(invitation.relayUrl);
+  if (saved) url.pathname += '/' + saved.code;
+  const value = await request(url, {
+    method: saved ? 'PUT' : 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + (saved?.revocationToken ?? managementToken) },
+    body: JSON.stringify(saved ? { invitation } : { invitation, persistent: true }),
+  }, 15000, payload);
+  if (!/^\d{9}$/.test(value.code) || typeof value.revocationToken !== 'string' || value.revocationToken.length < 32
+      || value.persistent !== true || value.expiresAt !== null || saved && value.code !== saved.code) {
+    throw new Error('This relay does not support a fixed pairing PIN yet. Update the relay before using this feature.');
+  }
+  return value;
 }

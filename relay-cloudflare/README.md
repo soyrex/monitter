@@ -50,3 +50,16 @@ to Node's DNS lookup and retains `api.monitter.com` for SNI and TLS validation.
 future deploy will create the DNS record and certificate only after the account
 owner has confirmed that the Cloudflare zone is active and has no conflicting
 CNAME. No deploy, DNS change, or account operation is performed by this project.
+
+## Persistent desktop PINs
+
+New desktop hosts opt in to a fixed random nine-digit rendezvous PIN. It is a
+public locator and never grants device or owner access by itself; existing
+verification and explicit desktop approval remain required. The desktop saves a
+random management token before POST, so a lost response can recover the same PIN
+by retrying with that token. Authenticated PUT updates the invitation and DELETE
+revokes the locator. Legacy five-minute single-use codes remain supported.
+
+Persistent rows have no automatic expiry and count toward the registry capacity.
+A desktop must revoke its PIN before changing relays. The local Node relay has
+in-memory endpoint parity only, so its registrations do not survive restart.

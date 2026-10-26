@@ -1,3 +1,4 @@
+import type { PairingRegistration } from './pairing-code';
 import { bytesToBase64url, generatePairingKeyPair, randomBytes } from './secure-session';
 
 export interface RememberedController {
@@ -16,6 +17,9 @@ export interface DesktopPairingRecord {
   devices: RememberedController[];
   /** Deliberately separate from controller access; never inferred from devices. */
   ownerDevices: RememberedController[];
+  /** Stable locator and its private management token; never sent to phones. */
+  pairingRegistration?: PairingRegistration;
+  pairingManagementToken?: string;
 }
 export interface MobilePairingRecord {
   version: 1;
@@ -29,6 +33,28 @@ const STORE = 'pairings';
 const DAY = 86_400_000;
 export const MAX_INACTIVITY_DAYS = 36_500;
 let writes: Promise<void> = Promise.resolve();
+let mobileIdentity: Promise<MobilePairingRecord['identity']> | null = null;
+
+// Native Keychain storage is exposed only by the bundled, trusted main frame.
+function nativePairing(): { postMessage(message: Record<string, unknown>): Promise<any> } | undefined {
+  return typeof window === 'undefined' ? undefined : (window as any).webkit?.messageHandlers?.monitterPairing;
+}
+function decodeNativeKey(value: string): Uint8Array {
+  return Uint8Array.from(atob(value), char => char.charCodeAt(0));
+}
+let nativeIdentity: Promise<MobilePairingRecord['identity']> | null = null;
+function getNativeIdentity(): Promise<MobilePairingRecord['identity']> {
+  if (!nativeIdentity) {
+    nativeIdentity = (async () => {
+      const value = await nativePairing()!.postMessage({ action: 'identity' });
+      const privateKey = await crypto.subtle.importKey('pkcs8', decodeNativeKey(value.privateKeyPkcs8), { name: 'ECDH', namedCurve: 'P-256' }, false, ['deriveBits']);
+      const publicKey = await crypto.subtle.importKey('raw', decodeNativeKey(value.publicKeyRaw), { name: 'ECDH', namedCurve: 'P-256' }, true, []);
+      return { keyPair: { privateKey, publicKey } };
+    })();
+    void nativeIdentity.catch(() => { nativeIdentity = null; });
+  }
+  return nativeIdentity;
+}
 
 export function deviceExpiresAt(device: RememberedController, days: number | null): number | null {
   return days === null ? null : device.lastAccessAt + days * DAY;
@@ -76,6 +102,8 @@ function validateDesktop(value: unknown): asserts value is DesktopPairingRecord 
     || !/^[A-Za-z0-9_-]{22,128}$/.test(record.identity.room)
     || typeof record.enabled !== 'boolean'
     || !(record.inactivityDays === null || Number.isInteger(record.inactivityDays) && record.inactivityDays >= 1 && record.inactivityDays <= MAX_INACTIVITY_DAYS)
+    || (record.pairingManagementToken !== undefined && !/^[A-Za-z0-9_-]{43}$/.test(record.pairingManagementToken))
+    || (record.pairingRegistration !== undefined && (!/^\d{9}$/.test(record.pairingRegistration.code) || record.pairingRegistration.persistent !== true || record.pairingRegistration.expiresAt !== null || typeof record.pairingRegistration.revocationToken !== 'string' || record.pairingRegistration.revocationToken.length < 32))
     || !validDevices(record.devices) || !validDevices(record.ownerDevices)) {
     throw new Error('Saved desktop pairing is invalid. Revoke saved devices and pair again.');
   }
@@ -136,27 +164,116 @@ export async function loadDesktopPairing(): Promise<DesktopPairingRecord | null>
   }
   validateDesktop(value); return value;
 }
+/** Device identity survives forgetting a desktop; grants remain desktop-owned. */
+export function getOrCreateMobileIdentity(): Promise<MobilePairingRecord['identity']> {
+  if (nativePairing()) return getNativeIdentity();
+  if (mobileIdentity) return mobileIdentity;
+  const operation = writes.then(async () => {
+    const db = await openDatabase();
+    try {
+      const stored = await new Promise<CryptoKeyPair | null>((resolve, reject) => {
+        const transaction = db.transaction(STORE, 'readonly');
+        const store = transaction.objectStore(STORE);
+        const identity = store.get('mobile-identity'), pairing = store.get('mobile');
+        transaction.oncomplete = () => {
+          if (identity.result !== undefined) {
+            if (!validKeys(identity.result?.keyPair)) { reject(new Error('Saved phone identity is invalid.')); return; }
+            resolve(identity.result.keyPair);
+          } else if (pairing.result !== undefined) {
+            try { validateMobile(pairing.result); resolve(pairing.result.identity.keyPair); }
+            catch (reason) { reject(reason); }
+          } else resolve(null);
+        };
+        transaction.onabort = transaction.onerror = () => reject(new Error('Could not read this phone identity.'));
+      });
+      // Generate only when neither persisted identity exists, outside a transaction.
+      const candidate = stored ?? await generatePairingKeyPair();
+      return await new Promise<MobilePairingRecord['identity']>((resolve, reject) => {
+        const transaction = db.transaction(STORE, 'readwrite');
+        const store = transaction.objectStore(STORE);
+        let identity: MobilePairingRecord['identity'];
+        transaction.oncomplete = () => resolve(identity);
+        transaction.onabort = transaction.onerror = () => reject(new Error('Could not persist this phone identity. Pairing has not started.'));
+        const existing = store.get('mobile-identity');
+        existing.onsuccess = () => {
+          if (existing.result !== undefined) {
+            if (!validKeys(existing.result?.keyPair)) { transaction.abort(); return; }
+            identity = existing.result;
+            return;
+          }
+          // The transaction serializes migration/creation across tabs too.
+          const saved = store.get('mobile');
+          saved.onsuccess = () => {
+            if (saved.result !== undefined) {
+              try { validateMobile(saved.result); } catch { transaction.abort(); return; }
+              identity = saved.result.identity;
+            } else identity = { keyPair: candidate };
+            identity = { keyPair: { privateKey: identity.keyPair.privateKey, publicKey: identity.keyPair.publicKey } };
+            try { store.put(identity, 'mobile-identity'); } catch { transaction.abort(); }
+          };
+        };
+      });
+    } finally { db.close(); }
+  });
+  writes = operation.then(() => undefined, () => undefined);
+  mobileIdentity = operation;
+  void operation.catch(() => { if (mobileIdentity === operation) mobileIdentity = null; });
+  return operation;
+}
 export async function loadMobilePairing(): Promise<MobilePairingRecord | null> {
+  const bridge = nativePairing();
+  if (bridge) {
+    const saved = await bridge.postMessage({ action: 'load' });
+    if (saved) {
+      const record = { version: 1 as const, invitation: saved.invitation, savedAt: saved.savedAt, identity: await getNativeIdentity() };
+      validateMobile(record);
+      return record;
+    }
+    // Legacy private keys are nonextractable. Keep their existing identity and
+    // locator together; a newly scanned pairing can adopt the native identity.
+    const legacy = await readRecord('mobile');
+    if (legacy === undefined) return null;
+    validateMobile(legacy);
+    return legacy;
+  }
   const value = await readRecord('mobile');
   if (value === undefined) return null;
-  validateMobile(value); return value;
+  validateMobile(value);
+  const identity = await getOrCreateMobileIdentity();
+  return { ...value, identity };
 }
 export function saveDesktopPairing(record: DesktopPairingRecord): Promise<void> {
   validateDesktop(record);
   // Copy ordinary fields so Svelte proxies never reach structured clone.
   return writeRecord('desktop', {
+    ...(record.pairingManagementToken ? { pairingManagementToken: record.pairingManagementToken } : {}),
+    ...(record.pairingRegistration ? { pairingRegistration: { ...record.pairingRegistration } } : {}),
     version: 2, relayUrl: record.relayUrl, enabled: record.enabled, inactivityDays: record.inactivityDays,
     identity: { room: record.identity.room, keyPair: { privateKey: record.identity.keyPair.privateKey, publicKey: record.identity.keyPair.publicKey } },
     devices: record.devices.map(device => ({ publicKey: device.publicKey, name: device.name, approvedAt: device.approvedAt, lastAccessAt: device.lastAccessAt })),
     ownerDevices: record.ownerDevices.map(device => ({ publicKey: device.publicKey, name: device.name, approvedAt: device.approvedAt, lastAccessAt: device.lastAccessAt })),
   });
 }
-export function saveMobilePairing(record: MobilePairingRecord): Promise<void> {
+export async function saveMobilePairing(record: MobilePairingRecord): Promise<void> {
   validateMobile(record);
+  const bridge = nativePairing();
+  if (bridge) {
+    const native = await getNativeIdentity();
+    const actual = bytesToBase64url(new Uint8Array(await crypto.subtle.exportKey('raw', record.identity.keyPair.publicKey)));
+    const expected = bytesToBase64url(new Uint8Array(await crypto.subtle.exportKey('raw', native.keyPair.publicKey)));
+    if (actual === expected) {
+      await bridge.postMessage({ action: 'save', invitation: record.invitation, savedAt: record.savedAt });
+      return;
+    }
+  }
   return writeRecord('mobile', {
     version: 1, invitation: record.invitation, savedAt: record.savedAt,
     identity: { keyPair: { privateKey: record.identity.keyPair.privateKey, publicKey: record.identity.keyPair.publicKey } },
   });
 }
 export function clearDesktopPairing(): Promise<void> { return writeRecord('desktop'); }
-export function clearMobilePairing(): Promise<void> { return writeRecord('mobile'); }
+export async function clearMobilePairing(): Promise<void> {
+  if (nativePairing()) await nativePairing()!.postMessage({ action: 'forget' });
+  else await getOrCreateMobileIdentity();
+  await writeRecord('mobile');
+}

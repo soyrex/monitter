@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { mock } from 'node:test';
 import { spawn } from 'node:child_process';
-import WebSocket from 'ws';
+import WebSocket, { WebSocketServer } from 'ws';
 import { createDesktopSession, createMobileSession } from '../src/lib/controller/remote-client.ts';
 import { controllerSnapshot } from '../src/lib/controller/dispatcher.ts';
-import { SecureChannel, bytesToBase64url, deriveDirectionalKeys, pairingCommitment, randomBytes } from '../src/lib/controller/secure-session.ts';
+import { SecureChannel, base64urlToBytes, bytesToBase64url, deriveDirectionalKeys, deriveEcdhSecret, exportPairingPublicKey, generatePairingKeyPair, pairingCommitment, randomBytes } from '../src/lib/controller/secure-session.ts';
 
 globalThis.WebSocket = WebSocket;
 const once = (predicate, ms = 5_000) => new Promise((resolve, reject) => {
@@ -48,6 +48,80 @@ const rejectionProbe = async (relayUrl, bridge, mode) => {
   await rejected;
   peer.close(); desktop.close();
 };
+
+// A native-compatible direct host exercises the exact private-LAN handshake:
+// join, mutual key commitment/reveal, pinned ECDH, then an encrypted pair proof.
+const directHost = async () => {
+  const keyPair = await generatePairingKeyPair();
+  const publicKey = await exportPairingPublicKey(keyPair.publicKey);
+  const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
+  await new Promise((resolve, reject) => { server.once('listening', resolve); server.once('error', reject); });
+  const port = server.address().port;
+  const sockets = new Set();
+  let closed = false;
+  let connections = 0;
+  server.on('connection', socket => {
+    sockets.add(socket); socket.once('close', () => sockets.delete(socket));
+    connections += 1;
+    const nonce = randomBytes(16);
+    let peerCommitment = null, channel = null;
+    let queue = Promise.resolve();
+    const send = value => socket.send(JSON.stringify(value));
+    const receive = async raw => {
+      const value = JSON.parse(raw.toString());
+      if (value.type === 'join') {
+        assert.equal(value.role, 'mobile');
+        send({ type: 'joined', capabilities: ['relay-heartbeat-v1'] });
+        send({ type: 'peer' });
+        send({ type: 'hello', phase: 'commit', nonce: bytesToBase64url(await pairingCommitment('desktop', publicKey, nonce)) });
+        return;
+      }
+      if (value.type === 'ping') { send({ type: 'pong' }); return; }
+      if (value.type === 'hello' && value.phase === 'commit') {
+        peerCommitment = base64urlToBytes(value.nonce);
+        send({ type: 'hello', phase: 'reveal', nonce: bytesToBase64url(nonce), publicKey: bytesToBase64url(publicKey) });
+        return;
+      }
+      if (value.type === 'hello' && value.phase === 'reveal') {
+        const peerNonce = base64urlToBytes(value.nonce), peerPublicKey = base64urlToBytes(value.publicKey);
+        assert.deepEqual(peerCommitment, await pairingCommitment('mobile', peerPublicKey, peerNonce));
+        const secret = await deriveEcdhSecret(keyPair.privateKey, peerPublicKey);
+        channel = new SecureChannel(await deriveDirectionalKeys(secret, nonce, peerNonce, 'desktop', 2));
+        return;
+      }
+      if (value.type === 'secure') {
+        assert.ok(channel, 'direct secure frame follows key agreement');
+        assert.equal((await channel.open(value)).type, 'pair-request');
+        send(await channel.seal({ type: 'pair-request' }));
+        return;
+      }
+      throw new Error('Unexpected direct test frame.');
+    };
+    socket.on('message', raw => { queue = queue.then(() => receive(raw)); queue.catch(() => socket.terminate()); });
+  });
+  return {
+    publicKey: bytesToBase64url(publicKey), port,
+    connections: () => connections,
+    close: () => {
+      if (closed) return Promise.resolve();
+      closed = true;
+      for (const socket of sockets) socket.terminate();
+      return new Promise(resolve => server.close(resolve));
+    },
+  };
+};
+
+// Browser security requires literal private IPv4 candidates. Tests route those
+// addresses to loopback while retaining and asserting the production URL order.
+const routedSockets = [];
+class RoutedWebSocket extends WebSocket {
+  constructor(url, protocols) {
+    const original = String(url); routedSockets.push(original);
+    const routed = new URL(original);
+    if (/^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(routed.hostname)) routed.hostname = '127.0.0.1';
+    super(routed, protocols);
+  }
+}
 
 // A dead TCP route or a socket that opens without joining must not leave either
 // endpoint spinning for the browser's multi-minute connection timeout.
@@ -151,6 +225,37 @@ try {
   const snapshot = { hosts: [], agents: [], tasks: [], messages: [], events: [], channels: [], projects: [], collaborations: [], queuedMessages: [], settings: { accent: '#000', theme: 'dark', interfaceScale: 125, showToolActivity: true, showReasoningSummaries: true, sendWithEnter: false, sidebarView: 'standard' } };
   let sends = 0;
   const bridge = { getSnapshot: async () => snapshot, sendMessage: async () => { sends += 1; return snapshot; }, cancelTask: async () => snapshot, resumeTask: async () => snapshot, listTerminals: async () => [], readTerminal: async () => ({ chunks: [], nextSeq: 0, status: 'exited', exitCode: 0, truncated: false }) };
+
+  const direct = await directHost();
+  globalThis.WebSocket = RoutedWebSocket;
+  try {
+    routedSockets.length = 0;
+    const directInvitation = JSON.stringify({
+      version: 2, relayUrl, room: bytesToBase64url(randomBytes(18)), publicKey: direct.publicKey,
+      directUrls: [`ws://192.168.10.1:${direct.port}/pairing/direct`],
+    });
+    const directMobile = await createMobileSession(directInvitation);
+    await once(callback => directMobile.subscribe(state => { if (state.status === 'awaiting_approval') callback(state); }));
+    assert.equal(direct.connections(), 1);
+    assert.match(routedSockets[0], /^ws:\/\/192\.168\.10\.1:\d+\/pairing\/direct\?/);
+    assert.equal(routedSockets.length, 1, 'an authenticated direct candidate avoids opening the relay');
+    directMobile.close();
+    await direct.close();
+
+    const fallbackDesktop = await createDesktopSession(relayUrl, bridge);
+    const fallbackInvitation = JSON.parse(fallbackDesktop.invitation);
+    fallbackInvitation.directUrls = [`ws://192.168.10.1:${direct.port}/pairing/direct`];
+    routedSockets.length = 0;
+    const fallbackPending = once(callback => fallbackDesktop.subscribe(state => { if (state.status === 'pending') callback(state); }));
+    const fallbackMobile = await createMobileSession(JSON.stringify(fallbackInvitation));
+    await fallbackPending;
+    assert.match(routedSockets[0], /^ws:\/\/192\.168\.10\.1:\d+\/pairing\/direct\?/);
+    assert.equal(new URL(routedSockets[1]).origin, new URL(relayUrl).origin, 'relay opens only after the direct candidate fails');
+    await fallbackDesktop.approve();
+    await once(callback => fallbackMobile.subscribe(state => { if (state.status === 'connected') callback(state); }));
+    fallbackMobile.close(); fallbackDesktop.close();
+  } finally { await direct.close(); globalThis.WebSocket = WebSocket; }
+
   const desktop = await createDesktopSession(relayUrl, bridge);
   const descriptor = JSON.parse(desktop.invitation);
   assert.deepEqual(Object.keys(descriptor).sort(), ['publicKey', 'relayUrl', 'room', 'version']);

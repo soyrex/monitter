@@ -27,6 +27,7 @@ pub(super) const CATEGORIES: &[Category] = &[
     Category { id: "security", label: "Session lock", description: "Protect this desktop with a PIN while agents keep running.", group: "Security & access", icon: IconName::ShieldCheck },
     Category { id: "approvals", label: "Approval rules", description: "Review and revoke saved always-approve rules.", group: "Security & access", icon: IconName::BadgeCheck },
     Category { id: "secrets", label: "Environment & secrets", description: "Manage shared environment variables for local agents.", group: "Security & access", icon: IconName::KeyRound },
+    Category { id: "pairing", label: "Pair a phone", description: "Pair an iPhone or secure browser with this desktop.", group: "Security & access", icon: IconName::Wifi },
     Category { id: "lan", label: "LAN access", description: "Connect to this desktop from a browser on your network.", group: "Security & access", icon: IconName::Wifi },
 ];
 

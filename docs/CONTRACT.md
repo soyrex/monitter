@@ -2554,7 +2554,9 @@ mode and uses a stable local loopback origin for its saved pairing state.
 Remote control is opt-in. The versioned controller allowlist dispatches only
 approved encrypted sessions through the existing desktop bridge. Desktop and
 mobile navigation stay independent. Initial pairing uses QR invitations or one-use
-nine-digit rendezvous codes and explicit desktop approval after comparing
+nine-digit rendezvous codes (legacy) or a persistent nine-digit desktop PIN.
+The persistent PIN is a reusable public locator, never an authorization secret.
+A new phone still requires explicit desktop approval after comparing
 verification numbers. Owner-approved phones and desktop identities persist as
 non-extractable P-256 CryptoKeys in IndexedDB. Each reconnection derives fresh
 transport keys and proves the remembered phone identity before approval.
@@ -3206,3 +3208,26 @@ downloads a workspace snapshot or replays an ambiguous mutation.
 Sharing/controller projections consume the current revisioned owner cache and
 existing bounded transcript pages; they do not first fetch all durable history.
 Raw snapshot endpoints remain explicit compatibility/diagnostic operations.
+
+### GPUI phone pairing host
+
+Settings → Pair a phone uses native GPUI controls and a single profile-scoped
+Rust pairing runtime. It creates no WebView, JavaScript bridge or loopback asset
+listener. Closing settings retains the runtime, identity and device grants.
+The host speaks the existing v2 P-256 commit/reveal, verification-number and
+AES-GCM controller protocol. A completed handshake alone grants no access:
+controller and owner workspace scopes require separate native approval, unless
+that exact identity and scope have a remembered, unexpired grant. Owner calls
+still use Rust's LAN command allow-list. Native records are atomically saved
+with mode0600 in the desktop profile. Existing WebView CryptoKeys are
+nonextractable, so the native host creates a fresh identity and requires phones
+to pair again; old WebView data is preserved. Phone access starts disabled on
+this migration. The new PIN then remains stable across native restarts.
+
+Persistent relay registration opts in with `POST /pairing` and `persistent:true`.
+The returned random nine-digit code and high-entropy management token are stored
+with desktop pairing identity. Reusable GET returns only the public invitation.
+Authenticated PUT updates the invitation; authenticated DELETE revokes the PIN.
+Legacy five-minute single-use registrations retain their existing behavior.
+Persistent records count toward the registry capacity; local development relay
+registrations are in-memory and do not survive process restart.

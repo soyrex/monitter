@@ -77,7 +77,7 @@ function cors(origin: string | null): Headers {
   const headers = new Headers({ Vary: 'Origin', 'Cache-Control': 'no-store' });
   if (origin) {
     headers.set('Access-Control-Allow-Origin', origin);
-    headers.set('Access-Control-Allow-Methods', 'POST, GET, DELETE, OPTIONS');
+    headers.set('Access-Control-Allow-Methods', 'POST, PUT, GET, DELETE, OPTIONS');
     headers.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
     headers.set('Access-Control-Max-Age', '600');
   }
@@ -116,7 +116,7 @@ function validPublicKey(value: unknown): value is string {
   return typeof value === 'string' && value.length === 87 && value.startsWith('B') && BASE64URL.test(value);
 }
 
-type Invitation = { version: 2; relayUrl: string; room: string; publicKey: string };
+type Invitation = { version: 2; relayUrl: string; room: string; publicKey: string; directUrls?: string[] };
 
 function relayUrlForRequest(request: Request): string | null {
   const requestUrl = new URL(request.url);
@@ -127,11 +127,26 @@ function relayUrlForRequest(request: Request): string | null {
   return scheme ? `${scheme}//${host}/relay` : null;
 }
 
+function validDirectCandidates(value: unknown): boolean {
+  if (value === undefined) return true;
+  return Array.isArray(value) && value.length <= 3 && value.every(candidate => {
+    if (typeof candidate !== 'string' || candidate.length > 160) return false;
+    try {
+      const url = new URL(candidate);
+      const octets = url.hostname.split('.').map(Number);
+      return url.protocol === 'ws:' && url.pathname === '/pairing/direct' && !!url.port
+        && !url.username && !url.password && !url.search && !url.hash
+        && octets.length === 4 && octets.every(n => Number.isInteger(n) && n >= 0 && n <= 255)
+        && (octets[0] === 10 || octets[0] === 192 && octets[1] === 168 || octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31);
+    } catch { return false; }
+  });
+}
+
 function validInvitation(value: unknown, expectedRelayUrl: string | null): value is Invitation {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const invitation = value as Record<string, unknown>;
   const keys = Object.keys(invitation).sort();
-  if (keys.join(',') !== 'publicKey,relayUrl,room,version' || invitation.version !== 2 || !validRoom(typeof invitation.room === 'string' ? invitation.room : null) || !validPublicKey(invitation.publicKey)) return false;
+  if (!['publicKey,relayUrl,room,version', 'directUrls,publicKey,relayUrl,room,version'].includes(keys.join(',')) || !validDirectCandidates(invitation.directUrls) || invitation.version !== 2 || !validRoom(typeof invitation.room === 'string' ? invitation.room : null) || !validPublicKey(invitation.publicKey)) return false;
   return expectedRelayUrl !== null && invitation.relayUrl === expectedRelayUrl;
 }
 
@@ -139,7 +154,7 @@ function validLocalInvitation(value: unknown): value is Invitation {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const invitation = value as Record<string, unknown>;
   const keys = Object.keys(invitation).sort();
-  if (keys.join(',') !== 'publicKey,relayUrl,room,version' || invitation.version !== 2 || !validRoom(typeof invitation.room === 'string' ? invitation.room : null) || !validPublicKey(invitation.publicKey) || typeof invitation.relayUrl !== 'string') return false;
+  if (!['publicKey,relayUrl,room,version', 'directUrls,publicKey,relayUrl,room,version'].includes(keys.join(',')) || !validDirectCandidates(invitation.directUrls) || invitation.version !== 2 || !validRoom(typeof invitation.room === 'string' ? invitation.room : null) || !validPublicKey(invitation.publicKey) || typeof invitation.relayUrl !== 'string') return false;
   try {
     const relay = new URL(invitation.relayUrl);
     return (relay.protocol === 'ws:' || relay.protocol === 'wss:') && relay.pathname === '/relay' && !relay.search && !relay.hash && ['localhost', '127.0.0.1', '[::1]'].includes(relay.hostname);
@@ -341,7 +356,7 @@ export class RelayRoom extends DurableObject<Env> {
   }
 }
 
-type PairingRow = { code: string; invitation: string; expires_at: number; revocation_token: string };
+type PairingRow = { code: string; invitation: string; expires_at: number; revocation_token: string; persistent: number };
 
 export class PairingRegistry extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
@@ -359,6 +374,9 @@ export class PairingRegistry extends DurableObject<Env> {
         count INTEGER NOT NULL
       );
     `);
+    // Existing reservations remain single-use; adding the opt-in flag is additive.
+    const columns = this.ctx.storage.sql.exec<{name: string}>('PRAGMA table_info(pairings)').toArray();
+    if (!columns.some(column => column.name === 'persistent')) this.ctx.storage.sql.exec('ALTER TABLE pairings ADD COLUMN persistent INTEGER NOT NULL DEFAULT 0');
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -373,6 +391,7 @@ export class PairingRegistry extends DurableObject<Env> {
     if (post) return this.create(request);
     if (request.method === 'GET' && code) return this.claim(request, code);
     if (request.method === 'DELETE' && code) return this.revoke(request, code);
+    if (request.method === 'PUT' && code) return this.renew(request, code);
     return response(404, 'Not found.');
   }
 
@@ -396,23 +415,38 @@ export class PairingRegistry extends DurableObject<Env> {
     let parsed: unknown;
     try { parsed = JSON.parse(body); } catch { return response(400, 'Invalid invitation.'); }
     const expectedRelay = request.headers.get('X-Monitter-Expected-Relay');
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || Object.keys(parsed as object).length !== 1) return response(400, 'Invalid invitation.');
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return response(400, 'Invalid invitation.');
+    const fields = parsed as Record<string, unknown>;
+    if (Object.keys(fields).some(key => !['invitation', 'persistent'].includes(key)) || (fields.persistent !== undefined && typeof fields.persistent !== 'boolean')) return response(400, 'Invalid invitation.');
+    const persistent = fields.persistent === true;
     const candidate = (parsed as Record<string, unknown>).invitation;
     if (!(expectedRelay?.startsWith('wss:') ? validInvitation(candidate, expectedRelay) : validLocalInvitation(candidate))) return response(400, 'Invalid invitation.');
 
+    const authorization = request.headers.get('Authorization');
+    const managementToken = authorization?.startsWith('Bearer ') ? authorization.slice(7) : '';
+    if (persistent && (!BASE64URL.test(managementToken) || managementToken.length !== 43)) return response(400, 'A persistent pairing management token is required.');
+    const invitation = JSON.stringify((parsed as { invitation: Invitation }).invitation);
+    if (persistent) {
+      // The client persists its management token before POST. A lost response
+      // can therefore recover the same locator instead of leaking a reservation.
+      const existing = this.ctx.storage.sql.exec<PairingRow>('SELECT code, invitation, expires_at, revocation_token, persistent FROM pairings WHERE persistent = 1 AND revocation_token = ?', managementToken).toArray()[0];
+      if (existing) {
+        this.ctx.storage.sql.exec('UPDATE pairings SET invitation = ? WHERE code = ?', invitation, existing.code);
+        return Response.json({ code: existing.code, expiresAt: null, persistent: true, revocationToken: managementToken });
+      }
+    }
     const now = Date.now();
-    this.ctx.storage.sql.exec('DELETE FROM pairings WHERE expires_at <= ?', now);
+    this.ctx.storage.sql.exec('DELETE FROM pairings WHERE persistent = 0 AND expires_at <= ?', now);
     const active = this.ctx.storage.sql.exec<{ count: number }>('SELECT COUNT(*) AS count FROM pairings').one().count;
     if (active >= PAIRING_LIMIT) return response(503, 'Pairing capacity reached.');
-    const invitation = JSON.stringify((parsed as { invitation: Invitation }).invitation);
-    const token = bytesToBase64url(crypto.getRandomValues(new Uint8Array(32)));
-    const expiresAt = now + PAIRING_TTL_MS;
+    const token = persistent ? managementToken : bytesToBase64url(crypto.getRandomValues(new Uint8Array(32)));
+    const expiresAt = persistent ? 0 : now + PAIRING_TTL_MS;
     for (let attempt = 0; attempt < 8; attempt += 1) {
       const code = randomDigits();
       try {
-        this.ctx.storage.sql.exec('INSERT INTO pairings (code, invitation, expires_at, revocation_token) VALUES (?, ?, ?, ?)', code, invitation, expiresAt, token);
+        this.ctx.storage.sql.exec('INSERT INTO pairings (code, invitation, expires_at, revocation_token, persistent) VALUES (?, ?, ?, ?, ?)', code, invitation, expiresAt, token, persistent ? 1 : 0);
         await this.scheduleExpiryAlarm();
-        return Response.json({ code, expiresAt, revocationToken: token }, { status: 201 });
+        return Response.json(persistent ? { code, expiresAt: null, persistent: true, revocationToken: token } : { code, expiresAt, revocationToken: token }, { status: 201 });
       } catch { /* A random code collision is retried without exposing data. */ }
     }
     return response(503, 'Pairing capacity reached.');
@@ -420,38 +454,57 @@ export class PairingRegistry extends DurableObject<Env> {
 
   private async claim(request: Request, code: string): Promise<Response> {
     if ((request.headers.get('Content-Length') && request.headers.get('Content-Length') !== '0') || request.body) return response(400, 'Claim requests cannot have a body.');
-    const row = this.ctx.storage.sql.exec<PairingRow>('SELECT code, invitation, expires_at, revocation_token FROM pairings WHERE code = ?', code).toArray()[0];
+    const row = this.ctx.storage.sql.exec<PairingRow>('SELECT code, invitation, expires_at, revocation_token, persistent FROM pairings WHERE code = ?', code).toArray()[0];
     if (!row) return response(404, 'Pairing not found.');
-    if (row.expires_at <= Date.now()) {
+    if (!row.persistent && row.expires_at <= Date.now()) {
       this.ctx.storage.sql.exec('DELETE FROM pairings WHERE code = ?', code);
       return response(404, 'Pairing not found.');
     }
-    // Both the read and deletion run synchronously in the DO turn: concurrent
-    // claims cannot observe the same invitation.
-    this.ctx.storage.sql.exec('DELETE FROM pairings WHERE code = ?', code);
-    return Response.json({ invitation: JSON.parse(row.invitation), expiresAt: row.expires_at });
+    // Legacy claims are consumed synchronously. Opted-in persistent locators
+    // reveal only the public invitation; desktop approval still grants access.
+    if (!row.persistent) this.ctx.storage.sql.exec('DELETE FROM pairings WHERE code = ?', code);
+    return Response.json(row.persistent ? { invitation: JSON.parse(row.invitation), expiresAt: null, persistent: true } : { invitation: JSON.parse(row.invitation), expiresAt: row.expires_at });
   }
 
   private async revoke(request: Request, code: string): Promise<Response> {
     const authorization = request.headers.get('Authorization');
     const token = authorization?.startsWith('Bearer ') ? authorization.slice(7) : '';
     if (!BASE64URL.test(token) || token.length !== 43) return response(404, 'Pairing not found.');
-    const row = this.ctx.storage.sql.exec<PairingRow>('SELECT code, invitation, expires_at, revocation_token FROM pairings WHERE code = ?', code).toArray()[0];
-    if (!row || row.expires_at <= Date.now() || row.revocation_token !== token) {
-      if (row?.expires_at <= Date.now()) this.ctx.storage.sql.exec('DELETE FROM pairings WHERE code = ?', code);
+    const row = this.ctx.storage.sql.exec<PairingRow>('SELECT code, invitation, expires_at, revocation_token, persistent FROM pairings WHERE code = ?', code).toArray()[0];
+    if (!row || (!row.persistent && row.expires_at <= Date.now()) || row.revocation_token !== token) {
+      if (row && !row.persistent && row.expires_at <= Date.now()) this.ctx.storage.sql.exec('DELETE FROM pairings WHERE code = ?', code);
       return response(404, 'Pairing not found.');
     }
     this.ctx.storage.sql.exec('DELETE FROM pairings WHERE code = ?', code);
     return response(204);
   }
 
+  private async renew(request: Request, code: string): Promise<Response> {
+    const authorization = request.headers.get('Authorization');
+    const token = authorization?.startsWith('Bearer ') ? authorization.slice(7) : '';
+    if (!BASE64URL.test(token) || token.length !== 43) return response(404, 'Pairing not found.');
+    const body = await readBoundedText(request, PAIRING_REQUEST_BYTES);
+    if (body === null) return response(413, 'Invitation too large.');
+    let parsed: unknown;
+    try { parsed = JSON.parse(body); } catch { return response(400, 'Invalid invitation.'); }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || Object.keys(parsed).join(',') !== 'invitation') return response(400, 'Invalid invitation.');
+    const candidate = (parsed as Record<string, unknown>).invitation;
+    const expectedRelay = request.headers.get('X-Monitter-Expected-Relay');
+    if (!(expectedRelay?.startsWith('wss:') ? validInvitation(candidate, expectedRelay) : validLocalInvitation(candidate))) return response(400, 'Invalid invitation.');
+    // No await between authority check and update: revoke/renew cannot interleave.
+    const row = this.ctx.storage.sql.exec<PairingRow>('SELECT code, invitation, expires_at, revocation_token, persistent FROM pairings WHERE code = ?', code).toArray()[0];
+    if (!row || !row.persistent || row.revocation_token !== token) return response(404, 'Pairing not found.');
+    this.ctx.storage.sql.exec('UPDATE pairings SET invitation = ? WHERE code = ?', JSON.stringify(candidate), code);
+    return Response.json({ code, expiresAt: null, persistent: true, revocationToken: token });
+  }
+
   async alarm(): Promise<void> {
-    this.ctx.storage.sql.exec('DELETE FROM pairings WHERE expires_at <= ?', Date.now());
+    this.ctx.storage.sql.exec('DELETE FROM pairings WHERE persistent = 0 AND expires_at <= ?', Date.now());
     await this.scheduleExpiryAlarm();
   }
 
   private async scheduleExpiryAlarm(): Promise<void> {
-    const row = this.ctx.storage.sql.exec<{ expires_at: number }>('SELECT expires_at FROM pairings ORDER BY expires_at LIMIT 1').toArray()[0];
+    const row = this.ctx.storage.sql.exec<{ expires_at: number }>('SELECT expires_at FROM pairings WHERE persistent = 0 ORDER BY expires_at LIMIT 1').toArray()[0];
     if (row) await this.ctx.storage.setAlarm(row.expires_at);
     else await this.ctx.storage.deleteAlarm();
   }

@@ -124,6 +124,28 @@ try {
     const revoked = await fetch(`${httpOrigin}/pairing/${revocable.body.code}`, { method: 'DELETE', headers: { Authorization: `Bearer ${revocable.body.revocationToken}`, 'CF-Connecting-IP': '198.51.100.5' } });
     assert.equal(revoked.status, 204);
     assert.equal((await fetch(`${httpOrigin}/pairing/${revocable.body.code}`, { headers: { 'CF-Connecting-IP': '198.51.100.6' } })).status, 404);
+    // Direct candidates are hints only; identity and explicit approval remain
+    // authoritative. Keep their shape bounded to private IPv4 WS endpoints.
+    const token = 'T'.repeat(43);
+    const initial = { ...invitation('P'.repeat(22)), directUrls: ['ws://192.168.1.2:19438/pairing/direct'] };
+    const persistent = await fetch(`${httpOrigin}/pairing`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'CF-Connecting-IP': '198.51.100.20' }, body: JSON.stringify({ invitation: initial, persistent: true }) });
+    assert.equal(persistent.status, 201, await persistent.clone().text());
+    const reservation = await persistent.json();
+    const updated = { ...initial, directUrls: ['ws://10.0.0.2:19438/pairing/direct'] };
+    const renewed = await fetch(`${httpOrigin}/pairing/${reservation.code}`, { method: 'PUT', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ invitation: updated }) });
+    assert.equal(renewed.status, 200);
+    assert.equal((await renewed.json()).code, reservation.code);
+    const saved = await (await fetch(`${httpOrigin}/pairing/${reservation.code}`)).json();
+    assert.deepEqual(saved.invitation, updated); assert.equal(saved.expiresAt, null); assert.equal(saved.persistent, true);
+    assert.equal((await fetch(`${httpOrigin}/pairing/${reservation.code}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } })).status, 204);
+    for (const [index, directUrls] of [
+      ['ws://8.8.8.8:19438/pairing/direct'], ['ws://127.0.0.1:19438/pairing/direct'],
+      ['ws://192.168.1.2:19438/other'], ['ws://user:pass@192.168.1.2:19438/pairing/direct'],
+      ['wss://192.168.1.2:19438/pairing/direct'], Array(4).fill('ws://10.0.0.2:19438/pairing/direct'),
+    ].entries()) {
+      assert.equal((await create({ invitation: { ...initial, directUrls } }, `198.51.100.${30 + index}`)).result.status, 400);
+    }
+
     for (let count = 0; count < 5; count += 1) await create({ invitation: invitation(`${count}`.repeat(22)) }, '198.51.100.7');
     assert.equal((await create({ invitation: invitation('Z'.repeat(22)) }, '198.51.100.7')).result.status, 429);
 

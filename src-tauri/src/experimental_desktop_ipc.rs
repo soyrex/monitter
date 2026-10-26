@@ -1382,6 +1382,9 @@ pub(super) fn dispatch(backend: &BackendService, method: &str, args: Value) -> R
         }
         "save_schedule" => encode(backend.save_schedule(arg(&args, "input")?)?),
         "schedule_action" => encode(backend.schedule_action(arg(&args, "id")?, arg(&args, "action")?)?),
+        "pairing_host_invoke" => backend.pairing_host_invoke(
+            &arg::<String>(&args, "command")?, arg(&args, "args")?,
+        ),
         "read_lan_status" => encode(backend.read_lan_status()?),
         "set_lan_access_code" => encode(backend.set_lan_access_code(arg(&args, "code")?)?),
         "start_lan" => encode(backend.start_lan()?),

@@ -12,7 +12,7 @@ export interface OwnerInvokeContext { readonly publicKey: string; }
 export type OwnerInvoke = (command: string, args: unknown, context: OwnerInvokeContext) => unknown | Promise<unknown>;
 export interface CollaboratorIdentity { readonly name: string; readonly role: 'visitor'; }
 export interface ControllerInvitationV1 { readonly version: 1; readonly relayUrl: string; readonly room: string; readonly secret: string; }
-export interface ControllerInvitationV2 { readonly version: 2; readonly relayUrl: string; readonly room: string; readonly publicKey: string; }
+export interface ControllerInvitationV2 { readonly version: 2; readonly relayUrl: string; readonly room: string; readonly publicKey: string; readonly directUrls?: readonly string[]; }
 export type ControllerInvitation = ControllerInvitationV1 | ControllerInvitationV2;
 export interface DesktopBridge extends ControllerClient {}
 export interface PersistentDesktopIdentity { readonly keyPair: CryptoKeyPair; readonly room: string; }
@@ -123,6 +123,16 @@ function uuid(): string { return crypto.randomUUID(); }
 function validRelayUrl(value: string): boolean {
   try { const url = new URL(value); return url.protocol === 'wss:' || (url.protocol === 'ws:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)); } catch { return false; }
 }
+function validDirectUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    const octets = url.hostname.split('.').map(Number);
+    return value.length <= 160 && url.protocol === 'ws:' && url.pathname === '/pairing/direct'
+      && !url.username && !url.password && !url.search && !url.hash && !!url.port
+      && octets.length === 4 && octets.every(n => Number.isInteger(n) && n >= 0 && n <= 255)
+      && (octets[0] === 10 || octets[0] === 192 && octets[1] === 168 || octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31);
+  } catch { return false; }
+}
 function parseInvitation(value: string): ControllerInvitation {
   if (new TextEncoder().encode(value).byteLength > MAX_INVITATION_BYTES) throw new Error('Invalid controller invitation.');
   let invitation: unknown; try { invitation = JSON.parse(value); } catch { throw new Error('Invalid controller invitation.'); }
@@ -130,7 +140,13 @@ function parseInvitation(value: string): ControllerInvitation {
   const v = invitation as Record<string, unknown>;
   if (typeof v.relayUrl !== 'string' || !validRelayUrl(v.relayUrl) || typeof v.room !== 'string' || !/^[A-Za-z0-9_-]{22,128}$/.test(v.room)) throw new Error('Invalid controller invitation.');
   if (v.version === 1 && typeof v.secret === 'string' && base64urlToBytes(v.secret).byteLength === 32) return { version: 1, relayUrl: v.relayUrl, room: v.room, secret: v.secret };
-  if (v.version === 2 && typeof v.publicKey === 'string' && base64urlToBytes(v.publicKey).byteLength === 65) return { version: 2, relayUrl: v.relayUrl, room: v.room, publicKey: v.publicKey };
+  if (v.version === 2 && typeof v.publicKey === 'string' && base64urlToBytes(v.publicKey).byteLength === 65) {
+    if (v.directUrls !== undefined && (!Array.isArray(v.directUrls) || v.directUrls.length > 3 || !v.directUrls.every(url => typeof url === 'string' && validDirectUrl(url)))) throw new Error('Invalid direct connection candidates.');
+    // The alternate hostname serves the same Worker, rooms and registry.
+    // Pinned desktop identity remains authoritative for saved invitations.
+    const relayUrl = v.relayUrl === 'wss://api.monitter.com/relay' ? 'wss://monitter-opaque-relay.soyrex.workers.dev/relay' : v.relayUrl;
+    return { version: 2, relayUrl, room: v.room, publicKey: v.publicKey, ...(v.directUrls ? { directUrls: v.directUrls as string[] } : {}) };
+  }
   throw new Error('Invalid controller invitation.');
 }
 function asObject(value: unknown): Record<string, unknown> | null { return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null; }
@@ -164,7 +180,7 @@ class PairingConnection {
   private commitmentSent = false;
   private revealSent = false;
   private peerCommitment: Uint8Array | null = null;
-  constructor(protected readonly invitationData: ControllerInvitation, protected readonly role: Role, private readonly pairingKeys: PairingKeys = {}, private readonly socketFactory: SocketFactory = url => new WebSocket(url)) {
+  constructor(protected readonly invitationData: ControllerInvitation, protected readonly role: Role, private readonly pairingKeys: PairingKeys = {}, private readonly socketFactory: SocketFactory = url => new WebSocket(url), private readonly endpointOverride?: string) {
     this.pairingTimer = setTimeout(() => { if (!this.closed) this.fail('Pairing timed out. Reconnect and try pairing again.'); }, PAIRING_TIMEOUT_MS);
     this.connect();
   }
@@ -202,7 +218,7 @@ class PairingConnection {
   }
   protected connect() {
     try {
-      const endpoint = new URL(this.invitationData.relayUrl);
+      const endpoint = new URL(this.endpointOverride ?? this.invitationData.relayUrl);
       // Public routing metadata only; the invitation secret never leaves the endpoints.
       endpoint.searchParams.set('room', this.invitationData.room);
       endpoint.searchParams.set('role', this.role);
@@ -264,6 +280,7 @@ class PairingConnection {
       if (this.heartbeatEnabled) this.pingRelay();
       return;
     }
+    if (data.type === 'ping' && this.endpointOverride) { this.sendRaw({ type: 'pong' }); return; }
     if (data.type === 'peer') {
       if (this.invitationData.version === 1) this.sendRaw({ type: 'hello', nonce: bytesToBase64url(this.nonce) });
       else await this.sendV2Commit();
@@ -321,6 +338,7 @@ class PairingConnection {
       const mobilePublic = this.role === 'mobile' ? this.pairingKeys.publicKey : peerPublic;
       this.verification = await verificationCode(desktopPublic, mobilePublic, desktopNonce, mobileNonce, sharedSecret);
       this.channel = new SecureChannel(await deriveDirectionalKeys(sharedSecret, desktopNonce, mobileNonce, this.role, 2));
+      if (this.closed) { this.channel = null; return; }
       await this.onChannelReady();
     } catch { this.fail(); }
   }
@@ -556,6 +574,28 @@ export function createMobileSession(invitation: string): Promise<MobileSession>;
 export function createMobileSession(invitation: string, operator: CollaboratorIdentity): Promise<CollaboratorMobileSession>;
 export function createMobileSession(invitation: string, operator: undefined, options: PersistentMobileSessionOptions): Promise<MobileSession>;
 export async function createMobileSession(invitation: string, operator?: CollaboratorIdentity, options?: PersistentMobileSessionOptions): Promise<MobileSession | CollaboratorMobileSession> {
+  const parsed = parseInvitation(invitation);
+  // Each attempt has fresh nonces, queues and socket handlers. Reachability alone
+  // never selects a route: awaiting_approval follows the pinned ECDH proof.
+  for (const endpoint of parsed.version === 2 ? parsed.directUrls ?? [] : []) {
+    const candidate = await createMobileSessionAtRoute(invitation, operator, options, endpoint);
+    const authenticated = await new Promise<boolean>(resolve => {
+      let settled = false;
+      let unsubscribe: (() => void) | undefined;
+      const finish = (ok: boolean) => { if (settled) return; settled = true; clearTimeout(timer); unsubscribe?.(); resolve(ok); };
+      const timer = setTimeout(() => finish(false), 1800);
+      unsubscribe = candidate.subscribe(state => {
+        if (state.status === 'awaiting_approval' || state.status === 'connected' || state.status === 'rejected') finish(true);
+        else if (state.status === 'error' || state.status === 'closed') finish(false);
+      });
+      if (settled) unsubscribe();
+    });
+    if (authenticated) return candidate;
+    candidate.close();
+  }
+  return createMobileSessionAtRoute(invitation, operator, options);
+}
+async function createMobileSessionAtRoute(invitation: string, operator?: CollaboratorIdentity, options?: PersistentMobileSessionOptions, endpointOverride?: string): Promise<MobileSession | CollaboratorMobileSession> {
   if (operator && !collaborator(operator)) throw new Error('Enter a collaborator name of 2-48 characters.');
   const invitationData = parseInvitation(invitation);
   if (options && !validPersistentKeyPair(options.identity.keyPair)) throw new Error('Persistent controller sessions require a valid identity.');
@@ -580,10 +620,10 @@ export async function createMobileSession(invitation: string, operator?: Collabo
     supportsOwnerWorkspace() { return this.ownerWorkspaceSupported; }
     getOwnerWorkspaceState() { return this.ownerWorkspaceState; }
     hasOwnerWorkspaceAccess() { return this.ownerWorkspaceState === 'approved'; }
-    protected async onChannelReady() { this.setStatus('awaiting_approval'); await this.sendSecure(operator ? { type: 'pair-request', operator } : { type: 'pair-request', capabilities: [SEND_RECEIPT_CAPABILITY, OWNER_LARGE_CHUNKS_CAPABILITY] }); }
+    protected async onChannelReady() { if (!endpointOverride) this.setStatus('awaiting_approval'); await this.sendSecure(operator ? { type: 'pair-request', operator } : { type: 'pair-request', capabilities: [SEND_RECEIPT_CAPABILITY, OWNER_LARGE_CHUNKS_CAPABILITY] }); }
     protected async onSecure(message: unknown) {
       const value = asObject(message); if (!value || typeof value.type !== 'string') throw new Error('Invalid paired response.');
-      if (value.type === 'pair-request') return;
+      if (value.type === 'pair-request') { if (endpointOverride) this.setStatus('awaiting_approval'); return; }
       if (value.type === 'approved') { this.rememberedDevices = invitationData.version === 2 && hasCapability(value.capabilities, REMEMBERED_DEVICE_CAPABILITY); this.messagePages = hasCapability(value.capabilities, TASK_MESSAGE_PAGES_CAPABILITY); this.ownerWorkspaceSupported = invitationData.version === 2 && hasCapability(value.capabilities, OWNER_WORKSPACE_CAPABILITY); this.ownerLargeChunksSupported = this.ownerWorkspaceSupported && hasCapability(value.capabilities, OWNER_LARGE_CHUNKS_CAPABILITY); this.completePairing(); this.setStatus('connected'); return; }
       if (value.type === 'rejected') { this.disconnect(); this.setStatus('rejected'); this.socket?.close(); return; }
       if (value.type === 'owner-workspace-approved') { this.ownerWorkspaceState = 'approved'; this.settleOwnerRequest(); return; }
@@ -746,7 +786,7 @@ export async function createMobileSession(invitation: string, operator?: Collabo
       for (const callback of this.pending.values()) { clearTimeout(callback.timer); callback.reject(new Error('Connection closed.')); }
       this.pending.clear(); this.rejectOwnerRequests(new OwnerRelayDisconnectedError());
     }
-  }(invitationData, 'mobile', keyPair ? { privateKey: keyPair.privateKey, publicKey, expectedPeerPublicKey } : {});
+  }(invitationData, 'mobile', keyPair ? { privateKey: keyPair.privateKey, publicKey, expectedPeerPublicKey } : {}, undefined, endpointOverride);
   return session as MobileSession | CollaboratorMobileSession;
 }
 

@@ -41,6 +41,9 @@ mod chat_voice;
 mod collaboration;
 mod agent_graph;
 mod plans;
+mod pairing_crypto;
+mod pairing_runtime;
+mod pairing_host;
 #[cfg(feature = "visual-export")]
 mod design_system_preview;
 mod command_palette;
@@ -363,6 +366,7 @@ struct Desktop {
     history_warmup_pending: HashSet<String>,
     history_warmup_queue: VecDeque<String>,
     history_warmup_running: bool,
+    pairing_host: Option<Entity<pairing_host::PairingHost>>,
     service: Option<DesktopService>,
     snapshot: Rc<Value>,
     revision: Option<String>,
@@ -574,6 +578,7 @@ impl Desktop {
             history_warmup_pending: HashSet::new(),
             history_warmup_queue: VecDeque::new(),
             history_warmup_running: false,
+            pairing_host: None,
             service: None,
             snapshot: Rc::new(cached.as_ref().map(|cache| cache.snapshot.clone()).unwrap_or_else(|| json!({}))),
             revision: None,
@@ -5350,6 +5355,11 @@ impl Desktop {
 }
 impl Render for Desktop {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.startup_pending && self.pairing_host.is_none() {
+            if let Some(service) = self.service.clone() {
+                self.pairing_host = Some(cx.new(|cx| pairing_host::PairingHost::new(service, window, cx)));
+            }
+        }
         self.ensure_workspace_window_registry(window, cx);
         self.restore_workspace_window_hosts(window,cx);
         self.process_workspace_window_intent(window,cx);

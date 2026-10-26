@@ -64,6 +64,7 @@ entries![
     ("security", "Session lock", "Protect the desktop with a PIN.", "password security idle unlock"),
     ("approvals", "Approval rules", "Review and revoke saved always-approve rules.", "permissions security"),
     ("secrets", "Environment & secrets", "Shared environment variables for local agents.", "env credentials keys"),
+    ("pairing", "Pair a phone", "Pair an iPhone or secure browser using a fixed PIN and device approval.", "qr pin iphone mobile relay remote control remembered device"),
     ("lan", "LAN access", "Connect from a browser on your network.", "wifi mobile pairing token"),
 ];
 pub(super) fn card_title(label: &'static str) -> &'static str {
