@@ -208,6 +208,8 @@
     backdrop-filter: blur(3px);
   }
   .backdrop:popover-open {
+    inset: 0;
+    box-sizing: border-box;
     width: 100%;
     height: 100%;
     max-width: none;
@@ -253,5 +255,23 @@
     width: 30px;
     height: 30px;
     padding: 0;
+  }
+  @media (max-width: 760px) {
+    .backdrop:popover-open {
+      width: 100dvw;
+      height: 100dvh;
+      padding: max(12px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) max(12px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
+      overflow: hidden;
+    }
+    /* Mobile WebKit can retain the first frame of the dialog animation after
+       promoting its parent popover to the top layer, leaving only the grey
+       backdrop visible. Keep open mobile dialogs on their final frame. */
+    .backdrop:popover-open:not(.closing) .modal {
+      opacity: 1 !important;
+      transform: none !important;
+    }
+    .modal {
+      max-height: calc(100dvh - max(24px, calc(env(safe-area-inset-top) + env(safe-area-inset-bottom))));
+    }
   }
 </style>
