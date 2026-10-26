@@ -56,6 +56,8 @@ impl Render for ActivityWatchModal {
 // Kept mounted at zero opacity so releasing Command can finish its fade. Frame
 // requests belong to this small retained view, never Desktop/backend publication.
 const NUMBER_HINT_FADE: std::time::Duration = std::time::Duration::from_millis(140);
+const WORKSPACE_TAB_DRAG_START_DELAY: std::time::Duration =
+    std::time::Duration::from_millis(500);
 struct WorkspaceNumberHint {
     number: usize,
     from: f32,
@@ -157,6 +159,7 @@ fn reorderable_tab(
         cx.stop_propagation();
         cx.new(|_| drag.clone())
     })
+    .drag_start_delay(WORKSPACE_TAB_DRAG_START_DELAY)
     .external_drag_payload::<WorkspaceTabDrag>(|_,_,_|Some(ExternalDragPayload::Internal))
     .on_drag_complete::<WorkspaceTabDrag>(on_complete)
     .can_drop(move |value, _, _| value.downcast_ref::<WorkspaceTabDrag>()
@@ -1418,72 +1421,85 @@ impl Desktop {
                     color, ink: rgb(palette.ink), background: rgb(palette.panel),
                 };
                 let icon_debug_id = id.clone();
-                let trigger = Button::new(SharedString::from(format!("edit-workspace-{id}")))
-                    .ghost()
-                    .compact()
-                    .w(tab_metrics.editor_size)
-                    .h(tab_metrics.editor_size)
-                    .rounded(px(4.))
-                    .p_0()
-                    .child(div().relative().size(tab_metrics.icon_size)
-                        .debug_selector(move || format!("workspace-edit-icon-{icon_debug_id}"))
-                        .child(workspace_favicon(&id, item.url.as_deref(), icon(&item.icon), color, active_agent, window, cx))
-                        .when(index < 9, |icon| icon.child(workspace_number_hint(
-                            &id, index + 1, self.window.workspace_number_hints, palette, window, cx,
-                        ))))
-                    .accessibility_label(format!("Edit {} workspace", item.name))
-                    .tooltip("Edit workspace")
-                    // Opening the editor is local; pending preference writes
-                    // must not block access. Save/removal keep their readiness guards.
-                    .disabled(self.closing || self.close_pending)
-                    // Popover opens on mouse-down and stops that event before
-                    // the containing tab can start a drag or move the window.
-                    .on_click(|_, _, cx| cx.stop_propagation());
+                let workspace_icon = div().relative().size(tab_metrics.icon_size)
+                    .debug_selector(move || format!("workspace-edit-icon-{icon_debug_id}"))
+                    .child(workspace_favicon(&id, item.url.as_deref(), icon(&item.icon), color, active_agent, window, cx))
+                    .when(index < 9, |icon| icon.child(workspace_number_hint(
+                        &id, index + 1, self.window.workspace_number_hints, palette, window, cx,
+                    )));
                 let editor_focus = self.window.workspace_editor
                     .as_ref()
                     .filter(|editor| editor.id == id)
                     .map(|editor| editor.name.read(cx).focus_handle(cx));
-                let menu = Popover::new(SharedString::from(format!("workspace-edit-menu-{id}")))
-                    .rounded(px(design::radius::MODAL))
-                    .trigger(trigger)
-                    .header("Workspace", "Name, appearance, and workspace settings.")
-                    .anchor(Anchor::TopLeft)
-                    .open(is_open)
-                    .when_some(editor_focus.as_ref(), |menu, focus| menu.track_focus(focus))
-                    // Nested picker surfaces are separate native popups. Let an outside
-                    // click dismiss the child first instead of destroying the editor draft.
-                    .overlay_closable(!self.window.workspace_editor.as_ref().is_some_and(|editor|
-                        editor.id == id && (editor.icon_picker_open || editor.color_picker.read(cx).is_open())))
-                    .on_open_change(move |open, window, cx| {
-                        owner.update(cx, |view, cx| view.with_workspace_window(window, cx, |view, window, cx| {
-                            if *open {
-                                if !view.workspace_controls_available()
-                                    || view.window.preferences_restore
-                                    || view.window.preferences_restoring
-                                    || view.window.preferences_restore_suppressed { return; }
-                                if !view.window.workspace_editor
-                                    .as_ref()
-                                    .is_some_and(|editor| editor.id == menu_id)
-                                {
-                                    view.edit_named_workspace(&menu_id, window, cx);
-                                    if let Some(editor) = &view.window.workspace_editor {
-                                        editor.name.read(cx).focus_handle(cx).focus(window, cx);
+                let settings_leading = if active {
+                    let trigger = Button::new(SharedString::from(format!("edit-workspace-{id}")))
+                        .ghost()
+                        .compact()
+                        .w(tab_metrics.editor_size)
+                        .h(tab_metrics.editor_size)
+                        .rounded(px(4.))
+                        .p_0()
+                        .child(workspace_icon)
+                        .accessibility_label(format!("Edit {} workspace", item.name))
+                        .tooltip("Edit workspace")
+                        // Opening the editor is local; pending preference writes
+                        // must not block access. Save/removal keep their readiness guards.
+                        .disabled(self.closing || self.close_pending)
+                        // Popover opens on mouse-down and stops that event before
+                        // the containing tab can start a drag or move the window.
+                        .on_click(|_, _, cx| cx.stop_propagation());
+                    Popover::new(SharedString::from(format!("workspace-edit-menu-{id}")))
+                        .rounded(px(design::radius::MODAL))
+                        .trigger(trigger)
+                        .header("Workspace", "Name, appearance, and workspace settings.")
+                        .anchor(Anchor::TopLeft)
+                        .open(is_open)
+                        .when_some(editor_focus.as_ref(), |menu, focus| menu.track_focus(focus))
+                        // Nested picker surfaces are separate native popups. Let an outside
+                        // click dismiss the child first instead of destroying the editor draft.
+                        .overlay_closable(!self.window.workspace_editor.as_ref().is_some_and(|editor|
+                            editor.id == id && (editor.icon_picker_open || editor.color_picker.read(cx).is_open())))
+                        .on_open_change(move |open, window, cx| {
+                            owner.update(cx, |view, cx| view.with_workspace_window(window, cx, |view, window, cx| {
+                                if *open {
+                                    if !view.workspace_controls_available()
+                                        || view.window.preferences_restore
+                                        || view.window.preferences_restoring
+                                        || view.window.preferences_restore_suppressed { return; }
+                                    if !view.window.workspace_editor
+                                        .as_ref()
+                                        .is_some_and(|editor| editor.id == menu_id)
+                                    {
+                                        view.edit_named_workspace(&menu_id, window, cx);
+                                        if let Some(editor) = &view.window.workspace_editor {
+                                            editor.name.read(cx).focus_handle(cx).focus(window, cx);
+                                        }
                                     }
+                                } else if view.window.workspace_editor
+                                    .as_ref()
+                                    .is_some_and(|editor| {
+                                        editor.id == menu_id && !editor.saved_layout_action_busy
+                                    })
+                                {
+                                    view.window.workspace_editor = None;
+                                    cx.notify();
                                 }
-                            } else if view.window.workspace_editor
-                                .as_ref()
-                                .is_some_and(|editor| {
-                                    editor.id == menu_id && !editor.saved_layout_action_busy
-                                })
-                            {
-                                view.window.workspace_editor = None;
-                                cx.notify();
-                            }
-                        }));
-                    })
-                    .content(move |_, window, cx| {
-                        menu_owner.update(cx, |view, cx| view.with_workspace_window(window, cx, |view, window, cx| view.render_workspace_editor(palette, window, cx)))
-                    });
+                            }));
+                        })
+                        .content(move |_, window, cx| {
+                            menu_owner.update(cx, |view, cx| view.with_workspace_window(window, cx, |view, window, cx| view.render_workspace_editor(palette, window, cx)))
+                        })
+                        .into_any_element()
+                } else {
+                    div()
+                        .w(tab_metrics.editor_size)
+                        .h(tab_metrics.editor_size)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(workspace_icon)
+                        .into_any_element()
+                };
                 let window_menu_owner = cx.weak_entity();
                 let window_menu_id = id.clone();
                 let host = window.window_handle();
@@ -1528,7 +1544,7 @@ impl Desktop {
                             if active_agent { ", active agent" } else { "" }
                         ))
                         .child(div().absolute().inset_0().child(selection_chrome))
-                        .child(menu)
+                        .child(settings_leading)
                         .when(!icon_only_tabs, |tab| tab.child(div().min_w_0().truncate()
                             .text_size(tab_metrics.text_size)
                             .child(item.name.clone())))
@@ -1554,7 +1570,7 @@ impl Desktop {
                             }
                         }))
                         .on_click(cx.workspace_listener(move |view, event: &ClickEvent, window, cx| {
-                            if event.click_count() == 2 {
+                            if active && event.click_count() == 2 {
                                 view.edit_named_workspace(&edit_id, window, cx);
                             } else {
                                 view.switch_named_workspace(id.clone(), window, cx);
@@ -2425,6 +2441,137 @@ mod workspace_editor_click_tests {
     }
 
     #[gpui_kit::test]
+    fn workspace_tab_hold_to_drag_and_active_settings_only(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let mut desktop = None;
+        let (_, visual) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| {
+                let mut view = Desktop::new(window, cx);
+                view.preferences = Some(NativePreferences::default());
+                view.preferences_busy = false;
+                view.active_workspace_id = Some("one".into());
+                view.named_workspaces = Some(NativeWorkspaceSet {
+                    active_id: "one".into(),
+                    items: ["one", "two"]
+                        .into_iter()
+                        .map(|id| NativeWorkspace {
+                            id: id.into(),
+                            name: id.into(),
+                            icon: "folder".into(),
+                            color: "#38BFD2".into(),
+                            url: None,
+                            layout: Some(super::empty_layout()),
+                        })
+                        .collect(),
+                });
+                view
+            });
+            desktop = Some(view.clone());
+            component::Root::new(cx.new(|_| Harness(view)), window, cx)
+        });
+        let desktop = desktop.unwrap();
+        visual.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+
+        let tab = visual
+            .debug_bounds("workspace-tab-one")
+            .expect("active workspace tab");
+        let drag_start = point(tab.right() - px(8.), tab.center().y);
+        visual.simulate_mouse_down(drag_start, MouseButton::Left, Modifiers::default());
+        visual.simulate_mouse_move(
+            drag_start + point(px(3.), px(0.)),
+            Some(MouseButton::Left),
+            Modifiers::default(),
+        );
+        assert!(
+            !visual.read(|cx| cx.has_active_drag()),
+            "pointer movement alone cannot start a workspace drag"
+        );
+        visual
+            .executor()
+            .advance_clock(std::time::Duration::from_millis(499));
+        visual.simulate_mouse_move(
+            drag_start + point(px(4.), px(0.)),
+            Some(MouseButton::Left),
+            Modifiers::default(),
+        );
+        assert!(
+            !visual.read(|cx| cx.has_active_drag()),
+            "workspace drag stays disarmed before 500 ms"
+        );
+        visual
+            .executor()
+            .advance_clock(std::time::Duration::from_millis(1));
+        visual.simulate_mouse_move(
+            drag_start + point(px(5.), px(0.)),
+            Some(MouseButton::Left),
+            Modifiers::default(),
+        );
+        assert!(
+            visual.read(|cx| cx.has_active_drag()),
+            "workspace drag starts after the 500 ms hold"
+        );
+        visual.simulate_mouse_up(
+            drag_start + point(px(5.), px(0.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        visual.run_until_parked();
+        assert!(!visual.read(|cx| cx.has_active_drag()));
+
+        visual.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        let active_icon = visual
+            .debug_bounds("workspace-edit-icon-one")
+            .expect("active workspace settings icon");
+        visual.simulate_click(active_icon.center(), Modifiers::default());
+        visual.run_until_parked();
+        visual.read(|cx| {
+            assert_eq!(
+                desktop
+                    .read(cx)
+                    .workspace_editor
+                    .as_ref()
+                    .map(|editor| editor.id.as_str()),
+                Some("one"),
+                "the active workspace icon opens settings"
+            );
+        });
+        visual.update(|window, cx| {
+            desktop.update(cx, |view, cx| {
+                view.window.workspace_editor = None;
+                cx.notify();
+            });
+            window.draw(cx).clear(cx);
+        });
+        visual.run_until_parked();
+        visual.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+
+        let inactive_icon = visual
+            .debug_bounds("workspace-edit-icon-two")
+            .expect("inactive workspace icon");
+        visual.simulate_click(inactive_icon.center(), Modifiers::default());
+        visual.read(|cx| {
+            let view = desktop.read(cx);
+            assert!(
+                view.window.workspace_editor.is_none(),
+                "inactive workspace icon is not a settings button"
+            );
+            assert!(
+                view.pending_workspace_activation
+                    .as_ref()
+                    .is_some_and(|(_, id)| id == "two")
+                    || view.window.active_workspace_id.as_deref() == Some("two"),
+                "inactive workspace icon belongs to the tab activation surface"
+            );
+        });
+    }
+
+    #[gpui_kit::test]
     fn saved_layout_project_menu_draws_miniature_and_opens_capture_form(
         cx: &mut TestAppContext,
     ) {
@@ -2559,8 +2706,9 @@ mod workspace_editor_click_tests {
                 let mut view = Desktop::new(window, cx);
                 view.preferences = Some(NativePreferences::default());
                 view.preferences_busy = true;
+                view.active_workspace_id = Some("two".into());
                 view.named_workspaces = Some(NativeWorkspaceSet {
-                    active_id: "one".into(), items: ["one", "two"].into_iter().map(|id| NativeWorkspace {
+                    active_id: "two".into(), items: ["one", "two"].into_iter().map(|id| NativeWorkspace {
                         id: id.into(), name: id.into(), icon: "folder".into(), color: "#38BFD2".into(), url: None, layout: None,
                     }).collect(),
                 });
@@ -2577,7 +2725,7 @@ mod workspace_editor_click_tests {
         visual.read(|cx| {
             let view = desktop.read(cx);
             assert_eq!(view.workspace_editor.as_ref().map(|editor|editor.id.as_str()), Some("two"));
-            assert_eq!(view.named_workspaces.as_ref().unwrap().active_id, "one");
+            assert_eq!(view.named_workspaces.as_ref().unwrap().active_id, "two");
         });
         assert!(visual.debug_bounds("workspace-editor-surface").is_some(), "editor popover is visible");
         let footer = visual.debug_bounds("workspace-editor-footer").expect("one shared action footer");
@@ -2595,7 +2743,7 @@ mod workspace_editor_click_tests {
         visual.read(|cx| {
             let view = desktop.read(cx);
             assert_eq!(view.workspace_editor.as_ref().unwrap().name.read(cx).value().as_str(), "a b  c");
-            assert_eq!(view.named_workspaces.as_ref().unwrap().active_id, "one", "typing cannot activate the edited tab");
+            assert_eq!(view.named_workspaces.as_ref().unwrap().active_id, "two", "typing cannot change the active tab");
         });
         visual.update(|window, cx| desktop.update(cx, |view, cx| {
             view.workspace_editor.as_ref().unwrap().icon_query.update(cx, |input, cx|
@@ -2678,12 +2826,12 @@ mod workspace_editor_click_tests {
             assert_eq!(view.named_workspaces.as_ref().unwrap().items[1].url, None);
         }));
         visual.update(|window, cx| { window.draw(cx).clear(cx); });
-        let tab = visual.debug_bounds("workspace-tab-one").unwrap();
+        let tab = visual.debug_bounds("workspace-tab-two").unwrap();
         visual.simulate_click(point(tab.right() - gpui_kit::px(8.), tab.center().y), Default::default());
         visual.simulate_keystrokes("f2");
         visual.run_until_parked();
-        visual.read(|cx| assert_eq!(desktop.read(cx).workspace_editor.as_ref().unwrap().id, "one",
-            "F2 still edits a focused tab"));
+        visual.read(|cx| assert_eq!(desktop.read(cx).workspace_editor.as_ref().unwrap().id, "two",
+            "F2 still edits the focused active tab"));
         visual.simulate_keystrokes("enter");
         visual.run_until_parked();
         visual.read(|cx| assert!(desktop.read(cx).workspace_editor.is_none(), "Enter still saves the editor"));

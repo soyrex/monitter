@@ -40,7 +40,7 @@ use std::{
     mem,
     rc::Rc,
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use super::ImageCacheProvider;
@@ -631,9 +631,20 @@ impl Interactivity {
             render: Box::new(move |value, offset, window, cx| {
                 constructor(value.downcast_ref().unwrap(), offset, window, cx).into()
             }),
+            activation_delay: Duration::ZERO,
             external_payload: None,
             completion: None,
         });
+    }
+
+    /// Require the pointer to remain pressed for `delay` before a movement can
+    /// start this element's drag. Must be called after [`Self::on_drag`].
+    pub fn drag_start_delay(&mut self, delay: Duration) {
+        let Some(drag_listener) = self.drag_listener.as_mut() else {
+            debug_assert!(false, "drag_start_delay must be called after on_drag");
+            return;
+        };
+        drag_listener.activation_delay = delay;
     }
 
     /// Registers a callback resolving a payload to offer the platform if a drag started by this
@@ -1674,6 +1685,17 @@ pub trait StatefulInteractiveElement: InteractiveElement {
         self
     }
 
+    /// Require the pointer to remain pressed for `delay` before a movement can
+    /// start this element's drag. Must be called after [`Self::on_drag`].
+    /// The fluent API equivalent to [`Interactivity::drag_start_delay`].
+    fn drag_start_delay(mut self, delay: Duration) -> Self
+    where
+        Self: Sized,
+    {
+        self.interactivity().drag_start_delay(delay);
+        self
+    }
+
     /// Registers a callback resolving a payload to offer the platform if a drag started by this
     /// element leaves the window. It is invoked at most once per drag gesture, when the pointer
     /// exits the viewport. Must be called after [`Self::on_drag`], with the same dragged value
@@ -1823,6 +1845,7 @@ impl HoverListenerMode {
 pub(crate) struct DragListener {
     value: Arc<dyn Any>,
     render: Box<dyn Fn(&dyn Any, Point<Pixels>, &mut Window, &mut App) -> AnyView + 'static>,
+    activation_delay: Duration,
     external_payload: Option<ExternalDragPayloadResolver>,
     completion: Option<DragCompletionListener>,
 }
@@ -2332,6 +2355,11 @@ impl Interactivity {
                 {
                     if let Some(pending_mouse_down) = element_state.pending_mouse_down.as_ref() {
                         *pending_mouse_down.borrow_mut() = None;
+                    }
+                    if let Some(pending_mouse_down_at) =
+                        element_state.pending_mouse_down_at.as_ref()
+                    {
+                        pending_mouse_down_at.set(None);
                     }
                     if let Some(clicked_state) = element_state.clicked_state.as_ref() {
                         *clicked_state.borrow_mut() = ElementClickedState::default();
@@ -2997,6 +3025,9 @@ impl Interactivity {
         let drag_cursor_style = self.base_style.as_ref().mouse_cursor;
 
         let mut drag_listener = mem::take(&mut self.drag_listener);
+        let drag_start_delay = drag_listener
+            .as_ref()
+            .map_or(Duration::ZERO, |listener| listener.activation_delay);
         let drop_listeners = mem::take(&mut self.drop_listeners);
         let click_listeners = mem::take(&mut self.click_listeners);
         let aux_click_listeners = mem::take(&mut self.aux_click_listeners);
@@ -3049,6 +3080,11 @@ impl Interactivity {
                     .get_or_insert_with(Default::default)
                     .clone();
 
+                let pending_mouse_down_at = element_state
+                    .pending_mouse_down_at
+                    .get_or_insert_with(Default::default)
+                    .clone();
+
                 let pending_keyboard_down = element_state
                     .pending_keyboard_down
                     .get_or_insert_with(Default::default)
@@ -3061,14 +3097,16 @@ impl Interactivity {
 
                 window.on_mouse_event({
                     let pending_mouse_down = pending_mouse_down.clone();
+                    let pending_mouse_down_at = pending_mouse_down_at.clone();
                     let hitbox = hitbox.clone();
                     let has_aux_click_listeners = !aux_click_listeners.is_empty();
-                    move |event: &MouseDownEvent, phase, window, _cx| {
+                    move |event: &MouseDownEvent, phase, window, cx| {
                         if phase == DispatchPhase::Bubble
                             && (event.button == MouseButton::Left || has_aux_click_listeners)
                             && hitbox.is_hovered(window)
                         {
                             *pending_mouse_down.borrow_mut() = Some(event.clone());
+                            pending_mouse_down_at.set(Some(cx.background_executor().now()));
                             window.refresh();
                         }
                     }
@@ -3076,6 +3114,7 @@ impl Interactivity {
 
                 window.on_mouse_event({
                     let pending_mouse_down = pending_mouse_down.clone();
+                    let pending_mouse_down_at = pending_mouse_down_at.clone();
                     let hitbox = hitbox.clone();
                     move |event: &MouseMoveEvent, phase, window, cx| {
                         if phase == DispatchPhase::Capture {
@@ -3086,6 +3125,12 @@ impl Interactivity {
                         if let Some(mouse_down) = pending_mouse_down.clone()
                             && !cx.has_active_drag()
                             && (event.position - mouse_down.position).magnitude() > DRAG_THRESHOLD
+                            && pending_mouse_down_at.get().is_some_and(|pressed_at| {
+                                cx.background_executor()
+                                    .now()
+                                    .saturating_duration_since(pressed_at)
+                                    >= drag_start_delay
+                            })
                             && let Some(listener) = drag_listener.take()
                             && mouse_down.button == MouseButton::Left
                         {
@@ -3128,6 +3173,7 @@ impl Interactivity {
                                 completion,
                             });
                             pending_mouse_down.take();
+                            pending_mouse_down_at.set(None);
                             window.refresh();
                             cx.stop_propagation();
                         }
@@ -3203,12 +3249,14 @@ impl Interactivity {
 
                 window.on_mouse_event({
                     let mut captured_mouse_down = None;
+                    let pending_mouse_down_at = pending_mouse_down_at.clone();
                     let hitbox = hitbox.clone();
                     move |event: &MouseUpEvent, phase, window, cx| match phase {
                         // Clear the pending mouse down during the capture phase,
                         // so that it happens even if another event handler stops
                         // propagation.
                         DispatchPhase::Capture => {
+                            pending_mouse_down_at.set(None);
                             let mut pending_mouse_down = pending_mouse_down.borrow_mut();
                             if pending_mouse_down.is_some() && hitbox.is_hovered(window) {
                                 captured_mouse_down = pending_mouse_down.take();
@@ -3739,6 +3787,7 @@ pub struct InteractiveElementState {
     pub(crate) hover_state: Option<Rc<RefCell<ElementHoverState>>>,
     pub(crate) hover_listener_state: Option<Rc<RefCell<bool>>>,
     pub(crate) pending_mouse_down: Option<Rc<RefCell<Option<MouseDownEvent>>>>,
+    pub(crate) pending_mouse_down_at: Option<Rc<Cell<Option<Instant>>>>,
     /// Set to the window's [`focus_generation`](crate::Window::focus_generation)
     /// when an Enter/Space keydown is received while this element is focused,
     /// recording that we are waiting for the matching keyup to fire a keyboard
