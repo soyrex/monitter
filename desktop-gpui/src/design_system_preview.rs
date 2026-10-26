@@ -3,7 +3,7 @@ use crate::design;
 use gpui_kit::{component::{ActiveTheme as _, Theme, ThemeMode, button::*, input::{Input, InputState}, select::{Select, SelectState}}, prelude::*, *};
 use serde_json::json;
 
-struct Preview { mode: String, name: Entity<InputState>, choice: Entity<SelectState<Vec<SharedString>>> }
+struct Preview { picker: Option<AnyView>, mode: String, name: Entity<InputState>, choice: Entity<SelectState<Vec<SharedString>>> }
 impl Render for Preview {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = design::palette(&json!({"theme":if self.mode.ends_with("light") { "light" } else { "dark" }}), window.appearance());
@@ -12,6 +12,9 @@ impl Render for Preview {
             .flex().flex_col().gap(design::ui_scaled_px(16.))
             .child(div().p(design::ui_scaled_px(16.)).font_weight(FontWeight::SEMIBOLD)
                 .child("Synthetic preview · no live backend"));
+        if let Some(picker) = self.picker.as_ref() {
+            return root.child(div().flex_1().flex().items_center().justify_center().child(picker.clone()));
+        }
         if self.mode.starts_with("plans") {
             let mut cards = div().p(px(24.)).flex().items_start().gap(px(24.));
             for (index, statuses) in [
@@ -97,7 +100,7 @@ pub(super) fn open_if_requested(cx: &mut App) -> bool {
         crate::surface_preview::open(cx);
         return true;
     }
-    let mode = if matches!(mode.as_str(), "overview" | "light" | "plans" | "plans-light") { mode } else { "overview".into() };
+    let mode = if matches!(mode.as_str(), "overview" | "light" | "plans" | "plans-light" | "model" | "model-light" | "permissions" | "permissions-light") { mode } else { "overview".into() };
     let _ = monitter_gpui_desktop::fonts::register(cx);
     Theme::change(if mode.ends_with("light") { ThemeMode::Light } else { ThemeMode::Dark }, None, cx);
     let palette = design::palette(&json!({"theme":if mode.ends_with("light") {"light"} else {"dark"}}),
@@ -119,7 +122,9 @@ pub(super) fn open_if_requested(cx: &mut App) -> bool {
         ..Default::default()
     }, cx, |window, cx| {
         window.on_window_should_close(cx, |_, cx| { cx.quit(); true });
+        let picker = if mode.starts_with("permissions") { Some(crate::composer_footer::permission_picker_preview(window, cx)) } else { mode.starts_with("model").then(|| crate::composer_footer::model_picker_preview(window, cx)) };
         let preview = cx.new(|cx| Preview {
+            picker,
             mode,
             name: cx.new(|cx| InputState::new(window, cx).default_value("Synthetic workspace")),
             choice: cx.new(|cx| SelectState::new(vec![SharedString::from("Workspace"), SharedString::from("Agents & integrations"), SharedString::from("Security & access")], Some(component::IndexPath::new(0)), window, cx)),

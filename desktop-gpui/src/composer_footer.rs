@@ -38,6 +38,8 @@ use std::time::{Duration, Instant};
 
 #[path = "composer_popup.rs"]
 mod composer_popup;
+#[cfg(feature = "visual-export")]
+pub(crate) use composer_popup::{model_picker_preview, permission_picker_preview};
 #[path = "model_save_queue.rs"]
 mod model_save_queue;
 use model_save_queue::{ModelSaveQueue, SaveOutcome};
@@ -895,7 +897,7 @@ impl ComposerFooterPane {
                 .x_for_index(text.len())
         };
         let permission_width =
-            measure(permission_label(selected)) + px(14. + design::space::TIGHT + 14.);
+            measure(permission_label(selected)) + px(14. + design::space::TIGHT + 36.);
         let model_reserve = if compact_footer && jev_mode == "off" {
             px(28.)
         } else if compact_footer {
@@ -939,9 +941,9 @@ impl ComposerFooterPane {
                     .data(if self.model_save.sandbox.is_some() {
                         icon_assets::LoaderCircle.1
                     } else {
-                        icon_assets::Shield.1
+                        match selected { "read-only" => icon_assets::Eye.1, "auto-approve-edits" => icon_assets::Pencil.1, _ => icon_assets::ShieldCheck.1 }
                     })
-                    .with_size(px(14.)),
+                    .with_size(px(14.)).text_color(rgb(match selected { "read-only" => 0x38d39f, "auto-approve-edits" => 0xf4a340, _ => 0xd85be8 })),
             )
             .when(!permission_compact, |content| {
                 content.child(
@@ -953,7 +955,16 @@ impl ComposerFooterPane {
                         .whitespace_nowrap()
                         .child(permission_label(selected)),
                 )
-            });
+            })
+            .child(div().flex().items_center().gap(px(2.)).children(
+                ["read-only", "auto-approve-edits", "full-access"].into_iter().enumerate().map(|(index, level)| {
+                    let supported = permission_supported(provider, acp, level)
+                        && backend_accepts_sandbox(provider, &stored_permission(provider, level));
+                    div().w(px(3.)).h(px(3.)).rounded_full().bg(rgb(if supported && level == selected {
+                        [0x38d39f, 0xf4a340, 0xd85be8][index]
+                    } else { palette.line }))
+                })
+            ));
         let access = Button::new("composer-permissions")
             .with_size(Size::Small)
             .compact()
@@ -967,16 +978,16 @@ impl ComposerFooterPane {
             })
             .when(permission_compact, |button| {
                 button
-                    .w(px(28.))
+                    .w(px(48.))
                     .h(px(28.))
-                    .min_w(px(28.))
-                    .max_w(px(28.))
+                    .min_w(px(48.))
+                    .max_w(px(48.))
                     .min_h(px(28.))
                     .px(px(0.))
                     .py(px(0.))
                     .justify_center()
             })
-            .rounded(px(design::radius::CONTROL))
+            .rounded_full().border_1().border_color(rgb(palette.line))
             .font_family(cx.theme().font_family.clone())
             .text_size(design::ui_scaled_px(11.0 * interface_font_ratio))
             .custom(
@@ -1045,6 +1056,14 @@ impl ComposerFooterPane {
                     .and_then(|level| level.get("id"))
                     .and_then(Value::as_str)
             });
+        let effort_bar_count = match effort {
+            Some("minimal" | "low") => 1,
+            Some("medium") => 2,
+            Some("high") => 3,
+            Some("xhigh" | "extra-high" | "extra_high") => 4,
+            Some("pro" | "max" | "ultra") => 5,
+            _ => 0,
+        };
         let fast = selected_model
             .is_some_and(|model| model.get("supportsFast").and_then(Value::as_bool) == Some(true))
             && settings.get("fastMode").and_then(Value::as_bool) == Some(true);
@@ -1116,23 +1135,15 @@ impl ComposerFooterPane {
                                 .child("SYS-1"),
                         )
                     })
-                    .child(
-                        Icon::default()
-                            .data(if catalog_loading || self.model_save.desired.is_some() {
-                                icon_assets::LoaderCircle.1
-                            } else {
-                                icon_assets::Brain.1
-                            })
-                            .with_size(px(14.)),
-                    )
-                    .when(fast && !compact_footer, |this| {
+                    .when(compact_footer || catalog_loading || self.model_save.desired.is_some(), |this| {
                         this.child(
-                            div().ml(-px(5.)).child(
-                                Icon::default()
-                                    .data(icon_assets::Zap.1)
-                                    .with_size(px(11.))
-                                    .text_color(rgb(palette.accent)),
-                            ),
+                            Icon::default()
+                                .data(if catalog_loading || self.model_save.desired.is_some() {
+                                    icon_assets::LoaderCircle.1
+                                } else {
+                                    icon_assets::Brain.1
+                                })
+                                .with_size(px(14.)),
                         )
                     })
                     .when(!compact_footer || jev_enabled, |this| {
@@ -1146,14 +1157,21 @@ impl ComposerFooterPane {
                                 .child(model_label.to_owned()),
                         )
                     })
-                    .when(!compact_footer && effort.is_some(), |this| {
+                    .when(!compact_footer, |this| {
                         this.child(
-                            div()
-                                .text_size(design::ui_scaled_px(11.0 * interface_font_ratio))
-                                .text_color(rgb(palette.muted))
-                                .opacity(0.5)
-                                .child(effort.unwrap_or_default().to_owned()),
+                            div().flex().items_end().gap_x(px(2.)).children(
+                                [0x38d39f, 0xe3d147, 0xf4a340, 0xef5a68, 0xd85be8]
+                                    .into_iter().enumerate().map(|(index, color)| {
+                                        div().w(px(3.)).h(px(4. + index as f32 * 2.))
+                                            .rounded_full()
+                                            .bg(rgb(if index < effort_bar_count { color } else { palette.line }))
+                                    }),
+                            ),
                         )
+                    })
+                    .when(fast && !compact_footer, |this| {
+                        this.child(Icon::default().data(icon_assets::Zap.1)
+                            .with_size(px(11.)).text_color(rgb(0x32c8ff)))
                     }),
             )
             .tooltip(if disabled {
