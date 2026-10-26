@@ -1,15 +1,31 @@
 # Monitter agent guide
 
-## Desktop and mobile build boundary
+## Canonical desktop and mobile boundary
 
-GPUI is the primary desktop GUI on the canonical `main` branch. Its Rust UI
-lives in `desktop-gpui/`; Tauri/Svelte is retained for iOS/Android and mobile web.
-The shared Rust backend lives in `src-tauri/`. Desktop work no longer requires
-an experimental branch or a separate checkout.
+The GPUI application in `desktop-gpui/` is the only current desktop app. It is
+developed and released from the canonical `main` branch. The names `GPUI`,
+`build:gpui`, `Monitter GPUI.app`, and `Monitter GPUI Server.app` are retained
+legacy names for the default desktop product; they do not identify an
+experimental branch or an alternative desktop app.
 
-Use `npm run check:gpui`, `npm run build:gpui`, and `npm run dev:gpui` for
-desktop development. Do not use legacy `build:mac` or `install:mac` to update
-`/Applications/Monitter.app`. See `desktop-gpui/LINUX.md` for Omarchy builds.
+Tauri/Svelte is retained for iOS, Android, and mobile/shared web surfaces. Do
+not use the Tauri desktop commands or `/Applications/Monitter.app` when asked
+to change, build, install, launch, or verify the desktop app. The shared Rust
+backend remains in `src-tauri/`.
+
+Use `npm run check:gpui`, `npm run build:gpui`, and `npm run dev:gpui` for all
+desktop development. `npm run build:gpui -- --release` packages the default
+desktop GUI and its persistent server; a successful package build does not
+install, restart, or runtime-verify them. Do not use legacy `build:mac`,
+`install:mac`, `npm run tauri dev`, or `/Applications/Monitter.app` for desktop
+delivery. See `desktop-gpui/LINUX.md` for Omarchy builds.
+
+`/Users/alex/code/monitter` on `main` is the canonical source checkout. The
+path `/Users/alex/code/monitter-gpui` may exist only as a host for the shared
+`.toolchain` and `.cargo-target/gpui` caches referenced by build commands. It
+must not be treated as a source checkout or as evidence of a separate GPUI
+branch. Do not recreate `experiment/gpui-desktop`; its history is already in
+`main`.
 When adding a harness, update the GPUI desktop picker and applicable mobile clients.
 Verify installed bundle identity before replacing it. Preserve live backend agents,
 profiles and sessions; installs and restarts require session authorization.
@@ -53,7 +69,7 @@ Monitter is a GPUI desktop workspace for real CLI and ACP agents. The desktop ru
 ## Working and verification
 
 - Use `npm ci` for a clean dependency install. `npm run check` checks Svelte/TypeScript; `npm run build` builds the web assets; `cargo test --manifest-path src-tauri/Cargo.toml` runs Rust tests. Choose focused tests from `scripts/` for the changed behavior, then broaden only for a concrete remaining risk.
-- `npm run tauri dev` runs the desktop app. `npm run dev` is a browser design preview and does not run native agents. For the installed macOS app, `npm run dev:app-ui` serves the hot UI on the dedicated bridge port; backend edits require a native rebuild.
+- `npm run dev:gpui` runs the desktop app. `npm run dev` is a browser design preview and does not run native agents. Tauri and `dev:app-ui` workflows apply only to retained mobile/web surfaces and are not desktop verification.
 - Do not purchase or provision paid services. A specific transaction requires Alex's explicit approval of vendor/account, total price and currency, term, and recurring charges before any charge or commitment; research or setup approval is not purchase approval.
 
 ## Experimental preview lifecycle authorization
