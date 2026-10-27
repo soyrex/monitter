@@ -1015,6 +1015,11 @@ mode are cached in `monitter.appearance.browser-colours.v1` and `monitter.appear
 page load can set the document colour before Safari captures its surrounding chrome. This covers both
 older Safari theme-colour behavior and Safari 26's document-background colour extension.
 
+Mobile and browser workspaces render opaque theme surfaces even when shared desktop settings
+select glass or translucency. Those surface modes require a native desktop backdrop; forwarding
+them to a WKWebView can expose its backing colour and wash out the selected dark palette.
+The shared preference is preserved, and the native desktop still applies it.
+
 Settings include `accent`, `theme`, legacy `interfaceScale` (integer percent, 80–200, default 125),
 `showToolActivity` and `showReasoningSummaries` (default true), and `sendWithEnter` (default false).
 The legacy shared scale seeds client-local `desktop` and `mobile` viewer preferences once. Current

@@ -128,6 +128,19 @@ systemDark = false;
 renderer.syncBrowserChrome({ ...settings, theme: 'dark' }, theme, 20);
 assert.deepEqual(writes, afterDark, 'explicit dark theme must ignore system media changes');
 assert.ok(afterDark.storage >= afterSystem.storage, 'explicit dark sync remains observable');
+for (const mode of ['light', 'dark']) {
+  for (const windowSurface of ['translucent', 'glass']) {
+    const sharedSettings = { ...settings, theme: mode, windowSurface, windowTransparency: 75 };
+    renderer.applyAppearance(sharedSettings, theme, 125);
+    assert.equal(root.dataset.windowSurface, 'opaque', `${mode} browser must not inherit desktop ${windowSurface}`);
+    assert.notEqual(root.style.backgroundColor, 'transparent', 'browser document needs an opaque theme backing');
+    assert.equal(body.style.backgroundColor, root.style.backgroundColor, 'browser body and document backing must match');
+    assert.equal(root.dataset.theme, mode, 'surface correction must preserve the selected light/dark mode');
+    assert.equal(style[`--app-${mode}-ink`], appThemePreset(theme[mode])[mode].ink, 'surface correction must preserve palette text');
+    assert.equal(sharedSettings.windowSurface, windowSurface, 'mobile rendering must not change the desktop preference');
+    assert.equal(sharedSettings.windowTransparency, 75, 'mobile rendering must not change desktop transparency');
+  }
+}
 zoomReject = true;
 const nativeRenderer = rendererFactory(20, true);
 nativeRenderer.applyAppearance(settings, theme, 125);
@@ -139,4 +152,9 @@ nativeRenderer.applyAppearance({ ...settings }, { ...theme }, 125);
 assert.equal(writes.zoom, 2, 'failed native zoom clears cache so same-key retry is attempted');
 nativeRenderer.applyAppearance({ ...settings }, { ...theme }, 125);
 assert.equal(writes.zoom, 2, 'successful native zoom retry remains cached');
+for (const windowSurface of ['translucent', 'glass']) {
+  nativeRenderer.applyAppearance({ ...settings, windowSurface, windowTransparency: 75 }, theme, 125);
+  assert.equal(root.dataset.windowSurface, windowSurface, 'native desktop keeps its selected surface');
+  assert.equal(root.style.backgroundColor === 'transparent', windowSurface === 'glass', 'native glass retains its backdrop');
+}
 console.log(`production appearance renderer guard passed (first=${JSON.stringify(afterFirst)}, after1000Repeats=${JSON.stringify(afterRepeats)}, final=${JSON.stringify(writes)})`);

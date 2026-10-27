@@ -2486,7 +2486,9 @@
       colour = dark ? colours.dark : colours.light,
       root = document.documentElement,
       meta = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
-    const glass = settings.windowSurface === 'glass';
+    // Glass needs a native desktop backdrop. A phone/browser's transparent
+    // document exposes the WebView backing colour and washes out dark surfaces.
+    const glass = nativeRuntime && settings.windowSurface === 'glass';
     root.style.backgroundColor = glass ? 'transparent' : colour;
     document.body.style.backgroundColor = glass ? 'transparent' : colour;
     meta?.setAttribute('content', colour);
@@ -2510,7 +2512,7 @@
     root.dataset.appThemeLight = selectedTheme.light;
     root.dataset.appThemeDark = selectedTheme.dark;
     root.dataset.theme = settings.theme;
-    root.dataset.windowSurface = ['opaque', 'translucent', 'glass'].includes(settings.windowSurface ?? '')
+    root.dataset.windowSurface = nativeRuntime && ['opaque', 'translucent', 'glass'].includes(settings.windowSurface ?? '')
       ? settings.windowSurface!
       : 'opaque';
     syncBrowserChrome(settings, selectedTheme, tint);
