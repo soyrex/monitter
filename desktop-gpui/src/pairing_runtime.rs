@@ -145,7 +145,7 @@ struct Connection {
     socket:WebSocket<MaybeTlsStream<TcpStream>>, direct:bool, crypto:CryptoSession, epoch:u64,
     joined:bool, heartbeat:bool, ping_at:Instant, pong_deadline:Option<Instant>, pairing_deadline:Instant,
     requested:bool, approved:bool, owner_requested:bool, owner:bool,
-    remembered_controller:bool, remembered_owner:bool, large_chunks:bool,
+    remembered_controller:bool, remembered_owner:bool, large_chunks:bool, send_receipts:bool,
     transfers:HashMap<String,Transfer>, uploads:HashMap<String,ControllerUpload>, receipts:HashMap<String,Receipt>, active:usize,
     outgoing:VecDeque<Value>, sent:VecDeque<Instant>, generation:Arc<AtomicU64>,
 }
@@ -165,7 +165,7 @@ fn connect(record:&Record,epoch:u64)->Result<Connection,String>{
     new_connection(record,epoch,socket,false)
 }
 fn new_connection(record:&Record,epoch:u64,socket:WebSocket<MaybeTlsStream<TcpStream>>,direct:bool)->Result<Connection,String>{
-    Ok(Connection{socket,direct,crypto:CryptoSession::new(&record.identity)?,epoch,joined:false,heartbeat:direct,ping_at:Instant::now(),pong_deadline:None,pairing_deadline:Instant::now()+Duration::from_secs(300),requested:false,approved:false,owner_requested:false,owner:false,remembered_controller:false,remembered_owner:false,large_chunks:false,transfers:HashMap::new(),uploads:HashMap::new(),receipts:HashMap::new(),active:0,outgoing:VecDeque::new(),sent:VecDeque::new(),generation:Arc::new(AtomicU64::new(0))})
+    Ok(Connection{socket,direct,crypto:CryptoSession::new(&record.identity)?,epoch,joined:false,heartbeat:direct,ping_at:Instant::now(),pong_deadline:None,pairing_deadline:Instant::now()+Duration::from_secs(300),requested:false,approved:false,owner_requested:false,owner:false,remembered_controller:false,remembered_owner:false,large_chunks:false,send_receipts:false,transfers:HashMap::new(),uploads:HashMap::new(),receipts:HashMap::new(),active:0,outgoing:VecDeque::new(),sent:VecDeque::new(),generation:Arc::new(AtomicU64::new(0))})
 }
 // Direct transport carries the identical encrypted protocol and grants. The
 // listener is deliberately separate from the unauthenticated LAN web bridge.
@@ -240,7 +240,17 @@ fn remember(record:&mut Record,key:&str,scope:&str)->Result<(),String>{
     let name=record.devices.iter().find(|d|d.public_key==key).map(|d|d.name.clone()).unwrap_or_else(||format!("Phone {}",record.devices.iter().map(|d|&d.public_key).collect::<std::collections::HashSet<_>>().len()+1));
     record.devices.push(Device{public_key:key.into(),name,scope:scope.into(),last_access_at:now()});Ok(())
 }
-fn approve(connection:&mut Connection,owner:bool){if owner{connection.owner=true;connection.owner_requested=false;connection.outgoing.push_back(json!({"type":"owner-workspace-approved"}));}else{connection.approved=true;connection.requested=false;connection.outgoing.push_back(json!({"type":"approved","capabilities":["remembered-device-v1","task-message-pages-v1","owner-workspace-v1","owner-chunks-512k-v1"]}));}}
+fn approve(connection:&mut Connection,owner:bool){
+    if owner {
+        connection.owner=true;connection.owner_requested=false;
+        connection.outgoing.push_back(json!({"type":"owner-workspace-approved"}));
+    } else {
+        connection.approved=true;connection.requested=false;
+        let mut capabilities=vec!["remembered-device-v1","task-message-pages-v1","owner-workspace-v1","owner-chunks-512k-v1"];
+        if connection.send_receipts {capabilities.push("send-receipt-v1");}
+        connection.outgoing.push_back(json!({"type":"approved","capabilities":capabilities}));
+    }
+}
 fn publish(shared:&Mutex<Status>,record:&Record,connection:Option<&Connection>,error:&Option<String>){
     let mut pending=vec![];
     if let Some(c)=connection {for (scope,requested)in [("controller",c.requested),("owner",c.owner_requested)]{if requested{pending.push(Pending{id:format!("{}:{scope}",c.epoch),name:"Phone".into(),sas:c.crypto.verification().unwrap_or("").into(),scope:scope.into()});}}}
@@ -371,6 +381,7 @@ fn secure(c:&mut Connection,value:Value,record:&mut Record,path:&Path,service:&D
             // Shared visitors have a separate protocol and can never gain owner scope.
             if value.get("operator").is_some(){return Err("Visitor identities cannot pair as a phone.".into());}
             c.large_chunks=value["capabilities"].as_array().is_some_and(|values|values.iter().any(|v|v=="owner-chunks-512k-v1"));
+            c.send_receipts=value["capabilities"].as_array().is_some_and(|values|values.iter().any(|v|v=="send-receipt-v1"));
             if trusted(record,&key,"controller"){access(record,&key,"controller");save(path,record)?;c.remembered_controller=true;approve(c,false);}else{c.requested=true;}Ok(())
         },
         Some("owner-workspace-request") if c.approved&&!c.owner&&!c.owner_requested=>{
@@ -503,18 +514,27 @@ fn spawn_work(c:&mut Connection,service:&DesktopService,done:&mpsc::SyncSender<C
         return;
     }
     let permit=WorkerPermit;
-    c.active+=1;let epoch=c.epoch;let authority=c.generation.clone();let generation=authority.load(Ordering::SeqCst);let service=service.clone();let done=done.clone();
+    c.active+=1;let epoch=c.epoch;let authority=c.generation.clone();let generation=authority.load(Ordering::SeqCst);let service=service.clone();let done=done.clone();let send_receipts=c.send_receipts;
     thread::spawn(move||{
         let _permit=permit;
         if authority.load(Ordering::SeqCst)!=generation{let _=done.send(Completed{generation,epoch,id,owner,result:Err("Pairing authorization changed.".into()),appearance:false});return;}
         let appearance=owner&&command=="set_owner_appearance";
-        let result=if owner&&matches!(command.as_str(),"get_owner_appearance"|"set_owner_appearance"){owner_appearance(&service,&command,args,&terminal_theme)}else{service.pairing_host_invoke(&command,args)}
-            .and_then(|value| {
-                if !owner && command == "send_message" && value["accepted"] == true && value.get("tasks").is_none() {
-                    service.pairing_host_invoke("get_snapshot", json!({}))
-                } else { Ok(value) }
-            })
-            .and_then(|value|if !owner&&matches!(command.as_str(),"get_snapshot"|"send_message"|"cancel_task"|"resume_task"){controller_snapshot(value)}else if !owner&&command=="get_task_messages"{controller_message_page(value)}else if !owner&&value.to_string().len()>MAX_CONTROLLER-1024{Err("Controller response exceeds 1 MiB. Use the owner workspace.".into())}else{Ok(value)});
+        let send_receipt=!owner&&command=="send_message"&&send_receipts;
+        let controller_mutation=!owner&&matches!(command.as_str(),"send_message"|"cancel_task"|"resume_task");
+        let result=if owner&&matches!(command.as_str(),"get_owner_appearance"|"set_owner_appearance") {
+            owner_appearance(&service,&command,args,&terminal_theme)
+        } else if send_receipt {
+            service.pairing_host_invoke("send_message_fast",args)
+        } else if controller_mutation {
+            // Keep the replayable private IPC mutation receipt bounded. Older
+            // phones still receive their compatibility Snapshot from a
+            // separate read after the durable mutation has completed.
+            service.pairing_host_invoke("invoke_ui_mutation",json!({"command":&command,"args":args}))
+                .and_then(|_|service.pairing_host_invoke("get_snapshot",json!({})))
+        } else {
+            service.pairing_host_invoke(&command,args)
+        }
+            .and_then(|value|if !owner&&!send_receipt&&matches!(command.as_str(),"get_snapshot"|"send_message"|"cancel_task"|"resume_task"){controller_snapshot(value)}else if !owner&&command=="get_task_messages"{controller_message_page(value)}else if !owner&&value.to_string().len()>MAX_CONTROLLER-1024{Err("Controller response exceeds 1 MiB. Use the owner workspace.".into())}else{Ok(value)});
         let _=done.send(Completed{generation,epoch,id,owner,result,appearance});
     });
 }
