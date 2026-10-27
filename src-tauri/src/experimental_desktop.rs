@@ -1521,6 +1521,40 @@ pub enum BackendAvailability {
     Present,
 }
 
+fn pairing_host_invoke_with(
+    command: &str, args: Value,
+    call: impl FnOnce(&str, Value) -> Result<Value, String>,
+) -> Result<Value, String> {
+    // Pairing starts with no transcript scope. Read metadata through the
+    // same bounded reset/delta feed as the native workspace; the phone
+    // fetches a chat's history through get_task_messages when it opens it.
+    // Trimming after pairing_host_invoke is too late: the legacy snapshot
+    // can already exceed the private IPC frame and replay receipt limits.
+    match command {
+        "get_ui_delta" => call(
+            if args["metadataPatch"].as_bool() == Some(true) {
+                "read_native_ui_changes_v2"
+            } else {
+                "read_native_ui_changes"
+            },
+            serde_json::json!({"revision": args.get("revision"), "messageTaskIds": []}),
+        ),
+        "get_snapshot" | "get_ui_snapshot" => {
+            let state: UiDeltaResponse = serde_json::from_value(call("read_native_ui_changes",
+                serde_json::json!({"revision": null, "messageTaskIds": []}))?)
+                .map_err(|_| "Invalid paired workspace state response.")?;
+            if command == "get_snapshot" {
+                encode(state.snapshot.ok_or("Paired workspace reset did not return a snapshot.")?)
+            } else {
+                let unchanged = args["revision"].as_str() == Some(state.revision.as_str());
+                Ok(serde_json::json!({"revision": state.revision,
+                    "snapshot": if unchanged { None } else { state.snapshot }}))
+            }
+        }
+        _ => call("pairing_host_invoke", serde_json::json!({"command":command,"args":args})),
+    }
+}
+
 /// Cloneable GUI facade. Dropping/closing any GUI handle disconnects only;
 /// execution and native preferences remain in the independent menu-bar server.
 #[derive(Clone)]
@@ -1693,7 +1727,7 @@ impl DesktopService {
         )
     }
     pub fn pairing_host_invoke(&self, command: &str, args: Value) -> Result<Value, String> {
-        self.0.call("pairing_host_invoke", serde_json::json!({"command":command,"args":args}))
+        pairing_host_invoke_with(command, args, |method, args| self.0.call(method, args))
     }
     pub fn read_lan_status(&self) -> Result<NativeLanStatus, String> {
         self.0.call("read_lan_status", Value::Null)

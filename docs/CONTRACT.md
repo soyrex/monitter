@@ -3209,6 +3209,14 @@ Sharing/controller projections consume the current revisioned owner cache and
 existing bounded transcript pages; they do not first fetch all durable history.
 Raw snapshot endpoints remain explicit compatibility/diagnostic operations.
 
+The native pairing host maps remote `get_ui_delta`, `get_ui_snapshot` and
+controller `get_snapshot` reads to the private native state feed with an empty
+task transcript scope before crossing IPC. The response retains its existing
+revision/snapshot/delta envelope; chat bodies load through `get_task_messages`.
+`metadataPatch: true` selects the native v2 feed, while older callers retain full
+metadata deltas. Forwarded reads use read-only IPC recovery and never allocate
+mutation replay receipts. Forwarded mutations retain exactly-once receipts.
+
 ### GPUI phone pairing host
 
 Settings → Pair a phone uses native GPUI controls and a single profile-scoped

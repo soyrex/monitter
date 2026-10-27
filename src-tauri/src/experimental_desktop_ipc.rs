@@ -630,7 +630,7 @@ mod unix {
     fn read_only_request(method: &str, args: &Value) -> bool {
         match method {
             "read_browser_open_requests" | "read_ui_changes" | "read_native_ui_changes" | "read_native_ui_changes_v2" | "confirm_native_command" | "read_idle_runtime_status" | "read_task_messages" | "read_channel_messages" | "read_attachment_file" | "load_native_preferences" | "read_lan_status" | "get_agent_extension_assignments" | "subscribe_changes" => true,
-            "invoke" => matches!(args["command"].as_str(), Some("read_admin_activity" | "get_snapshot" | "get_ui_snapshot" | "get_ui_delta" | "get_process_metrics" | "get_task_messages" | "get_channel_messages" | "get_task_events" | "get_task_event_detail" | "get_usage_overview" | "get_task_goal" | "get_task_slash_commands" | "get_subagent_transcript" | "get_task_git_status" | "get_task_git_diff" | "list_terminals" | "read_terminal" | "get_command_capabilities")),
+            "invoke" | "pairing_host_invoke" => matches!(args["command"].as_str(), Some("read_admin_activity" | "get_snapshot" | "get_ui_snapshot" | "get_ui_delta" | "get_process_metrics" | "get_task_messages" | "get_channel_messages" | "get_task_events" | "get_task_event_detail" | "get_usage_overview" | "get_task_goal" | "get_task_slash_commands" | "get_subagent_transcript" | "get_task_git_status" | "get_task_git_diff" | "list_terminals" | "read_terminal" | "get_command_capabilities")),
             _ => false,
         }
     }
@@ -856,6 +856,77 @@ mod unix {
     mod tests {
         use super::*;
         use serde_json::json;
+        #[test]
+        fn pairing_workspace_reads_compact_feed_and_recovers_without_replay_receipts() {
+            let root = std::env::temp_dir().join(format!("gpui-pairing-workspace-{}", uuid::Uuid::new_v4()));
+            let profile = secure_profile(&root.join(APP_ID), true).unwrap();
+            let path = socket_path(&profile, true).unwrap();
+            let listener = UnixListener::bind(&path).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let server_profile = profile.clone();
+            let worker = thread::spawn(move || {
+                let instance = uuid::Uuid::new_v4().to_string();
+                let mut snapshot = crate::model::default_snapshot();
+                snapshot.settings.user_name = "x".repeat(REPLAY_RESPONSE_LIMIT + 1);
+                let result = json!({"revision":"fixture:1","snapshot":snapshot,"delta":null});
+                let expected = ["read_native_ui_changes_v2", "read_native_ui_changes_v2",
+                    "read_native_ui_changes", "read_native_ui_changes", "read_native_ui_changes",
+                    "read_native_ui_changes", "pairing_host_invoke"];
+                // The first connection establishes the facade's backend identity.
+                for index in 0..=expected.len() {
+                    let (mut peer, _) = listener.accept().unwrap();
+                    peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                    let hello: Hello = read_frame(&mut peer).unwrap();
+                    assert_eq!(hello.profile, server_profile.to_string_lossy());
+                    write_frame(&mut peer, &Welcome { version: VERSION,
+                        instance_id: instance.clone(), pid: std::process::id() }).unwrap();
+                    if index == 0 { continue; }
+                    let request: Request = read_frame(&mut peer).unwrap();
+                    assert_eq!(request.method, expected[index - 1]);
+                    if request.method == "pairing_host_invoke" {
+                        assert_eq!(request.args["command"], "get_task_messages");
+                    } else {
+                        assert_eq!(request.args["messageTaskIds"], json!([]));
+                    }
+                    // Lose a response larger than the replay receipt budget.
+                    // Recovery must repeat the read, never reserve/execute it.
+                    if index == 1 { continue; }
+                    write_frame(&mut peer, &Response { id: request.id,
+                        result: result.clone(), error: None }).unwrap();
+                }
+            });
+            let client = Client::connect(&profile).unwrap();
+            let invoke = |command: &str, args: Value|
+                pairing_host_invoke_with(command, args, |method, args| client.call(method, args));
+            let delta = invoke("get_ui_delta", json!({"metadataPatch":true})).unwrap();
+            assert!(serde_json::to_vec(&delta).unwrap().len() > REPLAY_RESPONSE_LIMIT);
+            assert_eq!(delta["revision"], "fixture:1");
+            let legacy_delta = invoke("get_ui_delta", json!({})).unwrap();
+            assert_eq!(delta, legacy_delta);
+            let snapshot = invoke("get_snapshot", json!({})).unwrap();
+            assert_eq!(snapshot, delta["snapshot"]);
+            let changed = invoke("get_ui_snapshot", json!({"revision":"fixture:0"})).unwrap();
+            assert_eq!(changed["snapshot"], snapshot);
+            let unchanged = invoke("get_ui_snapshot", json!({"revision":"fixture:1"})).unwrap();
+            assert!(unchanged["snapshot"].is_null());
+            invoke("get_task_messages", json!({"taskId":"fixture"})).unwrap();
+            worker.join().unwrap();
+            drop(client);
+            std::fs::remove_file(&path).unwrap();
+            std::fs::remove_dir(path.parent().unwrap()).unwrap();
+            std::fs::remove_dir_all(root).unwrap();
+        }
+        #[test]
+        fn pairing_workspace_forwarded_reads_never_become_mutation_receipts() {
+            for command in ["get_snapshot", "get_ui_snapshot", "get_ui_delta", "get_task_messages",
+                "get_channel_messages", "get_command_capabilities"] {
+                assert!(read_only_request("pairing_host_invoke", &json!({"command":command})));
+            }
+            for command in ["send_message", "send_message_fast", "invoke_ui_mutation", "cancel_task",
+                "resume_task", "rename_task", "unknown", "get_unknown"] {
+                assert!(!read_only_request("pairing_host_invoke", &json!({"command":command})));
+            }
+        }
         #[test]
         fn ipc_retry_client_ticket_drop_semantic_error_and_legacy_fallback() {
             for mode in ["drop", "semantic", "legacy"] {
