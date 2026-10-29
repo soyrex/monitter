@@ -1152,8 +1152,19 @@ impl BrowserTab {
             self.pending_address = Some(self.location.clone());
             self.dirty_address = false;
             self.error = None;
-            cx.update_window_context(self.host_window, |window, cx| self.start_native(window, cx))
-                .map_err(|error| error.to_string())?;
+            // Link activation already holds the host window. Reentering it here
+            // fails with "window not found", causing the caller to remove the
+            // newly docked pane. Start after the current window update returns.
+            let tab = cx.weak_entity();
+            cx.defer(move |cx| {
+                let _ = tab.update(cx, |tab, cx| {
+                    if !tab.native_deferred { return; }
+                    if let Err(error) = cx.update_window_context(tab.host_window, |window, cx| tab.start_native(window, cx)) {
+                        tab.error = Some(format!("Cannot start native browser: {error}"));
+                        cx.notify();
+                    }
+                });
+            });
             cx.emit(BrowserTabEvent::MetadataChanged);
             cx.notify();
             return Ok(());
@@ -2559,6 +2570,28 @@ mod tests {
     };
 
     /// Real retained manager/tab entities with no WKWebView, network or profile.
+    #[gpui_kit::test]
+    fn chat_links_deferred_browser_accepts_navigation_inside_host_update(cx: &mut gpui_kit::TestAppContext) {
+        use gpui_kit::{AppContext as _, component::Root};
+        cx.update(|cx| gpui_kit::init(cx));
+        let (_, visual) = cx.add_window_view(|window, cx| {
+            let tab = cx.new(|cx| super::BrowserTab::new_deferred(window, cx));
+            tab.update(cx, |tab, cx| {
+                assert!(tab.open_url("javascript:alert(1)", None, cx).is_err());
+                assert!(tab.pending_navigation.is_none());
+                tab.open_url("https://example.com/", Some("Example"), cx)
+                    .expect("valid navigation must not reenter the leased host window");
+                tab.open_url("https://example.com/latest", None, cx).unwrap();
+                assert_eq!(tab.pending_navigation.as_ref().unwrap().0, "https://example.com/latest");
+                assert!(tab._native_init.is_none(), "native startup waits until the window update returns");
+                // Closing before deferred startup must cancel it without WebKit/network work.
+                tab.close(cx);
+            });
+            Root::new(tab, window, cx)
+        });
+        visual.update(|window, _| window.remove_window());
+    }
+
     fn offline_transfer_fixture(cx: &mut gpui_kit::TestAppContext) -> (
         gpui_kit::Entity<super::BrowserPane>,
         [gpui_kit::Entity<super::BrowserTab>; 2],

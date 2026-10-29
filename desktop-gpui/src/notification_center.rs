@@ -31,7 +31,9 @@ impl Desktop {
     }
 
     pub(super) fn sync_notification_bell(&mut self, cx: &mut Context<Self>) {
-        if let Some(service) = self.service.clone() {
+        // Preserve queued summaries while cached inputs are available but the
+        // shared service still withholds authoritative command dispatch.
+        if let Some(service) = self.service.clone().filter(|service| service.workspace_commands_ready()) {
             for (task_id, message_id) in self.notification_model.take_summary_requests() {
                 let service = service.clone();
                 let request_task = task_id.clone();

@@ -606,7 +606,8 @@
       "resultTsType": "MarkdownDocument",
       "legacyCompatible": true,
       "surfaces": [
-        "native"
+        "native",
+        "lan"
       ]
     },
     "read_image_file": {
@@ -637,7 +638,8 @@
       "resultTsType": "ImageDocument",
       "legacyCompatible": false,
       "surfaces": [
-        "native"
+        "native",
+        "lan"
       ]
     },
     "read_report_file": {
@@ -668,7 +670,8 @@
       "resultTsType": "ReportDocument",
       "legacyCompatible": false,
       "surfaces": [
-        "native"
+        "native",
+        "lan"
       ]
     },
     "open_task_file": {

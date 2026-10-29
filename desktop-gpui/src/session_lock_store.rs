@@ -112,7 +112,12 @@ fn random_verifier(pin: &str) -> Result<String, StoreError> {
     hash_with_salt(pin, &salt)
 }
 fn configured_at(path: &Path) -> Result<bool, StoreError> {
-    let verifier = read_verifier_at(path)?;
+    with_database(path, configured_in)
+}
+fn configured_in(tx: &rusqlite::Transaction<'_>) -> Result<bool, StoreError> {
+    let verifier: Option<String> = tx
+        .query_row("SELECT verifier FROM session_lock WHERE id=1", [], |r| r.get(0))
+        .map_err(|_| StoreError::Storage)?;
     match verifier {
         Some(v) => {
             parse_verifier(&v)?;
@@ -322,6 +327,13 @@ fn record_failure_at(path: &Path, attempts: u32, retry_until_ms: u64) -> Result<
 }
 pub fn read_snapshot() -> Result<LockSnapshot, String> {
     read_snapshot_at(&database_path().map_err(|e| e.to_string())?).map_err(|e| e.to_string())
+}
+/// Read initial lock authority and verifier configuration from the same
+/// transaction. A failed read leaves the UI in its fail-closed startup state.
+pub fn read_startup_state() -> Result<(LockSnapshot, bool), String> {
+    let path = database_path().map_err(|e| e.to_string())?;
+    with_database(&path, |tx| Ok((snapshot_in(tx)?, configured_in(tx)?)))
+        .map_err(|e| e.to_string())
 }
 pub fn read_locked() -> Result<bool, String> {
     read_snapshot().map(|s| s.locked)

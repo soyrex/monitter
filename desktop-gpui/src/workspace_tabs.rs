@@ -402,7 +402,7 @@ impl Desktop {
         })
     }
     /// Expanded rows, Activity icons and compact group menus share this path.
-    /// Keep only the latest click while restore/save owns the layout; do not set
+    /// Keep only the latest click while restore owns the layout; do not set
     /// selected then, because rendering it would add it to the outgoing dock.
     pub(super) fn navigate_sidebar_task(&mut self, task_id: String, window: &mut Window, cx: &mut Context<Self>) {
         if crate::session_lock::locked(cx) || !self.workspace_controls_available() { return; }
@@ -431,6 +431,7 @@ impl Desktop {
     }
 
     fn drain_sidebar_task_navigation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let started = std::time::Instant::now();
         let Some(task_id) = self.window.pending_sidebar_task.clone() else {
             return;
         };
@@ -439,7 +440,7 @@ impl Desktop {
             self.window.pending_notification_read = None;
             return;
         }
-        if !self.workspace_ready() {
+        if !self.workspace_selection_ready() {
             return;
         }
         let pane_id = format!("chat:{task_id}");
@@ -457,7 +458,7 @@ impl Desktop {
             &pane_id,
             &layout,
             self.named_workspaces.as_ref(),
-            self.workspace_ready(),
+            self.workspace_selection_ready(),
         ) {
             crate::workspace_visibility::SidebarTaskDestination::Wait => {}
             crate::workspace_visibility::SidebarTaskDestination::Current => {
@@ -465,11 +466,11 @@ impl Desktop {
                 self.focus_sidebar_task(&task_id, window, cx);
             }
             crate::workspace_visibility::SidebarTaskDestination::Workspace(id) => {
-                self.begin_named_workspace_switch(id.clone(), window, cx);
+                self.begin_named_workspace_switch(id.clone(), started, window, cx);
                 if self.window.active_workspace_id.as_deref() == Some(id.as_str()) {
                     // A retained target activates synchronously, so there is no
                     // restore completion to consume this host's focus/read intent.
-                    if self.workspace_ready() {
+                    if self.workspace_selection_ready() {
                         self.window.pending_sidebar_task = None;
                         if !self.focus_sidebar_task(&task_id, window, cx) {
                             self.window.pending_notification_read = None;
@@ -510,7 +511,7 @@ impl Desktop {
 
     /// A scoped feed explicitly chooses its workspace, even if a chat appears in more than one.
     pub(super) fn navigate_workspace_notification(&mut self, id: &str, task_id: String, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if crate::session_lock::locked(cx) || !self.workspace_ready() {
+        if crate::session_lock::locked(cx) || !self.workspace_selection_ready() {
             // A later attempted review must not acknowledge an earlier queued review.
             self.window.pending_notification_read = None;
             return false;
@@ -583,8 +584,11 @@ impl Desktop {
             && !self.close_pending
     }
     pub(super) fn workspace_ready(&self) -> bool {
+        self.workspace_selection_ready() && !self.preferences_busy
+    }
+    /// A save snapshots preferences; it does not lease retained native views.
+    pub(super) fn workspace_selection_ready(&self) -> bool {
         self.workspace_controls_available()
-            && !self.preferences_busy
             && !self.window.preferences_restore
             && !self.window.preferences_restoring
             && !self.window.preferences_restore_suppressed
@@ -600,6 +604,7 @@ impl Desktop {
         self.switch_named_workspace(id, window, cx);
     }
     pub(super) fn switch_named_workspace(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let started = std::time::Instant::now();
         // Include panes added since the last preference load in the shared
         // history warmup. Duplicate task IDs are ignored by the warmup queue.
         self.close_activity_overview(window, cx);
@@ -607,12 +612,13 @@ impl Desktop {
         self.window.pending_pane_focus = None;
         self.window.pending_sidebar_task = None;
         self.window.pending_notification_read = None;
-        self.begin_named_workspace_switch(id, window, cx);
+        self.begin_named_workspace_switch(id, started, window, cx);
         self.prewarm_workspace_history(cx);
     }
     fn begin_named_workspace_switch(
         &mut self,
         id: String,
+        started: std::time::Instant,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -627,19 +633,37 @@ impl Desktop {
             return;
         }
         if self.window.active_workspace_id.as_deref() == Some(id.as_str()) {
-            self.pending_workspace_activation = None;
+            crate::workspace_timing::cancel(window, cx);
+            self.pending_workspace_activation.remove(&self.current_workspace_window);
             return;
         }
         if !self.workspace_controls_available() { return; }
-        if !self.workspace_ready() {
-            self.pending_workspace_activation = Some((self.current_workspace_window.clone(), id));
+        let warmed = self.retained_workspace_content_ready(&id, window, cx);
+        if !warmed {
+            self.workspace_interface_preload_prepared.remove(&id);
+            if let Some(view) = self.workspace_view_cache.get_mut(&id) {
+                // Viewport/history revisions can invalidate an old completed
+                // queue. Revisit the requested visible panes at their new key.
+                view.transcript_preload = None;
+                view.transcript_preload_deferred = false;
+            }
+        }
+        if crate::workspace_timing::enabled() {
+            crate::workspace_timing::request(window, started, warmed, cx);
+            if !warmed { self.trace_retained_workspace_readiness(&id, window, cx); }
+        }
+        self.pending_workspace_activation.insert(self.current_workspace_window.clone(), id.clone());
+        if !self.workspace_selection_ready() {
             self.schedule_saved_workspace_interface_tick(window, cx);
+            cx.notify();
             return;
         }
         match self.activate_retained_workspace(&id, window, cx) {
-            Ok(true) => { self.pending_workspace_activation = None; return; },
+            Ok(true) => { self.pending_workspace_activation.remove(&self.current_workspace_window); return; },
             Ok(false) => {}
             Err(error) => {
+                crate::workspace_timing::failed(window, cx);
+                self.pending_workspace_activation.remove(&self.current_workspace_window);
                 self.preferences_error = Some(error);
                 cx.notify();
                 return;
@@ -647,11 +671,11 @@ impl Desktop {
         }
         // Keep the current dock on screen until the retained target is ready.
         // Startup preloading normally makes this path an immediate cache hit.
-        self.pending_workspace_activation = Some((self.current_workspace_window.clone(), id.clone()));
         self.prioritize_workspace_interface(&id);
         self.workspace_interface_preload_queue.retain(|queued| queued != &id);
         self.workspace_interface_preload_queue.push_front(id);
         self.schedule_saved_workspace_interface_tick(window, cx);
+        cx.notify();
     }
 
     fn add_named_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1385,6 +1409,7 @@ impl Desktop {
         if let Some(set) = self.window_named_workspaces() {
             for (index, item) in set.items.iter().enumerate() {
                 let active = !self.window.activity_overview_open && item.id == set.active_id;
+                let switch_pending = self.pending_workspace_activation.get(&self.current_workspace_window) == Some(&item.id);
                 let active_agent = crate::workspace_notification_scope::task_ids_for_layout(
                     item.layout.as_ref(),
                 )
@@ -1423,7 +1448,7 @@ impl Desktop {
                 let icon_debug_id = id.clone();
                 let workspace_icon = div().relative().size(tab_metrics.icon_size)
                     .debug_selector(move || format!("workspace-edit-icon-{icon_debug_id}"))
-                    .child(workspace_favicon(&id, item.url.as_deref(), icon(&item.icon), color, active_agent, window, cx))
+                    .child(workspace_favicon(&id, item.url.as_deref(), icon(&item.icon), color, active_agent || switch_pending, window, cx))
                     .when(index < 9, |icon| icon.child(workspace_number_hint(
                         &id, index + 1, self.window.workspace_number_hints, palette, window, cx,
                     )));
@@ -1436,6 +1461,9 @@ impl Desktop {
                         .ghost()
                         .compact()
                         .w(tab_metrics.editor_size)
+                        // Compact buttons otherwise retain their default 32px
+                        // minimum, widening only the selected workspace tab.
+                        .min_w_0()
                         .h(tab_metrics.editor_size)
                         .rounded(px(4.))
                         .p_0()
@@ -1521,7 +1549,7 @@ impl Desktop {
                         .gap(px(4.))
                         .rounded(px(4.))
                         .border_1()
-                        .border_color(rgb(palette.line).opacity(0.))
+                        .border_color(if switch_pending { color.opacity(0.65) } else { rgb(palette.line).opacity(0.) })
                         .text_color(rgb(if active { palette.ink } else { palette.muted }))
                         .cursor_pointer()
                         .track_focus(&focus)
@@ -1538,14 +1566,17 @@ impl Desktop {
                         .role(Role::Tab)
                         .aria_selected(active)
                         .aria_label(format!(
-                            "{} workspace{}{}",
+                            "{} workspace{}{}{}",
                             item.name,
                             if active { ", selected" } else { "" },
-                            if active_agent { ", active agent" } else { "" }
+                            if active_agent { ", active agent" } else { "" },
+                            if switch_pending { ", switching" } else { "" }
                         ))
                         .child(div().absolute().inset_0().child(selection_chrome))
-                        .child(settings_leading)
+                        // Both trigger variants occupy the same immutable slot.
+                        .child(div().flex_none().size(tab_metrics.editor_size).child(settings_leading))
                         .when(!icon_only_tabs, |tab| tab.child(div().min_w_0().truncate()
+                            .debug_selector({let id=id.clone();move ||format!("workspace-label-{id}")})
                             .text_size(tab_metrics.text_size)
                             .child(item.name.clone())))
                         .child(div().flex_shrink_0()
@@ -2563,8 +2594,8 @@ mod workspace_editor_click_tests {
             );
             assert!(
                 view.pending_workspace_activation
-                    .as_ref()
-                    .is_some_and(|(_, id)| id == "two")
+                    .get(&view.current_workspace_window)
+                    .is_some_and(|id| id == "two")
                     || view.window.active_workspace_id.as_deref() == Some("two"),
                 "inactive workspace icon belongs to the tab activation surface"
             );

@@ -11,7 +11,7 @@ use gpui_kit::{
     prelude::*,
     *,
 };
-use std::collections::{HashMap, HashSet};
+use std::{collections::{HashMap, HashSet}, sync::Arc};
 #[path = "palette_search.rs"]
 mod palette_search;
 use palette_search::PaletteSearch;
@@ -262,6 +262,12 @@ pub struct CommandPalette {
     query: Entity<InputState>,
     entries: Vec<PaletteEntry>,
     search: PaletteSearch,
+    search_catalog: Arc<Vec<PaletteEntry>>,
+    search_revision: u64,
+    search_indexed_revision: Option<u64>,
+    search_generation: u64,
+    search_running: bool,
+    search_pending: bool,
     generation: u64,
     async_content: HashMap<String, String>,
     visible: Vec<usize>,
@@ -307,6 +313,12 @@ impl CommandPalette {
             query,
             entries: vec![],
             search: PaletteSearch::default(),
+            search_catalog: Arc::new(vec![]),
+            search_revision: 0,
+            search_indexed_revision: None,
+            search_generation: 0,
+            search_running: false,
+            search_pending: false,
             generation: 0,
             async_content: HashMap::new(),
             visible: vec![],
@@ -337,8 +349,8 @@ impl CommandPalette {
         self.generation = self.generation.wrapping_add(1);
         self.async_content.clear();
         self.mode = mode;
-        self.search.update(&entries);
         self.entries = entries;
+        self.search_catalog_changed();
         self.selected = None;
         self.refilter(cx);
         self.query.update(cx, |input, cx| input.focus(window, cx));
@@ -364,8 +376,9 @@ impl CommandPalette {
                 entry.search_text.clone_from(text);
             }
         }
-        self.search.update(&entries);
+        if self.entries == entries { return Ok(()); }
         self.entries = entries;
+        self.search_catalog_changed();
         self.selected =
             selected.and_then(|id| self.entries.iter().position(|entry| entry.id == id));
         self.refilter(cx);
@@ -394,7 +407,7 @@ impl CommandPalette {
         }
         entry.search_text = text;
         let followed_top = self.selected == self.visible.first().copied();
-        self.search.update(&self.entries);
+        self.search_catalog_changed();
         // An asynchronously discovered pane should become the default result,
         // while a selection moved further down the list remains stable.
         if followed_top {
@@ -429,6 +442,8 @@ impl CommandPalette {
     }
     fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open = false;
+        self.search_generation = self.search_generation.wrapping_add(1);
+        self.search_pending = false;
         if let Some(focus) = self.previous_focus.take() {
             window.focus(&focus, cx);
         }
@@ -440,16 +455,55 @@ impl CommandPalette {
         })
     }
     fn refilter(&mut self, cx: &mut Context<Self>) {
-        let query = self.query.read(cx).value().to_string();
-        self.visible = self.search.ranked(&self.entries, self.category, &query);
-        if !self
-            .selected
-            .is_some_and(|index| self.visible.contains(&index) && !self.entries[index].disabled)
-        {
-            self.selected = moved_selection(&self.entries, &self.visible, None, true);
-        }
-        self.reveal();
+        self.search_generation = self.search_generation.wrapping_add(1);
+        self.search_pending = true;
+        // Old indices may refer to a replaced catalog. Never show or activate
+        // results for a query/category whose ranking is still pending.
+        self.visible.clear();
+        self.start_search(cx);
         cx.notify();
+    }
+    fn search_catalog_changed(&mut self) {
+        self.search_revision = self.search_revision.wrapping_add(1);
+        self.search_catalog = Arc::new(self.entries.clone());
+    }
+    fn start_search(&mut self, cx: &mut Context<Self>) {
+        if !self.open || self.search_running || !self.search_pending { return; }
+        self.search_running = true;
+        let generation = self.search_generation;
+        let revision = self.search_revision;
+        let update_index = self.search_indexed_revision != Some(revision);
+        let entries = self.search_catalog.clone();
+        let query = self.query.read(cx).value().to_string();
+        let category = self.category;
+        // The SQLite connection and its index belong exclusively to this one
+        // job until it returns. Typing queues only the latest generation.
+        let mut search = std::mem::take(&mut self.search);
+        let worker = cx.background_executor().spawn(async move {
+            if update_index { search.update(&entries); }
+            let visible = search.ranked(&entries, category, &query);
+            (search, visible)
+        });
+        cx.spawn(async move |palette, cx| {
+            let (search, visible) = worker.await;
+            let _ = palette.update(cx, |palette, cx| {
+                palette.search = search;
+                palette.search_running = false;
+                palette.search_indexed_revision = Some(revision);
+                if palette.open && palette.search_generation == generation {
+                    palette.visible = visible;
+                    palette.search_pending = false;
+                    if !palette.selected.is_some_and(|index| palette.visible.contains(&index) && !palette.entries[index].disabled) {
+                        palette.selected = moved_selection(&palette.entries, &palette.visible, None, true);
+                    }
+                    palette.reveal();
+                    cx.notify();
+                }
+                // At most one running job and one implicit latest request;
+                // edits arriving during work never create a task backlog.
+                palette.start_search(cx);
+            });
+        }).detach();
     }
     fn reveal(&self) {
         if let Some(position) = self.selected.and_then(|index| {
@@ -462,11 +516,12 @@ impl CommandPalette {
         }
     }
     fn confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.open {
+        if !self.open || self.search_pending {
             return;
         }
         if let Some(entry) = self
             .selected
+            .filter(|index| self.visible.contains(index))
             .and_then(|index| self.entries.get(index))
             .filter(|entry| !entry.disabled)
             .cloned()
@@ -792,7 +847,7 @@ impl Render for CommandPalette {
                         .justify_center()
                         .text_color(muted)
                         .text_size(px(12.))
-                        .child("No matching items"),
+                        .child(if self.search_pending { "Searching…" } else { "No matching items" }),
                 )
             })
             .when(!self.visible.is_empty(), |panel| {

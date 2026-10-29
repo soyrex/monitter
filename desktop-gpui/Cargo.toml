@@ -15,6 +15,7 @@ nsh-core = { git = "https://github.com/longbridge/nsh.git", rev = "c1511fa4dda6c
 nsh-engine = { git = "https://github.com/longbridge/nsh.git", rev = "c1511fa4dda6ce2ed04e8f47ed087a1e7dee876b", default-features = false }
 nsh-base = { git = "https://github.com/longbridge/nsh.git", rev = "c1511fa4dda6ce2ed04e8f47ed087a1e7dee876b", default-features = false }
 anyhow = "1"
+async-channel = "=2.5.0"
 rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled"] }
 argon2 = "=0.5.3"
 rand_core = { version = "0.6", features = ["getrandom"] }

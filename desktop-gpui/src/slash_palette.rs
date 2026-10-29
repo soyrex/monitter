@@ -15,6 +15,7 @@ use monitter_lib::experimental_desktop::DesktopService;
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
+    rc::Rc,
     sync::{Arc, LazyLock, Mutex},
 };
 
@@ -139,7 +140,7 @@ struct LookupKey {
 
 pub struct SlashPalette {
     service: DesktopService,
-    snapshot: Value,
+    snapshot: Rc<Value>,
     composed_palette: Option<crate::design::Palette>,
     revision: String,
     task_id: String,
@@ -164,7 +165,7 @@ impl SlashPalette {
     pub fn new(service: DesktopService) -> Self {
         Self {
             service,
-            snapshot: Value::Null,
+            snapshot: Rc::new(Value::Null),
             composed_palette: None,
             revision: String::new(),
             task_id: String::new(),
@@ -189,21 +190,32 @@ impl SlashPalette {
         task_id: impl Into<String>,
         cx: &mut Context<Self>,
     ) {
+        let snapshot = Rc::new(serde_json::json!({
+            "settings": snapshot["settings"],
+            "tasks": snapshot["tasks"],
+        }));
+        self.set_context_shared(snapshot, revision, task_id, cx);
+    }
+
+    /// Accept the publication's retained source without copying all task rows.
+    /// Canonical revision changes still fence provider lookups exactly as in
+    /// the borrowed-snapshot entrypoint.
+    pub(crate) fn set_context_shared(
+        &mut self,
+        snapshot: Rc<Value>,
+        revision: impl ToString,
+        task_id: impl Into<String>,
+        cx: &mut Context<Self>,
+    ) {
         let revision = revision.to_string();
         let task_id = task_id.into();
         if self.revision == revision && self.task_id == task_id {
-            self.snapshot = serde_json::json!({
-                "settings": snapshot["settings"],
-                "tasks": snapshot["tasks"],
-            });
+            self.snapshot = snapshot;
             self.refilter(cx);
             return;
         }
 
-        self.snapshot = serde_json::json!({
-            "settings": snapshot["settings"],
-            "tasks": snapshot["tasks"],
-        });
+        self.snapshot = snapshot;
         self.revision = revision;
         self.task_id = task_id;
         self.generation = self.generation.wrapping_add(1);
@@ -230,6 +242,12 @@ impl SlashPalette {
         if let Some(key) = self.lookup_key.as_mut() {
             key.revision = self.revision.clone();
         }
+    }
+
+    /// Preserve the lookup proof while releasing its older shared source.
+    pub(crate) fn advance_unaffected_snapshot(&mut self, snapshot: Rc<Value>, revision: &str) {
+        self.snapshot = snapshot;
+        self.advance_revision(revision);
     }
 
     /// Track the owner's unsent text. Opening and provider lookup begin only

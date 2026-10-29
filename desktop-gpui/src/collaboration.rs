@@ -656,6 +656,51 @@ pub enum SubagentPaneEvent {
 
 impl EventEmitter<SubagentPaneEvent> for SubagentPane {}
 
+/// A distinct retained render boundary for the composer status controls. Child
+/// transcript updates repaint this surface without rebuilding the owning chat.
+pub struct SubagentVisor {
+    pane: Entity<SubagentPane>,
+    appearance: Option<(crate::design::Palette, f32, f32)>,
+    _pane_changed: Subscription,
+}
+
+impl SubagentVisor {
+    pub fn new(pane: Entity<SubagentPane>, cx: &mut Context<Self>) -> Self {
+        let changed = cx.observe(&pane, |_, _, cx| cx.notify());
+        Self { pane, appearance: None, _pane_changed: changed }
+    }
+
+    pub fn set_appearance(
+        &mut self,
+        palette: crate::design::Palette,
+        height: f32,
+        width: f32,
+        cx: &mut Context<Self>,
+    ) {
+        let appearance = Some((palette, height, width));
+        if self.appearance != appearance {
+            self.appearance = appearance;
+            cx.notify();
+        }
+    }
+}
+
+impl Render for SubagentVisor {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some((palette, height, width)) = self.appearance else {
+            return div().into_any_element();
+        };
+        self.pane.update(cx, |pane, cx| pane.render_visor(palette, height, width, window, cx))
+    }
+}
+
+#[derive(Default, PartialEq, Eq)]
+struct PaneStatusSummary {
+    has_plan: bool,
+    build_project: Option<String>,
+    pending_builds: usize,
+}
+
 pub struct SubagentPane {
     service: DesktopService,
     snapshot: Rc<Value>,
@@ -672,6 +717,7 @@ pub struct SubagentPane {
     error: Option<String>,
     menus: VisorMenus,
     drawer_fraction: f32,
+    drawer_slide_height: f32,
     drawer_drag: Option<(f32, f32)>,
     drawer_revision: u64,
     drawer_save_error: Option<String>,
@@ -688,9 +734,30 @@ pub struct SubagentPane {
     sidebar_visible: bool,
     visor_visible: bool,
     suppress_completion: bool,
+    status_summary: PaneStatusSummary,
 }
 
 impl SubagentPane {
+    pub(super) fn has_status_bar(&self) -> bool {
+        !self.items.is_empty()
+            || self.status_summary.has_plan
+            || self.status_summary.build_project.is_some()
+    }
+
+    fn refresh_status_summary(&mut self) -> bool {
+        let build_project = build_queue::project(&self.snapshot, self.parent_task.as_deref())
+            .map(|project| field(project, "id"));
+        let summary = PaneStatusSummary {
+            has_plan: has_pane_work_plan(&self.snapshot, self.parent_task.as_deref()),
+            pending_builds: build_project.as_deref()
+                .map(|id| build_queue::pending_count(&self.snapshot, id)).unwrap_or(0),
+            build_project,
+        };
+        if self.status_summary == summary { return false; }
+        self.status_summary = summary;
+        true
+    }
+
     fn save_drawer_height(&mut self, cx: &mut Context<Self>) {
         let Some(task) = self.parent_task.clone() else {
             return;
@@ -823,11 +890,15 @@ impl SubagentPane {
     }
 
     /// The parent chat uses this to decide whether to mount the child visor below its composer.
+    // The owning cached chat must relayout for each expansion/collapse frame.
+    pub(super) fn has_open_or_animating_drawer(&self) -> bool {
+        self.visor_open() || self.drawer_slide_height > 0.1
+    }
+
     pub fn visor_open(&self) -> bool {
-        (self.menus.builds
-            && build_queue::project(&self.snapshot, self.parent_task.as_deref()).is_some())
+        (self.menus.builds && self.status_summary.build_project.is_some())
             || (self.menus.subagents && !self.items.is_empty())
-            || (self.menus.plan && has_pane_work_plan(&self.snapshot, self.parent_task.as_deref()))
+            || (self.menus.plan && self.status_summary.has_plan)
     }
 
     pub fn new(
@@ -852,6 +923,7 @@ impl SubagentPane {
             error: None,
             menus: VisorMenus::default(),
             drawer_fraction: 0.5,
+            drawer_slide_height: 0.,
             drawer_drag: None,
             drawer_revision: 0,
             drawer_save_error: None,
@@ -868,6 +940,7 @@ impl SubagentPane {
             sidebar_visible: false,
             visor_visible: false,
             suppress_completion: true,
+            status_summary: PaneStatusSummary::default(),
         }
     }
 
@@ -917,19 +990,21 @@ impl SubagentPane {
     /// Publication dependency comparison proved this parent's prepared child
     /// records/transcripts unchanged. Release the older global source without
     /// rebuilding records, fencing native reads, or notifying the visor.
-    pub(crate) fn advance_unaffected_snapshot(&mut self, snapshot: Rc<Value>) {
+    pub(crate) fn advance_unaffected_snapshot(&mut self, snapshot: Rc<Value>, _cx: &mut Context<Self>) {
+        // The publication index includes this task's plan and project build
+        // dependencies. Unchanged publications only release the previous source;
+        // rescanning every global collection here would defeat that proof.
         self.snapshot = snapshot;
-        self.reconcile_menus();
     }
     fn reconcile_menus(&mut self) {
-        if build_queue::project(&self.snapshot, self.parent_task.as_deref()).is_none() {
+        if self.status_summary.build_project.is_none() {
             self.menus.builds = false;
         }
         if self.items.is_empty() {
             self.menus.subagents = false;
             self.menus.detail = false;
         }
-        if !has_pane_work_plan(&self.snapshot, self.parent_task.as_deref()) {
+        if !self.status_summary.has_plan {
             self.menus.plan = false;
         }
     }
@@ -944,6 +1019,7 @@ impl SubagentPane {
         let changed = self.parent_task.as_deref() != Some(task_id);
         self.snapshot = snapshot;
         self.parent_task = Some(task_id.to_owned());
+        self.refresh_status_summary();
         if changed {
             self.completion_markers.clear();
             self.menus.reset_task();
@@ -1230,12 +1306,12 @@ impl SubagentPane {
             window,
             cx,
         );
+        self.drawer_slide_height = slide_height;
         self.reconcile_menus();
         let has_subagents = !self.items.is_empty();
-        let has_plan = has_pane_work_plan(&self.snapshot, self.parent_task.as_deref());
-        let build_project = build_queue::project(&self.snapshot, self.parent_task.as_deref())
-            .map(|project| field(project, "id"));
-        if !has_subagents && !has_plan && build_project.is_none() {
+        let has_plan = self.status_summary.has_plan;
+        let build_project = self.status_summary.build_project.clone();
+        if !self.has_status_bar() {
             return div().into_any_element();
         }
         // Use the owning pane's logical pixel width, independent of window size
@@ -1304,8 +1380,8 @@ impl SubagentPane {
                 self.menus.subagents,
             ));
         }
-        if let Some(project_id) = &build_project {
-            let count = build_queue::pending_count(&self.snapshot, project_id);
+        if build_project.is_some() {
+            let count = self.status_summary.pending_builds;
             bar = bar.child(div().flex_1());
             bar = bar.child(pill(
                 "build-queue-menu-pill",
@@ -1436,6 +1512,7 @@ impl SubagentPane {
                             .w_full()
                             .h(px(expanded_height))
                             .id("build-queue-drawer")
+                            .debug_selector(|| "build-queue-drawer".into())
                             .overflow_y_scroll()
                             .track_scroll(&scroll)
                             .p(px(10.))
@@ -1474,6 +1551,7 @@ impl SubagentPane {
         } else if slide_height > 0.1 && (!self.menus.detail || item.is_none()) {
             let mut body = div()
                 .id("subagent-drawer-list")
+                .debug_selector(|| "subagent-drawer-list".into())
                 .absolute()
                 .bottom_0()
                 .left_0()

@@ -36,12 +36,16 @@ fn icon_button(
 
 pub(super) fn render(
     desktop: &Desktop,
-    agents: &[Value],
-    tasks: &[Value],
+    agents: &[&Value],
+    tasks: &[&Value],
     palette: design::Palette,
     window: &mut Window,
     cx: &mut Context<Desktop>,
 ) -> AnyElement {
+    let agents: Vec<Value> = agents.iter().map(|record| sidebar_list::metadata(record)).collect();
+    let tasks: Vec<Value> = tasks.iter().map(|record| sidebar_list::metadata(record)).collect();
+    let agents = agents.as_slice();
+    let tasks = tasks.as_slice();
     let tern = design::tile_theme() == monitter_lib::experimental_desktop::NativeTileTheme::Tern;
     let rail_width = gpui_kit::px(design::COMPACT_SIDEBAR_WIDTH_POINTS);
     let width = if tern {
@@ -176,7 +180,8 @@ pub(super) fn render(
             ));
         }
     } else {
-        let projects = rows(&desktop.snapshot, "projects");
+        let projects: Vec<Value> = sidebar_rows(&desktop.snapshot, "projects")
+            .iter().map(sidebar_list::metadata).collect();
         let groups = compact_groups(desktop.sidebar_view, agents, &projects, tasks);
         let owner = cx.weak_entity();
         let select: SelectChat = Rc::new(move |id, window, cx| {

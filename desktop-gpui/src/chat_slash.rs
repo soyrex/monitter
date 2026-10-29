@@ -36,8 +36,7 @@ impl ChatPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        (!self.watcher.enabled || self.watcher.interject_open)
-            && !self.approval_popup_open
+        !self.approval_popup_open
             && !crate::preferences_modal::workspace_blocked(cx)
             && self.composer.read(cx).focus_handle(cx).is_focused(window)
             && !self.composer.update(cx, |input, cx| {

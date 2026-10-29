@@ -14,6 +14,11 @@ use std::rc::Rc;
 pub(crate) fn install(window: &mut Window, cx: &mut gpui_kit::App) {
     #[cfg(target_os = "macos")]
     {
+        // Menus and modals need Fast's GPUI overlay above native pane chrome
+        // even in chat-only windows, before any webview enables composition.
+        if let Err(error) = window.enable_window_composition() {
+            eprintln!("Could not enable native window composition: {error}");
+        }
         // Metal captures the ordered backdrop during the same frame, before
         // foreground paint. Avoid a late CPU snapshot replacing this result.
         window.configure_dialog_backdrop(cx, None, Some(0.25));

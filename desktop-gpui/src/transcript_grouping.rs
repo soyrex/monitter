@@ -11,8 +11,9 @@
 //! (no `reasoningSummary`) is filtered out, transport-artifact activities are
 //! dropped, and approval rows are emitted only when the request is resolved.
 use serde_json::Value;
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 use super::TimelineRow;
 
@@ -578,6 +579,71 @@ pub enum NestedGroup {
     Tool(Vec<Rc<Value>>),
 }
 
+#[derive(Clone, Debug, Default)]
+struct ActivityToolProjection {
+    key: Option<String>,
+    failed: bool,
+    excluded: bool,
+}
+
+thread_local! {
+    // Timeline rows are immutable Rc<Value>s. A weak pointer paired with its
+    // allocation address gives each content revision a stable cache key while
+    // preventing stale hits after deletion and allocator address reuse.
+    static ACTIVITY_TOOL_PROJECTIONS: RefCell<HashMap<usize, (Weak<Value>, ActivityToolProjection)>> = RefCell::new(HashMap::new());
+    static ACTIVITY_TOOL_COUNTS: RefCell<HashMap<Vec<usize>, (Vec<Weak<Value>>, (usize, usize))>> = RefCell::new(HashMap::new());
+}
+
+const MAX_ACTIVITY_TOOL_PROJECTIONS: usize = 4096;
+const MAX_ACTIVITY_TOOL_COUNT_REVISIONS: usize = 1024;
+const MAX_ACTIVITY_TOOL_COUNT_ROWS: usize = 8192;
+
+fn activity_tool_projection(row: &Rc<Value>) -> ActivityToolProjection {
+    let address = Rc::as_ptr(row) as usize;
+    if let Some(projection) = ACTIVITY_TOOL_PROJECTIONS.with(|cache| {
+        cache.borrow().get(&address).and_then(|(cached, projection)| {
+            cached.upgrade().filter(|cached| Rc::ptr_eq(cached, row)).map(|_| projection.clone())
+        })
+    }) {
+        return projection;
+    }
+
+    let kind = field(row, "kind");
+    let projection = if matches!(kind.as_str(), "tool" | "subagent") {
+        let detail = parse_detail(&field(row, "detail"));
+        let compaction = normalize_compaction_label(&field(row, "title")) == "contextcompaction"
+            || detail.as_ref()
+                .and_then(as_record)
+                .and_then(|record| record.get("type"))
+                .and_then(Value::as_str)
+                .is_some_and(|label| normalize_compaction_label(label) == "contextcompaction");
+        ActivityToolProjection {
+            excluded: compaction,
+            failed: detail.as_ref().is_some_and(|detail| {
+                detail["update"]["status"].as_str().or_else(|| detail["status"].as_str()) == Some("failed")
+            }),
+            key: detail.as_ref()
+                .and_then(|detail| detail["toolCallId"].as_str().or_else(|| detail["item"]["id"].as_str()).or_else(|| detail["id"].as_str()))
+                .map(str::to_owned)
+                .or_else(|| Some(field(row, "id"))),
+        }
+    } else {
+        ActivityToolProjection { excluded: true, ..ActivityToolProjection::default() }
+    };
+    ACTIVITY_TOOL_PROJECTIONS.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.len() >= MAX_ACTIVITY_TOOL_PROJECTIONS {
+            cache.retain(|_, (cached, _)| cached.strong_count() > 0);
+            while cache.len() >= MAX_ACTIVITY_TOOL_PROJECTIONS {
+                let Some(oldest) = cache.keys().next().copied() else { break; };
+                cache.remove(&oldest);
+            }
+        }
+        cache.insert(address, (Rc::downgrade(row), projection.clone()));
+    });
+    projection
+}
+
 impl ConversationItem {
     /// Leaves retain source identity while their list index belongs to the run.
     pub fn leaves(&self) -> Vec<&ConversationItem> {
@@ -599,20 +665,75 @@ impl ConversationItem {
             _ => self.stable_key(),
         }
     }
-    pub fn activity_tool_keys(&self) -> HashSet<String> { self.activity_tool_keys_matching(false) }
-    pub fn activity_failed_tool_keys(&self) -> HashSet<String> { self.activity_tool_keys_matching(true) }
+    pub fn activity_tool_keys(&self) -> HashSet<String> {
+        self.activity_tool_keys_matching(false)
+    }
+    pub fn activity_failed_tool_keys(&self) -> HashSet<String> {
+        self.activity_tool_keys_matching(true)
+    }
     fn activity_tool_keys_matching(&self, failed_only: bool) -> HashSet<String> {
         let values = match self {
             Self::ToolGroup(values) | Self::ReasoningGroup(values) | Self::ProcessGroup { values, .. } => values,
             _ => return HashSet::new(),
         };
-        values.iter().filter(|row| matches!(field(row,"kind").as_str(),"tool" | "subagent") && !is_context_compaction(row))
-            .filter(|row| !failed_only || parse_detail(&field(row,"detail")).is_some_and(|d| d["update"]["status"].as_str().or_else(||d["status"].as_str()) == Some("failed")))
-            .map(|row| {
-                let detail = parse_detail(&field(row,"detail"));
-                detail.as_ref().and_then(|d| d["toolCallId"].as_str().or_else(||d["item"]["id"].as_str()).or_else(||d["id"].as_str()))
-                    .map(str::to_owned).unwrap_or_else(||field(row,"id"))
-            }).collect::<HashSet<_>>()
+        values.iter().filter_map(|row| {
+            let projection = activity_tool_projection(row);
+            (!projection.excluded && (!failed_only || projection.failed))
+                .then_some(projection.key)
+                .flatten()
+        }).collect()
+    }
+    /// Counts unique tool-call keys across a peer exchange in one pass. Parsed
+    /// event data is memoized by immutable Rc content revision, so appends and
+    /// replacements naturally get fresh projections while unchanged rows reuse
+    /// their cached key and failure state.
+    pub fn activity_tool_counts(items: &[ConversationItem]) -> (usize, usize) {
+        let mut rows: Vec<&Rc<Value>> = Vec::new();
+        for item in items {
+            if let Self::ToolGroup(values) | Self::ReasoningGroup(values) | Self::ProcessGroup { values, .. } = item {
+                rows.extend(values);
+            }
+        }
+        let revision: Vec<usize> = rows.iter().map(|row| Rc::as_ptr(row) as usize).collect();
+        if let Some(counts) = ACTIVITY_TOOL_COUNTS.with(|cache| {
+            cache.borrow().get(&revision).and_then(|(cached_rows, counts)| {
+                (cached_rows.len() == rows.len() && cached_rows.iter().zip(&rows).all(|(cached, row)| {
+                    cached.upgrade().is_some_and(|cached| Rc::ptr_eq(&cached, row))
+                })).then_some(*counts)
+            })
+        }) {
+            return counts;
+        }
+
+        let mut tools = HashMap::<String, bool>::new();
+        for row in &rows {
+            let projection = activity_tool_projection(row);
+            if !projection.excluded {
+                if let Some(key) = projection.key {
+                    tools.entry(key).and_modify(|failed| *failed |= projection.failed).or_insert(projection.failed);
+                }
+            }
+        }
+        let failed = tools.values().filter(|failed| **failed).count();
+        let counts = (tools.len(), failed);
+        if rows.len() <= MAX_ACTIVITY_TOOL_COUNT_ROWS {
+            ACTIVITY_TOOL_COUNTS.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            if cache.len() >= MAX_ACTIVITY_TOOL_COUNT_REVISIONS
+                || cache.values().map(|(cached_rows, _)| cached_rows.len()).sum::<usize>().saturating_add(rows.len()) > MAX_ACTIVITY_TOOL_COUNT_ROWS
+            {
+                cache.retain(|_, (cached_rows, _)| cached_rows.iter().all(|row| row.strong_count() > 0));
+            }
+            while cache.len() >= MAX_ACTIVITY_TOOL_COUNT_REVISIONS
+                || cache.values().map(|(cached_rows, _)| cached_rows.len()).sum::<usize>().saturating_add(rows.len()) > MAX_ACTIVITY_TOOL_COUNT_ROWS
+            {
+                let Some(old_revision) = cache.keys().next().cloned() else { break; };
+                cache.remove(&old_revision);
+            }
+            cache.insert(revision, (rows.iter().map(|row| Rc::downgrade(row)).collect(), counts));
+            });
+        }
+        counts
     }
     pub fn at(&self) -> i64 {
         match self {

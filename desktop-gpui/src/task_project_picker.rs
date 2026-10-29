@@ -1,6 +1,6 @@
 //! Task-scoped project assignment through the existing set_task_project API.
-//! This picker changes only the task's project link; its working folder and
-//! native session remain under the backend's existing preservation contract.
+//! The backend moves an unstarted chat to the project's workspace. An existing
+//! native session keeps its folder and cannot be silently moved.
 use crate::design::ui_scaled_px as px;
 use gpui_kit::{
     base::Selectable as _,
@@ -170,7 +170,7 @@ impl TaskProjectPicker {
                     .text_size(px(12.))
                     .text_color(rgb(palette.muted))
                     .child(
-                        "Changing the project keeps this chat’s working folder and native session.",
+                        "An unstarted chat uses the project’s workspace folder. A chat with an existing session must start a new chat to work in a different folder.",
                     ),
             );
 

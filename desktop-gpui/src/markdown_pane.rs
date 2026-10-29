@@ -1,5 +1,5 @@
 //! Bounded, read-only native Markdown documents for the workspace dock.
-use gpui_kit::{component::text::TextView, prelude::*, *};
+use gpui_kit::{component::{button::{Button, ButtonVariants as _}, text::TextView}, prelude::*, *};
 use std::{
     fs::File,
     io::Read,
@@ -8,6 +8,44 @@ use std::{
 
 const MAX_MARKDOWN_BYTES: u64 = 8 * 1024 * 1024;
 const PANE_PREFIX: &str = "markdown:";
+
+#[derive(Clone, PartialEq)]
+pub(crate) struct Typography {
+    requested_family: String,
+    font_catalog_revision: u64,
+    family: SharedString,
+    size: f32,
+    weight: f32,
+    line_height: f32,
+}
+impl Global for Typography {}
+
+pub(crate) fn sync_typography(settings: &serde_json::Value, cx: &mut App) {
+    let mut typography = typography_from_settings(settings);
+    typography.font_catalog_revision = monitter_gpui_desktop::fonts::catalog_revision(cx);
+    if let Some(current) = cx.try_global::<Typography>() {
+        typography.family = current.family.clone();
+        if *current == typography { return; }
+    }
+    typography.family = monitter_gpui_desktop::fonts::resolve_family(
+        &typography.requested_family, crate::design::FONT_SANS, cx);
+    cx.set_global(typography);
+}
+
+fn typography_from_settings(settings: &serde_json::Value) -> Typography {
+    let requested = settings["chatFont"].as_str().unwrap_or("");
+    let family = if requested.is_empty() { crate::design::FONT_SANS } else { requested };
+    let size = settings["chatFontSize"].as_f64()
+        .unwrap_or(crate::design::CHAT_FONT_SIZE as f64).clamp(8., 32.) as f32;
+    Typography {
+        requested_family: requested.to_owned(),
+        font_catalog_revision: 0,
+        family: family.to_owned().into(),
+        size,
+        weight: settings["chatFontWeight"].as_f64().unwrap_or(400.).clamp(300., 700.) as f32,
+        line_height: size * settings["chatLineHeight"].as_f64().unwrap_or(1.65).clamp(1., 2.5) as f32,
+    }
+}
 
 pub(crate) fn pane_id(path: &Path) -> Result<String, String> {
     let path = path.to_str().ok_or("Markdown path is not valid UTF-8.")?;
@@ -94,6 +132,7 @@ pub(crate) struct MarkdownPane {
 
 impl MarkdownPane {
     pub(crate) fn new(path: PathBuf, _window: &mut Window, cx: &mut Context<Self>) -> Self {
+        cx.observe_global::<Typography>(|_, cx| cx.notify()).detach();
         let title = path
             .file_name()
             .and_then(|name| name.to_str())
@@ -129,7 +168,15 @@ impl MarkdownPane {
 }
 
 impl Render for MarkdownPane {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let typography = cx.try_global::<Typography>().cloned().unwrap_or(Typography {
+            requested_family: String::new(),
+            font_catalog_revision: monitter_gpui_desktop::fonts::catalog_revision(cx),
+            family: crate::design::FONT_SANS.into(),
+            size: crate::design::CHAT_FONT_SIZE,
+            weight: 400.,
+            line_height: crate::design::CHAT_FONT_SIZE * 1.65,
+        });
         let body = match &self.markdown {
             None => div()
                 .text_color(rgb(0x9BA7B5))
@@ -158,15 +205,41 @@ impl Render for MarkdownPane {
             .child(
                 div()
                     .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
                     .px_4()
                     .py_2()
                     .border_b_1()
                     .border_color(rgb(0x343A43))
                     .text_size(px(12.))
                     .text_color(rgb(0x9BA7B5))
-                    .child(self.title.clone()),
+                    .child(div().min_w_0().truncate().child(self.title.clone()))
+                    .when(cfg!(target_os = "macos"), |header| {
+                        header.child(
+                            Button::new("reveal-markdown-in-finder")
+                                .link()
+                                .compact()
+                                .text_size(px(12.))
+                                .flex_shrink_0()
+                                .label("Reveal in Finder")
+                                .on_click(cx.listener(|pane, _, _, cx| {
+                                    cx.reveal_path(&pane.path);
+                                })),
+                        )
+                    }),
             )
-            .child(div().flex_1().min_h_0().px_5().py_4().child(body))
+            .child(
+                div().flex_1().min_h_0().min_w_0().flex().justify_center().px_5().py_4()
+                    .child(div().w_full().min_w_0().h_full()
+                        .max_w(crate::design::ui_scaled_px(crate::design::CHAT_MAX_WIDTH))
+                        .font_family(typography.family)
+                        .font_weight(FontWeight(typography.weight))
+                        .text_size(crate::design::ui_scaled_px(typography.size))
+                        .line_height(crate::design::ui_scaled_px(typography.line_height))
+                        .child(body)),
+            )
     }
 }
 
@@ -180,6 +253,22 @@ impl Focusable for MarkdownPane {
 mod tests {
     use super::{pane_id, path_from_pane_id};
     use std::path::Path;
+    #[test]
+    fn markdown_pane_typography_matches_chat_preferences_and_limits() {
+        let default = super::typography_from_settings(&serde_json::json!({}));
+        assert_eq!(default.size, crate::design::CHAT_FONT_SIZE);
+        assert_eq!(default.line_height, default.size * 1.65);
+        let custom = super::typography_from_settings(&serde_json::json!({
+            "chatFont": "IBM Plex Mono", "chatFontSize": 18,
+            "chatFontWeight": 500, "chatLineHeight": 1.5
+        }));
+        assert_eq!(custom.family.as_ref(), "IBM Plex Mono");
+        assert_eq!((custom.size, custom.weight, custom.line_height), (18., 500., 27.));
+        let bounded = super::typography_from_settings(&serde_json::json!({
+            "chatFontSize": 100, "chatFontWeight": 900, "chatLineHeight": 9
+        }));
+        assert_eq!((bounded.size, bounded.weight, bounded.line_height), (32., 700., 80.));
+    }
     #[test]
     fn pane_id_round_trips_spaces_and_unicode() {
         let path = Path::new("/Users/alex/reports/triage notes-日本.md");

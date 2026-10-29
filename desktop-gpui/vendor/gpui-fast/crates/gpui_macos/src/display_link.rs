@@ -337,6 +337,10 @@ impl WindowFrameSource {
         self.signal.take()
     }
 
+    pub fn is_running(&self) -> bool {
+        self.registration.is_some()
+    }
+
     pub fn stop(&mut self) {
         if let Some((display_id, subscriber_id)) = self.registration.take() {
             unsubscribe(display_id, subscriber_id);

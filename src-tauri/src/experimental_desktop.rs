@@ -1558,7 +1558,54 @@ fn pairing_host_invoke_with(
 /// Cloneable GUI facade. Dropping/closing any GUI handle disconnects only;
 /// execution and native preferences remain in the independent menu-bar server.
 #[derive(Clone)]
-pub struct DesktopService(ipc::Client, Arc<std::sync::atomic::AtomicBool>);
+pub struct DesktopService(DesktopClient, Arc<std::sync::atomic::AtomicBool>);
+
+/// A GUI may construct retained local inputs before an IPC handshake completes.
+/// Every clone binds to the same immutable server instance. No operation is
+/// queued: an unavailable or unauthorized call fails before dispatch.
+#[derive(Clone)]
+struct DesktopClient(Arc<DesktopClientState>);
+struct DesktopClientState {
+    client: std::sync::OnceLock<ipc::Client>,
+    workspace_ready: std::sync::atomic::AtomicBool,
+}
+impl DesktopClient {
+    fn pending() -> Self {
+        Self(Arc::new(DesktopClientState {
+            client: std::sync::OnceLock::new(),
+            workspace_ready: std::sync::atomic::AtomicBool::new(false),
+        }))
+    }
+    fn connected(client: ipc::Client) -> Self {
+        let facade = Self::pending();
+        let _ = facade.0.client.set(client);
+        facade.0.workspace_ready.store(true, std::sync::atomic::Ordering::Release);
+        facade
+    }
+    fn instance_id(&self) -> &str {
+        self.0.client.get().map(ipc::Client::instance_id).unwrap_or("")
+    }
+    fn disconnect(&self) {
+        self.0.workspace_ready.store(false, std::sync::atomic::Ordering::Release);
+        if let Some(client) = self.0.client.get() { client.disconnect(); }
+    }
+    fn call<T: DeserializeOwned>(&self, method: &str, args: Value) -> Result<T, String> {
+        // Only bootstrap reads can run before authoritative state/preferences
+        // reconcile the cached workspace. Only the two session listings may use `invoke`; every
+        // mutation is denied, including calls from retained child entities.
+        let bootstrap_session_listing = method == "invoke" && matches!(args["command"].as_str(), Some("list_terminals" | "list_neovim"));
+        if !self.0.workspace_ready.load(std::sync::atomic::Ordering::Acquire)
+            && !bootstrap_session_listing
+            && !matches!(method, "read_ui_changes" | "read_native_ui_changes" | "read_native_ui_changes_v2"
+                | "read_task_messages" | "read_channel_messages" | "load_native_preferences") {
+            return Err("Monitter is still connecting. Try again when the workspace is ready.".into());
+        }
+        self.0.client.get().ok_or_else(|| "Monitter is still connecting. Try again when the workspace is ready.".to_owned())?.call(method, args)
+    }
+    fn subscribe(&self) -> Result<async_channel::Receiver<()>, String> {
+        self.0.client.get().ok_or_else(|| "Monitter is still connecting.".to_owned())?.subscribe()
+    }
+}
 
 fn native_ui_changes_or_legacy(
     unavailable: &std::sync::atomic::AtomicBool,
@@ -1579,11 +1626,27 @@ fn native_ui_changes_or_legacy(
 }
 
 impl DesktopService {
+    /// No filesystem, socket, or process work. Safe for local workspace creation.
+    pub fn pending() -> Self {
+        Self(DesktopClient::pending(), Arc::new(std::sync::atomic::AtomicBool::new(false)))
+    }
+    /// Bind once after the background handshake. Never changes server identity
+    /// and never replays a request made before connection.
+    pub fn bind_connection(&self, connected: &Self) -> Result<(), String> {
+        let client = connected.0.0.client.get().ok_or("Native service is not connected.")?.clone();
+        self.0.0.client.set(client).map_err(|_| "Native service was already connected.".to_owned())
+    }
+    pub fn enable_workspace_commands(&self) {
+        self.0.0.workspace_ready.store(true, std::sync::atomic::Ordering::Release);
+    }
+    pub fn workspace_commands_ready(&self) -> bool {
+        self.0.0.workspace_ready.load(std::sync::atomic::Ordering::Acquire)
+    }
     /// A permanently disconnected facade for explicitly enabled UI fixtures.
     /// It never resolves the user's profile or opens a backend connection.
     #[cfg(feature = "gpui-ui-fixtures")]
     pub fn disconnected_for_ui_fixture() -> Self {
-        Self(ipc::Client::disconnected_for_ui_fixture(), Arc::new(std::sync::atomic::AtomicBool::new(false)))
+        Self(DesktopClient::connected(ipc::Client::disconnected_for_ui_fixture()), Arc::new(std::sync::atomic::AtomicBool::new(false)))
     }
     pub fn open() -> Result<Self, String> {
         Self::connect()
@@ -1591,7 +1654,7 @@ impl DesktopService {
     pub fn connect() -> Result<Self, String> {
         // Client identity is fixed to the server instance. Reconnecting creates
         // a fresh capability cache; facade clones share this instance's result.
-        ipc::Client::connect(&profile_dir()?).map(|client| Self(client, Arc::new(std::sync::atomic::AtomicBool::new(false))))
+        ipc::Client::connect(&profile_dir()?).map(|client| Self(DesktopClient::connected(client), Arc::new(std::sync::atomic::AtomicBool::new(false))))
     }
     /// Only Absent permits the launcher to start a missing/stale backend.
     /// Permission, authentication, and live protocol failures remain visible.

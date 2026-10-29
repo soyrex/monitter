@@ -249,3 +249,71 @@ fn auto_size_moving_tab_rebalances_without_a_new_group(cx: &mut TestAppContext) 
         assert!(sizes.iter().all(|s| (s - 1. / 3.).abs() < 0.005), "{sizes:?}");
     });
 }
+
+#[gpui_kit::test]
+fn auto_size_closing_pane_rebalances_remaining_space(cx: &mut TestAppContext) {
+    let (dock, visual) = setup(cx);
+    visual.update(|window, cx| dock.update(cx, |dock, cx| {
+        unequal(dock, cx);
+        assert!(dock.remove("empty:preset-1", window, cx));
+    }));
+    settle(&dock, visual);
+    visual.update(|_, cx| {
+        let sizes = shares(dock.read(cx), cx);
+        assert_eq!(sizes.len(), 2);
+        assert!(sizes.iter().all(|s| (s - 0.5).abs() < 0.005), "{sizes:?}");
+    });
+}
+
+#[gpui_kit::test]
+fn auto_size_directional_move_rebalances_without_changing_pane_count(cx: &mut TestAppContext) {
+    let (dock, visual) = setup(cx);
+    visual.update(|window, cx| dock.update(cx, |dock, cx| {
+        unequal(dock, cx);
+        assert!(dock.move_focused_tab("right", window, cx));
+        assert_eq!(dock.visible_panel_count(cx), 3);
+    }));
+    settle(&dock, visual);
+    visual.update(|_, cx| {
+        let sizes = shares(dock.read(cx), cx);
+        assert_eq!(sizes.len(), 3);
+        assert!(sizes.iter().all(|s| (s - 1. / 3.).abs() < 0.005), "{sizes:?}");
+    });
+}
+
+#[gpui_kit::test]
+fn auto_size_tab_reorder_rebalances_without_changing_pane_count(cx: &mut TestAppContext) {
+    let (dock, visual) = setup(cx);
+    let tab = visual.update(|window, cx| dock.update(cx, |dock, cx| {
+        let group = dock.focused_group_node(window, cx).unwrap();
+        dock.add_empty_tab(group, window, cx).unwrap()
+    }));
+    settle(&dock, visual);
+    visual.update(|window, cx| dock.update(cx, |dock, cx| {
+        unequal(dock, cx);
+        assert!(dock.focus(&tab, window, cx));
+        assert!(dock.move_focused_tab_order("first", window, cx));
+        assert_eq!(dock.visible_panel_count(cx), 4);
+    }));
+    settle(&dock, visual);
+    visual.update(|_, cx| {
+        let sizes = shares(dock.read(cx), cx);
+        assert_eq!(sizes.len(), 3);
+        assert!(sizes.iter().all(|s| (s - 1. / 3.).abs() < 0.005), "{sizes:?}");
+    });
+}
+
+#[gpui_kit::test]
+fn disabled_auto_size_preserves_proportions_when_panes_move(cx: &mut TestAppContext) {
+    let (dock, visual) = setup(cx);
+    visual.update(|window, cx| dock.update(cx, |dock, cx| {
+        dock.set_auto_size_panes(false, window, cx);
+        unequal(dock, cx);
+        assert!(dock.move_focused_tab("right", window, cx));
+    }));
+    settle(&dock, visual);
+    visual.update(|_, cx| {
+        let sizes = shares(dock.read(cx), cx);
+        assert!(sizes.iter().zip([0.3, 0.2, 0.5]).all(|(s,t)| (s-t).abs() < 0.005), "{sizes:?}");
+    });
+}

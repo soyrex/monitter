@@ -359,6 +359,10 @@ reconnection and a new authoritative snapshot.
   fail visibly. Clients only merge a page at its matching snapshot revision. Loading earlier
   messages preserves the detached reader's anchor and frozen live transcript; returning to the
   bottom, sending or switching conversations releases queued live updates.
+  Paired owner workspaces may start with metadata only. Opening a chat pulls its latest 64
+  messages through this endpoint, with loading/error/retry presentation before an empty-state
+  claim. Mounted chats refresh their bounded tail after reconnects; older history remains
+  available through the exclusive cursor rather than a full-workspace transcript download.
 - `get_channel_messages { channelId: string, beforeId?: string, limit?: number }` ->
   `{ channelId: string, messages: ChannelMessage[], nextBeforeId: string | null, revision: string }`.
   Native and owner-LAN only. It uses the same chronological default-64/max-100 exclusive-ID page
@@ -1106,8 +1110,10 @@ folder; blank fields in the form mean no mapping for that host.
 
 When the first draft message creates a task, its project folder for the selected agent's host
 overrides the agent folder. Without a mapping, the existing agent/host folder fallback applies.
-Changing a project's folders affects future chats. Moving an existing chat changes only its
-project link: cwd, host, native session, running turn, messages and activity timestamps stay intact.
+Changing a project's folders affects future chats. Assigning an unstarted chat to a project
+with a workspace on its host also changes its working folder to that workspace. A chat with an
+established session or turn in another folder cannot be moved into that project: start a new chat
+there instead. Assignment keeps the host, messages and activity timestamps intact.
 Deleting a project unassigns its chats, including archived/running chats, without deleting them.
 A host referenced by a project workspace cannot be deleted until that mapping is removed.
 
@@ -2884,6 +2890,18 @@ and mount no scrollbar UI, minimap hit targets, previews or animation;
 wheel, trackpad and keyboard transcript scrolling remain available. This adds no backend settings, IPC or
 shared-client protocol fields and works with an older resident backend.
 
+The GPUI Conversation settings also include `Auto-hide composer`, disabled by
+default on new and existing installs without a saved selection. Off keeps Chat
+and Watch composers visible in inactive panes. On enables inactive-pane hiding,
+while retaining drafts and staged attachments. Scroll-driven hiding remains
+enabled with either selection and persists across pane hover and focus changes,
+including when a draft is present. Returning to the bottom or editing the draft
+restores the composer without discarding its text or staged attachments.
+The selection applies live and persists as `on`/`off` in the private
+profile's `composer-autohide.v1` file using bounded background reads and atomic
+writes. Load/save errors appear in Settings. This is a GUI presentation preference;
+it adds no backend settings, IPC, mobile or shared-client protocol fields.
+
 The GPUI new-tab session picker is a local presentation of existing unarchived
 chat metadata. It searches across projects/workspaces and uses the existing
 internal-task visibility projection. Choosing a result revalidates the current
@@ -2964,6 +2982,16 @@ The grant-scoped collaboration MCP exposes `browser_open { request_id, url, titl
 Success returns `{ status: "queued", id, url }`; this does not prove opening or rendering. Same task/request ID returns the same receipt; changing target/title rejects the retry. The runtime queue holds at most 64 receipts. Pending requests expire after 30 minutes, acknowledged receipts 30 minutes from first acknowledgement. At capacity, acknowledged receipts may be evicted; 64 pending requests reject additions. Restart does not replay requests.
 
 Private owner IPC provides `read_browser_open_requests {}` and `ack_browser_open_request { id }`, without Snapshot or LAN commands. The GUI consumes pending requests into new native tabs, shows opening errors, and acknowledges handled requests. Web content gets no Monitter IPC. Local HTML uses WKWebView read access to its containing directory for relative assets. Saved file metadata validates syntax; explicit reopening validates existence. GPUI chat HTTP(S), file URI and absolute HTML Markdown links open new browser panes split to the right of the originating chat, keeping it visible. MCP browser_open uses the same split placement, falling back to the focused pane when the originating chat is not mounted.
+
+### Raster image links
+
+Local raster image links in GPUI chats open beside their originating chat in an image preview,
+including PNG, JPEG, GIF, WebP, BMP, TIFF, ICO and PNM. The GUI reads and decodes them off the UI
+thread, bounded to 20 MiB source bytes, 8192 pixels per side and 16 megapixels. It renders a
+normalized still PNG inside a private cached HTML document using the existing browser pane;
+animated inputs show their first frame. Filename text is escaped, and the preview has no script,
+network or Monitter IPC access. Remote task file paths retain the existing rejection; HTTP(S)
+image URLs continue to use normal browser navigation. Source files still open in the editor.
 
 ### Backend owner restart
 
@@ -3047,6 +3075,13 @@ pane titles or last-five-message context are skipped when applying names.
 Model inputs are untrusted source data and request no tools or actions. No
 selected panes means no Admin turn. This command is absent from LAN/mobile/shared
 dispatch.
+While the GPUI desktop is open, it also runs this same guarded check in the
+background: first after two minutes, then every fifteen minutes. It checks
+only open chat tabs (including saved workspaces), rotating batches of at most
+32. The check runs off the UI thread, skips busy/restoring windows, does not
+start an Admin turn unless System One judges a title stale, and does not retry
+immediately on failure. Closing the desktop stops the timer. A title or recent
+message change during inference still prevents the proposed rename.
 
 ## Private Work Logs
 

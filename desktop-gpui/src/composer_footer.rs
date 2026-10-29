@@ -34,7 +34,10 @@ use gpui_kit::{
 };
 use monitter_lib::experimental_desktop::DesktopService;
 use serde_json::{Value, json};
-use std::time::{Duration, Instant};
+use std::{
+    rc::Rc,
+    time::{Duration, Instant},
+};
 
 #[path = "composer_popup.rs"]
 mod composer_popup;
@@ -65,9 +68,33 @@ fn footer_snapshot(snapshot: &Value) -> Value {
     json!({"settings": snapshot["settings"], "tasks": snapshot["tasks"], "agents": snapshot["agents"]})
 }
 
+/// Footer rendering consumes settings, its selected task and that task's agent.
+/// Other tasks remain in the shared source for queued model-save reconciliation,
+/// but changes to them do not require reconstructing this footer's controls.
+fn footer_dependencies_equal(previous: &Value, next: &Value, task_id: &str) -> bool {
+    fn task<'a>(snapshot: &'a Value, id: &str) -> Option<&'a Value> {
+        snapshot["tasks"]
+            .as_array()?
+            .iter()
+            .find(|row| row["id"].as_str() == Some(id))
+    }
+    fn agent<'a>(snapshot: &'a Value, task: Option<&Value>) -> Option<&'a Value> {
+        let id = task?.get("agentId")?.as_str()?;
+        snapshot["agents"]
+            .as_array()?
+            .iter()
+            .find(|row| row["id"].as_str() == Some(id))
+    }
+    let previous_task = task(previous, task_id);
+    let next_task = task(next, task_id);
+    previous["settings"] == next["settings"]
+        && previous_task == next_task
+        && agent(previous, previous_task) == agent(next, next_task)
+}
+
 pub struct ComposerFooterPane {
     service: DesktopService,
-    snapshot: Value,
+    snapshot: Rc<Value>,
     task_id: String,
     context_cleared_at: Option<i64>,
     catalog: Option<Value>,
@@ -105,7 +132,7 @@ impl ComposerFooterPane {
     ) -> Self {
         let mut pane = Self {
             service,
-            snapshot: footer_snapshot(snapshot),
+            snapshot: Rc::new(footer_snapshot(snapshot)),
             task_id: task_id.into(),
             context_cleared_at: None,
             catalog: None,
@@ -136,6 +163,12 @@ impl ComposerFooterPane {
         pane
     }
 
+    /// Unrelated publications only rebind source ownership. Model-save queues
+    /// and usage markers retain their existing task-scoped refresh behavior.
+    pub(crate) fn advance_unaffected_snapshot(&mut self, snapshot: Rc<Value>) {
+        self.snapshot = snapshot;
+    }
+
     /// Keep selection state scoped to the same task while accepting the
     /// parent's canonical snapshot. A task switch invalidates async catalog
     /// results before requesting the new exact target.
@@ -145,12 +178,22 @@ impl ComposerFooterPane {
         task_id: impl Into<String>,
         cx: &mut Context<Self>,
     ) {
+        self.set_snapshot_shared(Rc::new(footer_snapshot(snapshot)), task_id, cx);
+    }
+
+    /// Reuse the publication's source arrays while still reconciling every
+    /// queued save and advancing the selected task's activity/usage marker.
+    pub(crate) fn set_snapshot_shared(
+        &mut self,
+        snapshot: Rc<Value>,
+        task_id: impl Into<String>,
+        cx: &mut Context<Self>,
+    ) {
         let task_id = task_id.into();
         let changed_task = self.task_id != task_id;
         let previous_marker = self.observed_task_marker.clone();
-        let next_snapshot = footer_snapshot(snapshot);
-        let snapshot_changed = self.snapshot != next_snapshot;
-        self.snapshot = next_snapshot;
+        let snapshot_changed = !footer_dependencies_equal(&self.snapshot, &snapshot, &task_id);
+        self.snapshot = snapshot;
         if changed_task {
             self.model_menu_open = false;
             let next_queue = self.model_save_queues.remove(&task_id).unwrap_or_default();
@@ -318,7 +361,22 @@ impl ComposerFooterPane {
             .cloned()
     }
 
+    /// Cached panes retain this footer through startup. Defer authority reads
+    /// until the shared service opens, then refresh without losing local intent.
+    pub(crate) fn startup_service_ready(&mut self, cx: &mut Context<Self>) {
+        if !self.service.workspace_commands_ready() {
+            return;
+        }
+        if self.catalog.is_none() && !self.catalog_loading {
+            self.refresh_catalog(false, cx);
+        }
+        self.refresh_usage(cx);
+    }
+
     fn refresh_catalog(&mut self, force: bool, cx: &mut Context<Self>) {
+        if !self.service.workspace_commands_ready() {
+            return;
+        }
         let Some(task) = self.selected_task() else {
             return;
         };
@@ -372,6 +430,9 @@ impl ComposerFooterPane {
     }
 
     fn drive_usage_refresh(&mut self, cx: &mut Context<Self>) {
+        if !self.service.workspace_commands_ready() {
+            return;
+        }
         self.usage_refresh.observe(
             &self.task_id,
             self.observed_task_marker
@@ -392,12 +453,12 @@ impl ComposerFooterPane {
         if let Err(error) = std::thread::Builder::new()
             .name("monitter-composer-usage".into())
             .spawn(move || {
-                let _ = sender.send(service.invoke(
-                    "get_usage_overview", json!({"policy":"cache-only"}),
-                ));
+                let _ = sender
+                    .send(service.invoke("get_usage_overview", json!({"policy":"cache-only"})));
             })
         {
-            self.usage_refresh.complete(&request, self.usage_clock.elapsed());
+            self.usage_refresh
+                .complete(&request, self.usage_clock.elapsed());
             self.usage_loading = false;
             self.usage_error = Some(format!("Could not start usage reader: {error}"));
             cx.notify();
@@ -406,9 +467,9 @@ impl ComposerFooterPane {
         self.usage_loading = true;
         self.usage_error = None;
         cx.spawn(async move |entity, cx| {
-            let result = receiver.await.unwrap_or_else(|_| {
-                Err("Composer usage reader stopped before responding.".into())
-            });
+            let result = receiver
+                .await
+                .unwrap_or_else(|_| Err("Composer usage reader stopped before responding.".into()));
             let _ = entity.update(cx, |pane, cx| {
                 if pane
                     .usage_refresh
@@ -610,7 +671,7 @@ impl ComposerFooterPane {
     fn accept_save_result(&mut self, result: Result<Value, String>, cx: &mut Context<Self>) {
         match result {
             Ok(snapshot) => {
-                self.snapshot = footer_snapshot(&snapshot);
+                self.snapshot = Rc::new(footer_snapshot(&snapshot));
                 let current_settings = self.selected_task().map(|task| {
                     let configured = task.get("modelSettings").cloned().unwrap_or(Value::Null);
                     if configured.get("model").and_then(Value::as_str).is_some_and(|model| !model.is_empty()) {
@@ -778,6 +839,52 @@ impl ComposerFooterPane {
         }
     }
 
+    /// Measure labels at their configured font size instead of imposing a
+    /// pane-width breakpoint. Reserve the same padding, icons and scale bars
+    /// as the compact controls. Reserve equal space on either side of Watch
+    /// so the pill stays centered even when the model label is longer.
+    pub fn fits_beside_watch(&self, width: f32, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(task) = self.selected_task() else { return false; };
+        // Keep transient error/status text on its own unconstrained row.
+        if self.model_save.error.is_some() || self.save_error.is_some()
+            || self.catalog_error.is_some() || self.model_pending_status().is_some() {
+            return false;
+        }
+        let ratio = self.snapshot["settings"]["interfaceFontSize"].as_f64()
+            .unwrap_or(14.).clamp(8., 32.) as f32 / 14.;
+        let measure = |text: &str, size: f32| {
+            window.text_system().shape_line(text.to_owned().into(), px(size * ratio),
+                &[TextRun { len: text.len(), font: font(cx.theme().font_family.clone()),
+                    color: rgb(0xffffff).into(), background_color: None,
+                    underline: None, strikethrough: None }], None).x_for_index(text.len())
+        };
+        let agent = self.selected_agent(&task);
+        let acp = task.get("acp").filter(|value| !value.is_null())
+            .or_else(|| agent.as_ref().and_then(|agent| agent.get("acp"))).unwrap_or(&Value::Null);
+        let sandbox = self.model_save.sandbox.as_ref().unwrap_or(&task)["sandbox"]
+            .as_str().unwrap_or("harness-configured");
+        let permission = normalized_permission(task["provider"].as_str().unwrap_or("opencode"), acp, sandbox);
+        let settings = self.selected_settings(&task);
+        let choices = composer_popup::model_choices(self.catalog.as_ref());
+        let model = choices.iter().find(|model| model["id"] == settings["model"]
+            || model["_thinkingModel"].as_str().is_some_and(|id| Some(id) == settings["model"].as_str()));
+        let label = self.catalog.as_ref().and_then(|catalog| catalog["models"].as_array())
+            .and_then(|models| models.iter().find(|model| model["id"] == settings["model"]))
+            .and_then(|model| model["name"].as_str())
+            .or_else(|| settings["model"].as_str()).filter(|label| !label.is_empty()).unwrap_or("Harness default");
+        let steps = model.and_then(|model| model["reasoningEfforts"].as_array()).map_or(0, Vec::len);
+        let routing = agent.as_ref().and_then(|agent| agent["jevRouting"].as_str()).unwrap_or("inherit");
+        let routing = if routing == "inherit" { self.snapshot["settings"]["systemOneRouting"].as_str().unwrap_or("off") } else { routing };
+        let badge = if routing != "off" { measure("SYS-1", 8.) + px(12. + design::space::TIGHT) } else { px(0.) };
+        let loading = if self.catalog_loading || self.model_save.desired.is_some() { px(14. + design::space::TIGHT) } else { px(0.) };
+        let bars = if steps > 0 { px(steps as f32 * 5. - 2. + design::space::TIGHT) } else { px(0.) };
+        let model_width = (measure(label, 11.) + px(14.) + badge + loading + bars).min(px(220.));
+        let permission_width = measure(permission_label(permission), 11.) + px(14. + design::space::TIGHT + 36.);
+        let watch_width = measure("Watch", 11.) + px(11. + 20. + 24. + 2. + design::space::TIGHT);
+        px(width) >= permission_width.max(model_width) * 2. + watch_width
+            + px(2. * design::space::TIGHT + 24.)
+    }
+
     pub fn render_footer(
         &self,
         palette: Option<crate::design::Palette>,
@@ -831,8 +938,12 @@ impl ComposerFooterPane {
             .and_then(Value::as_str)
             .unwrap_or("inherit");
         let jev_mode = if jev_mode == "inherit" {
-            self.snapshot["settings"]["systemOneRouting"].as_str().unwrap_or("off")
-        } else { jev_mode };
+            self.snapshot["settings"]["systemOneRouting"]
+                .as_str()
+                .unwrap_or("off")
+        } else {
+            jev_mode
+        };
         let settings = self.selected_settings(&task);
         let catalog = self.catalog.clone();
         let catalog_loading = self.catalog_loading;
@@ -898,9 +1009,7 @@ impl ComposerFooterPane {
         };
         let permission_width =
             measure(permission_label(selected)) + px(14. + design::space::TIGHT + 36.);
-        let model_reserve = if compact_footer && jev_mode == "off" {
-            px(28.)
-        } else if compact_footer {
+        let model_reserve = if compact_footer {
             (measure(model_label) + px(64.)).min(px(220.))
         } else {
             px(220.)
@@ -987,7 +1096,7 @@ impl ComposerFooterPane {
                     .py(px(0.))
                     .justify_center()
             })
-            .rounded_full().border_1().border_color(rgb(palette.line))
+            .rounded(px(design::radius::CONTROL))
             .font_family(cx.theme().font_family.clone())
             .text_size(design::ui_scaled_px(11.0 * interface_font_ratio))
             .custom(
@@ -1033,37 +1142,20 @@ impl ComposerFooterPane {
             );
         }
         let jev_enabled = jev_mode != "off";
-        let selected_model = catalog
-            .as_ref()
-            .and_then(|c| c.get("models"))
-            .and_then(Value::as_array)
-            .and_then(|models| {
-                models.iter().find(|model| {
-                    model.get("id").and_then(Value::as_str)
-                        == settings.get("model").and_then(Value::as_str)
-                })
-            });
-        let effort = settings
-            .get("reasoningEffort")
-            .and_then(Value::as_str)
-            .or_else(|| {
-                selected_model.and_then(|model| model.get("defaultEffort").and_then(Value::as_str))
-            })
-            .or_else(|| {
-                selected_model
-                    .and_then(|model| model.get("reasoningEfforts").and_then(Value::as_array))
-                    .and_then(|levels| levels.first())
-                    .and_then(|level| level.get("id"))
-                    .and_then(Value::as_str)
-            });
-        let effort_bar_count = match effort {
-            Some("minimal" | "low") => 1,
-            Some("medium") => 2,
-            Some("high") => 3,
-            Some("xhigh" | "extra-high" | "extra_high") => 4,
-            Some("pro" | "max" | "ultra") => 5,
-            _ => 0,
+        let model_choices = composer_popup::model_choices(catalog.as_ref());
+        let selected_model = model_choices.iter().find(|model| {
+            model["id"] == settings["model"] || model["_thinkingModel"].as_str().is_some_and(|id| Some(id) == settings["model"].as_str())
+        });
+        let levels = selected_model.and_then(|model| model["reasoningEfforts"].as_array());
+        let effort = if let Some(model) = selected_model.filter(|model| model["_thinkingModel"].is_string()) {
+            Some(if model["_thinkingModel"] == settings["model"] { "thinking" } else { "normal" })
+        } else {
+            settings["reasoningEffort"].as_str()
+                .or_else(|| selected_model.and_then(|model| model["defaultEffort"].as_str()))
+                .or_else(|| levels.and_then(|levels| levels.first()).and_then(|level| level["id"].as_str()))
         };
+        let effort_step_count = levels.map_or(0, Vec::len);
+        let effort_bar_count = levels.and_then(|levels| levels.iter().position(|level| level["id"].as_str() == effort)).map_or(0, |index| index + 1);
         let fast = selected_model
             .is_some_and(|model| model.get("supportsFast").and_then(Value::as_bool) == Some(true))
             && settings.get("fastMode").and_then(Value::as_bool) == Some(true);
@@ -1076,26 +1168,7 @@ impl ComposerFooterPane {
             .py(px(5.))
             .max_w(px(220.))
             .min_w_0()
-            .when(compact_footer, |button| {
-                if jev_enabled {
-                    button
-                        .h(px(28.))
-                        .min_h(px(28.))
-                        .px(px(7.))
-                        .py(px(0.))
-                        .max_w(px(220.))
-                } else {
-                    button
-                        .w(px(28.))
-                        .h(px(28.))
-                        .min_w(px(28.))
-                        .max_w(px(28.))
-                        .min_h(px(28.))
-                        .px(px(0.))
-                        .py(px(0.))
-                        .justify_center()
-                }
-            })
+            .when(compact_footer, |button| button.h(px(28.)).min_h(px(28.)).px(px(7.)).py(px(0.)))
             .rounded(px(design::radius::CONTROL))
             .font_family(cx.theme().font_family.clone())
             .text_size(design::ui_scaled_px(11.0 * interface_font_ratio))
@@ -1135,7 +1208,7 @@ impl ComposerFooterPane {
                                 .child("SYS-1"),
                         )
                     })
-                    .when(compact_footer || catalog_loading || self.model_save.desired.is_some(), |this| {
+                    .when(catalog_loading || self.model_save.desired.is_some(), |this| {
                         this.child(
                             Icon::default()
                                 .data(if catalog_loading || self.model_save.desired.is_some() {
@@ -1146,7 +1219,7 @@ impl ComposerFooterPane {
                                 .with_size(px(14.)),
                         )
                     })
-                    .when(!compact_footer || jev_enabled, |this| {
+                    .when(true, |this| {
                         this.child(
                             div()
                                 .flex_1()
@@ -1157,16 +1230,15 @@ impl ComposerFooterPane {
                                 .child(model_label.to_owned()),
                         )
                     })
-                    .when(!compact_footer, |this| {
-                        this.child(
-                            div().flex().items_end().gap_x(px(2.)).children(
-                                [0x38d39f, 0xe3d147, 0xf4a340, 0xef5a68, 0xd85be8]
-                                    .into_iter().enumerate().map(|(index, color)| {
-                                        div().w(px(3.)).h(px(4. + index as f32 * 2.))
-                                            .rounded_full()
-                                            .bg(rgb(if index < effort_bar_count { color } else { palette.line }))
-                                    }),
-                            ),
+                    .child({
+                        div().flex().items_end().gap_x(px(2.)).children(
+                            (0..effort_step_count).map(|index| {
+                                    let colors = [0x38d39f, 0xe3d147, 0xf4a340, 0xef5a68, 0xd85be8];
+                                    let color = colors[index.min(colors.len() - 1)];
+                                    div().w(px(3.)).h(px(4. + index as f32 * 2.))
+                                        .rounded_full()
+                                        .bg(rgb(if index < effort_bar_count { color } else { palette.line }))
+                                }),
                         )
                     })
                     .when(fast && !compact_footer, |this| {
@@ -1545,6 +1617,7 @@ mod permission_label_layout_tests {
     };
     use monitter_lib::experimental_desktop::DesktopService;
     use serde_json::json;
+    use std::rc::Rc;
     struct Fixture {
         pane: Entity<ComposerFooterPane>,
         width: f32,
@@ -1576,7 +1649,7 @@ mod permission_label_layout_tests {
         let (_, visual) = cx.add_window_view(|window, cx| {
             let pane = cx.new(|_| ComposerFooterPane {
                 service: DesktopService::disconnected_for_ui_fixture(),
-                snapshot: json!({"settings":{"interfaceFontSize":14},"tasks":[{"id":"label-task","provider":"codex","status":"idle","archived":false,"sandbox":"read-only","model":"fixture-model"}],"agents":[]}),
+                snapshot: Rc::new(json!({"settings":{"interfaceFontSize":14},"tasks":[{"id":"label-task","provider":"codex","status":"idle","archived":false,"sandbox":"read-only","model":"fixture-model"}],"agents":[]})),
                 task_id: "label-task".into(), context_cleared_at: None, catalog: None, usage_overview: None,
                 catalog_loading: false, usage_loading: false, saving: false, model_save: Default::default(), model_save_queues: Default::default(), busy: false,
                 catalog_error: None, usage_error: None, save_error: None, model_menu_open: false, model_menu_open_generation: 0,
@@ -1599,7 +1672,7 @@ mod permission_label_layout_tests {
                         cx.notify();
                     });
                     pane.update(cx, |pane, cx| {
-                        pane.snapshot["tasks"][0]["sandbox"] = json!(sandbox);
+                        Rc::make_mut(&mut pane.snapshot)["tasks"][0]["sandbox"] = json!(sandbox);
                         cx.notify();
                     });
                     window.draw(cx).clear(cx);
@@ -1625,6 +1698,40 @@ mod model_save_tests {
     use gpui_kit::{AppContext as _, TestAppContext};
     use monitter_lib::experimental_desktop::DesktopService;
     use serde_json::{Value, json};
+    #[gpui_kit::test]
+    fn startup_footer_defers_reads_and_recovers_when_service_is_ready(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let service = DesktopService::pending();
+        let snapshot = json!({"settings":{}, "agents":[], "tasks":[
+            {"id":"startup","provider":"codex","status":"idle","archived":false}
+        ]});
+        let (pane, visual) = cx.add_window_view(|window, cx| {
+            ComposerFooterPane::new(service.clone(), &snapshot, "startup", window, cx)
+        });
+        visual.update(|_, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.set_snapshot(&snapshot, "startup", cx);
+                pane.startup_service_ready(cx);
+                assert_eq!(pane.catalog_generation, 0);
+                assert!(!pane.catalog_loading && !pane.usage_loading);
+                assert!(pane.catalog_error.is_none() && pane.usage_error.is_none());
+                // A retained error from a pre-readiness request must not prevent
+                // the explicit startup transition from requesting fresh data.
+                pane.catalog_error = Some("Monitter is still connecting.".into());
+                service.enable_workspace_commands();
+                pane.startup_service_ready(cx);
+                assert_eq!(pane.catalog_generation, 1);
+                assert!(pane.catalog_loading);
+                assert!(pane.catalog_error.is_none());
+                pane.startup_service_ready(cx);
+                assert_eq!(
+                    pane.catalog_generation, 1,
+                    "coalesce duplicate readiness notifications"
+                );
+            });
+        });
+    }
+
     #[gpui_kit::test]
     fn task_switch_keeps_original_queue_and_model_controls_ignore_busy_state(
         cx: &mut TestAppContext,

@@ -427,6 +427,12 @@ impl PaneDetails {
         }
     }
 
+    /// The parent's publication proof leaves this inspector's inputs unchanged.
+    /// Release the older shared source without changing its read fences or UI.
+    pub(crate) fn advance_unaffected_snapshot(&mut self, snapshot: Rc<Value>) {
+        self.snapshot = snapshot;
+    }
+
     /// Rebind the retained entity to the selected task. A task change clears
     /// task-owned history; a revision change fences in-flight reads. Loaded
     /// history remains visible, and refresh is user-triggered to avoid page
@@ -434,6 +440,19 @@ impl PaneDetails {
     pub fn set_context(
         &mut self,
         snapshot: &Value,
+        revision: Option<&str>,
+        task_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_context_shared(details_snapshot(snapshot), revision, task_id, cx);
+    }
+
+    /// Publications already share their canonical source with the parent.
+    /// Rebind that owner without cloning every task/plan into each inspector;
+    /// retain the same revision fences and task/scope reconciliation below.
+    pub(crate) fn set_context_shared(
+        &mut self,
+        snapshot: Rc<Value>,
         revision: Option<&str>,
         task_id: &str,
         cx: &mut Context<Self>,
@@ -446,7 +465,7 @@ impl PaneDetails {
             .and_then(|tasks| tasks.iter().find(|task| text(task, "id") == task_id))
             .map(|task| (text(task, "hostId"), text(task, "cwd")));
         let terminal_scope_changed = self.terminal_scope != next_scope;
-        self.snapshot = details_snapshot(snapshot);
+        self.snapshot = snapshot;
         if task_changed {
             self.task_id = task_id.to_owned();
             self.generation = self.generation.wrapping_add(1);

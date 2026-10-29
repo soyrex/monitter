@@ -100,6 +100,7 @@ pub struct PaneSpec {
 const EMPTY_TAB_PREFIX: &str = "empty:";
 #[derive(Clone, Debug)]
 pub enum WorkspaceEvent {
+    ContentReady,
     LayoutChanged,
     AutoSizePanesChanged(bool),
     VisibilityChanged {
@@ -572,7 +573,19 @@ impl Render for NativePanel {
         let content_opacity = appearance
             .filter(|appearance| !active && appearance.dim_inactive)
             .map_or(1., |appearance| appearance.inactive_opacity);
-        let content = self.spec.content.clone().cached(StyleRefinement::default().size_full()).into_any_element();
+        let content_view = self.spec.content.clone();
+        #[cfg(feature = "performance-profiling")]
+        let content = if crate::performance_chat::retained_chat_splice_override()
+            && content_view.clone().downcast::<crate::chat::ChatPane>().is_ok()
+        {
+            // Keep the same retained entity and full-size constraint, but let
+            // GPUI traverse/splice the dirty child instead of caching the pane.
+            div().size_full().child(content_view).into_any_element()
+        } else {
+            content_view.cached(StyleRefinement::default().size_full()).into_any_element()
+        };
+        #[cfg(not(feature = "performance-profiling"))]
+        let content = content_view.cached(StyleRefinement::default().size_full()).into_any_element();
         let content = if let Some(header) = self.git_header() {
             div().size_full().min_h_0().flex().flex_col().child(header)
                 .child(div().flex_1().min_h_0().w_full().relative().child(content)).into_any_element()
@@ -674,7 +687,10 @@ pub struct DockWorkspace {
     restore_generation: u64,
     live_group_count: usize,
     live_panel_count: usize,
+    live_topology: Vec<(DockPlacement, Vec<NodeId>, Vec<PanelId>)>,
     host_generation: u64,
+    host_window: gpui::WindowId,
+    deferred_content_panes: Option<HashSet<String>>,
 }
 impl EventEmitter<WorkspaceEvent> for DockWorkspace {}
 impl DockWorkspace {
@@ -732,9 +748,11 @@ impl DockWorkspace {
             match event {
                 DockEvent::ManuallyResized => workspace.set_auto_size_panes(false, window, cx),
                 DockEvent::LayoutChanged => {
+                    let topology = workspace.visible_topology(cx);
+                    let panes_changed = topology != workspace.live_topology;
+                    workspace.live_topology = topology;
                     let count = workspace.visible_group_count(cx);
                     let panels = workspace.visible_panel_count(cx);
-                    let panes_changed = count != workspace.live_group_count || panels != workspace.live_panel_count;
                     workspace.live_group_count = count;
                     workspace.live_panel_count = panels;
                     if panes_changed && !workspace.restoring_layout { workspace.schedule_auto_size(window, cx); }
@@ -769,7 +787,10 @@ impl DockWorkspace {
             restore_generation: 0,
             live_group_count: 0,
             live_panel_count: 0,
+            live_topology: Vec::new(),
             host_generation: 0,
+            host_window: window.window_handle().window_id(),
+            deferred_content_panes: None,
         }
     }
     pub fn auto_size_panes(&self) -> bool { self.auto_size_panes }
@@ -795,6 +816,16 @@ impl DockWorkspace {
             .into_iter().filter(|placement| *placement == DockPlacement::Center || area.is_dock_open(*placement))
             .filter_map(|placement| area.layout(placement))
             .map(|tree| tree.panels().count()).sum()
+    }
+    fn visible_topology(&self, cx: &App) -> Vec<(DockPlacement, Vec<NodeId>, Vec<PanelId>)> {
+        let area = self.area.read(cx);
+        [DockPlacement::Center, DockPlacement::Left, DockPlacement::Right, DockPlacement::Bottom]
+            .into_iter()
+            .filter(|placement| *placement == DockPlacement::Center || area.is_dock_open(*placement))
+            .filter_map(|placement| area.layout(placement).map(|tree| {
+                (placement, tree.node_ids(), tree.panels().collect())
+            }))
+            .collect()
     }
     fn schedule_auto_size(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.auto_size_panes || self.auto_size_pending || self.restoring_layout { return; }
@@ -822,8 +853,7 @@ impl DockWorkspace {
     /// panes from previously selected named layouts. Content/session owners
     /// retain those views independently; this never invokes removal lifecycle.
     pub fn retain_displayed_panels(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
-        let saved = self.serialize(cx)?;
-        let ids: HashSet<String> = Self::saved_ids(&saved)?.into_iter().collect();
+        let ids = self.layout_pane_ids(cx);
         // Preflight before dropping anything: every saved ID must still point
         // at the exact retained panel registered with this live DockArea.
         {
@@ -864,6 +894,57 @@ impl DockWorkspace {
         contents.sort_by(|a, b| a.0.cmp(&b.0));
         contents
     }
+    /// Read live membership directly; ownership checks do not need to dump and
+    /// reparse every split, size, and pane's saved presentation metadata.
+    pub fn layout_pane_ids(&self, cx: &App) -> HashSet<String> {
+        let area = self.area.read(cx);
+        let keys: HashSet<_> = [DockPlacement::Center, DockPlacement::Left, DockPlacement::Right, DockPlacement::Bottom]
+            .into_iter().filter_map(|placement| area.layout(placement))
+            .flat_map(|tree| tree.panels()).collect();
+        self.panels.borrow().iter()
+            .filter(|(_, panel)| keys.contains(&PanelId::from(panel.entity_id())))
+            .map(|(id, _)| id.clone()).collect()
+    }
+    /// Match DockArea's rendered slot selection: the zoomed group alone, or
+    /// the active tab in every center/open-dock group. Remembered focus can
+    /// point into a closed dock and does not establish paint membership.
+    pub(crate) fn visible_pane_ids(&self, cx: &App) -> HashSet<String> {
+        fn active_keys(node: &PaneNode, keys: &mut HashSet<PanelId>) {
+            node.walk(&mut |node| {
+                if let PaneRef::Tabs { panels, active_ix } = node.kind() {
+                    if let Some(key) = panels.get(active_ix) { keys.insert(*key); }
+                }
+            });
+        }
+        let area = self.area.read(cx);
+        let placements = [DockPlacement::Center, DockPlacement::Left, DockPlacement::Right, DockPlacement::Bottom];
+        let zoomed = area.zoomed_group().and_then(|node| placements.into_iter()
+            .filter_map(|placement| area.layout(placement)).find_map(|tree| tree.find_node(node)));
+        let mut keys = HashSet::new();
+        if let Some(node) = zoomed {
+            active_keys(node, &mut keys);
+        } else {
+            for placement in placements {
+                if placement == DockPlacement::Center || area.is_dock_open(placement) {
+                    if let Some(tree) = area.layout(placement) { active_keys(tree.root(), &mut keys); }
+                }
+            }
+        }
+        self.panels.borrow().iter()
+            .filter(|(_, panel)| keys.contains(&PanelId::from(panel.entity_id())))
+            .map(|(id, _)| id.clone()).collect()
+    }
+    pub(crate) fn await_visible_content(&mut self, ids: HashSet<String>) {
+        self.deferred_content_panes = Some(ids);
+    }
+    fn content_viewport_ready(&self, ids: &HashSet<String>, window: &Window, cx: &App) -> bool {
+        ids.iter().all(|id| {
+            let panel = self.panels.borrow().get(id).cloned();
+            let Some(panel) = panel else { return false; };
+            let Ok(chat) = panel.read(cx).spec.content.clone().downcast::<crate::chat::ChatPane>() else { return true; };
+            chat.read(cx).transcript_viewport_ready(window, cx)
+        })
+    }
     pub(crate) fn is_pane_visible(&self,id:&str)->bool {self.paint.borrow().visible.contains(id)}
     pub fn retained_browser_ids(&self) -> Vec<u64> {
         let mut ids: Vec<_> = self
@@ -903,6 +984,8 @@ impl DockWorkspace {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
+        let destination = window.window_handle().window_id();
+        if self.host_window == destination { return Ok(()); }
         let mut ids = self.retained_entity_ids(cx);
         ids.push(cx.entity_id());
         for id in ids {
@@ -913,6 +996,7 @@ impl DockWorkspace {
         // of entity callback routing. Invalidate those probes/animations; the
         // first destination render schedules a fresh visibility probe.
         self.host_generation = self.host_generation.wrapping_add(1);
+        self.host_window = destination;
         self.cancel_layout_motion();
         self.equalize_frame_pending = false;
         let mut paint = self.paint.borrow_mut();
@@ -2272,6 +2356,7 @@ impl DockWorkspace {
         // Restoring/switching workspaces must preserve the saved proportions.
         self.live_group_count = self.visible_group_count(cx);
         self.live_panel_count = self.visible_panel_count(cx);
+        self.live_topology = self.visible_topology(cx);
         // A single restored group has an unambiguous active pane. Give it
         // actual keyboard focus so shortcuts work before the first click.
         // Multiple split groups require an explicit user focus choice.
@@ -2479,6 +2564,21 @@ impl Render for DockWorkspace {
                             HashSet::new()
                         }
                     };
+                    if workspace.paint.borrow().shown && !window.has_active_dialog(cx) {
+                        let timing_pending = crate::workspace_timing::needs_content_readiness(window, cx.entity_id(), cx);
+                        if workspace.deferred_content_panes.is_some() || timing_pending {
+                            // Reconcile only this requested viewport's current
+                            // topology and preparation keys. No transcript walk,
+                            // grouping work or periodic callback is introduced.
+                            let expected = workspace.visible_pane_ids(cx);
+                            let ready_after_render = workspace.content_viewport_ready(&expected, window, cx);
+                            if workspace.deferred_content_panes.is_some() && expected.is_subset(&next) && ready_after_render {
+                                workspace.deferred_content_panes = None;
+                                cx.emit(WorkspaceEvent::ContentReady);
+                            }
+                            crate::workspace_timing::observed_paint(window, cx.entity_id(), &expected, &next, ready_after_render, cx);
+                        }
+                    }
                     workspace.apply_visibility(next, window, cx);
                     let removed = std::mem::take(&mut workspace.paint.borrow_mut().removed);
                     for (id, was_visible) in removed {

@@ -2127,6 +2127,26 @@ impl Service {
                 &arg::<String>(&args, "command")?, arg(&args, "args")?,
             ),
             "get_snapshot" => value(self.snapshot()?),
+            // Approved owner LAN/relay only; readers retain task-folder containment.
+            "read_markdown_file" => value(self.read_markdown_file(
+                &arg::<String>(&args, "taskId")?, &arg::<String>(&args, "href")?,
+                args.get("basePath").and_then(serde_json::Value::as_str),
+            )?),
+            "read_image_file" => value(self.read_image_file(
+                &arg::<String>(&args, "taskId")?, &arg::<String>(&args, "href")?,
+                args.get("basePath").and_then(serde_json::Value::as_str),
+            )?),
+            "read_report_file" => {
+                let document = self.read_report_file(
+                    &arg::<String>(&args, "taskId")?, &arg::<String>(&args, "href")?,
+                    args.get("basePath").and_then(serde_json::Value::as_str),
+                )?;
+                // Leave room for JSON metadata under the relay's 32 MiB ceiling.
+                if document.data_url.len() > 30 * 1024 * 1024 {
+                    return Err("Report is too large for remote viewing (30 MiB encoded limit).".into());
+                }
+                value(document)
+            },
             "get_process_metrics" => value(self.process_metrics()?),
             "get_ui_delta" => value(self.ui_delta_with_metadata_patch(args.get("revision").and_then(|value| value.as_str()), args.get("metadataPatch").and_then(serde_json::Value::as_bool).unwrap_or(false))?),
             "get_channel_messages" => value(self.channel_messages(
@@ -3412,19 +3432,31 @@ impl Service {
             }
             if !changes.is_empty() {
                 let timing = if task.status == "running" { " (next turn)" } else { "" };
-                snapshot.messages.push(Message {
-                    stream_status: None,
-                    phase: None,
-                    response_metadata: None,
-                    id: id(),
-                    task_id: task_id.into(),
-                    role: "system".into(),
-                    text: format!("{MODEL_SETTINGS_CHANGE_PREFIX}{}{timing}", changes.join(" · ")),
-                    created_at: changed_at,
-                    sender_agent_id: None,
-                    collaboration_id: None,
-                    attachments: vec![],
-                });
+                let previous = snapshot.messages.iter().rposition(|message| message.task_id == task_id);
+                if let Some(index) = previous.filter(|&index| is_model_settings_change_message(&snapshot.messages[index])) {
+                    // Keep the divider's identity while replacing its earlier
+                    // choice with the final settings for this uninterrupted run.
+                    let model = if task.model.is_empty() { "Harness default" } else { &task.model };
+                    snapshot.messages[index].text = format!(
+                        "{MODEL_SETTINGS_CHANGE_PREFIX}Model → {model} · Thinking level → {}{timing}",
+                        current_effort.unwrap_or("Default"),
+                    );
+                    snapshot.messages[index].created_at = changed_at;
+                } else {
+                    snapshot.messages.push(Message {
+                        stream_status: None,
+                        phase: None,
+                        response_metadata: None,
+                        id: id(),
+                        task_id: task_id.into(),
+                        role: "system".into(),
+                        text: format!("{MODEL_SETTINGS_CHANGE_PREFIX}{}{timing}", changes.join(" · ")),
+                        created_at: changed_at,
+                        sender_agent_id: None,
+                        collaboration_id: None,
+                        attachments: vec![],
+                    });
+                }
             }
             Ok(snapshot.clone())
         })
@@ -4390,20 +4422,44 @@ impl Service {
         project_id: Option<String>,
     ) -> Result<Snapshot, String> {
         self.mutate(Some(task_id.into()), |snapshot| {
-            if let Some(project_id) = &project_id {
-                if !snapshot
-                    .projects
-                    .iter()
-                    .any(|project| project.id == *project_id)
-                {
-                    return Err("Project was not found.".into());
+            let project = project_id.as_deref().map(|id| {
+                snapshot.projects.iter().find(|project| project.id == id)
+                    .ok_or_else(|| "Project was not found.".to_string())
+            }).transpose()?;
+            let task_index = snapshot
+                .tasks
+                .iter()
+                .position(|task| task.id == task_id)
+                .ok_or_else(|| "Task was not found.".to_string())?;
+            let task = &snapshot.tasks[task_index];
+            let next_cwd = project.and_then(|project| {
+                project.workspaces.iter()
+                    .find(|workspace| workspace.host_id == task.host_id)
+                    .map(|workspace| workspace.cwd.as_str())
+            });
+            if let Some(project) = project {
+                if project.agent_worktrees_enabled && task.agent_worktree.is_none() {
+                    return Err("Start a new chat to use this project's isolated worktree.".into());
                 }
             }
-            let task = snapshot
-                .tasks
-                .iter_mut()
-                .find(|task| task.id == task_id)
-                .ok_or_else(|| "Task was not found.".to_string())?;
+            if let Some(cwd) = next_cwd.filter(|cwd| *cwd != task.cwd) {
+                let has_started = task.native_session_id.is_some()
+                    || task.status != "idle"
+                    || task.agent_worktree.is_some()
+                    || snapshot.messages.iter().any(|message| {
+                        message.task_id == task_id
+                            && matches!(message.role.as_str(), "user" | "assistant")
+                    })
+                    || snapshot.queued_messages.iter().any(|message| {
+                        message.task_id == task_id
+                            && matches!(message.status.as_str(), "queued" | "sending")
+                    });
+                if has_started {
+                    return Err("This chat already has a session in another folder. Start a new chat in the selected project to work there.".into());
+                }
+                snapshot.tasks[task_index].cwd = cwd.into();
+            }
+            let task = &mut snapshot.tasks[task_index];
             task.project_id = project_id;
             Ok(snapshot.clone())
         })
@@ -5319,6 +5375,16 @@ impl Service {
         task_id: &str,
         control: &Arc<runner::RunControl>,
     ) {
+        self.complete_resident_turn_outcome(task_id, control, false);
+    }
+
+    pub(crate) fn complete_resident_turn_outcome(
+        self: &Arc<Self>,
+        task_id: &str,
+        control: &Arc<runner::RunControl>,
+        failed: bool,
+    ) {
+        let status = if failed { "error" } else { "completed" };
         let _ = control.refresh_runtime_process_baseline_if_no_tool_work();
         // Claude can also back the internal admin. Its normalized text was
         // already routed through `apply_event`; complete only the broker and
@@ -5332,7 +5398,7 @@ impl Service {
                 }
                 let task = data.snapshot.tasks.iter_mut().find(|task| task.id == task_id)
                     .ok_or("Monitter Admin task was not found.")?;
-                task.status = "completed".into();
+                task.status = status.into();
                 task.updated_at = now();
                 Ok(crate::app_server_service::expire_inputs(&mut data.snapshot, task_id))
             });
@@ -5341,7 +5407,13 @@ impl Service {
                     self.notify_input_waiter(&request_id, Err("Resident turn ended.".into()));
                     self.notify_approval_waiters(&request_id, Err("Resident turn ended.".into()));
                 }
-                self.admin_turn_broker.complete_owned(task_id, control);
+                if failed {
+                    self.admin_turn_broker.cancel_with_error_owned(
+                        task_id, control, "Claude reported a failed turn.".into(),
+                    );
+                } else {
+                    self.admin_turn_broker.complete_owned(task_id, control);
+                }
                 self.mark_runtime_idle_if_current(task_id, control);
             }
             return;
@@ -5369,10 +5441,15 @@ impl Service {
                 .ok_or_else(|| "Task was not found.".to_string())?;
             let was_running = task.status == "running";
             if task.status != "interrupted" {
-                task.status = "completed".into();
+                task.status = status.into();
             }
             task.updated_at = now();
             let should_route = was_running && task.status == "completed";
+            let final_status = task.status.clone();
+            Service::complete_collaborations(
+                state, task_id, &final_status,
+                failed.then_some("Claude reported a failed turn."),
+            );
             let expired = crate::app_server_service::expire_inputs(state, task_id);
             Ok((should_route, expired))
         });
@@ -12225,7 +12302,7 @@ readline.createInterface({input: process.stdin}).on('line', line => {
             model: "gpt-test".into(), reasoning_effort: Some("low".into()), fast_mode: None,
         }).unwrap();
         let thinking_change = service.snapshot().unwrap().messages.last().unwrap().clone();
-        assert_eq!(thinking_change.text, "[Monitter settings change] Thinking level → low (next turn)");
+        assert_eq!(thinking_change.text, "[Monitter settings change] Model → gpt-test · Thinking level → low (next turn)");
         assert!(is_model_settings_change_message(&thinking_change));
         let before_retry = service.snapshot().unwrap();
         let desired_task = before_retry.tasks.iter().find(|item| item.id == task.id).unwrap();
@@ -13674,6 +13751,39 @@ readline.createInterface({input: process.stdin}).on('line', line => {
             .messages
             .iter()
             .any(|message| message.task_id == first.id && message.text == "kept transcript"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn assigning_project_rehomes_only_a_chat_without_a_session() {
+        let dir = temp_dir("assign-project-workspace");
+        let service = Service::open(None, dir.clone()).unwrap();
+        let snapshot = service.snapshot().unwrap();
+        let host_id = snapshot.hosts[0].id.clone();
+        let agent_id = snapshot.agents[0].id.clone();
+        service.save_project(project("project", &host_id, "/project-workspace")).unwrap();
+
+        let fresh = service.create_task(task_input(agent_id.clone(), "fresh", None)).unwrap();
+        assert_ne!(fresh.cwd, "/project-workspace");
+        let assigned = service.set_task_project(&fresh.id, Some("project".into())).unwrap();
+        let fresh = assigned.tasks.iter().find(|task| task.id == fresh.id).unwrap();
+        assert_eq!(fresh.cwd, "/project-workspace");
+        assert_eq!(fresh.project_id.as_deref(), Some("project"));
+
+        let established = service.create_task(task_input(agent_id, "established", None)).unwrap();
+        service.mutate(None, |snapshot| {
+            let task = snapshot.tasks.iter_mut().find(|task| task.id == established.id).unwrap();
+            task.native_session_id = Some("existing-session".into());
+            task.status = "completed".into();
+            Ok(())
+        }).unwrap();
+        let error = service.set_task_project(&established.id, Some("project".into())).unwrap_err();
+        assert!(error.contains("Start a new chat"));
+        let unchanged = service.snapshot().unwrap();
+        let established_after = unchanged.tasks.iter().find(|task| task.id == established.id).unwrap();
+        assert_eq!(established_after.cwd, established.cwd);
+        assert_eq!(established_after.project_id, None);
+        assert_eq!(established_after.native_session_id.as_deref(), Some("existing-session"));
         let _ = std::fs::remove_dir_all(dir);
     }
 

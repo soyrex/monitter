@@ -1,5 +1,6 @@
 //! Anchored rich popovers for the composer permission and model controls.
 use super::*;
+use std::{cell::RefCell, rc::Rc};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
     ActiveTheme as _, Selectable as _, ThemeStyled as _,
@@ -608,6 +609,8 @@ pub(super) fn permissions_menu(
     };
     let entity = cx.entity();
     let state_key = format!("composer-permission-picker-{}-{}", entity.entity_id(), props.task_id);
+    let panel_slot: Rc<RefCell<Option<Entity<PermissionPopupState>>>> =
+        Rc::new(RefCell::new(None));
     Popover::new(SharedString::from(format!(
         "composer-permission-picker-popover-{}",
         entity.entity_id()
@@ -616,18 +619,13 @@ pub(super) fn permissions_menu(
     .trigger(trigger)
     .anchor(Anchor::BottomLeft)
     .on_open_change({
-        let props = props.clone();
-        let entity = entity.clone();
-        let state_key = state_key.clone();
-        move |open, window, cx| {
-            let factory_props = props.clone();
-            let factory_pane = entity.clone();
-            let panel = window.use_keyed_state(SharedString::from(state_key.clone()), cx,
-                move |window, cx| PermissionPopupState::new(factory_props, factory_pane, window, cx));
-            panel.update(cx, |state, cx| {
-                if *open { state.draft = None; state.hovered_level = None; state.set_props(props.clone(), cx); }
-                else { state.apply_draft(cx); }
-            });
+        let panel_slot = panel_slot.clone();
+        move |open, _, cx| {
+            if !*open {
+                if let Some(panel) = panel_slot.borrow().clone() {
+                    panel.update(cx, |state, cx| state.apply_draft(cx));
+                }
+            }
         }
     })
     .overlay_closable(true)
@@ -643,6 +641,7 @@ pub(super) fn permissions_menu(
                 PermissionPopupState::new(factory_props, factory_pane, window, panel_cx)
             },
         );
+        *panel_slot.borrow_mut() = Some(panel.clone());
         panel.update(cx, |state, panel_cx| state.set_props(props, panel_cx));
         panel
     })
@@ -679,6 +678,17 @@ struct ModelPopupState {
     search_observation: Option<gpui_kit::Subscription>,
     hovered_choice: Option<(String, String)>,
     focus: FocusHandle,
+    drag: Option<PickerDrag>,
+    search_visible: bool,
+    model_scroll: ScrollHandle,
+}
+
+struct PickerDrag {
+    model: Option<String>,
+    origin: f32,
+    start: f32,
+    value: f32,
+    stops: Vec<(f32, String)>,
 }
 
 impl ModelPopupState {
@@ -697,14 +707,12 @@ impl ModelPopupState {
             search_observation: None,
             hovered_choice: None,
             focus: cx.focus_handle(),
+            drag: None,
+            search_visible: false,
+            model_scroll: ScrollHandle::new(),
         };
         state.search_observation = Some(cx.observe(&state.search, |_, _, cx| cx.notify()));
-        if state.models().len() > 7 {
-            state
-                .search
-                .update(cx, |search, cx| search.focus(window, cx));
-        }
-        if state.models().len() <= 7 { state.focus.focus(window, cx); }
+        state.focus.focus(window, cx);
         state
     }
 
@@ -717,12 +725,16 @@ impl ModelPopupState {
                 .catalog
                 .as_ref()
                 .and_then(|catalog| catalog["models"].as_array())
-                .is_some_and(|models| models.len() <= 5);
+                .is_some_and(|_| model_choices(props.catalog.as_ref()).len() <= 10);
         if self.props.open_generation != props.open_generation {
+            self.drag = None;
+            self.search_visible = false;
+            self.model_scroll.set_offset(gpui_kit::point(px(0.), px(0.)));
             self.draft = None;
             self.hovered_choice = None;
         }
         if hide_search || self.props.open_generation != props.open_generation {
+            self.search_visible = false;
             self.search
                 .update(cx, |search, cx| search.set_value("", window, cx));
         }
@@ -730,25 +742,21 @@ impl ModelPopupState {
         cx.notify();
     }
 
-    fn models(&self) -> Vec<Value> {
-        self.props
-            .catalog
-            .as_ref()
-            .and_then(|catalog| catalog.get("models"))
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default()
-    }
+    fn models(&self) -> Vec<Value> { model_choices(self.props.catalog.as_ref()) }
 
     fn selected_model(&self) -> Option<Value> {
         let selected = self.settings().get("model")?.as_str()?;
         self.models()
             .into_iter()
-            .find(|model| model.get("id").and_then(Value::as_str) == Some(selected))
+            .find(|model| model.get("id").and_then(Value::as_str) == Some(selected)
+                || model.get("_thinkingModel").and_then(Value::as_str) == Some(selected))
     }
 
     fn selected_effort_id(&self, levels: &[Value]) -> String {
         let selected_model = self.selected_model();
+        if let Some(model) = selected_model.as_ref().filter(|model| model["_thinkingModel"].is_string()) {
+            return if model["_thinkingModel"] == self.settings()["model"] { "thinking" } else { "normal" }.to_owned();
+        }
         self.settings()
             .get("reasoningEffort")
             .and_then(Value::as_str)
@@ -778,7 +786,9 @@ impl ModelPopupState {
         if !model["reasoningEfforts"].as_array().is_some_and(|levels|
             levels.iter().any(|level| level["id"].as_str() == Some(&effort_id))) { return; }
         let fast = if model["supportsFast"].as_bool() == Some(true) { self.settings()["fastMode"].clone() } else { Value::Null };
-        self.draft = Some(json!({"model":model_id,"reasoningEffort":effort_id,"fastMode":fast}));
+        self.draft = Some(if model["_thinkingModel"].is_string() {
+            json!({"model":if effort_id == "thinking" { model["_thinkingModel"].as_str().unwrap_or(&model_id) } else { &model_id },"reasoningEffort":null,"fastMode":fast})
+        } else { json!({"model":model_id,"reasoningEffort":effort_id,"fastMode":fast}) });
         self.hovered_choice = None;
         cx.notify();
     }
@@ -843,13 +853,18 @@ impl ModelPopupState {
             return true;
         }
         if !matches!(key, "left" | "right" | "up" | "down") { return false; }
-        let query = self.search.read(cx).value().to_lowercase();
+        let choices = self.models();
+        let search_available = choices.len() > 10;
+        let query = if search_available { self.search.read(cx).value().to_lowercase() } else { String::new() };
         let models: Vec<_> = self.models().into_iter().filter(|model| query.is_empty()
             || ["id", "name", "description"].iter().any(|field| model[*field].as_str().unwrap_or_default().to_lowercase().contains(&query))).collect();
         if models.is_empty() { return true; }
-        let selected = self.hovered_choice.clone().unwrap_or_else(|| (
-            self.settings()["model"].as_str().unwrap_or_default().to_owned(),
-            self.settings()["reasoningEffort"].as_str().unwrap_or_default().to_owned()));
+        let selected = self.hovered_choice.clone().unwrap_or_else(|| {
+            let model = self.selected_model();
+            let levels = model.as_ref().and_then(|model| model["reasoningEfforts"].as_array()).cloned().unwrap_or_default();
+            (model.as_ref().and_then(|model| model["id"].as_str()).unwrap_or_default().to_owned(),
+             self.selected_effort_id(&levels))
+        });
         let mut row = models.iter().position(|model| model["id"].as_str() == Some(&selected.0)).unwrap_or(0);
         if key == "up" { row = row.saturating_sub(1); }
         if key == "down" { row = (row + 1).min(models.len() - 1); }
@@ -866,6 +881,7 @@ impl ModelPopupState {
     }
 
     fn close(&mut self, cx: &mut Context<Self>) {
+        self.finish_drag(cx);
         self.apply_draft(cx);
         let pane = self.pane.clone();
         let task_id = self.props.task_id.clone();
@@ -876,14 +892,66 @@ impl ModelPopupState {
             }
         });
     }
+
+    fn move_drag(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        let Some(drag) = self.drag.as_mut() else { return; };
+        let pointer = if drag.model.is_some() { event.position.x.as_f32() } else { event.position.y.as_f32() };
+        let min = drag.stops.first().map(|stop| stop.0).unwrap_or(0.);
+        let max = drag.stops.last().map(|stop| stop.0).unwrap_or(min);
+        drag.value = (drag.start + (pointer - drag.origin) / popup_px(1.).as_f32()).clamp(min, max);
+        cx.notify();
+    }
+
+    fn finish_drag(&mut self, cx: &mut Context<Self>) {
+        let Some(drag) = self.drag.take() else { return; };
+        let Some((_, choice)) = drag.stops.iter().min_by(|a, b| (a.0 - drag.value).abs().total_cmp(&(b.0 - drag.value).abs())) else { return; };
+        if let Some(model) = drag.model {
+            self.choose_model_effort(model, choice.clone(), cx);
+        } else {
+            let moved = (drag.value - drag.start).abs() > 3.;
+            self.save_fast_mode(if moved { choice == "on" } else { self.settings()["fastMode"].as_bool() != Some(true) }, cx);
+        }
+        cx.notify();
+    }
 }
+
+pub(super) fn model_choices(catalog: Option<&Value>) -> Vec<Value> {
+        let models = catalog
+            .and_then(|catalog| catalog.get("models"))
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let mut result = Vec::new();
+        for model in &models {
+            let Some(id) = model["id"].as_str() else { result.push(model.clone()); continue; };
+            let lower = id.to_ascii_lowercase();
+            if lower.contains("minimax") && lower.contains("m3") && (lower.ends_with(":v:thinking") || lower.ends_with("-thinking")) {
+                let base = if lower.ends_with(":v:thinking") { &lower[..lower.len() - "thinking".len()] } else { &lower[..lower.len() - "-thinking".len()] };
+                if models.iter().any(|candidate| candidate["id"].as_str().is_some_and(|v| v.to_ascii_lowercase() == base) && candidate["reasoningEfforts"].as_array().is_none_or(|v| v.is_empty())) { continue; }
+            }
+            let thinking = if lower.ends_with(":v:") { format!("{lower}thinking") } else { format!("{lower}-thinking") };
+            if lower.contains("minimax") && lower.contains("m3") && model["reasoningEfforts"].as_array().is_none_or(|v| v.is_empty()) {
+                if let Some(variant) = models.iter().find(|candidate| candidate["id"].as_str().is_some_and(|v| v.to_ascii_lowercase() == thinking) && candidate["reasoningEfforts"].as_array().is_none_or(|v| v.is_empty())) {
+                    let mut grouped = model.clone();
+                    grouped["_thinkingModel"] = variant["id"].clone();
+                    grouped["reasoningEfforts"] = json!([{ "id":"normal", "name":"Normal" }, { "id":"thinking", "name":"Thinking" }]);
+                    grouped["defaultEffort"] = json!("normal");
+                    result.push(grouped);
+                    continue;
+                }
+            }
+            result.push(model.clone());
+        }
+        result
+    }
+
 
 impl Render for ModelPopupState {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mut props = self.props.clone();
         props.settings = self.settings().clone();
-        let selected_id = props.settings["model"].as_str().unwrap_or_default().to_owned();
         let selected_model = self.selected_model();
+        let selected_id = selected_model.as_ref().and_then(|model| model["id"].as_str()).unwrap_or_else(|| props.settings["model"].as_str().unwrap_or_default()).to_owned();
         let selected_efforts = selected_model.as_ref().and_then(|model| model["reasoningEfforts"].as_array()).cloned().unwrap_or_default();
         let effort_id = self.selected_effort_id(&selected_efforts);
         let selected_effort = selected_efforts.iter().find(|level| level["id"].as_str() == Some(&effort_id));
@@ -892,7 +960,10 @@ impl Render for ModelPopupState {
         let caption_effort_id = hovered_choice.as_ref().map(|choice| choice.1.as_str()).unwrap_or(&effort_id);
         let caption_model = self.models().into_iter().find(|model| model["id"].as_str() == Some(caption_model_id));
         let caption_effort = caption_model.as_ref().and_then(|model| model["reasoningEfforts"].as_array()).and_then(|efforts| efforts.iter().find(|effort| effort["id"].as_str() == Some(caption_effort_id)));
-        let query = self.search.read(cx).value().to_lowercase();
+        let search_available = self.models().len() > 10;
+        let search_shown = search_available && self.search_visible;
+        let has_description = caption_model.as_ref().is_some_and(|model| model["description"].as_str().is_some_and(|text| !text.trim().is_empty()));
+        let query = if search_available { self.search.read(cx).value().to_lowercase() } else { String::new() };
         let models = self.models().into_iter().filter(|model| {
             ["name", "id", "description"].into_iter().any(|key| model[key].as_str().unwrap_or_default().to_lowercase().contains(&query))
         }).collect::<Vec<_>>();
@@ -900,7 +971,7 @@ impl Render for ModelPopupState {
         let track = cx.theme().muted;
         let edge = cx.theme().border;
         let secondary = cx.theme().muted_foreground;
-        let fast_rail_height = (models.len().min(7) as f32 * 36. - 28.).max(64.);
+        let fast_rail_height = (models.len().min(7) as f32 * 30. - 52.).max(48.);
         let font_ratio = props.font_ratio;
         let popup_state = cx.entity();
         let pane = self.pane.clone();
@@ -920,18 +991,19 @@ impl Render for ModelPopupState {
             .filter_map(|level| level.get("id").and_then(Value::as_str).map(str::to_owned))
             .collect::<Vec<_>>();
         columns.sort_by_key(|id| (match id.as_str() {
-            "minimal" => 0,
+            "normal" | "minimal" => 0,
             "low" => 0,
             "medium" => 1,
-            "high" => 2,
+            "thinking" | "high" => 2,
             "xhigh" | "extra-high" | "extra_high" => 3,
             "pro" | "max" | "ultra" => 4,
             _ => 5,
         }, id.clone()));
         columns.dedup();
-        let cell_width = 360. / columns.len().max(5) as f32;
+        let matrix_width = columns.len().clamp(2, 5) as f32 * 60.;
+        let cell_width = matrix_width / columns.len().max(1) as f32;
         let effort_color = |index: usize| [0x38d39f, 0xe3d147, 0xf4a340, 0xef5a68, 0xd85be8][match columns.get(index).map(String::as_str).unwrap_or("low") {
-            "minimal" | "low" => 0, "medium" => 1, "high" => 2,
+            "normal" | "minimal" | "low" => 0, "medium" => 1, "thinking" | "high" => 2,
             "xhigh" | "extra-high" | "extra_high" => 3, "pro" | "max" | "ultra" => 4, _ => index.min(4),
         }];
         let headers = columns.iter().enumerate().map(|(index, id)| {
@@ -949,29 +1021,32 @@ impl Render for ModelPopupState {
                     .unwrap_or(id);
                 v_flex().w(popup_px(cell_width))
                     .items_center()
-                    .gap_y(popup_px(4.))
+                    .gap_y(popup_px(2.))
                     .child(
                         div()
-                            .w(popup_px(18.))
-                            .h(popup_px(2.))
+                            .w(popup_px(12.))
+                            .h(popup_px(1.))
                             .bg(rgb(effort_color(index))),
                     )
                     .child(
                         div()
-                            .text_size(popup_px(10. * font_ratio))
+                            .text_size(popup_px(8. * font_ratio))
                             .text_color(if id == caption_effort_id { rgb(effort_color(index)).into() } else { secondary })
                             .child(label.to_owned()),
                     )
             });
         let mut content = v_flex()
             .id("composer-model-picker")
+            .on_mouse_move(cx.listener(|state, event, _, cx| state.move_drag(event, cx)))
+            .on_mouse_up(MouseButton::Left, cx.listener(|state, _, _, cx| state.finish_drag(cx)))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(|state, _, _, cx| state.finish_drag(cx)))
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|state, event: &KeyDownEvent, _, cx| {
                 if state.navigate(&event.keystroke.key, cx) { cx.stop_propagation(); }
             }))
             .debug_selector(|| "composer-model-picker".into())
-            .w(popup_px(650.))
-            .h(popup_px(240. + models.len().clamp(4, 7) as f32 * 36. + if self.models().len() > 7 { 46. } else { 0. })
+            .w(popup_px(250. + matrix_width))
+            .h(popup_px(110. + if has_description { 70. } else { 0. } + models.len().clamp(2, 7) as f32 * 30. + if search_shown { 46. } else { 0. })
                 .min((window.viewport_size().height - popup_px(64.)).max(popup_px(1.))))
             .flex_shrink_0()
             .relative()
@@ -992,7 +1067,7 @@ impl Render for ModelPopupState {
                     .border_color(edge)
                     .child(
                         v_flex()
-                            .w(popup_px(154.))
+                            .w(popup_px(114.))
                             .flex_shrink_0()
                             .gap_y(popup_px(3.))
                             .child(div().font_weight(FontWeight::SEMIBOLD)
@@ -1000,7 +1075,7 @@ impl Render for ModelPopupState {
                             .child(div().text_size(popup_px(10. * font_ratio))
                                 .text_color(secondary).child(harness_label)),
                     )
-                    .child(h_flex().w(popup_px(360.)).flex_shrink_0().children(headers))
+                    .child(h_flex().w(popup_px(matrix_width)).flex_shrink_0().children(headers))
                     .child(
                         Button::new("model-picker-refresh")
                             .ml_auto()
@@ -1082,7 +1157,7 @@ impl Render for ModelPopupState {
             content = content.child(model_note(warning.to_owned(), font_ratio, cx));
         }
 
-        if self.models().len() > 7 {
+        if search_shown {
             content = content.child(
                 div()
                     .px(popup_px(22.))
@@ -1096,6 +1171,8 @@ impl Render for ModelPopupState {
                     ),
             );
         }
+        let drag_model = self.drag.as_ref().and_then(|drag| drag.model.as_deref());
+        let drag_value = self.drag.as_ref().map(|drag| drag.value);
         let model_rows = models.iter().cloned().map(|model| {
             let id = model
                 .get("id")
@@ -1123,10 +1200,15 @@ impl Render for ModelPopupState {
             let selected_index = columns.iter().position(|column| column == &effort_id).unwrap_or(first_column);
             let hover_column = hovered_choice.as_ref().filter(|choice| choice.0 == id).and_then(|choice| columns.iter().position(|column| *column == choice.1));
             let rail_width = popup_px(((last_column.saturating_sub(first_column) + 1) as f32) * cell_width);
+            let dragging = drag_model == Some(id.as_str());
+            let stops: Vec<_> = supported_columns.iter().map(|column| ((*column as f32 + 0.5) * cell_width, columns[*column].clone())).collect();
+            let target = if dragging { drag_value.unwrap_or(0.) } else { (selected_index as f32 + 0.5) * cell_width };
+            let thumb_x = gpui_kit::base::spring(SharedString::from(format!("model-thumb-{id}")), target,
+                cx.theme().motion_tokens().spring_control.with_damping(0.72), window, cx);
             let dots = (0..columns.len()).map(|column_index| {
                 let level = supported.iter().find(|level| level["id"].as_str() == Some(columns[column_index].as_str()));
                 let Some(level) = level else {
-                    return div().w(popup_px(cell_width)).h(popup_px(34.)).flex().items_center().justify_center()
+                    return div().w(popup_px(cell_width)).h(popup_px(28.)).flex().items_center().justify_center()
                         .bg(surface).text_color(secondary).child("–").into_any_element();
                 };
                 let level_id = level["id"].as_str().unwrap_or_default().to_owned();
@@ -1139,12 +1221,19 @@ impl Render for ModelPopupState {
                 let hover_state = popup_state.clone();
                 let hover_model = id.clone();
                 let hover_effort = level_id.clone();
+                let drag_stops = stops.clone();
                 Button::new(SharedString::from(format!("model-effort-{id}-{level_id}"))).ghost().compact()
-                    .w(popup_px(cell_width)).h(popup_px(34.)).role(Role::RadioButton).selected(false).disabled(props.disabled)
+                    .w(popup_px(cell_width)).h(popup_px(28.)).role(Role::RadioButton).selected(false).disabled(props.disabled)
                     .accessibility_label(format!("{name}, {level_name}")).tooltip(format!("{name} · {level_name}"))
-                    .child(div().w(popup_px(if active || ghost { 28. } else if default_ring { 10. } else { 6. })).h(popup_px(if active || ghost { 28. } else if default_ring { 10. } else { 6. })).rounded_full()
+                    .child(div().w(popup_px(if ghost { 20. } else if default_ring { 8. } else { 5. })).h(popup_px(if ghost { 20. } else if default_ring { 8. } else { 5. })).rounded_full()
                         .when(active || ghost || default_ring, |dot| dot.border_2()).border_color(if active || ghost { rgb(effort_color(column_index)).into() } else { secondary.opacity(0.5) }).bg(if active { rgb(0xf3f7fa).into() } else if ghost { cx.theme().muted.opacity(0.2) } else if default_ring { track } else { secondary.opacity(0.65).into() }))
-                    .on_click(move |_, _, cx| popup_state.update(cx, |state, cx| state.choose_model_effort(cell_model.clone(), level_id.clone(), cx)))
+                    .on_mouse_down(MouseButton::Left, move |event, _, cx| popup_state.update(cx, |state, cx| {
+                        if state.props.disabled { return; }
+                        let value = (column_index as f32 + 0.5) * cell_width;
+                        state.drag = Some(PickerDrag { model: Some(cell_model.clone()), origin: event.position.x.as_f32(), start: value, value, stops: drag_stops.clone() });
+                        state.hovered_choice = None;
+                        cx.notify(); cx.stop_propagation();
+                    }))
                     .on_hover(move |hovered, _, cx| { let _ = hover_state.update(cx, |state, cx| { let next = (*hovered).then(|| (hover_model.clone(), hover_effort.clone())); if state.hovered_choice != next { state.hovered_choice = next; cx.notify(); } }); })
                     .into_any_element()
             });
@@ -1155,33 +1244,35 @@ impl Render for ModelPopupState {
                     .on_click(move |_, _, cx| state.update(cx, |state, cx| state.choose_model_without_effort(model_id.clone(), cx))).into_any_element()
             } else { div().min_w_0().truncate().font_weight(if chosen { FontWeight::SEMIBOLD } else { FontWeight::MEDIUM }).text_color(if chosen { rgb(effort_color(selected_index)).into() } else { cx.theme().foreground }).child(name.clone()).into_any_element() };
             let effort_controls = if supported.is_empty() || columns.is_empty() {
-                div().w(popup_px(360.)).h(popup_px(34.)).flex().items_center().text_color(secondary).child("Default effort").into_any_element()
+                div().w(popup_px(matrix_width)).h(popup_px(28.)).flex().items_center().text_color(secondary).child("Default effort").into_any_element()
             } else {
-                div().relative().w(popup_px(360.)).h(popup_px(34.))
-                    .child(div().absolute().left(popup_px(first_column as f32 * cell_width)).top(popup_px(5.)).w(rail_width).h(popup_px(24.)).rounded_full().border_1().border_color(edge).overflow_hidden().bg(track)
-                            .when(chosen, |rail| rail.child(div().absolute().left(popup_px(6.)).top(popup_px(5.)).h(popup_px(12.)).w(popup_px((selected_index.saturating_sub(first_column) as f32 + 0.5) * cell_width - 6.)).rounded_full().overflow_hidden().flex().children((first_column..=selected_index).map(|cost| div().w(popup_px(cell_width)).flex_shrink_0().h_full().bg(rgb(effort_color(cost)).opacity(0.62)))))))
+                div().relative().w(popup_px(matrix_width)).h(popup_px(28.))
+                    .child(div().absolute().left(popup_px(first_column as f32 * cell_width)).top(popup_px(13.)).w(rail_width).h(popup_px(1.)).overflow_hidden().bg(secondary.opacity(0.18))
+                            .when(chosen, |rail| rail.child(div().absolute().left(popup_px(6.)).top(popup_px(0.)).h(popup_px(1.)).w(popup_px((selected_index.saturating_sub(first_column) as f32 + 0.5) * cell_width - 6.)).rounded_full().overflow_hidden().flex().children((first_column..=selected_index).map(|cost| div().w(popup_px(cell_width)).flex_shrink_0().h_full().bg(rgb(effort_color(cost)).opacity(0.62)))))))
                     .when(hover_column.is_some() && !chosen, |area| area.child(
                         div().absolute().left(popup_px(first_column as f32 * cell_width + 6.))
-                            .top(popup_px(11.)).h(popup_px(12.))
+                            .top(popup_px(13.)).h(popup_px(1.))
                             .w(popup_px((hover_column.unwrap_or(first_column).saturating_sub(first_column) as f32 + 0.5) * cell_width - 6.))
                             .rounded_full().border_1().border_dashed()
                             .border_color(rgb(effort_color(hover_column.unwrap_or(first_column))).opacity(0.6))))
-                    .child(div().size_full().flex().children(dots)).into_any_element()
+                    .child(div().size_full().flex().children(dots))
+                    .when(chosen || dragging, |area| area.child(div().absolute().left(popup_px(thumb_x - 10.)).top(popup_px(4.)).size(popup_px(20.)).rounded_full().border_2().border_color(rgb(effort_color(selected_index))).bg(rgb(0xf3f7fa))))
+                    .into_any_element()
             };
             h_flex()
                 .w_full()
                 .flex_shrink_0()
                 .debug_selector(move || row_selector.clone())
-                .h(popup_px(36.))
+                .h(popup_px(30.))
                 .items_center()
                 .child(
-                    div().w(popup_px(176.)).pl(popup_px(22.))
+                    div().w(popup_px(136.)).pl(popup_px(22.))
                         .min_w_0()
                         .child(model_name),
                 )
                 .child(effort_controls)
                 .into_any_element()
-        });
+        }).collect::<Vec<_>>();
 
         if props.catalog.is_some() && self.models().is_empty() {
             content = content.child(model_note(
@@ -1197,6 +1288,12 @@ impl Render for ModelPopupState {
                 .child(
                     div()
                         .id("model-picker-model-list")
+                        .track_scroll(&self.model_scroll)
+                        .on_scroll_wheel(cx.listener(|state, event: &ScrollWheelEvent, _, cx| {
+                            if state.models().len() > 10 && !state.search_visible && state.model_scroll.offset().y >= px(-1.) && event.delta.pixel_delta(px(20.)).y > px(2.) {
+                                state.search_visible = true; cx.notify();
+                            }
+                        }))
                         .debug_selector(|| "model-picker-model-list".into())
                         .role(Role::RadioGroup)
                         .aria_label("Model and thinking level")
@@ -1225,14 +1322,32 @@ impl Render for ModelPopupState {
                 .to_owned();
             let popup_state = popup_state.clone();
             let fast_on = props.settings.get("fastMode").and_then(Value::as_bool) == Some(true);
-            let fast_button = Button::new(SharedString::from(format!("fast-mode-{}", props.task_id))).ghost().compact().p_0()
-                .w(popup_px(50.)).h(popup_px(fast_rail_height + 46.)).disabled(props.disabled || !supports_fast).accessibility_label("Fast mode").tooltip(fast_description)
-                .child(div().relative().w(popup_px(50.)).h(popup_px(fast_rail_height + 46.)).flex().flex_col().items_center().child(div().text_size(popup_px(10. * font_ratio)).text_color(if fast_on { rgb(0x32c8ff).into() } else { secondary }).child(h_flex().gap_x(popup_px(4.)).child(Icon::default().data(icon_assets::Zap.1).with_size(popup_px(10.))).child("FAST"))).child(div().mt(popup_px(8.)).w(popup_px(50.)).h(popup_px(fast_rail_height)).relative().rounded_full().border_1().border_color(if fast_on { rgb(0x32c8ff).into() } else { edge }).bg(if fast_on { rgb(0x32c8ff).opacity(0.10).into() } else { track }).flex().flex_col().items_center().child(div().absolute().top(popup_px(16.)).bottom(popup_px(16.)).left(popup_px(24.)).w(popup_px(1.)).bg(edge)).when(fast_on, |rail| rail.justify_start()).when(!fast_on, |rail| rail.justify_end()).child(div().m(popup_px(3.)).w(popup_px(34.)).h(popup_px(34.)).rounded_full().border_2().border_color(if fast_on { rgb(0x32c8ff).into() } else { edge }).bg(if fast_on { rgb(0x32c8ff).into() } else { secondary }).flex().items_center().justify_center().text_color(track).child(Icon::default().data(icon_assets::Zap.1).with_size(popup_px(15.))))))
-                .on_click(move |_, _, cx| popup_state.update(cx, |state, state_cx| state.save_fast_mode(!fast_on, state_cx)));
-            content = content.child(h_flex().absolute().right(popup_px(32.)).top(popup_px(if self.models().len() > 7 { 110. } else { 64. })).child(fast_button));
+            let travel = (fast_rail_height - 40.).max(0.);
+            let target = self.drag.as_ref().filter(|drag| drag.model.is_none()).map(|drag| drag.value)
+                .unwrap_or(if fast_on { 0. } else { travel });
+            let thumb_y = gpui_kit::base::spring("fast-toggle-thumb", target,
+                cx.theme().motion_tokens().spring_control.with_damping(0.72), window, cx);
+            let fast_button = v_flex().w(popup_px(50.)).gap_y(popup_px(6.)).items_center()
+                .opacity(if supports_fast { 1. } else { 0.4 })
+                .child(div().text_size(popup_px(9. * font_ratio)).text_color(secondary).child("FAST"))
+                .child(div().id("fast-mode-drag").w(popup_px(50.)).h(popup_px(fast_rail_height))
+                    .relative().rounded_full().border_1().border_color(edge).bg(track)
+                    .aria_label("Fast mode: drag up to enable, down to disable")
+                    .on_mouse_down(MouseButton::Left, move |event, _, cx| popup_state.update(cx, |state, cx| {
+                        if state.props.disabled || !supports_fast { return; }
+                        state.drag = Some(PickerDrag { model: None, origin: event.position.y.as_f32(), start: target, value: target,
+                            stops: vec![(0., "on".into()), (travel, "off".into())] });
+                        cx.notify(); cx.stop_propagation();
+                    }))
+                    .child(div().absolute().top(popup_px(18.)).bottom(popup_px(18.)).left(popup_px(24.)).w(popup_px(1.)).bg(edge.opacity(0.3)))
+                    .child(div().absolute().left(popup_px(7.)).top(popup_px(3. + thumb_y)).size(popup_px(34.))
+                        .rounded_full().border_2().border_color(edge).bg(if fast_on { rgb(0x32c8ff).into() } else { secondary })
+                        .flex().items_center().justify_center().text_color(track)
+                        .child(Icon::default().data(icon_assets::Zap.1).with_size(popup_px(15.)))));
+            content = content.child(h_flex().absolute().right(popup_px(20.)).top(popup_px(if search_shown { 110. } else { 64. })).mb(popup_px(16.)).child(fast_button));
         }
 
-        if let Some(model) = caption_model.as_ref() {
+        if let Some(model) = caption_model.as_ref().filter(|_| has_description) {
             let model_name = model.get("name").and_then(Value::as_str).unwrap_or("Model");
             let effort_name = caption_effort
                 .and_then(|level| level.get("name"))
@@ -1243,18 +1358,18 @@ impl Render for ModelPopupState {
                 caption_effort.and_then(|level| level.get("description")).and_then(Value::as_str),
             ].into_iter().flatten().filter(|text| !text.is_empty()).collect::<Vec<_>>().join(" ");
             // A fixed viewport keeps the matrix and popup anchored as preview text changes.
-            content = content.child(v_flex().id("model-preview-caption").mx(popup_px(22.)).mb(popup_px(10.)).w_auto().h(popup_px(28. + 76. * font_ratio)).flex_shrink_0().overflow_y_scroll().p(popup_px(12.))
+            content = content.child(v_flex().id("model-preview-caption").mx(popup_px(22.)).mb(popup_px(10.)).w_auto().h(popup_px(20. + 48. * font_ratio)).flex_shrink_0().overflow_y_scroll().px(popup_px(12.)).pt(popup_px(8.)).pb(popup_px(16.)).text_size(popup_px(10. * font_ratio))
                     .rounded(popup_px(10.))
                     .bg(track.opacity(0.65))
                     .border_1()
                     .border_color(edge)
-                    .gap_y(popup_px(4.))
+                    .gap_y(popup_px(2.))
                     .child(h_flex().gap_x(popup_px(6.)).font_weight(FontWeight::SEMIBOLD).child(model_name.to_owned()).child("·").child(div().text_color(rgb(columns.iter().position(|id| id == caption_effort_id).map(effort_color).unwrap_or(0x82919f))).child(effort_name.to_owned())).when(props.settings["fastMode"].as_bool() == Some(true), |row| row.child(div().px(popup_px(6.)).rounded(popup_px(3.)).bg(rgb(0x32c8ff).opacity(0.15)).text_color(rgb(0x32c8ff)).child("Fast"))).when(hovered_choice.is_some(), |row| row.child(div().ml_auto().px(popup_px(6.)).rounded(popup_px(3.)).bg(cx.theme().muted).text_size(popup_px(10. * font_ratio)).child("Preview"))))
                     .when(!description.is_empty(), |this| {
                         this.child(
                             div()
                                 .text_color(secondary)
-                                .text_size(popup_px(11. * font_ratio))
+                                .text_size(popup_px(9. * font_ratio)).line_height(popup_px(13. * font_ratio))
                                 .child(description.clone()),
                         )
                     }));
@@ -1363,6 +1478,8 @@ pub(super) fn model_menu(
         "composer-model-selection-panel-{}-{task_id}",
         entity.entity_id()
     );
+    let panel_slot: Rc<RefCell<Option<Entity<ModelPopupState>>>> =
+        Rc::new(RefCell::new(None));
     Popover::new(SharedString::from(format!(
         "composer-model-selection-popover-{}",
         entity.entity_id()
@@ -1374,15 +1491,12 @@ pub(super) fn model_menu(
     .on_open_change({
         let entity = entity.clone();
         let task_id = task_id.clone();
-        let props = props.clone();
-        let state_key = state_key.clone();
-        move |open, window, cx| {
+        let panel_slot = panel_slot.clone();
+        move |open, _, cx| {
             if !*open {
-                let factory_props = props.clone();
-                let factory_pane = entity.clone();
-                let panel = window.use_keyed_state(SharedString::from(state_key.clone()), cx,
-                    move |window, cx| ModelPopupState::new(factory_props, factory_pane, window, cx));
-                panel.update(cx, |state, cx| state.apply_draft(cx));
+                if let Some(panel) = panel_slot.borrow().clone() {
+                    panel.update(cx, |state, cx| state.apply_draft(cx));
+                }
             }
             let _ = entity.update(cx, |pane, cx| {
                 if pane.task_id == task_id { pane.set_model_picker_open(*open, cx); }
@@ -1402,6 +1516,7 @@ pub(super) fn model_menu(
                 ModelPopupState::new(factory_props, factory_pane, window, panel_cx)
             },
         );
+        *panel_slot.borrow_mut() = Some(panel.clone());
         panel.update(cx, |state, panel_cx| {
             state.set_props(props, window, panel_cx)
         });
@@ -1523,7 +1638,7 @@ mod native_model_popup_tests {
                 service: DesktopService::disconnected_for_ui_fixture(),
                 snapshot: json!({"settings":{"interfaceFontSize":14},"tasks":[{"id":"popup-task","provider":"codex","status":"idle","archived":false,"model":"model-0"}],"agents":[]}).into(),
                 task_id: "popup-task".into(), context_cleared_at: None,
-                catalog: Some(json!({"current":{"model":"model-0"},"models":(0..8).map(|index| json!({"id":format!("model-{index}"),"name":format!("Model {index}"),"description":"A model supplied by the loaded catalog.","supportsFast":true,"reasoningEfforts":[{"id":"low","name":"Low","description":"Fast reasoning for straightforward tasks."},{"id":"high","name":"High","description":"More reasoning for difficult tasks."}]})).collect::<Vec<_>>()})),
+                catalog: Some(json!({"current":{"model":"model-0"},"models":(0..12).map(|index| json!({"id":format!("model-{index}"),"name":format!("Model {index}"),"description":"A model supplied by the loaded catalog.","supportsFast":true,"reasoningEfforts":[{"id":"low","name":"Low","description":"Fast reasoning for straightforward tasks."},{"id":"high","name":"High","description":"More reasoning for difficult tasks."}]})).collect::<Vec<_>>()})),
                 usage_overview: None, catalog_loading: false, usage_loading: false, saving: false, model_save: Default::default(), model_save_queues: Default::default(), busy: false,
                 catalog_error: None, usage_error: None, save_error: None, model_menu_open: false, model_menu_open_generation: 0,
                 catalog_generation: 0, usage_refresh: Default::default(), usage_clock: std::time::Instant::now(), save_generation: 0,
@@ -1543,7 +1658,7 @@ mod native_model_popup_tests {
         let panel = visual
             .debug_bounds("composer-model-picker")
             .expect("full retained popover opened");
-        assert!(panel.size.height >= px(400.), "popup collapsed: {panel:?}");
+        assert!(panel.size.height >= px(300.), "popup collapsed: {panel:?}");
         assert!(panel.top() >= px(0.) && panel.bottom() <= px(800.));
         assert!(
             visual.debug_bounds("model-picker-header").is_none(),
@@ -1553,9 +1668,16 @@ mod native_model_popup_tests {
             .debug_bounds("model-picker-toolbar")
             .expect("model toolbar visible");
         assert!(toolbar.top() >= panel.top() && toolbar.bottom() <= panel.bottom());
-        let search = visual
-            .debug_bounds("model-picker-search")
-            .expect("search visible");
+        assert!(visual.debug_bounds("model-picker-search").is_none(), "search starts hidden");
+        let list = visual.debug_bounds("model-picker-model-list").unwrap();
+        visual.simulate_event(gpui_kit::ScrollWheelEvent {
+            position: list.center(), delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(40.))), ..Default::default()
+        });
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        let search = visual.debug_bounds("model-picker-search").expect("pulling down reveals search");
+        let panel = visual.debug_bounds("composer-model-picker").unwrap();
+        let toolbar = visual.debug_bounds("model-picker-toolbar").unwrap();
         let list = visual
             .debug_bounds("model-picker-model-list")
             .expect("models visible");
@@ -1568,10 +1690,10 @@ mod native_model_popup_tests {
                 && search.bottom() <= panel.bottom()
         );
         assert!(
-            list.size.height > panel.size.height * 0.5 && list.bottom() <= panel.bottom(),
+            list.size.height > panel.size.height * 0.3 && list.bottom() <= panel.bottom(),
             "models should occupy most of the menu: list={list:?}, panel={panel:?}"
         );
-        assert!(first.size.height >= px(44.) && first.bottom() <= list.bottom());
+        assert!(first.size.height >= px(28.) && first.bottom() <= list.bottom());
         let first_top = first.top();
         visual.simulate_event(gpui_kit::ScrollWheelEvent {
             position: list.center(),
@@ -1624,9 +1746,14 @@ mod native_model_popup_tests {
                 "new opening resets search for {selector}"
             );
         }
-        let search = visual
-            .debug_bounds("model-picker-search")
-            .expect("search remains available");
+        assert!(visual.debug_bounds("model-picker-search").is_none(), "reopening hides search");
+        let list = visual.debug_bounds("model-picker-model-list").unwrap();
+        visual.simulate_event(gpui_kit::ScrollWheelEvent {
+            position: list.center(), delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(40.))), ..Default::default()
+        });
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        let search = visual.debug_bounds("model-picker-search").expect("search can be revealed again");
         visual.simulate_click(search.center(), Default::default());
         visual.simulate_input("Model 7");
         visual.run_until_parked();

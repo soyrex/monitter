@@ -1,4 +1,5 @@
-use super::{ContextKey, RefreshState, TaskMarker, task_context};
+use super::{ContextKey, RefreshState, TaskMarker, task_context, workspace_status_ready};
+use monitter_lib::experimental_desktop::DesktopService;
 use serde_json::json;
 use std::time::Duration;
 
@@ -175,6 +176,26 @@ fn hidden_panes_schedule_nothing_and_reveal_refreshes_latest_scope_immediately()
         state.begin(ms(200)).is_some(),
         "reveal refreshes even when the old read completed hidden"
     );
+}
+
+#[::core::prelude::v1::test]
+fn startup_readiness_deferral_keeps_the_initial_git_refresh_pending() {
+    let service = DesktopService::pending();
+    let mut state = RefreshState::default();
+    state.observe(running(1));
+    state.set_visible(true);
+
+    // The startup gate may defer dispatch, but must not consume the initial
+    // dirty marker as a failed request. Once commands are authorized, the
+    // retained strip starts exactly one urgent read.
+    assert!(!workspace_status_ready(&service));
+    assert_eq!(state.deadline(ms(0)), Some(ms(0)));
+    assert!(state.in_flight.is_none());
+    service.enable_workspace_commands();
+    assert!(workspace_status_ready(&service));
+    let ready_request = state.begin(ms(0)).expect("read starts after readiness");
+    assert!(state.complete(&ready_request));
+    assert!(state.deadline(ms(10_000)).is_none());
 }
 
 #[::core::prelude::v1::test]

@@ -1959,6 +1959,9 @@ impl Render for TerminalPane {
             self.focus_requested = false;
         }
         let palette = crate::design::palette(&self.snapshot["settings"], window.appearance());
+        // Darken the inherited chat/dock surface by 20% without tinting text
+        // or overriding explicit ANSI cell backgrounds.
+        let screen_background = rgb(0x000000).opacity(0.20);
         let interface_font_ratio = self.snapshot["settings"]["interfaceFontSize"]
             .as_f64()
             .filter(|size| size.is_finite())
@@ -2020,6 +2023,7 @@ impl Render for TerminalPane {
             };
             let mut screen = div()
                 .relative()
+                .bg(screen_background)
                 .flex()
                 .flex_col()
                 .size_full()
@@ -2124,6 +2128,7 @@ impl Render for TerminalPane {
             );
         }
         let mut pane = div()
+            .bg(screen_background)
             .flex()
             .flex_col()
             .size_full()

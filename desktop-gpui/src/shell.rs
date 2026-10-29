@@ -25,6 +25,8 @@ use gpui_kit::{
 
 #[path = "sidebar_compact.rs"]
 mod sidebar_compact;
+#[path = "sidebar_list.rs"]
+mod sidebar_list;
 #[path = "sidebar_hover.rs"]
 mod sidebar_hover;
 
@@ -205,8 +207,8 @@ impl Desktop {
     /// Narrow icon rail used when the workspace sidebar is collapsed.
     pub(super) fn render_compact_sidebar(
         &self,
-        agents: &[Value],
-        tasks: &[Value],
+        agents: &[&Value],
+        tasks: &[&Value],
         palette: design::Palette,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -382,49 +384,6 @@ impl Desktop {
             .into_any_element()
     }
 
-    fn grouped_task_rows(
-        &self,
-        tasks: Vec<&Value>,
-        show_project: bool,
-        palette: design::Palette,
-        id_prefix: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let now = sidebar_now_ms();
-        let mut ordered = tasks;
-        ordered.sort_by_key(|task| std::cmp::Reverse(task_activity_ms(task)));
-        let mut group = div()
-            .flex_shrink_0()
-            .flex()
-            .flex_col()
-            .gap(px(design::space::TIGHT));
-        for older in [false, true] {
-            let rows: Vec<_> = ordered
-                .iter()
-                .copied()
-                .filter(|task| task_is_older(task, now) == older)
-                .collect();
-            if rows.is_empty() {
-                continue;
-            }
-            group = group.child(Self::section_label(
-                if older { "Older" } else { "Recent" },
-                palette,
-                &self.snapshot["settings"],
-            ));
-            for task in rows {
-                let context = if show_project {
-                    project_name(&self.snapshot, task)
-                } else {
-                    None
-                };
-                group = group.child(self.task_row(task, context, palette, id_prefix, window, cx));
-            }
-        }
-        group.into_any_element()
-    }
-
     fn project_row(
         project: &Value,
         chat_count: usize,
@@ -538,285 +497,97 @@ impl Desktop {
             )
     }
 
+    fn sidebar_agent_row(&self, agent: &Value, collapsed: bool, palette: design::Palette,
+        window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let id = field(agent, "id");
+        let color = design::parse_color(&field(agent, "color"), palette.accent);
+        let avatar = field(agent, "name")
+            .chars()
+            .next()
+            .unwrap_or('?')
+            .to_string();
+        let toggle = id.clone();
+        let new_id = id.clone();
+        let agent_row_id = format!("agent-row-{id}");
+        let (agent_hover_state, agent_background_opacity) =
+            sidebar_hover::state(&agent_row_id, false, window, cx);
+        let row = div()
+                .id(SharedString::from(agent_row_id))
+                .flex_shrink_0()
+                .rounded_md()
+                .relative()
+                .overflow_hidden()
+                .bg(crate::design::surface_color(palette.soft)
+                    .opacity(agent_background_opacity))
+                .flex()
+                .items_center()
+                .gap(px(design::space::TIGHT))
+                .py(px(design::space::INSET))
+                .px(px(design::space::INSET))
+                .child(
+                    div()
+                        .id(SharedString::from(format!("agent-toggle-{id}")))
+                        .w(px(design::AGENT_AVATAR_SIZE))
+                        .h(px(design::AGENT_AVATAR_SIZE))
+                        .rounded_md()
+                        .bg(rgb(color))
+                        .text_color(rgb(0xffffff))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .child(if collapsed { "›".into() } else { avatar })
+                        .on_click(cx.workspace_listener(move |view, _, _, cx| {
+                            if !view.window.collapsed_agents.remove(&toggle) {
+                                view.window.collapsed_agents.insert(toggle.clone());
+                            }
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(design::space::TIGHT))
+                        .child(div().text_size(sidebar_primary_text_px(cx.theme().font_size)).child(field(agent, "name")))
+                        .child(
+                            div()
+                                .text_size(sidebar_text_px(10., &self.snapshot["settings"]))
+                                .text_color(rgb(palette.muted))
+                                .child(format!(
+                                    "{} · {}",
+                                    field(agent, "provider"),
+                                    field(agent, "model")
+                                )),
+                        ),
+                )
+                .child(
+                    Button::new(SharedString::from(format!("new-{id}")))
+                        .compact()
+                        .label("+")
+                        .disabled(self.window.busy)
+                        .on_click(cx.workspace_listener(move |view, _, window, cx| {
+                            view.open_chat_draft(Some(new_id.clone()), window, cx);
+                        })),
+                )
+                .on_hover(cx.workspace_listener(move |_, hovered, _, cx| {
+                    sidebar_hover::set(&agent_hover_state, *hovered, cx);
+                }));
+        row.into_any_element()
+    }
+
     pub(super) fn render_sidebar(
         &self,
-        agents: &[Value],
-        tasks: &[Value],
+        agents: &[&Value],
+        tasks: &[&Value],
         palette: design::Palette,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let tern =
-            design::tile_theme() == monitter_lib::experimental_desktop::NativeTileTheme::Tern;
-        let tree_scroll = window
-            .use_keyed_state("sidebar-tree-overflow", cx, |_, _| ScrollHandle::new())
-            .read(cx)
-            .clone();
-        let mut tree = div()
-            .id("sidebar-tree")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .track_scroll(&tree_scroll)
-            .flex()
-            .flex_col()
-            .gap(px(design::space::TIGHT))
-            .px(px(design::space::INSET))
-            .py(px(design::space::INSET))
-            .when(tern, |tree| tree.pt_0());
-        if self.window.sidebar_view == SidebarView::Agents {
-            for agent in agents {
-                let id = field(agent, "id");
-                let collapsed = self.window.collapsed_agents.contains(&id);
-                let color = design::parse_color(&field(agent, "color"), palette.accent);
-                let owned: Vec<_> = tasks
-                    .iter()
-                    .filter(|task| field(task, "agentId") == id)
-                    .collect();
-                let avatar = field(agent, "name")
-                    .chars()
-                    .next()
-                    .unwrap_or('?')
-                    .to_string();
-                let toggle = id.clone();
-                let new_id = id.clone();
-                let agent_row_id = format!("agent-row-{id}");
-                let (agent_hover_state, agent_background_opacity) =
-                    sidebar_hover::state(&agent_row_id, false, window, cx);
-                tree = tree.child(
-                    div()
-                        .id(SharedString::from(agent_row_id))
-                        .flex_shrink_0()
-                        .rounded_md()
-                        .relative()
-                        .overflow_hidden()
-                        .bg(crate::design::surface_color(palette.soft)
-                            .opacity(agent_background_opacity))
-                        .flex()
-                        .items_center()
-                        .gap(px(design::space::TIGHT))
-                        .py(px(design::space::INSET))
-                        .px(px(design::space::INSET))
-                        .child(
-                            div()
-                                .id(SharedString::from(format!("agent-toggle-{id}")))
-                                .w(px(design::AGENT_AVATAR_SIZE))
-                                .h(px(design::AGENT_AVATAR_SIZE))
-                                .rounded_md()
-                                .bg(rgb(color))
-                                .text_color(rgb(0xffffff))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .cursor_pointer()
-                                .child(if collapsed { "›".into() } else { avatar })
-                                .on_click(cx.workspace_listener(move |view, _, _, cx| {
-                                    if !view.window.collapsed_agents.remove(&toggle) {
-                                        view.window.collapsed_agents.insert(toggle.clone());
-                                    }
-                                    cx.notify();
-                                })),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .flex()
-                                .flex_col()
-                                .gap(px(design::space::TIGHT))
-                                .child(div().text_size(sidebar_primary_text_px(cx.theme().font_size)).child(field(agent, "name")))
-                                .child(
-                                    div()
-                                        .text_size(sidebar_text_px(10., &self.snapshot["settings"]))
-                                        .text_color(rgb(palette.muted))
-                                        .child(format!(
-                                            "{} · {}",
-                                            field(agent, "provider"),
-                                            field(agent, "model")
-                                        )),
-                                ),
-                        )
-                        .child(
-                            Button::new(SharedString::from(format!("new-{id}")))
-                                .compact()
-                                .label("+")
-                                .disabled(self.window.busy)
-                                .on_click(cx.workspace_listener(move |view, _, window, cx| {
-                                    view.open_chat_draft(Some(new_id.clone()), window, cx);
-                                })),
-                        )
-                        .on_hover(cx.workspace_listener(move |_, hovered, _, cx| {
-                            sidebar_hover::set(&agent_hover_state, *hovered, cx);
-                        })),
-                );
-                if !collapsed {
-                    tree = tree.child(self.grouped_task_rows(
-                        owned,
-                        true,
-                        palette,
-                        "agent-task",
-                        window,
-                        cx,
-                    ));
-                }
-            }
-            // A removed agent may own an unarchived chat in older stores; keep it reachable.
-            let orphaned = tasks
-                .iter()
-                .filter(|task| {
-                    !agents
-                        .iter()
-                        .any(|agent| field(agent, "id") == field(task, "agentId"))
-                })
-                .collect();
-            tree =
-                tree.child(self.grouped_task_rows(orphaned, true, palette, "orphan", window, cx));
-            if tasks.is_empty() {
-                tree = tree.child(
-                    div()
-                        .text_size(sidebar_text_px(11., &self.snapshot["settings"]))
-                        .text_color(rgb(palette.muted))
-                        .p(px(design::space::INSET))
-                        .child("No chats yet. Use + beside an agent to start one."),
-                );
-            }
-        } else if self.window.sidebar_view == SidebarView::Projects {
-            let projects = rows(&self.snapshot, "projects");
-            let mut seen_project_ids = std::collections::HashSet::new();
-            for project in &projects {
-                let project_id = field(project, "id");
-                seen_project_ids.insert(project_id.clone());
-                let project_tasks: Vec<_> = tasks
-                    .iter()
-                    .filter(|task| field(task, "projectId") == project_id)
-                    .collect();
-                let running = project_tasks
-                    .iter()
-                    .any(|task| field(task, "status") == "running");
-                let collapse = window.use_keyed_state(
-                    SharedString::from(format!("project-collapse-{project_id}")),
-                    cx,
-                    |_, _| ProjectCollapseState { collapsed: false },
-                );
-                let collapsed = collapse.read(cx).collapsed;
-                tree = tree.child(Self::project_row(
-                    project,
-                    project_tasks.len(),
-                    running,
-                    collapsed,
-                    collapse,
-                    palette,
-                    sidebar_text_px(11., &self.snapshot["settings"]),
-                    cx,
-                ));
-                if !collapsed {
-                    tree = tree.child(self.grouped_task_rows(
-                        project_tasks,
-                        false,
-                        palette,
-                        "project-task",
-                        window,
-                        cx,
-                    ));
-                }
-            }
-            let missing_project_ids: std::collections::BTreeSet<_> = tasks
-                .iter()
-                .map(|task| field(task, "projectId"))
-                .filter(|id| !id.is_empty() && !seen_project_ids.contains(id))
-                .collect();
-            for project_id in missing_project_ids {
-                tree = tree.child(Self::section_label(
-                    &format!("Other project · {project_id}"),
-                    palette,
-                    &self.snapshot["settings"],
-                ));
-                let project_tasks = tasks
-                    .iter()
-                    .filter(|task| field(task, "projectId") == project_id)
-                    .collect();
-                tree = tree.child(self.grouped_task_rows(
-                    project_tasks,
-                    false,
-                    palette,
-                    "unlisted-project-task",
-                    window,
-                    cx,
-                ));
-            }
-            let unassigned: Vec<_> = tasks
-                .iter()
-                .filter(|task| field(task, "projectId").is_empty())
-                .collect();
-            if !unassigned.is_empty() {
-                tree = tree.child(Self::section_label("No project", palette, &self.snapshot["settings"]));
-                tree = tree.child(self.grouped_task_rows(
-                    unassigned,
-                    false,
-                    palette,
-                    "unassigned-task",
-                    window,
-                    cx,
-                ));
-            }
-            if tasks.is_empty() {
-                tree = tree.child(
-                    div()
-                        .text_size(sidebar_text_px(11., &self.snapshot["settings"]))
-                        .text_color(rgb(palette.muted))
-                        .p(px(design::space::INSET))
-                        .child("No chats yet."),
-                );
-            }
-        } else {
-            let mut running: Vec<_> = tasks
-                .iter()
-                .filter(|task| field(task, "status") == "running")
-                .collect();
-            let mut recent: Vec<_> = tasks
-                .iter()
-                .filter(|task| field(task, "status") != "running")
-                .collect();
-            let by_updated = |left: &&Value, right: &&Value| {
-                let left = left.get("updatedAt").and_then(Value::as_i64).unwrap_or(0);
-                let right = right.get("updatedAt").and_then(Value::as_i64).unwrap_or(0);
-                right.cmp(&left)
-            };
-            running.sort_by(by_updated);
-            recent.sort_by(by_updated);
-            if !running.is_empty() {
-                tree = tree.child(Self::section_label("Running", palette, &self.snapshot["settings"]));
-                for task in running {
-                    tree = tree.child(self.task_row(
-                        task,
-                        project_name(&self.snapshot, task),
-                        palette,
-                        "activity-running",
-                        window,
-                        cx,
-                    ));
-                }
-            }
-            if !recent.is_empty() {
-                tree = tree.child(self.grouped_task_rows(
-                    recent,
-                    true,
-                    palette,
-                    "activity-recent",
-                    window,
-                    cx,
-                ));
-            }
-            if tasks.is_empty() {
-                tree = tree.child(
-                    div()
-                        .text_size(sidebar_text_px(11., &self.snapshot["settings"]))
-                        .text_color(rgb(palette.muted))
-                        .p(px(design::space::INSET))
-                        .child("No recent activity."),
-                );
-            }
-        }
+        let tern = design::tile_theme() == monitter_lib::experimental_desktop::NativeTileTheme::Tern;
+        let tree = sidebar_list::render(self, agents, tasks, palette, window, cx);
 
         // Three primary sidebar tabs (Agents / Projects / Activity) — match the
         // These views change the sidebar listing while leaving the selected
@@ -1065,8 +836,8 @@ impl Desktop {
             });
             usage.clone()
         });
-        let pending = rows(&self.snapshot, "approvalRequests")
-            .into_iter()
+        let pending = sidebar_rows(&self.snapshot, "approvalRequests")
+            .iter()
             .filter(|r| field(r, "status") == "pending" && r["input"].is_null())
             .collect::<Vec<_>>();
         let approval_block = if pending.is_empty() {
@@ -1175,7 +946,6 @@ impl Desktop {
             .flex()
             .flex_col()
             .children(usage_stats);
-        let tree = ScrollEdgeFade::new(tree, tree_scroll, Axis::Vertical, gpui_kit::px(20.));
         let sidebar = if tern {
             let outer_pad = design::tern_spacing(&self.snapshot["settings"]).gutter / 2.;
             let header = div()
@@ -1230,23 +1000,29 @@ impl Desktop {
     }
 }
 
+// Sidebar rendering only reads metadata. Borrow the snapshot arrays instead of
+// deep-cloning every project (including its documents) for each visible task.
+fn sidebar_rows<'a>(snapshot: &'a Value, key: &str) -> &'a [Value] {
+    snapshot.get(key).and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[])
+}
+
 fn project_name(snapshot: &Value, task: &Value) -> Option<String> {
     let project_id = field(task, "projectId");
     if project_id.is_empty() {
         return None;
     }
-    rows(snapshot, "projects")
-        .into_iter()
-        .find(|project| field(project, "id") == project_id)
-        .map(|project| field(&project, "name"))
+    sidebar_rows(snapshot, "projects")
+        .iter()
+        .find(|project| project["id"].as_str() == Some(project_id.as_str()))
+        .map(|project| field(project, "name"))
         .filter(|name| !name.is_empty())
 }
 
 fn provider_label(snapshot: &Value, task: &Value) -> String {
     let agent_id = field(task, "agentId");
-    let agent = rows(snapshot, "agents")
-        .into_iter()
-        .find(|agent| field(agent, "id") == agent_id);
+    let agent = sidebar_rows(snapshot, "agents")
+        .iter()
+        .find(|agent| agent["id"].as_str() == Some(agent_id.as_str()));
     let provider = {
         let task_provider = field(task, "provider");
         if task_provider.is_empty() {

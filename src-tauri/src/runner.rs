@@ -2675,6 +2675,27 @@ impl RunControl {
         if terminal { processes.remove(process); } else { processes.insert(process.to_owned()); }
     }
 
+    /// Claude background jobs can outlive the result for the foreground turn.
+    /// Keep the resident owner until the CLI reports a terminal task status.
+    fn observe_claude_background_task(&self, value: &Value) {
+        if value.get("type").and_then(Value::as_str) != Some("system") { return; }
+        let subtype = value.get("subtype").and_then(Value::as_str).unwrap_or("");
+        if !matches!(subtype, "task_started" | "task_progress" | "task_updated" | "task_notification") { return; }
+        let Some(task_id) = value.get("task_id").and_then(Value::as_str)
+            .filter(|id| !id.is_empty() && id.len() <= 512) else { return };
+        let status = value.pointer("/patch/status").or_else(|| value.get("status"))
+            .and_then(Value::as_str);
+        let terminal = status.is_some_and(|status| matches!(status, "completed" | "failed" | "stopped" | "killed"));
+        let key = format!("claude-task:{task_id}");
+        let Ok(mut processes) = self.runtime_background_processes.lock() else { return };
+        if terminal {
+            processes.remove(&key);
+        } else if matches!(subtype, "task_started" | "task_progress")
+            || status.is_some_and(|status| matches!(status, "pending" | "running" | "paused")) {
+            processes.insert(key);
+        }
+    }
+
     pub(crate) fn observe_runtime_command_exit(&self, item: &Value) {
         if item.get("type").and_then(Value::as_str) != Some("commandExecution") { return; }
         let terminal = item.get("exitCode").is_some_and(|exit| !exit.is_null())
@@ -5397,6 +5418,7 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
                                 let complete_claude_turn = provider == "claude"
                                     && value.get("type").and_then(Value::as_str) == Some("result");
                                 if provider == "claude" {
+                                    control.observe_claude_background_task(&value);
                                     if let Some((request_id, tool, input, summary, detail, risk)) =
                                         claude_approval(&value)
                                     {
@@ -5582,7 +5604,10 @@ pub fn start(service: Arc<Service>, task_id: String, prompt: String, control: Ar
                                 // current run before making the resident
                                 // transport eligible for its next prompt.
                                 if complete_claude_turn {
-                                    service.complete_resident_turn(&task, &control);
+                                    service.complete_resident_turn_outcome(
+                                        &task, &control,
+                                        value.get("is_error").and_then(Value::as_bool).unwrap_or(false),
+                                    );
                                 }
                             }
                             Err(error) => {

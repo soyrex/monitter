@@ -469,6 +469,10 @@ fn start_status_worker(
     Ok(receiver)
 }
 
+fn workspace_status_ready(service: &DesktopService) -> bool {
+    service.workspace_commands_ready()
+}
+
 pub struct ComposerGitStrip {
     service: DesktopService,
     snapshot: Value,
@@ -652,7 +656,28 @@ impl ComposerGitStrip {
         self.drive_refresh(cx);
     }
 
+    /// Retained panes exist before the backend becomes authoritative. Keep the
+    /// pending refresh intact until startup authorizes workspace commands, then
+    /// dispatch it through the normal bounded scheduler.
+    pub(crate) fn startup_service_ready(&mut self, cx: &mut Context<Self>) {
+        if !workspace_status_ready(&self.service) {
+            return;
+        }
+        self.refresh.request_urgent();
+        self.drive_refresh(cx);
+        if self.refresh.visible {
+            cx.notify();
+        }
+    }
+
     fn drive_refresh(&mut self, cx: &mut Context<Self>) {
+        // Git status is a workspace command. A retained chat pane can become
+        // visible during startup, before those commands are authorized. Do not
+        // consume its dirty marker with the expected connecting error: the
+        // owning ChatPane explicitly resumes this scheduler at readiness.
+        if !workspace_status_ready(&self.service) {
+            return;
+        }
         let now = self.clock.elapsed();
         let Some(deadline) = self.refresh.deadline(now) else {
             self.refresh_timer = None;

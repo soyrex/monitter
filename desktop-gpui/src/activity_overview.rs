@@ -16,11 +16,85 @@ use std::{
     path::Path,
     rc::Rc,
     cell::{Cell, RefCell},
+    sync::{Arc, LazyLock, Mutex},
     time::Duration,
 };
 
 #[path = "activity_communications.rs"]
 mod communications;
+
+const PROJECT_WASH_PIXELS: u32 = 660;
+const PROJECT_WASH_DIAMETER: f32 = PROJECT_WASH_PIXELS as f32;
+const MAX_PROJECT_WASH_COLORS: usize = 64;
+static PROJECT_WASHES: LazyLock<Mutex<HashMap<u32, Arc<Image>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn project_wash_alpha(opacity: f32, x: u32, y: u32) -> u8 {
+    // Stochastic rounding distributes each fractional alpha level across the
+    // image instead of making a visible circular step. The hash is fixed, so
+    // the wash stays steady while the map is panned or repainted.
+    let mut hash = x.wrapping_mul(0x1f12_3bb5) ^ y.wrapping_mul(0x5f35_6495);
+    hash ^= hash >> 16;
+    hash = hash.wrapping_mul(0x7feb_352d);
+    hash ^= hash >> 15;
+    let threshold = (hash & 0xffff) as f32 / 65536.;
+    (opacity * 255. + threshold).floor().clamp(0., 255.) as u8
+}
+
+fn project_wash_png(color: u32) -> Vec<u8> {
+    let red = (color >> 16) as u8;
+    let green = (color >> 8) as u8;
+    let blue = color as u8;
+    let center = PROJECT_WASH_DIAMETER / 2.;
+    let pixels = image::RgbaImage::from_fn(PROJECT_WASH_PIXELS, PROJECT_WASH_PIXELS, |x, y| {
+        let radius = ((x as f32 + 0.5 - center).hypot(y as f32 + 0.5 - center) / center)
+            .min(1.);
+        let smooth = radius * radius * (3. - 2. * radius);
+        let alpha = project_wash_alpha(0.16 * (1. - smooth), x, y);
+        image::Rgba([red, green, blue, alpha])
+    });
+    let mut bytes = Vec::new();
+    image::DynamicImage::ImageRgba8(pixels)
+        .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+        .expect("encoding an in-memory project wash must succeed");
+    bytes
+}
+
+fn project_wash(color: u32) -> Arc<Image> {
+    let color = color & 0x00ff_ffff;
+    if let Ok(mut washes) = PROJECT_WASHES.lock() {
+        if let Some(wash) = washes.get(&color) {
+            return wash.clone();
+        }
+        let wash = Arc::new(Image::from_bytes(ImageFormat::Png, project_wash_png(color)));
+        if washes.len() >= MAX_PROJECT_WASH_COLORS {
+            if let Some(oldest) = washes.keys().next().copied() {
+                washes.remove(&oldest);
+            }
+        }
+        washes.insert(color, wash.clone());
+        wash
+    } else {
+        Arc::new(Image::from_bytes(ImageFormat::Png, project_wash_png(color)))
+    }
+}
+
+fn activity_group_color(
+    snapshot: &Value,
+    grouping: NativeActivityGrouping,
+    group_id: &str,
+    fallback: u32,
+) -> u32 {
+    if grouping != NativeActivityGrouping::Project {
+        return fallback;
+    }
+    rows(snapshot, "projects")
+        .iter()
+        .find(|project| text(project, "id") == group_id)
+        .map_or(fallback, |project| {
+            design::parse_color(text(project, "color"), fallback)
+        })
+}
 
 fn text<'a>(value: &'a Value, key: &str) -> &'a str {
     value[key].as_str().unwrap_or_default()
@@ -1144,6 +1218,11 @@ impl ActivityOverview {
         cx.emit(ActivityOverviewEvent::GroupingChanged { grouping });
         cx.notify();
     }
+    /// Publication updates keep communications and cards current without
+    /// rebuilding the desktop shell or recomputing its composed palette.
+    pub(crate) fn update_snapshot(&mut self, snapshot: Rc<Value>, cx: &mut Context<Self>) {
+        self.set_snapshot(snapshot, self.palette, cx);
+    }
     pub fn set_snapshot(&mut self, snapshot: Rc<Value>, palette: Palette, cx: &mut Context<Self>) {
         let mut changed = self.palette != palette;
         if !Rc::ptr_eq(&self.snapshot, &snapshot) {
@@ -1620,10 +1699,7 @@ impl ActivityOverview {
                     .find(|project| text(project, "id") == key)
             })
             .flatten();
-        let project_color = design::parse_color(
-            project.map_or("", |project| text(project, "color")),
-            p.accent,
-        );
+        let project_color = activity_group_color(&self.snapshot, self.grouping, &key, p.accent);
         let project_icon = if self.grouping == NativeActivityGrouping::Workspace {
             gpui_kit::assets::IconName::Folder
         } else {
@@ -2144,9 +2220,8 @@ impl Render for ActivityOverview {
             let geometry = self.painted_map.clone();
             let pan = self.canvas_pan;
             let owner = cx.weak_entity();
-            // Four quiet, theme-coloured discs approximate the reference's
-            // radial project wash without another animated or offscreen layer.
-            // Paint them below links and cards so the map remains legible.
+            // One continuous, cached radial wash avoids visible rings from
+            // stacked translucent discs. Keep it below links and cards.
             let mut washes = div().absolute().inset_0();
             for (_, cards) in groups.iter() {
                 let key = cards[0].group_id(self.grouping);
@@ -2155,19 +2230,15 @@ impl Render for ActivityOverview {
                 let hub = project.hub.unwrap();
                 let center_x = (bounds.x + project.target.x + hub.x + hub.w / 2.) * scale;
                 let center_y = (bounds.y + project.target.y + hub.y + hub.h / 2.) * scale;
-                let color = if self.grouping == NativeActivityGrouping::Project {
-                    rows(&self.snapshot, "projects").iter()
-                        .find(|row| text(row, "id") == key)
-                        .map_or(p.accent, |row| design::parse_color(text(row, "color"), p.accent))
-                } else { p.accent };
-                for (diameter, opacity) in [(660., 0.012), (530., 0.015), (400., 0.020), (260., 0.030)] {
-                    let diameter = px(diameter * scale);
-                    washes = washes.child(div().absolute()
-                        .left(px(center_x) - diameter / 2.)
-                        .top(px(center_y) - diameter / 2.)
-                        .size(diameter).rounded_full()
-                        .bg(rgb(color).opacity(opacity)));
-                }
+                // Match the same project color used by the hub directly above it.
+                let color = activity_group_color(&self.snapshot, self.grouping, key, p.accent);
+                let diameter = px(PROJECT_WASH_DIAMETER * scale);
+                washes = washes.child(img(project_wash(color))
+                    .absolute()
+                    .left(px(center_x) - diameter / 2.)
+                    .top(px(center_y) - diameter / 2.)
+                    .size(diameter)
+                    .object_fit(ObjectFit::Fill));
             }
             let mut graph = div()
                 .id("activity-responsive-map")
@@ -2489,6 +2560,40 @@ mod tests {
     };
     use serde_json::json;
     use std::collections::HashSet;
+    #[test]
+    fn activity_overview_wash_uses_its_project_color() {
+        let snapshot = json!({"projects": [
+            {"id": "green", "color": "#2aa365"},
+            {"id": "red", "color": "#d45548"}
+        ]});
+        let green = super::activity_group_color(
+            &snapshot, NativeActivityGrouping::Project, "green", 0x4477cc,
+        );
+        let red = super::activity_group_color(
+            &snapshot, NativeActivityGrouping::Project, "red", 0x4477cc,
+        );
+        assert_eq!(green, 0x2aa365);
+        assert_eq!(red, 0xd45548);
+        let green_wash = image::load_from_memory(&super::project_wash_png(green))
+            .expect("project wash PNG should decode")
+            .to_rgba8();
+        let red_wash = image::load_from_memory(&super::project_wash_png(red))
+            .expect("project wash PNG should decode")
+            .to_rgba8();
+        let center = super::PROJECT_WASH_PIXELS / 2;
+        assert_eq!(&green_wash.get_pixel(center, center).0[..3], &[0x2a, 0xa3, 0x65]);
+        assert_eq!(&red_wash.get_pixel(center, center).0[..3], &[0xd4, 0x55, 0x48]);
+        assert!(green_wash.get_pixel(center, center).0[3]
+            > green_wash.get_pixel(center + 150, center).0[3]);
+        assert_eq!(green_wash.get_pixel(0, 0).0[3], 0);
+        let dithered: HashSet<_> = (0..128)
+            .map(|x| super::project_wash_alpha(0.08, x, 42))
+            .collect();
+        assert_eq!(dithered, HashSet::from([20, 21]));
+        assert_eq!(super::activity_group_color(
+            &snapshot, NativeActivityGrouping::Workspace, "green", 0x4477cc,
+        ), 0x4477cc);
+    }
     #[gpui_kit::test]
     fn activity_overview_native_communication_paint_and_card_interaction(cx: &mut gpui_kit::TestAppContext) {
         use gpui_kit::{AppContext as _, IntoElement, Entity, Render, Window, Context, MouseButton, point};

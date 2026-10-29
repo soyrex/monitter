@@ -610,12 +610,12 @@ pub(super) fn render(
         let auto_size_panes = desktop.dock.read(cx).auto_size_panes();
         let auto_size = card(
             "Auto Size Panes",
-            "Keep split panes evenly sized when panes are added. Resizing a divider turns this off.",
+            "Keep split panes evenly sized when panes are added, moved, closed, or reordered. Resizing a divider turns this off.",
             palette,
         )
         .child(settings_toggle(
             "Auto Size Panes",
-            "New panes rebalance the workspace automatically until you resize a divider.",
+            "Layout changes rebalance the workspace automatically until you resize a divider.",
             auto_size_panes,
             palette,
         ).child(

@@ -6,6 +6,11 @@ use std::ops::{Deref, DerefMut};
 
 pub(super) struct DesktopWindowView {
     pub(super) active_workspace_id: Option<String>,
+    native_host: gpui::WindowId,
+    layout_dirty: bool,
+    retained_focus: Option<FocusHandle>,
+    pub(super) transcript_preload: Option<VecDeque<Entity<chat::ChatPane>>>,
+    pub(super) transcript_preload_deferred: bool,
     pub(super) removed_pane_ids: Vec<String>,
     pub(super) projection_revision: Option<String>,
     pub(super) pending_detach_workspace: Option<String>,
@@ -303,7 +308,7 @@ impl Desktop {
     }
     pub(super) fn capture_window_layouts(&mut self, cx: &App) -> Result<(), String> {
         let mut layouts = Vec::new();
-        let mut capture = |view: &DesktopWindowView| -> Result<(), String> {
+        let mut capture = |view: &mut DesktopWindowView| -> Result<(), String> {
             if !view.preferences_restore && !view.preferences_restoring {
                 if let Some(id) = &view.active_workspace_id {
                     let mut layout = view.dock.read(cx).serialize(cx)?;
@@ -312,16 +317,16 @@ impl Desktop {
                         view.dock_current.as_deref(),
                     );
                     layouts.push((id.clone(), layout));
+                    view.layout_dirty = false;
                 }
             }
             Ok(())
         };
-        capture(&self.window)?;
-        for view in self
-            .parked_window_views
-            .values()
-            .chain(self.workspace_view_cache.values())
-        {
+        capture(&mut self.window)?;
+        for view in self.parked_window_views.values_mut() {
+            capture(view)?;
+        }
+        for view in self.workspace_view_cache.values_mut().filter(|view| view.layout_dirty) {
             capture(view)?;
         }
         if let Some(set) = &mut self.named_workspaces {
@@ -338,6 +343,21 @@ impl Desktop {
                 }
             }
         }
+        Ok(())
+    }
+    fn capture_outgoing_workspace_layout(&mut self, cx: &App) -> Result<(), String> {
+        if self.window.preferences_restore || self.window.preferences_restoring { return Ok(()); }
+        let Some(id) = self.window.active_workspace_id.clone() else { return Ok(()); };
+        let mut layout = self.window.dock.read(cx).serialize(cx)?;
+        crate::workspace_visibility::remember_focus(&mut layout, self.window.dock_current.as_deref());
+        if let Some(item) = self.named_workspaces.as_mut().and_then(|set| set.items.iter_mut().find(|item| item.id == id)) {
+            crate::workspace_visibility::preserve_focus_metadata(&mut layout, item.layout.as_ref());
+            if item.layout.as_ref() != Some(&layout) {
+                item.layout = Some(layout);
+                self.workspaces_dirty = true;
+            }
+        }
+        self.window.layout_dirty = false;
         Ok(())
     }
     pub(super) fn reconcile_workspace_window_assignments(&mut self) -> Result<(), String> {
@@ -359,8 +379,7 @@ impl Desktop {
         window_state::save_workspace_windows(&self.workspace_window_assignments, flush)
     }
     fn active_layout_ids(view: &DesktopWindowView, cx: &App) -> Result<HashSet<String>, String> {
-        docking::DockWorkspace::saved_ids(&view.dock.read(cx).serialize(cx)?)
-            .map(|ids| ids.into_iter().collect())
+        Ok(view.dock.read(cx).layout_pane_ids(cx))
     }
     fn preflight_workspace_view(
         &self,
@@ -388,6 +407,10 @@ impl Desktop {
         window: &mut Window,
         cx: &mut App,
     ) -> Result<(), String> {
+        let destination = window.window_handle().window_id();
+        // Hiding a retained workspace does not change its native owner. Keep
+        // focus, transcript caches, children and queued frame probes intact.
+        if view.native_host == destination { return Ok(()); }
         let ids = view.dock.read(cx).retained_browser_ids();
         if let Some(browser) = browser {
             browser.read(cx).preflight_tab_transfer(&ids, window, cx)?;
@@ -457,6 +480,7 @@ impl Desktop {
         view.dock.update(cx, |dock, cx| {
             dock.set_shown(!session_lock::locked(cx), window, cx)
         });
+        view.native_host = destination;
         Ok(())
     }
     fn create_workspace_host(
@@ -876,24 +900,20 @@ impl Desktop {
             let Some(host) = assignments.window_for_workspace(&item.id) else {
                 continue;
             };
-            let layout = if self.window.active_workspace_id.as_deref() == Some(&item.id) {
-                Some(self.window.dock.read(cx).serialize(cx)?)
+            let ids = if self.window.active_workspace_id.as_deref() == Some(&item.id) {
+                self.window.dock.read(cx).layout_pane_ids(cx)
             } else if let Some(view) = self
                 .parked_window_views
                 .values()
                 .chain(self.workspace_view_cache.values())
                 .find(|view| view.active_workspace_id.as_deref() == Some(&item.id))
             {
-                Some(view.dock.read(cx).serialize(cx)?)
+                view.dock.read(cx).layout_pane_ids(cx)
             } else {
-                item.layout.clone()
+                item.layout.as_ref().map(docking::DockWorkspace::saved_ids)
+                    .transpose()?.unwrap_or_default().into_iter().collect()
             };
-            for id in layout
-                .as_ref()
-                .map(docking::DockWorkspace::saved_ids)
-                .transpose()?
-                .unwrap_or_default()
-            {
+            for id in ids {
                 if !(id.starts_with("chat:")
                     || id.starts_with("browser:")
                     || id.starts_with("draft:"))
@@ -940,13 +960,17 @@ impl Desktop {
         if !self.workspace_view_cache.contains_key(id) {
             return Ok(false);
         }
+        let content_ready = self.retained_workspace_content_ready(id, window, cx);
         if self.workspace_view_cache.get(id).is_some_and(|view|
             view.preferences_restore || view.preferences_restoring || view.preferences_restore_suppressed
-        ) {
+        ) || (!content_ready
+            && !self.workspace_view_cache.get(id).is_some_and(|view|
+                view.transcript_preload_deferred && view.transcript_preload.as_ref().is_some_and(VecDeque::is_empty))) {
             return Ok(false);
         }
-        self.capture_native_drafts(cx);
-        self.capture_window_layouts(cx)?;
+        let outgoing_ids = self.window.dock.read(cx).layout_pane_ids(cx);
+        self.capture_native_drafts_for_panes(&outgoing_ids, cx);
+        self.capture_outgoing_workspace_layout(cx)?;
         self.validate_workspace_assignments(&self.workspace_window_assignments, cx)?;
         self.window
             .dock
@@ -955,7 +979,13 @@ impl Desktop {
             .workspace_view_cache
             .remove(id)
             .expect("Retained workspace was checked");
+        next.transcript_preload_deferred = !content_ready;
         let browser = self.browser.clone();
+        // A pointer selection already focused the workspace tab during mouse
+        // down. Only preserve an input focus that still belongs to the dock;
+        // otherwise the target's remembered pane supplies its native focus.
+        self.window.retained_focus = self.window.dock.read(cx).focused_pane_id(window, cx)
+            .and_then(|_| window.focused(cx));
         self.window
             .dock
             .update(cx, |dock, cx| dock.set_shown(false, window, cx));
@@ -976,7 +1006,14 @@ impl Desktop {
         self.carry_activity_overview_to(&mut next);
         let old = std::mem::replace(&mut self.window, next);
         if let Some(id) = old.active_workspace_id.clone() {
-            self.workspace_view_cache.insert(id, old);
+            // This outgoing view was already presented. A later selection can
+            // mount its retained content without repeating cold preparation.
+            self.workspace_view_cache.insert(id.clone(), old);
+            if self.retained_workspace_content_ready(&id, window, cx) {
+                self.workspace_interface_preload_prepared.insert(id.clone());
+            } else {
+                self.workspace_interface_preload_prepared.remove(&id);
+            }
         }
         if let Some(set) = &mut self.named_workspaces {
             if let Some(removal) = &removal {
@@ -993,12 +1030,103 @@ impl Desktop {
         self.window
             .dock
             .update(cx, |dock, cx| dock.set_shown(true, window, cx));
+        if self.window.pending_sidebar_task.is_none() {
+            if let Some(focus) = &self.window.retained_focus {
+                window.focus(focus, cx);
+            } else if let Some(id) = self.window.dock_current.clone() {
+                self.window.dock.update(cx, |dock, cx| { dock.focus(&id, window, cx); });
+            }
+        }
+        crate::workspace_timing::shell_ready(window, cx);
+        if !self.window.transcript_preload_deferred {
+            crate::workspace_timing::content_ready(window, cx);
+        }
+        if self.window.transcript_preload_deferred || crate::workspace_timing::enabled() {
+            let visible = self.window.dock.read(cx).visible_pane_ids(cx);
+            if self.window.transcript_preload_deferred {
+                self.window.dock.update(cx, |dock, _| dock.await_visible_content(visible.clone()));
+            }
+            crate::workspace_timing::mount(window, self.window.dock.entity_id(), visible, cx);
+        }
         if let Err(error) = self.persist_workspace_window_assignments(false) {
             self.preferences_error = Some(error);
         }
         self.queue_preferences_save(cx);
         cx.notify();
         Ok(true)
+    }
+
+    pub(super) fn retained_workspace_content_ready(&self, id: &str, window: &Window, cx: &App) -> bool {
+        let Some(view) = self.workspace_view_cache.get(id) else { return false; };
+        if view.preferences_restore || view.preferences_restoring || view.preferences_restore_suppressed { return false; }
+        // Non-chat panes are fully constructed by shell restore. Transcript
+        // preparation is a separate stage only for visible chat contents.
+        let visible = view.dock.read(cx).visible_pane_ids(cx);
+        view.dock.read(cx).retained_content_views(cx).into_iter()
+            .filter(|(pane_id, _)| visible.contains(pane_id))
+            .all(|(_, content)| match content.downcast::<chat::ChatPane>() {
+                Ok(chat) => chat.read(cx).transcript_viewport_ready(window, cx),
+                Err(_) => true,
+            })
+    }
+
+    /// Hidden publications can stale a prepared transcript after idle preload
+    /// has finished. Requeue only affected visible chats before the user clicks
+    /// their workspace, using the existing bounded per-frame preparation path.
+    pub(super) fn requeue_stale_retained_workspaces(
+        &mut self,
+        changed_tasks: &HashSet<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if changed_tasks.is_empty() { return; }
+        let stale = self.workspace_view_cache.iter().filter_map(|(id, view)| {
+            let dock = view.dock.read(cx);
+            let visible = dock.visible_pane_ids(cx);
+            dock.retained_content_views(cx).into_iter().any(|(pane_id, content)| {
+                visible.contains(&pane_id)
+                    && pane_id.strip_prefix("chat:").is_some_and(|task| changed_tasks.contains(task))
+                    && content.downcast::<chat::ChatPane>().is_ok_and(|pane|
+                        pane.read(cx).retained_transcript_inputs_stale())
+            }).then(|| id.clone())
+        }).collect::<Vec<_>>();
+        let mut hosts = HashSet::new();
+        for id in stale {
+            self.workspace_interface_preload_prepared.remove(&id);
+            if let Some(view) = self.workspace_view_cache.get_mut(&id) {
+                view.transcript_preload = None;
+                view.transcript_preload_deferred = false;
+            }
+            if self.workspace_interface_preload_active.as_deref() != Some(id.as_str())
+                && !self.workspace_interface_preload_queue.contains(&id)
+            {
+                self.workspace_interface_preload_queue.push_back(id.clone());
+            }
+            if let Some(host) = self.workspace_window_assignments.window_for_workspace(&id) {
+                hosts.insert(host.clone());
+            }
+        }
+        for host in hosts {
+            self.schedule_workspace_interface_host(&host, cx);
+        }
+    }
+
+    pub(super) fn trace_retained_workspace_readiness(&self, id: &str, window: &Window, cx: &App) {
+        let Some(view) = self.workspace_view_cache.get(id) else {
+            crate::workspace_timing::readiness("view_absent", 0);
+            return;
+        };
+        if view.preferences_restore || view.preferences_restoring || view.preferences_restore_suppressed {
+            crate::workspace_timing::readiness("preferences_pending", 0);
+            return;
+        }
+        let visible = view.dock.read(cx).visible_pane_ids(cx);
+        for (pane_id, content) in view.dock.read(cx).retained_content_views(cx) {
+            if !visible.contains(&pane_id) { continue; }
+            if let Ok(chat) = content.downcast::<chat::ChatPane>() {
+                let (reason, rows) = chat.read(cx).transcript_viewport_readiness_diagnostic(window, cx);
+                if reason != "ready" { crate::workspace_timing::readiness(reason, rows); }
+            }
+        }
     }
 
     pub(super) fn start_saved_workspace_interfaces(
@@ -1032,24 +1160,56 @@ impl Desktop {
                 view.preferences_restore = true;
                 view.preferences_restoring = false;
                 view.preferences_restore_suppressed = false;
-                self.workspace_interface_preload_queue.push_back(active);
             }
+            // Resume idle transcript preparation after the requested switch.
+            self.workspace_interface_preload_queue.push_back(active);
         }
         self.workspace_interface_preload_active = None;
     }
 
     pub(super) fn schedule_saved_workspace_interface_tick(
-        &self,
+        &mut self,
         window: &Window,
         cx: &Context<Self>,
     ) {
-        let task = self.spawn_workspace_host(window, cx, async move |view, cx| {
-            cx.background_executor().timer(std::time::Duration::from_millis(16)).await;
-            let _ = view.update_in(cx, |desktop, window, cx| {
-                desktop.advance_saved_workspace_interface_preload(window, cx)
+        let host = self.current_workspace_window.clone();
+        if !self.workspace_interface_tick_hosts.insert(host.clone()) { return; }
+        let tick_started = Rc::new(std::cell::Cell::new(false));
+        let frame_started = tick_started.clone();
+        let weak = cx.weak_entity();
+        window.on_next_frame(move |window, cx| {
+            if frame_started.replace(true) { return; }
+            let _ = weak.update(cx, |desktop, cx| {
+                desktop.workspace_interface_tick_hosts.remove(&host);
+                desktop.with_workspace_window(window, cx, |desktop, window, cx| {
+                    desktop.advance_saved_workspace_interface_preload(window, cx)
+                });
             });
         });
-        task.detach();
+        // A retained window can be occluded while its workspace is requested.
+        // Keep its bounded preparation queue moving without requiring a paint.
+        self.spawn_workspace_host(window, cx, async move |view, cx| {
+            cx.background_executor().timer(std::time::Duration::from_millis(32)).await;
+            if tick_started.replace(true) { return; }
+            let _ = view.update_in(cx, |desktop, window, cx| {
+                desktop.workspace_interface_tick_hosts.remove(&desktop.current_workspace_window);
+                desktop.advance_saved_workspace_interface_preload(window, cx);
+            });
+        }).detach();
+    }
+
+    fn schedule_workspace_interface_host(&self, host: &WorkspaceWindowId, cx: &mut Context<Self>) {
+        let Some(handle) = self.window_hosts.get(host).map(|host| host.handle) else { return; };
+        let weak = cx.weak_entity();
+        cx.defer(move |cx| {
+            let _ = handle.update(cx, |_, window, cx| {
+                let _ = weak.update(cx, |desktop, cx| {
+                    desktop.with_workspace_window(window, cx, |desktop, window, cx| {
+                        desktop.schedule_saved_workspace_interface_tick(window, cx)
+                    });
+                });
+            });
+        });
     }
 
     fn advance_saved_workspace_interface_preload(
@@ -1057,6 +1217,18 @@ impl Desktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Construction and native transcript resources belong to the assigned
+        // host. A global warmup queue can be advanced by any window's frame.
+        if !self.pending_workspace_activation.contains_key(&self.current_workspace_window) {
+            let target = self.workspace_interface_preload_active.as_ref()
+                .or_else(|| self.workspace_interface_preload_queue.front());
+            if let Some(host) = target.and_then(|id| self.workspace_window_assignments.window_for_workspace(id))
+                .filter(|host| *host != &self.current_workspace_window).cloned()
+            {
+                self.schedule_workspace_interface_host(&host, cx);
+                return;
+            }
+        }
         if self.window.workspace_switch.is_some()
             || self.window.preferences_restore
             || self.window.preferences_restoring
@@ -1066,41 +1238,90 @@ impl Desktop {
         }
         for id in std::mem::take(&mut self.workspace_interface_preload_failed) {
             self.workspace_view_cache.remove(&id);
-            if self.pending_workspace_activation.as_ref().is_some_and(|(_, target)| target == &id) {
-                self.pending_workspace_activation = None;
+            self.workspace_interface_preload_prepared.remove(&id);
+            self.workspace_interface_preload_queue.retain(|queued| queued != &id);
+            if self.pending_workspace_activation.get(&self.current_workspace_window) == Some(&id) {
+                crate::workspace_timing::failed(window, cx);
+            }
+            if self.pending_workspace_activation.values().any(|target| target == &id) {
+                self.pending_workspace_activation.retain(|_, target| target.as_str() != id.as_str());
                 self.preferences_error = Some("Workspace preparation failed. Select it again to retry.".into());
             }
             if self.workspace_interface_preload_active.as_deref() == Some(id.as_str()) {
                 self.workspace_interface_preload_active = None;
             }
         }
-        if let Some((host, id)) = self.pending_workspace_activation.clone() {
-            if host == self.current_workspace_window {
-                if !self.workspace_ready() {
-                    if !self.closing && !self.preferences_blocked {
-                        self.schedule_saved_workspace_interface_tick(window, cx);
-                    }
-                    return;
+        if let Some(id) = self.pending_workspace_activation.get(&self.current_workspace_window).cloned() {
+            if self.focus_workspace_owner(&id, cx) {
+                self.pending_workspace_activation.remove(&self.current_workspace_window);
+                crate::workspace_timing::cancel(window, cx);
+                return;
+            }
+            if !self.workspace_selection_ready() {
+                if !self.closing && !self.preferences_blocked {
+                    self.schedule_saved_workspace_interface_tick(window, cx);
                 }
-                self.prioritize_workspace_interface(&id);
-                if self.workspace_interface_preload_active.as_deref() != Some(id.as_str())
-                    && self.workspace_view_cache.get(&id).is_none_or(|view| view.preferences_restore || view.preferences_restoring)
-                {
-                    self.workspace_interface_preload_queue.retain(|queued| queued != &id);
-                    self.workspace_interface_preload_queue.push_front(id.clone());
+                return;
+            }
+            let waiting_for_history = self.workspace_view_cache.get(&id)
+                .and_then(|view| view.transcript_preload.as_ref())
+                .is_some_and(|queue| !queue.is_empty() && queue.iter().all(|pane| pane.read(cx).history_warmup_pending));
+            if waiting_for_history {
+                // An explicit selection must not wait for background history
+                // IPC before showing an already restored native workspace.
+                // Its visible panes will own content readiness after mounting.
+                if let Some(view) = self.workspace_view_cache.get_mut(&id) {
+                    view.transcript_preload_deferred = true;
+                    if let Some(queue) = view.transcript_preload.as_mut() {
+                        queue.clear();
+                    }
                 }
             }
-            let ready = host == self.current_workspace_window && self.workspace_view_cache.get(&id).is_some_and(|view|
+            self.prioritize_workspace_interface(&id);
+            if self.workspace_interface_preload_active.as_deref() != Some(id.as_str())
+                && !self.workspace_interface_preload_prepared.contains(&id)
+            {
+                self.workspace_interface_preload_queue.retain(|queued| queued != &id);
+                self.workspace_interface_preload_queue.push_front(id.clone());
+            }
+            let ready = self.workspace_view_cache.get(&id).is_some_and(|view|
                 !view.preferences_restore && !view.preferences_restoring && !view.preferences_restore_suppressed);
             if ready {
+                crate::workspace_timing::shell_ready(window, cx);
                 match self.activate_retained_workspace(&id, window, cx) {
-                    Ok(true) => self.pending_workspace_activation = None,
-                    Err(error) => { self.preferences_error = Some(error); self.pending_workspace_activation = None; },
+                    Ok(true) => {
+                        self.pending_workspace_activation.remove(&self.current_workspace_window);
+                        if self.workspace_interface_preload_active.as_deref() == Some(id.as_str()) {
+                            self.workspace_interface_preload_active = None;
+                        }
+                        self.workspace_interface_preload_queue.retain(|queued| queued != &id);
+                        self.schedule_saved_workspace_interface_tick(window, cx);
+                        return;
+                    },
+                    Err(error) => { self.preferences_error = Some(error); self.pending_workspace_activation.remove(&self.current_workspace_window); crate::workspace_timing::failed(window, cx); },
                     Ok(false) => {},
                 }
             }
         }
         if let Some(id) = self.workspace_interface_preload_active.clone() {
+            if let Some(host) = self.workspace_window_assignments.window_for_workspace(&id)
+                .filter(|host| *host != &self.current_workspace_window).cloned()
+            {
+                self.schedule_workspace_interface_host(&host, cx);
+                return;
+            }
+            let browser = self.browser.clone();
+            if let Some(view) = self.workspace_view_cache.get_mut(&id) {
+                if view.native_host != window.window_handle().window_id() {
+                    if let Err(error) = Self::rehost_workspace_view(view, browser.as_ref(), window, cx) {
+                        self.preferences_error = Some(error);
+                        self.workspace_interface_preload_failed.insert(id);
+                        self.schedule_saved_workspace_interface_tick(window, cx);
+                        return;
+                    }
+                    view.dock.update(cx, |dock, cx| dock.set_shown(false, window, cx));
+                }
+            }
             // Projection and native-state revisions can differ when the first
             // restore is attempted. Retry the retained intent after publication.
             if self.workspace_view_cache.get(&id).is_some_and(|view| view.preferences_restore && !view.preferences_restoring) {
@@ -1117,14 +1338,76 @@ impl Desktop {
                 self.schedule_saved_workspace_interface_tick(window, cx);
                 return;
             }
+            // Shell readiness and visible transcript grouping are distinct.
+            // Prepare one bounded page per frame without rendering a hidden
+            // pane or constructing its transcript row entities.
+            if !self.workspace_interface_preload_prepared.contains(&id) {
+                let visible = self.workspace_view_cache.get(&id).unwrap().dock.read(cx).visible_pane_ids(cx);
+                let view = self.workspace_view_cache.get_mut(&id).unwrap();
+                let queue = view.transcript_preload.get_or_insert_with(|| {
+                    view.dock.read(cx).retained_content_views(cx).into_iter()
+                        .filter(|(pane_id, _)| visible.contains(pane_id))
+                        .filter_map(|(_, content)| content.downcast::<chat::ChatPane>().ok())
+                        .collect()
+                });
+                // A slow history request in one split must not stop another
+                // visible split from preparing its retained renderer.
+                if let Some(index) = queue.iter().position(|pane| !pane.read(cx).history_warmup_pending) {
+                    let pane = queue.remove(index).expect("Preparation index was checked");
+                    if !pane.update(cx, |pane, cx| pane.prepare_visible_transcript(window, cx)) {
+                        // Large retained histories and a failed idle history
+                        // lookup must remain selectable. Their first visible
+                        // render owns preparation; do not claim content ready.
+                        view.transcript_preload_deferred = true;
+                    }
+                    self.schedule_saved_workspace_interface_tick(window, cx);
+                    return;
+                }
+                if !queue.is_empty() {
+                    self.workspace_interface_preload_active = None;
+                    self.workspace_interface_preload_queue.retain(|queued| queued != &id);
+                    self.workspace_interface_preload_queue.push_back(id);
+                    self.schedule_saved_workspace_interface_tick(window, cx);
+                    return;
+                }
+                if !view.transcript_preload_deferred {
+                    self.workspace_interface_preload_prepared.insert(id.clone());
+                }
+                if self.pending_workspace_activation.get(&self.current_workspace_window) == Some(&id) {
+                    match self.activate_retained_workspace(&id, window, cx) {
+                        Ok(true) => {
+                            self.pending_workspace_activation.remove(&self.current_workspace_window);
+                            self.workspace_interface_preload_active = None;
+                            self.workspace_interface_preload_queue.retain(|queued| queued != &id);
+                            self.schedule_saved_workspace_interface_tick(window, cx);
+                            return;
+                        },
+                        Err(error) => {
+                            self.preferences_error = Some(error);
+                            self.pending_workspace_activation.remove(&self.current_workspace_window);
+                            crate::workspace_timing::failed(window, cx);
+                        },
+                        Ok(false) => {},
+                    }
+                }
+            }
             self.workspace_interface_preload_active = None;
         }
         while let Some(id) = self.workspace_interface_preload_queue.pop_front() {
             if self.window.active_workspace_id.as_deref() == Some(id.as_str()) { continue; }
+            if let Some(host) = self.workspace_window_assignments.window_for_workspace(&id)
+                .filter(|host| *host != &self.current_workspace_window).cloned()
+            {
+                self.workspace_interface_preload_queue.push_front(id);
+                self.schedule_workspace_interface_host(&host, cx);
+                return;
+            }
             if self.workspace_view_cache.contains_key(&id) {
-                if self.workspace_view_cache.get(&id).is_some_and(|view| view.preferences_restore) {
+                if !self.workspace_interface_preload_prepared.contains(&id) {
                     self.workspace_interface_preload_active = Some(id.clone());
-                    let _ = self.with_retained_workspace(Some(&id), window, cx, |desktop, window, cx| desktop.restore_preferences(window, cx));
+                    if self.workspace_view_cache.get(&id).is_some_and(|view| view.preferences_restore) {
+                        let _ = self.with_retained_workspace(Some(&id), window, cx, |desktop, window, cx| desktop.restore_preferences(window, cx));
+                    }
                     self.schedule_saved_workspace_interface_tick(window, cx);
                     return;
                 }
@@ -2144,12 +2427,20 @@ impl Desktop {
                     }
                     return;
                 }
+                if matches!(event, docking::WorkspaceEvent::ContentReady) {
+                    view.window.transcript_preload_deferred = false;
+                    if let Some(id) = view.window.active_workspace_id.clone() {
+                        view.workspace_interface_preload_prepared.insert(id);
+                    }
+                    return;
+                }
                 if matches!(event, docking::WorkspaceEvent::LayoutChanged)
                     && !view.closing
                     && view.preferences.is_some()
                     && !view.window.preferences_restore
                     && !view.window.preferences_restore_suppressed
                 {
+                    view.window.layout_dirty = true;
                     view.workspaces_dirty = true;
                     view.queue_preferences_save(cx);
                 }
@@ -2227,6 +2518,11 @@ impl Desktop {
 
         DesktopWindowView {
             active_workspace_id: None,
+            native_host: window.window_handle().window_id(),
+            layout_dirty: true,
+            retained_focus: None,
+            transcript_preload: None,
+            transcript_preload_deferred: false,
             removed_pane_ids: Vec::new(),
             projection_revision: None,
             pending_detach_workspace: None,

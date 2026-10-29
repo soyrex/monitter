@@ -28,13 +28,14 @@ use std::{
     time::Duration,
 };
 
-// Fixture-only observer: no timers, repaint requests, or focus changes.
+// Window-scoped observer: no timers, repaint requests, or focus changes.
 thread_local! {
     static WINDOW_OBSERVATION: std::cell::RefCell<Option<WindowObservation>> = const { std::cell::RefCell::new(None) };
     static WORKLOAD_UPDATES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 struct WindowObservation {
+    window_id: gpui_kit::WindowId,
     started: std::time::Instant,
     last_seconds: f64,
     active: bool,
@@ -60,9 +61,10 @@ impl WindowObservation {
     }
 }
 
-fn observe_window_conditions(window: &Window) {
+pub(crate) fn observe_window_conditions(window: &Window) {
     WINDOW_OBSERVATION.with_borrow_mut(|observation| {
         if let Some(observation) = observation {
+            if observation.window_id != window.window_handle().window_id() { return; }
             observation.record(observation.started.elapsed().as_secs_f64(), window.is_window_active(), window.is_visible());
         }
     });
@@ -73,6 +75,7 @@ pub(crate) fn begin_window_observation(window: &Window) {
     let visible = window.is_visible();
     WINDOW_OBSERVATION.with_borrow_mut(|slot| {
         *slot = Some(WindowObservation {
+            window_id: window.window_handle().window_id(),
             started: std::time::Instant::now(), last_seconds: 0.0, active, visible,
             active_seconds: 0.0, visible_seconds: 0.0, all_active_visible: active && visible,
             transitions: vec![json!({"elapsedSeconds": 0.0, "active": active, "visible": visible})],
@@ -84,6 +87,9 @@ pub(crate) fn begin_window_observation(window: &Window) {
 pub(crate) fn finish_window_observation(window: &Window) -> Value {
     observe_window_conditions(window);
     WINDOW_OBSERVATION.with_borrow_mut(|slot| {
+        if slot.as_ref().is_none_or(|observation| observation.window_id != window.window_handle().window_id()) {
+            return Value::Null;
+        }
         let Some(observation) = slot.take() else { return Value::Null; };
         json!({
             "schemaVersion": 1,
@@ -109,6 +115,7 @@ mod window_observation_tests {
 
     fn observation(active: bool, visible: bool) -> WindowObservation {
         WindowObservation {
+            window_id: gpui_kit::WindowId::from(0),
             started: std::time::Instant::now(), last_seconds: 0.0, active, visible,
             active_seconds: 0.0, visible_seconds: 0.0, all_active_visible: active && visible,
             transitions: Vec::new(), workload_start: 0,

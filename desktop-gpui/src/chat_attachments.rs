@@ -46,6 +46,11 @@ pub(super) struct AttachmentScope {
     pub host_id: String,
     pub cwd: String,
 }
+impl AttachmentScope {
+    fn is_resolved(&self) -> bool {
+        !self.host_id.is_empty() && !self.cwd.is_empty()
+    }
+}
 pub(super) struct AttachmentDraft {
     pub id: String,
     pub name: String,
@@ -216,6 +221,7 @@ pub(super) struct ChatAttachments {
     service: DesktopService,
     task_id: String,
     scope: AttachmentScope,
+    scope_resolved: bool,
     drafts: Vec<AttachmentDraft>,
     entrances: std::collections::HashMap<String, super::feedback::Clock>,
     visible: bool,
@@ -232,10 +238,12 @@ pub(super) struct ChatAttachments {
 impl EventEmitter<AttachmentEvent> for ChatAttachments {}
 impl ChatAttachments {
     pub fn new(service: DesktopService, task_id: String, scope: AttachmentScope) -> Self {
+        let scope_resolved = scope.is_resolved();
         Self {
             service,
             task_id,
             scope,
+            scope_resolved,
             drafts: vec![],
             entrances: std::collections::HashMap::new(),
             visible: true,
@@ -345,9 +353,45 @@ impl ChatAttachments {
             return false;
         };
         self.drafts = restored;
-        self.restore_thumbnails(cx);
+        if self.service.workspace_commands_ready() { self.restore_thumbnails(cx); }
         cx.notify();
         true
+    }
+    /// Initial authoritative scope setup is not a user deletion. Recover saved
+    /// refs once, only after unlock and before attachment commands are enabled.
+    pub(super) fn hydrate_startup_snapshot(
+        &mut self,
+        current_task: &str,
+        saved_task: &str,
+        saved: &NativeAttachmentDraft,
+        cx: &mut Context<Self>,
+    ) -> Option<NativeAttachmentDraft> {
+        if self.pending { return None; }
+        if !persistence_scope_matches(current_task, saved_task, &self.scope, saved) {
+            // Keep unmatched saved refs in preferences; never expose them under
+            // another host/folder or interpret an automatic scope reset as removal.
+            if self.drafts.is_empty() { self.touched = false; }
+            return None;
+        }
+        let mut merged = saved.clone();
+        for attachment in self.persistence_snapshot().attachments {
+            if !merged.attachments.iter().any(|old| old.id == attachment.id) {
+                merged.attachments.push(attachment);
+            }
+        }
+        let previous = std::mem::take(&mut self.drafts);
+        let was_touched = self.touched;
+        self.touched = false;
+        if !self.restore_persistence_snapshot(current_task, saved_task, &merged, cx) {
+            self.drafts = previous;
+            self.touched = was_touched;
+            return None;
+        }
+        self.touched = was_touched && !previous.is_empty();
+        Some(self.persistence_snapshot())
+    }
+    pub(super) fn startup_service_ready(&self, cx: &mut Context<Self>) {
+        self.restore_thumbnails(cx);
     }
     fn restore_thumbnails(&self, cx: &mut Context<Self>) {
         let ids: Vec<_> = self
@@ -421,23 +465,55 @@ impl ChatAttachments {
             self.changed(cx);
         }
     }
+    /// Draft visibility follows staged files/uploads, not connection readiness.
+    pub(super) fn has_draft(&self) -> bool {
+        self.pending || !self.drafts.is_empty()
+    }
     pub fn pending(&self) -> bool {
-        self.pending
+        self.pending || !self.scope_resolved
     }
     pub fn set_scope(&mut self, scope: AttachmentScope, cx: &mut Context<Self>) {
-        if self.scope != scope {
-            self.scope = scope;
-            self.generation = self.generation.wrapping_add(1);
-            self.paste_wait_notice = None;
-            self.paste_wait_timer = None;
-            self.drafts.clear();
-            self.entrances.clear();
-            self.touched = true;
-            self.pending = false;
-            self.error = None;
-            self.notice =
-                Some("Working folder changed. Attach files again for this destination.".into());
+        // Startup and reconnect snapshots can temporarily omit the task. Keep
+        // its last known destination and staged files, but pause attachment
+        // actions until an authoritative destination appears again.
+        if !scope.is_resolved() {
+            if self.scope_resolved {
+                self.scope_resolved = false;
+                self.generation = self.generation.wrapping_add(1);
+                self.pending = false;
+                self.paste_wait_notice = None;
+                self.paste_wait_timer = None;
+                cx.notify();
+            }
+            return;
+        }
+        let was_unresolved = !self.scope_resolved;
+        self.scope_resolved = true;
+        if self.scope == scope {
+            if was_unresolved {
+                cx.notify();
+            }
+            return;
+        }
+        self.scope = scope;
+        self.generation = self.generation.wrapping_add(1);
+        self.paste_wait_notice = None;
+        self.paste_wait_timer = None;
+        let had_drafts = !self.drafts.is_empty();
+        self.drafts.clear();
+        self.entrances.clear();
+        self.touched |= had_drafts;
+        self.pending = false;
+        self.error = None;
+        self.notice = had_drafts.then(|| {
+            "Attachments from the previous folder were removed from this draft.".into()
+        });
+        if had_drafts {
             self.changed(cx);
+        } else {
+            // An empty startup scope must not overwrite a saved attachment
+            // draft before preference hydration has had a chance to run.
+            cx.notify();
         }
     }
     pub fn acknowledge(&mut self, ids: &[String], cx: &mut Context<Self>) {
@@ -454,7 +530,7 @@ impl ChatAttachments {
     /// The existing owner-only store path checks the captured host and folder;
     /// no temporary file or new backend command is needed.
     pub fn attach_message_text(&mut self, author: &str, text: &str, cx: &mut Context<Self>) {
-        if self.pending {
+        if !self.scope_resolved || !self.service.workspace_commands_ready() || self.pending {
             return;
         }
         if self.scope.host_id.is_empty() || self.scope.cwd.is_empty() || self.task_id.is_empty() {
@@ -573,6 +649,11 @@ impl ChatAttachments {
     /// Consume native image paste payloads; ordinary text keeps the input's
     /// default paste behavior. Encoding and registration run away from the UI.
     pub(super) fn paste(&mut self, item: &ClipboardItem, cx: &mut Context<Self>) -> bool {
+        if !self.scope_resolved || !self.service.workspace_commands_ready() {
+            // Consume image paste without cloning/encoding/registering it.
+            // Ordinary text keeps the editor's default paste behavior.
+            return item.entries().iter().any(|entry| matches!(entry, ClipboardEntry::Image(_)));
+        }
         let Some(image) = item.entries().iter().find_map(|entry| match entry {
             ClipboardEntry::Image(image) => Some(image.clone()),
             _ => None,
@@ -633,16 +714,13 @@ impl ChatAttachments {
         true
     }
     pub(super) fn choose(&mut self, cx: &mut Context<Self>) {
-        if self.pending || self.scope.host_id.is_empty() || self.scope.cwd.is_empty() {
+        if !self.can_choose() {
             return;
         }
         self.pending = true;
         self.error = None;
         self.notice = None;
         let generation = self.generation;
-        let task_id = self.task_id.clone();
-        let scope = self.scope.clone();
-        let service = self.service.clone();
         let prompt = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
@@ -673,7 +751,30 @@ impl ChatAttachments {
                     return;
                 }
             };
-            for path in paths.unwrap_or_default() {
+            let _ = view.update(cx, |view, cx| {
+                if view.generation == generation {
+                    view.pending = false;
+                    view.attach_paths(paths.unwrap_or_default(), cx);
+                    view.changed(cx);
+                }
+            });
+        })
+        .detach();
+        self.changed(cx);
+    }
+    pub(super) fn attach_paths(&mut self, paths: Vec<std::path::PathBuf>, cx: &mut Context<Self>) {
+        if !self.can_choose() || paths.is_empty() {
+            return;
+        }
+        self.pending = true;
+        self.error = None;
+        self.notice = None;
+        let generation = self.generation;
+        let task_id = self.task_id.clone();
+        let scope = self.scope.clone();
+        let service = self.service.clone();
+        cx.spawn(async move |view, cx| {
+            for path in paths {
                 let still_current = view
                     .read_with(cx, |view, _| view.generation == generation)
                     .unwrap_or(false);
@@ -693,7 +794,7 @@ impl ChatAttachments {
                 let task_id = task_id.clone();
                 let scope = scope.clone();
                 let task = cx.background_executor().spawn(async move {
-                    // Read only the path explicitly selected in the native picker.
+                    // Read only paths explicitly selected in the picker or dropped onto this pane.
                     let file = service.read_attachment_file(&path)?;
                     let encoded = file.data_base64.as_str();
                     if encoded.len() > ((MAX_FILE + 2) / 3) * 4 + 4 {
@@ -739,7 +840,8 @@ impl ChatAttachments {
         self.changed(cx);
     }
     pub(super) fn can_choose(&self) -> bool {
-        !self.pending && !self.scope.host_id.is_empty() && !self.scope.cwd.is_empty()
+        self.scope_resolved && self.service.workspace_commands_ready() && !self.pending
+            && !self.task_id.is_empty() && !self.scope.host_id.is_empty() && !self.scope.cwd.is_empty()
     }
 }
 impl Render for ChatAttachments {
@@ -1039,5 +1141,89 @@ mod tests {
             },
             &saved,
         ));
+    }
+}
+
+#[cfg(test)]
+mod native_scope_tests {
+    use super::{AttachmentDraft, AttachmentScope, ChatAttachments};
+    use gpui_kit::{AppContext as _, TestAppContext};
+    use monitter_lib::experimental_desktop::DesktopService;
+
+    #[gpui_kit::test]
+    fn transient_missing_destination_keeps_attachments_without_a_warning(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            let original = AttachmentScope {
+                host_id: "host-a".into(),
+                cwd: "/work/project".into(),
+            };
+            let pane = cx.new(|_| {
+                ChatAttachments::new(
+                    DesktopService::disconnected_for_ui_fixture(),
+                    "task-a".into(),
+                    original.clone(),
+                )
+            });
+            pane.update(cx, |pane, cx| {
+                pane.drafts.push(AttachmentDraft {
+                    id: "attachment-a".into(),
+                    name: "notes.txt".into(),
+                    mime_type: "text/plain".into(),
+                    size: 5,
+                    preview: None,
+                });
+                pane.set_scope(
+                    AttachmentScope {
+                        host_id: String::new(),
+                        cwd: String::new(),
+                    },
+                    cx,
+                );
+                assert!(pane.pending());
+                assert_eq!(pane.ids(), ["attachment-a"]);
+                assert_eq!(pane.persistence_snapshot().cwd, original.cwd);
+                assert!(pane.notice.is_none());
+
+                pane.set_scope(original.clone(), cx);
+                assert!(!pane.pending());
+                assert_eq!(pane.ids(), ["attachment-a"]);
+                assert!(pane.notice.is_none());
+
+                pane.set_scope(
+                    AttachmentScope {
+                        host_id: original.host_id,
+                        cwd: "/work/elsewhere".into(),
+                    },
+                    cx,
+                );
+                assert!(pane.ids().is_empty());
+                assert!(pane.notice.is_some());
+            });
+
+            let empty = cx.new(|_| {
+                ChatAttachments::new(
+                    DesktopService::disconnected_for_ui_fixture(),
+                    "task-b".into(),
+                    AttachmentScope {
+                        host_id: String::new(),
+                        cwd: String::new(),
+                    },
+                )
+            });
+            empty.update(cx, |pane, cx| {
+                pane.set_scope(
+                    AttachmentScope {
+                        host_id: "host-a".into(),
+                        cwd: "/work/project".into(),
+                    },
+                    cx,
+                );
+                assert!(pane.notice.is_none());
+                assert!(!pane.touched());
+            });
+        });
     }
 }

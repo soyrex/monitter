@@ -302,6 +302,24 @@ pub struct PreparedPublication {
 fn rows<'a>(snapshot: &'a Value, key: &str) -> impl Iterator<Item = &'a Value> {
     snapshot[key].as_array().into_iter().flatten()
 }
+/// Transcript preparation does not read top-level channels/projects metadata.
+/// Compare all other borrowed entries conservatively, without cloning the tree.
+fn transcript_metadata_equal(previous: &Value, next: &Value) -> bool {
+    let (Some(previous), Some(next)) = (previous.as_object(), next.as_object()) else {
+        return previous == next;
+    };
+    let relevant_len = |object: &serde_json::Map<String, Value>| {
+        object
+            .keys()
+            .filter(|key| !matches!(key.as_str(), "channels" | "projects"))
+            .count()
+    };
+    relevant_len(previous) == relevant_len(next)
+        && previous
+            .iter()
+            .filter(|(key, _)| !matches!(key.as_str(), "channels" | "projects"))
+            .all(|(key, value)| next.get(key) == Some(value))
+}
 fn task_id(row: &Value) -> &str {
     row["taskId"].as_str().unwrap_or_default()
 }
@@ -565,6 +583,12 @@ pub fn prepare_visible(
         }
     }
     let metadata_changed = previous.as_ref().is_none_or(|old| old.metadata != metadata);
+    // Full pane sync still observes channels/projects. If transcript
+    // preparation gains dependencies on either, include them in this check.
+    let transcript_metadata_changed = metadata_changed
+        && previous
+        .as_ref()
+        .is_none_or(|old| !transcript_metadata_equal(&old.metadata, &metadata));
     let settings_changed = previous
         .as_ref()
         .is_none_or(|old| old.metadata["settings"] != metadata["settings"]);
@@ -602,7 +626,7 @@ pub fn prepare_visible(
             })
         });
         if !changes.reset
-            && !metadata_changed
+            && !transcript_metadata_changed
             && !events_changed
             && !child_changed
             && !descendant_activity_changed

@@ -1,7 +1,6 @@
 //! Pane-local, read-only overview of authoritative work already in progress.
 use super::*;
 use gpui_kit::base::Selectable as _;
-use gpui_kit::component::{ThemeStyled as _, popover::Popover};
 
 pub(super) fn watcher_surface(palette: design::Palette) -> gpui_kit::Rgba {
     design::surface_color(mix_rgb(
@@ -81,10 +80,19 @@ pub(super) struct WatcherState {
     finished_expanded: bool,
     activity_observer: Option<Subscription>,
     finished_plan_expanded: bool,
+    completed_detail: Option<CompletedWatchDetail>,
+    completed_reply_id: Option<String>,
     pub(super) transitioning: bool,
     pub(super) fade_in: bool,
     pub(super) transition_serial: u64,
     transition_task: Option<Task<()>>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CompletedWatchDetail {
+    Plan,
+    Goal,
+    Activity,
 }
 
 #[derive(Clone, Debug)]
@@ -593,6 +601,31 @@ fn measure_watch_card(owner: WeakEntity<ChatPane>, height: Pixels, window: &mut 
     });
 }
 
+/// Only a settled local answer from the current turn belongs in completed Watch.
+fn watcher_final_reply(
+    status: &str,
+    task_id: &str,
+    latest_user_at: Option<i64>,
+    messages: &[Rc<Value>],
+) -> Option<Rc<Value>> {
+    if !matches!(status, "idle" | "completed" | "succeeded" | "failed" | "error" | "blocked") {
+        return None;
+    }
+    let scoped = |message: &Value| message["taskId"].as_str() == Some(task_id);
+    let latest_user_at = latest_user_at.into_iter().chain(messages.iter()
+        .filter(|message| scoped(message) && message["role"] == "user")
+        .map(|message| at(message, "createdAt"))).max()?;
+    let answer = messages.iter().filter(|message| {
+        scoped(message) && message["role"] == "assistant"
+            && field(message, "senderAgentId").is_empty()
+            && field(message, "collaborationId").is_empty()
+            && matches!(field(message, "phase").as_str(), "" | "final_answer")
+            && at(message, "createdAt") >= latest_user_at
+    }).max_by_key(|message| at(message, "createdAt"))?;
+    (field(answer, "streamStatus") != "streaming"
+        && !field(answer, "text").trim().is_empty()).then(|| answer.clone())
+}
+
 #[derive(Debug)]
 struct WatcherProjection {
     plan: Option<Value>,
@@ -606,6 +639,8 @@ struct WatcherProjection {
     model: String,
     duration: String,
     request: Option<String>,
+    final_reply: Option<Rc<Value>>,
+    completion_failed: bool,
     agents: Vec<Value>,
     running_agents: usize,
     status: String,
@@ -716,7 +751,14 @@ impl WatcherProjection {
             .cloned()
             .collect();
         activity.sort_by_key(|event| std::cmp::Reverse(at(event, "createdAt")));
-        activity.truncate(8);
+        let final_reply = watcher_final_reply(&status, task_id, user_at, messages);
+        // Live Watch needs only eight rows. Retain more only when the user can
+        // open the completed card's Activity detail.
+        activity.truncate(if final_reply.is_some() { 200 } else { 8 });
+        let last_turn_status = activity.iter().find(|event| field(event, "kind") == "status")
+            .map(|event| field(event, "title"));
+        let completion_failed = matches!(status.as_str(), "failed" | "error" | "blocked")
+            || last_turn_status.as_deref() == Some("turn.failed");
         let attention = values(snapshot, "approvalRequests")
             .filter(|request| request["taskId"] == task_id && request["status"] == "pending")
             .count();
@@ -738,6 +780,8 @@ impl WatcherProjection {
                 .unwrap_or_default(),
             duration: task.as_ref().map(task_duration).unwrap_or_default(),
             request,
+            final_reply,
+            completion_failed,
             agents,
             running_agents,
             status,
@@ -750,6 +794,13 @@ impl WatcherProjection {
 }
 
 impl ChatPane {
+    pub(super) fn watcher_has_active_work(&self) -> bool {
+        let task_id = self.task_id();
+        values(&self.snapshot, "tasks")
+            .any(|task| task["id"] == task_id && active(&field(task, "status")))
+            || values(&self.snapshot, "workPlans")
+                .any(|plan| plan["taskId"] == task_id && plan["status"] == "active")
+    }
     pub(crate) fn begin_activity_watch_modal(&mut self, cx: &mut Context<Self>) -> u64 {
         self.watcher.modal_generation = self.watcher.modal_generation.wrapping_add(1);
         self.watcher.modal_tokens.insert(self.watcher.modal_generation);
@@ -1109,8 +1160,25 @@ impl ChatPane {
         palette: design::Palette,
         ratio: f32,
         width: Pixels,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let active = self.watcher.modal_open || crate::docking::pane_visual_active(&self.focus, window, cx);
+        if active { self.focus_composer_on_activation(window, cx); }
+        let has_text = !self.draft(cx).is_empty();
+        let visible = !super::composer_autohide_preference::enabled() || active || has_text
+            || self.attachments.read(cx).has_draft();
+        let reveal = if crate::native_motion::motion_allowed() {
+            let policy = if visible { cx.theme().motion_tokens().spring_control.with_travel(!has_text) }
+                else { gpui_kit::base::Spring::new(Duration::from_millis(540)).with_damping(0.82) };
+            gpui_kit::base::spring("watch-composer-visibility", if visible { 1. } else { 0. }, policy, window, cx).clamp(0., 1.)
+        } else { if visible { 1. } else { 0. } };
+        let input_height = self.decoration_bounds.composer.get().map(|bounds| bounds.size.height).unwrap_or(px(100.));
+        self.composer_footer.update(cx, |footer, cx| footer.set_appearance(palette, Some(width / px(1.)), cx));
+        self.composer_context_bar.update(cx, |bar, cx| bar.set_appearance(palette, cx));
+        let (chat_family, chat_size, chat_weight, chat_line_height) = self.apply_chat_typography(cx);
+        let attachments_for_paste = self.attachments.clone();
+        let geometry = self.decoration_bounds.composer.clone();
         let task_id = self.task_id();
         let messages = self
             .transcripts
@@ -1139,23 +1207,28 @@ impl ChatPane {
                     )
                     .selectable(true)
                     .scrollable(false)
+                    .w_full()
+                    .min_w_0()
+                    .max_w_full()
                     .into_any_element()
                 })
         });
         let attachment_count = self.attachments.read(cx).ids().len();
         let draft_empty = self.composer.read(cx).value().trim().is_empty();
         let pending_attachment = self.attachments.read(cx).pending();
-        let can_send = !self.busy && !pending_attachment && (!draft_empty || attachment_count > 0);
+        let can_send = !self.busy && !pending_attachment && !self.has_pending_user_question()
+            && !self.is_performance_fixture() && (!draft_empty || attachment_count > 0);
         let error = self.error.clone();
         let font_family = cx.theme().font_family.clone();
         let danger = cx.theme().danger;
-        div()
+        let surface = div()
+            .relative()
             .id("watcher-interject-menu")
             .debug_selector(|| "watcher-interject-menu".into())
-            .w(width)
-            .max_h(px(430.))
-            .popover_style(cx)
+            .w_full()
+            .min_w_0()
             .overflow_hidden()
+            .child(canvas(move |bounds, _, _| geometry.set(Some(bounds)), |_, _, _, _| ()).absolute().size_full())
             .font_family(font_family.clone())
             .text_color(rgb(palette.ink))
             .when_some(exchange, |surface, exchange| {
@@ -1163,6 +1236,8 @@ impl ChatPane {
                     div()
                         .id("watcher-interject-exchange")
                         .debug_selector(|| "watcher-interject-exchange".into())
+                        .w_full()
+                        .min_w_0()
                         .max_h(px(250.))
                         .overflow_y_scroll()
                         .flex()
@@ -1172,10 +1247,15 @@ impl ChatPane {
                         .py(px(11.))
                         .child(
                             div()
+                                .w_full()
+                                .min_w_0()
                                 .flex()
                                 .justify_end()
                                 .child(
                                     div()
+                                        .debug_selector(|| "watcher-interject-request".into())
+                                        .min_w_0()
+                                        .flex_shrink_1()
                                         .max_w(px(310.))
                                         .px(px(10.))
                                         .py(px(8.))
@@ -1191,12 +1271,16 @@ impl ChatPane {
                         )
                         .child(
                             div()
+                                .w_full()
+                                .min_w_0()
                                 .flex()
                                 .justify_start()
                                 .child(
                                     div()
                                         .id("watcher-interject-reply")
                                         .debug_selector(|| "watcher-interject-reply".into())
+                                        .min_w_0()
+                                        .flex_shrink_1()
                                         .max_w(px(326.))
                                         .px(px(10.))
                                         .py(px(8.))
@@ -1254,29 +1338,38 @@ impl ChatPane {
             })
             .child(
                 div()
-                    .p(px(12.))
                     .child(
                         div()
                             .id("watcher-interject-composer")
                             .debug_selector(|| "watcher-interject-composer".into())
+                            .relative()
                             .flex()
-                            .items_end()
-                            .gap(px(8.))
+                            .flex_col()
                             .p(px(design::space::INSET))
                             .rounded(px(design::radius::CONTROL))
                             .border_1()
-                            .border_color(design::surface_color(palette.line))
+                            .border_color(design::composer_border_color(palette))
                             .bg(crate::surface_blend::raised_background(
                                 crate::surface_blend::Area::Composer,
                                 palette.card,
                             ))
+                            .child(self.attachments.clone())
+                            .child(div().flex().items_end().gap(px(design::space::TIGHT))
+                            .child(Button::new("watcher-attach-files").compact()
+                                .w(px(design::COMPOSER_CONTROL_SIZE)).h(px(design::COMPOSER_CONTROL_SIZE))
+                                .icon(Icon::new(IconName::Paperclip)).accessibility_label("Attach files").tooltip("Attach files")
+                                .disabled(!self.attachments.read(cx).can_choose() || self.is_performance_fixture())
+                                .on_click(cx.listener(|pane, _, _, cx| pane.attachments.update(cx, |attachments, cx| attachments.choose(cx)))))
                             .child(
                                 Textarea::new(&self.composer)
+                                    .on_paste(move |item, _, cx| attachments_for_paste.update(cx, |attachments, cx| attachments.paste(item, cx)))
                                     .small()
                                     .appearance(false)
                                     .bordered(false)
-                                    .font_family(font_family)
-                                    .text_size(px(12. * ratio))
+                                    .font_family(chat_family)
+                                    .font_weight(chat_weight)
+                                    .text_size(px(chat_size))
+                                    .line_height(px(chat_line_height))
                                     .min_h(px(design::COMPOSER_CONTROL_SIZE))
                                     .max_h(px(108.))
                                     .flex_1()
@@ -1306,7 +1399,8 @@ impl ChatPane {
                                     .on_click(cx.listener(|pane, _, _, cx| {
                                         pane.send_watcher_interjection(cx)
                                     })),
-                            ),
+                            ))
+                            .child(self.composer_context_bar.clone().cached(StyleRefinement::default().absolute().bottom_0().left_0().right_0())),
                     )
                     .when(attachment_count > 0, |footer| {
                         footer.child(
@@ -1321,6 +1415,12 @@ impl ChatPane {
                         )
                     }),
             )
+            ;
+        div().w_full().flex().flex_col().flex_shrink_0()
+            .child(div().w_full().overflow_hidden()
+                .when(reveal < 0.999, |view| view.h(input_height * reveal))
+                .child(div().relative().top(px(12. * (1. - reveal))).opacity(reveal).child(surface)))
+            .child(self.composer_footer.clone().cached(self.composer_footer.read(cx).cached_style()))
             .into_any_element()
     }
 
@@ -1410,6 +1510,8 @@ impl ChatPane {
     pub(super) fn render_watcher_toggle(
         &self,
         palette: design::Palette,
+        has_status_bar: bool,
+        inline: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let button = Button::new("chat-watcher-toggle")
@@ -1433,13 +1535,15 @@ impl ChatPane {
         div()
             .id("chat-watch-mode-dock")
             .debug_selector(|| "chat-watch-mode-dock".into())
-            .absolute()
-            // The dock is positioned relative to the status-bar container,
-            // so its fixed-height center stays on that container's top rule.
-            .top(px(-12.))
-            .left_0()
-            .right_0()
-            .h(px(24.))
+            // Preserve the original overlay on the status-bar rule. Only a
+            // barless pane needs its own inset row to avoid clipping.
+            .when(has_status_bar && !inline, |dock| {
+                dock.absolute().top(px(-12.)).left_0().right_0().h(px(24.))
+            })
+            .when(!has_status_bar && !inline, |dock| {
+                dock.w_full().h(px(40.)).flex_shrink_0()
+            })
+            .when(inline, |dock| dock.h(px(40.)).flex_shrink_0())
             .px(px(12.))
             .flex()
             .items_center()
@@ -1459,6 +1563,141 @@ impl ChatPane {
                     ))
                     .child(button),
             )
+            .with_animation(
+                "watch-footer-fade-in",
+                Animation::new(Duration::from_millis(250)).with_max_fps(60.),
+                |dock, progress| dock.opacity(progress),
+            )
+            .into_any_element()
+    }
+
+    fn render_watcher_completed_card(
+        &mut self,
+        state: &WatcherProjection,
+        palette: design::Palette,
+        ratio: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let answer = state.final_reply.as_ref().expect("completed Watch has a final reply");
+        let failed = state.completion_failed;
+        let outcome_color = if failed { palette.err() } else { palette.ok() };
+        let plan = state.finished_plan.as_ref().or(state.plan.as_ref());
+        let goal = self.activity.read(cx).watch_goal().cloned();
+        let (family, size, weight, line_height) = self.apply_chat_typography(cx);
+        let owner = cx.weak_entity();
+        let mut links = div()
+            .id("watcher-completed-links")
+            .debug_selector(|| "watcher-completed-links".into())
+            .w_full()
+            .flex()
+            .flex_wrap()
+            .gap(px(8.));
+        if plan.is_some() {
+            links = links.child(Button::new("watcher-completed-plan-link")
+                .compact().xsmall().text().label("View work plan")
+                .debug_selector(|| "watcher-completed-plan-link".into())
+                .on_click(cx.listener(|pane, _, _, cx| {
+                    pane.watcher.completed_detail =
+                        (pane.watcher.completed_detail != Some(CompletedWatchDetail::Plan))
+                            .then_some(CompletedWatchDetail::Plan);
+                    cx.notify();
+                })));
+        }
+        if goal.is_some() {
+            links = links.child(Button::new("watcher-completed-goal-link")
+                .compact().xsmall().text().label("View goal")
+                .debug_selector(|| "watcher-completed-goal-link".into())
+                .on_click(cx.listener(|pane, _, _, cx| {
+                    pane.watcher.completed_detail =
+                        (pane.watcher.completed_detail != Some(CompletedWatchDetail::Goal))
+                            .then_some(CompletedWatchDetail::Goal);
+                    cx.notify();
+                })));
+        }
+        if !state.activity.is_empty() {
+            links = links.child(Button::new("watcher-completed-activity-link")
+                .compact().xsmall().text().label("View activity")
+                .debug_selector(|| "watcher-completed-activity-link".into())
+                .on_click(cx.listener(|pane, _, _, cx| {
+                    pane.watcher.completed_detail =
+                        (pane.watcher.completed_detail != Some(CompletedWatchDetail::Activity))
+                            .then_some(CompletedWatchDetail::Activity);
+                    cx.notify();
+                })));
+        }
+        let detail: Option<AnyElement> = match self.watcher.completed_detail {
+            Some(CompletedWatchDetail::Plan) => plan.map(|plan| {
+                div().id("watcher-completed-plan").debug_selector(|| "watcher-completed-plan".into())
+                    .w_full().min_w_0()
+                    .child(crate::plans::render_plan_card(plan, palette, ratio, true))
+                    .into_any_element()
+            }),
+            Some(CompletedWatchDetail::Goal) => goal.as_ref().map(|goal| {
+                div().id("watcher-completed-goal").debug_selector(|| "watcher-completed-goal".into())
+                    .w_full().min_w_0().flex().flex_col().gap(px(10.))
+                    .child(self.activity.read(cx).render_watch_goal_pill(palette, ratio))
+                    .child(div().text_size(px(13. * ratio)).text_color(rgb(palette.ink))
+                        .child(field(goal, "objective")))
+                    .into_any_element()
+            }),
+            Some(CompletedWatchDetail::Activity) if !state.activity.is_empty() => {
+                let mut rows = div().id("watcher-completed-activity")
+                    .debug_selector(|| "watcher-completed-activity".into())
+                    .w_full().min_w_0().flex().flex_col().gap(px(9.));
+                for event in &state.activity {
+                    rows = rows.child(div().w_full().min_w_0().flex().items_start().gap(px(8.))
+                        .child(div().w(px(42.)).flex_shrink_0().font_family(design::FONT_MONO)
+                            .text_size(px(10. * ratio)).text_color(rgb(palette.text(3)))
+                            .child(event_time(event)))
+                        .child(div().flex_1().min_w_0().text_size(px(12. * ratio))
+                            .text_color(rgb(palette.text(1)))
+                            .child(watcher_activity_text(event))));
+                }
+                Some(rows.into_any_element())
+            }
+            _ => None,
+        };
+        div().id("watcher-final-reply")
+            .debug_selector(|| "watcher-final-reply".into())
+            .w_full().min_w_0().max_w(px(design::CHAT_MAX_WIDTH))
+            .p(px(20.))
+            .rounded(px(16.))
+            .border_1().border_color(rgb(palette.line))
+            .bg(design::surface_color(palette.panel))
+            .flex().flex_col().gap(px(16.))
+            .child(div().w_full().flex().items_center().gap(px(14.))
+                .child(div().id("watcher-completed-outcome")
+                    .debug_selector(move || if failed {
+                        "watcher-completed-failed".into()
+                    } else {
+                        "watcher-completed-success".into()
+                    })
+                    .size(px(56.)).flex_shrink_0().rounded_full()
+                    .bg(rgb(outcome_color).opacity(0.14))
+                    .flex().items_center().justify_center()
+                    .child(Icon::new(if failed { IconName::X } else { IconName::Check })
+                        .size(px(32.)).text_color(rgb(outcome_color))))
+                .child(div().min_w_0().flex().flex_col().gap(px(3.))
+                    .child(div().font_family(design::FONT_MONO).text_size(px(11. * ratio))
+                        .text_color(rgb(palette.text(2))).child("FINAL REPLY"))
+                    .child(div().text_size(px(15. * ratio)).font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(outcome_color))
+                        .child(if failed { "Turn failed" } else { "Turn completed" }))))
+            .child(div().w_full().min_w_0().font_family(family)
+                .text_size(px(size)).font_weight(weight).line_height(px(line_height))
+                .text_color(rgb(palette.ink))
+                .child(gpui_kit::component::text::TextView::markdown(
+                    SharedString::from(format!("watcher-final-{}-{}", self.task_id(), field(answer, "id"))),
+                    field(answer, "text"),
+                ).selectable(true).scrollable(false).w_full().min_w_0().max_w_full()
+                    .on_link_click(move |url, _, _, cx| {
+                        open_markdown_link(Some(owner.clone()), url.as_str(), cx);
+                    })))
+            .when(plan.is_some() || goal.is_some() || !state.activity.is_empty(), |card| card
+                .child(div().w_full().pt(px(10.)).border_t_1()
+                    .border_color(rgb(palette.line)).child(links)))
+            .when_some(detail, |card, detail| card.child(div().w_full().min_w_0()
+                .pt(px(12.)).border_t_1().border_color(rgb(palette.line)).child(detail)))
             .into_any_element()
     }
 
@@ -1479,6 +1718,12 @@ impl ChatPane {
             .map(|state| state.messages.iter().cloned().collect::<Vec<_>>())
             .unwrap_or_default();
         let state = WatcherProjection::new(&self.snapshot, &self.task_id(), &records, &messages);
+        let completed_reply_id = state.final_reply.as_ref()
+            .map(|reply| format!("{}:{}", field(reply, "id"), at(reply, "createdAt")));
+        if self.watcher.completed_reply_id != completed_reply_id {
+            self.watcher.completed_reply_id = completed_reply_id;
+            self.watcher.completed_detail = None;
+        }
         let ratio = self.snapshot["settings"]["interfaceFontSize"]
             .as_f64()
             .unwrap_or(14.)
@@ -1526,6 +1771,11 @@ impl ChatPane {
             .flex()
             .flex_col()
             .gap(px(if modal { 12. } else { 20. }));
+        if state.final_reply.is_some() {
+            body = body.child(div().w_full().min_w_0().flex().justify_center().child(
+                self.render_watcher_completed_card(&state, palette, ratio, cx),
+            ));
+        }
         if let Some(error) = self
             .error
             .as_deref()
@@ -1564,6 +1814,7 @@ impl ChatPane {
                     .on_click(cx.listener(|pane, _, window, cx| pane.toggle_watcher(window, cx))),
             );
         }
+        if state.final_reply.is_none() {
         let build_pill_palette = design::palette(&Value::Null, WindowAppearance::Dark);
         let mut build_pill = None;
         let running_build = watcher_running_build(&self.snapshot, &self.task_id());
@@ -1849,7 +2100,7 @@ impl ChatPane {
         }
         let terminal_font = field(&self.snapshot["settings"], "terminalFont");
         let terminal_font = if terminal_font.trim().is_empty() { "Menlo".to_owned() } else { terminal_font };
-        for (index, event) in state.activity.iter().enumerate() {
+        for (index, event) in state.activity.iter().take(8).enumerate() {
             let kind = field(event, "kind");
             let description = watcher_activity_text(event);
             let icon_color = if matches!(kind.as_str(), "tool" | "computer" | "computer_image") {
@@ -1899,102 +2150,23 @@ impl ChatPane {
                 .child(div().flex_1().min_w_0().child(card_slot))
                 .child(secondary.flex_1()),
         );
-        let interject_width = (window.viewport_size().width - px(24.)).min(px(390.));
-        let interject_open = self.watcher.interject_open && question_count == 0;
-        let interject_focus = self.composer.read(cx).focus_handle(cx);
-        let interject_palette = design::palette(&Value::Null, WindowAppearance::Dark);
-        let owner = cx.weak_entity();
-        let content_owner = owner.clone();
-        let chat_button = watcher_mode_button(
-            "chat-mode-chat", if self.watcher.modal_open { "Close" } else { "Chat" }, true, interject_palette, ratio, window, cx,
-        )
+        }
+        let interject_width = (self.watcher.content_width - px(24.)).max(px(0.)).min(px(design::CHAT_MAX_WIDTH));
+        let chat_button = Button::new("chat-mode-chat")
+            .compact().ghost().w(px(28.)).h(px(28.))
+            .icon(Icon::default().data(gpui_kit::assets::__private::ArrowLeft.1).with_size(px(14.)))
             .debug_selector(|| "chat-mode-chat".into())
             .accessibility_label(if self.watcher.modal_open { "Close Watch" } else { "Show chat" })
             .tooltip(if self.watcher.modal_open { "Return to activity" } else { "Return to chat" })
             .on_click(cx.listener(|pane, _, window, cx| {
                 if pane.watcher.modal_open { window.close_dialog(cx); } else { pane.toggle_watcher(window, cx); }
             }));
-        let interject = Popover::new("watcher-interject-popover")
-            .appearance(false)
-            .anchor(Anchor::BottomCenter)
-            .offset(px(7.))
-            .open(interject_open)
-            .overlay_closable(true)
-            .track_focus(&interject_focus)
-            .trigger(
-                watcher_mode_button(
-                    "watcher-back", "Steer", question_count == 0,
-                    interject_palette, ratio, window, cx,
-                )
-                    .debug_selector(|| "watcher-back".into())
-                    .accessibility_label("Steer without leaving Watch")
-                    .tooltip("Send a steer without leaving Watch"),
-            )
-            .on_open_change(move |open, window, cx| {
-                let _ = owner.update(cx, |pane, cx| {
-                    pane.watcher.interject_open = *open;
-                    if *open {
-                        pane.slash.update(cx, |slash, cx| {
-                            slash.handle_action(
-                                crate::slash_palette::PaletteAction::Dismiss,
-                                cx,
-                            );
-                        });
-                        let focus = pane.composer.read(cx).focus_handle(cx);
-                        window.defer(cx, move |window, cx| window.focus(&focus, cx));
-                    }
-                    cx.notify();
-                });
-            })
-            .content(move |_, _, cx| {
-                content_owner
-                    .update(cx, |pane, cx| {
-                        pane.render_watcher_interject_menu(
-                            palette,
-                            ratio,
-                            interject_width,
-                            cx,
-                        )
-                    })
-                    .unwrap_or_else(|_| div().into_any_element())
-            });
-        let interject_dock = div()
-            .id("watcher-interject-dock")
+        let interject_dock = div().id("watcher-interject-dock")
             .debug_selector(|| "watcher-interject-dock".into())
-            .absolute()
-            .bottom(px(8.))
-            .left_0()
-            .w_full()
-            .min_w_0()
-            .px(px(12.))
-            .flex()
-            .items_center()
-            .justify_center()
-            .child(
-                div()
-                    .id("watcher-interject-bar")
-                    .debug_selector(|| "watcher-interject-bar".into())
-                    .flex()
-                    .items_center()
-                    .rounded_full()
-                    .border_1()
-                    .border_color(rgb(interject_palette.line))
-                    .bg(crate::surface_blend::floating_control_background(
-                        interject_palette.panel,
-                        true,
-                    ))
-                    .child(chat_button)
-                    .child(
-                        div()
-                            .id("watcher-mode-separator")
-                            .debug_selector(|| "watcher-mode-separator".into())
-                            .w(px(1.))
-                            .h(px(16.))
-                            .flex_shrink_0()
-                            .bg(rgb(interject_palette.line)),
-                    )
-                    .child(interject),
-            );
+            .w_full().flex_shrink_0().px(px(12.)).pb(px(8.))
+            .flex().justify_center()
+            .child(div().w_full().max_w(px(design::CHAT_MAX_WIDTH))
+                .child(self.render_watcher_interject_menu(palette, ratio, interject_width, window, cx)));
         let layout_owner = cx.weak_entity();
         let previous_width = self.watcher.content_width;
         div()
@@ -2056,6 +2228,7 @@ impl ChatPane {
                 px(24.),
             ))
             .child(interject_dock)
+            .when(modal, |view| view.child(div().absolute().top(px(8.)).left(px(8.)).child(chat_button)))
             .into_any_element()
     }
 }
@@ -2063,6 +2236,40 @@ impl ChatPane {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[::core::prelude::v1::test]
+    fn watcher_final_reply_is_current_local_settled_answer() {
+        let user = Rc::new(json!({"taskId":"t","role":"user","createdAt":20}));
+        let answer = Rc::new(json!({"id":"answer","taskId":"t","role":"assistant",
+            "createdAt":21,"phase":"final_answer","streamStatus":"complete","text":"**Done**"}));
+        let mut messages = vec![user, answer.clone()];
+        assert!(Rc::ptr_eq(&watcher_final_reply("idle", "t", None, &messages).unwrap(), &answer));
+        assert!(watcher_final_reply("failed", "t", None, &messages).is_some(),
+            "an explicit failed turn can still deliver a final explanation");
+        for status in ["running", "queued", "pending", "starting", "interrupted"] {
+            assert!(watcher_final_reply(status, "t", None, &messages).is_none());
+        }
+        for (key, value) in [("taskId", json!("other")), ("senderAgentId", json!("peer")),
+            ("collaborationId", json!("delivery")), ("phase", json!("commentary")),
+            ("streamStatus", json!("streaming")), ("text", json!("  "))] {
+            let mut invalid = (*answer).clone();
+            invalid[key] = value;
+            messages[1] = Rc::new(invalid);
+            assert!(watcher_final_reply("idle", "t", None, &messages).is_none(), "{key}");
+        }
+        messages[1] = answer;
+        assert!(watcher_final_reply("idle", "t", Some(22), &messages).is_none());
+        messages.push(Rc::new(json!({"taskId":"t","role":"user","createdAt":22})));
+        assert!(watcher_final_reply("idle", "t", None, &messages).is_none());
+    }
+
+    #[::core::prelude::v1::test]
+    fn watcher_final_reply_supports_providers_without_phase() {
+        let messages = vec![Rc::new(json!({"taskId":"t","role":"assistant",
+            "createdAt":11,"streamStatus":"complete","text":"Done"}))];
+        assert!(watcher_final_reply("completed", "t", Some(10), &messages).is_some());
+        assert!(watcher_final_reply("idle", "t", None, &messages).is_none());
+    }
 
     #[::core::prelude::v1::test]
     fn watcher_build_indicator_tracks_owner_combined_requests_and_completion() {
@@ -2349,6 +2556,197 @@ mod native_tests {
     use super::*;
     use core::prelude::v1::test;
     use gpui_kit::{TestAppContext, VisualTestContext};
+    #[gpui_kit::test]
+    fn watcher_pill_stays_on_status_rule_through_hover(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            crate::surface_blend::initialize_for_ui_fixture();
+            crate::native_motion::initialize_for_ui_fixture(cx);
+        });
+        design::set_interface_scale(125);
+        let snapshot = Rc::new(json!({"settings":{"theme":"dark","interfaceFontSize":16},
+            "tasks":[{"id":"watch","title":"Work","agentId":"agent","provider":"codex","status":"running","queue":[]}],
+            "agents":[{"id":"agent","name":"Codex","provider":"codex"}],
+            "workPlans":[{"id":"plan","taskId":"watch","title":"Work","status":"active","items":[]}],
+            "subagentSessions":[],"messages":[],"events":[],"approvalRequests":[],"queuedMessages":[],"hosts":[],"channels":[]}));
+        let mut retained = None;
+        let (_, visual) = cx.add_window_view(|window, cx| {
+            let pane = cx.new(|cx| ChatPane::performance_fixture("watch".into(), snapshot, window, cx));
+            retained = Some(pane.clone());
+            gpui_kit::component::Root::new(pane, window, cx)
+        });
+        let pane = retained.unwrap();
+        visual.update(|window, _| window.activate_window());
+        for width in [360., 700.] {
+          for active in [true, false, true] {
+            visual.update(|window, cx| {
+                if active { pane.read(cx).focus.clone().focus(window, cx); }
+                else { window.blur(cx); }
+            });
+            visual.simulate_resize(size(gpui_kit::px(width), gpui_kit::px(800.)));
+            draw(visual);
+            draw(visual);
+            let pill = visual.debug_bounds("chat-watcher-toggle").expect("Watch pill");
+            for position in [pill.center(), gpui_kit::point(gpui_kit::px(20.), gpui_kit::px(100.)), pill.center()] {
+                visual.simulate_mouse_move(position, None, Default::default());
+                for _ in 0..20 {
+                    visual.executor().advance_clock(Duration::from_millis(25));
+                    visual.update(|window, cx| { window.simulate_next_frame(cx); window.draw(cx).clear(cx); });
+                    let pill = visual.debug_bounds("chat-watcher-toggle").expect("Watch pill");
+                    let bar = visual.debug_bounds("pane-drawer-toolbar").expect("status bar");
+                    assert!((pill.center().y - bar.top()).abs() <= gpui_kit::px(2.),
+                        "Watch must straddle status rule on hover, active={active}: pill={pill:?}, bar={bar:?}");
+                }
+            }
+          }
+        }
+        design::set_interface_scale(100);
+    }
+    #[gpui_kit::test]
+    fn watcher_interjection_bubbles_wrap_inside_narrow_panes(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            crate::surface_blend::initialize_for_ui_fixture();
+            crate::native_motion::initialize_for_ui_fixture(cx);
+        });
+        design::set_interface_scale(125);
+        let snapshot = json!({"settings":{"theme":"dark","interfaceFontSize":16},
+            "tasks":[{"id":"watch","title":"Work","status":"running","queue":[]}],
+            "agents":[],"workPlans":[],"subagentSessions":[],"messages":[],
+            "events":[],"approvalRequests":[],"queuedMessages":[],"hosts":[],"channels":[]});
+        let (_, visual) = cx.add_window_view(|window, cx| {
+            let pane = cx.new(|cx| ChatPane::performance_fixture(
+                "watch".into(), Rc::new(snapshot.clone()), window, cx));
+            pane.update(cx, |pane, cx| {
+                pane.watcher.enabled = true;
+                pane.watcher.interjection = Some(InterjectionExchange::capture(
+                    "did you achieve this by running our script? or did you do it in pieces yourself?  I want an end 2 end dry run result i can stand behind.".into(),
+                    "steer".into(), &snapshot, &[],
+                ));
+                pane.reconcile_history(vec![
+                    json!({"id":"steer-user","taskId":"watch","role":"user","createdAt":10,"text":"steer"}),
+                    json!({"id":"steer-reply","taskId":"watch","role":"assistant","createdAt":11,
+                        "streamStatus":"complete","text":"The full dry run uses the existing script from start to finish. Every stage records its result so you can review the complete evidence and see exactly which checks passed before relying on the final outcome."}),
+                ], true, cx);
+            });
+            gpui_kit::component::Root::new(pane, window, cx)
+        });
+        let mut wide_heights = None;
+        for width in [700., 360., 320., 240., 185., 360.] {
+            visual.simulate_resize(size(gpui_kit::px(width), gpui_kit::px(1000.)));
+            draw(visual);
+            draw(visual);
+            let exchange = visual.debug_bounds("watcher-interject-exchange").expect("exchange");
+            let mut heights = Vec::new();
+            for selector in ["watcher-interject-request", "watcher-interject-reply"] {
+                let bubble = visual.debug_bounds(selector).expect("bubble");
+                assert!(bubble.left() >= exchange.left() && bubble.right() <= exchange.right(),
+                    "{width}px bubble {selector} is clipped: {bubble:?} in {exchange:?}");
+                heights.push(bubble.size.height);
+            }
+            if width == 700. {
+                wide_heights = Some(heights);
+            } else if width == 240. {
+                for (narrow, wide) in heights.iter().zip(wide_heights.as_ref().unwrap()) {
+                    assert!(narrow > wide, "narrow bubbles must wrap onto more lines");
+                }
+            }
+        }
+        design::set_interface_scale(100);
+    }
+    #[gpui_kit::test]
+    fn watcher_final_reply_toggle_stays_inside_without_status_bar(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            crate::surface_blend::initialize_for_ui_fixture();
+            crate::native_motion::initialize_for_ui_fixture(cx);
+        });
+        let snapshot = json!({"settings":{"theme":"dark","interfaceFontSize":14},
+            "tasks":[{"id":"watch","title":"Work","status":"idle","queue":[]}],
+            "agents":[],"workPlans":[],"subagentSessions":[],"messages":[],
+            "events":[],"approvalRequests":[],"queuedMessages":[],"hosts":[],"channels":[]});
+        let (_, visual) = cx.add_window_view(|window, cx| {
+            let pane = cx.new(|cx| ChatPane::performance_fixture(
+                "watch".into(), Rc::new(snapshot), window, cx));
+            gpui_kit::component::Root::new(pane, window, cx)
+        });
+        for width in [320., 800.] {
+            visual.simulate_resize(size(px(width), px(600.)));
+            draw(visual);
+            draw(visual);
+            assert!(visual.debug_bounds("pane-drawer-toolbar").is_none());
+            let dock = visual.debug_bounds("chat-watch-mode-dock").expect("independent Watch row");
+            let pill = visual.debug_bounds("chat-watcher-toggle").expect("visible Watch action");
+            assert!(pill.top() >= dock.top() && pill.bottom() <= dock.bottom());
+            assert!(dock.top() >= px(0.) && dock.bottom() <= px(600.));
+        }
+    }
+    #[gpui_kit::test]
+    fn watcher_completed_reply_replaces_live_sections_and_reveals_details_on_demand(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            crate::surface_blend::initialize_for_ui_fixture();
+            crate::native_motion::initialize_for_ui_fixture(cx);
+        });
+        let mut snapshot = json!({"settings":{"theme":"dark","interfaceFontSize":14},
+            "tasks":[{"id":"watch","title":"Finish work","status":"idle","queue":[]}],
+            "agents":[],"nativeMessageContext":{"watch":{"latestUserAt":10}},
+            "workPlans":[{"id":"plan","taskId":"watch","title":"Delivery plan","status":"closed",
+                "createdAt":10,"items":[{"id":"step","title":"Ship it","status":"completed"}]}],
+            "subagentSessions":[],"messages":[
+                {"id":"user","taskId":"watch","role":"user","createdAt":10,"text":"Finish work"},
+                {"id":"answer","taskId":"watch","role":"assistant","createdAt":22,
+                    "phase":"final_answer","streamStatus":"complete","text":"Finished the requested work."}],
+            "events":[{"id":"tool","taskId":"watch","kind":"tool","title":"Verified the result","createdAt":15},
+                {"id":"done","taskId":"watch","kind":"status","title":"turn.completed","createdAt":21}],
+            "approvalRequests":[],"queuedMessages":[],"hosts":[],"channels":[]});
+        let mut retained = None;
+        let (_, visual) = cx.add_window_view(|window, cx| {
+            let pane = cx.new(|cx| ChatPane::performance_fixture(
+                "watch".into(), Rc::new(snapshot.clone()), window, cx));
+            pane.update(cx, |pane, cx| {
+                pane.reconcile_history(snapshot["messages"].as_array().unwrap().clone(), true, cx);
+                pane.watcher.enabled = true;
+                pane.activity.update(cx, |activity, cx| activity.set_watch_goal_fixture(
+                    Some(json!({"objective":"Complete the goal","status":"complete"})), cx));
+            });
+            retained = Some(pane.clone());
+            gpui_kit::component::Root::new(pane, window, cx)
+        });
+        visual.simulate_resize(size(px(720.), px(900.)));
+        draw(visual);
+        draw(visual);
+        assert!(visual.debug_bounds("watcher-final-reply").is_some());
+        assert!(visual.debug_bounds("watcher-completed-success").is_some());
+        visual.simulate_resize(size(px(320.), px(900.)));
+        draw(visual);
+        let card = visual.debug_bounds("watcher-final-reply").expect("completed card in narrow pane");
+        let outcome = visual.debug_bounds("watcher-completed-success").expect("outcome icon");
+        assert!(card.left() >= px(0.) && card.right() <= px(320.));
+        assert!(outcome.left() >= card.left() && outcome.right() <= card.right());
+        for hidden in ["watcher-now", "watcher-plan", "watcher-activity", "watcher-agents",
+            "watcher-completed-plan", "watcher-completed-goal", "watcher-completed-activity"] {
+            assert!(visual.debug_bounds(hidden).is_none(), "{hidden} stays out of the completed surface");
+        }
+        for (link, detail) in [
+            ("watcher-completed-plan-link", "watcher-completed-plan"),
+            ("watcher-completed-goal-link", "watcher-completed-goal"),
+            ("watcher-completed-activity-link", "watcher-completed-activity"),
+        ] {
+            let bounds = visual.debug_bounds(link).expect("completed detail link");
+            visual.simulate_click(bounds.center(), Default::default());
+            draw(visual);
+            assert!(visual.debug_bounds(detail).is_some(), "{link} reveals {detail}");
+        }
+        snapshot["tasks"][0]["status"] = json!("failed");
+        snapshot["events"][1]["title"] = json!("turn.failed");
+        retained.unwrap().update(visual, |pane, cx| pane.sync(Rc::new(snapshot), Some("failed".into()), cx));
+        draw(visual);
+        assert!(visual.debug_bounds("watcher-completed-failed").is_some());
+        assert!(visual.debug_bounds("watcher-completed-success").is_none());
+    }
     fn draw(visual: &mut VisualTestContext) {
         visual.run_until_parked();
         visual.update(|window, cx| window.draw(cx).clear(cx));
@@ -2494,9 +2892,9 @@ mod native_tests {
                     assert!(bounds.left() >= body.left() - px(1.) && bounds.right() <= body.right() + px(1.),
                         "content fits after resize: {bounds:?} in {body:?}");
                 }
-                let dock = visual.debug_bounds("watcher-interject-bar").unwrap();
+                let dock = visual.debug_bounds("watcher-interject-dock").unwrap();
                 assert!((dock.center().x - root.center().x).abs() <= px(1.), "controls stay centered");
-                assert!((root.bottom() - dock.bottom() - px(8.)).abs() <= px(1.), "controls stay at the bottom");
+                assert!((root.bottom() - dock.bottom()).abs() <= px(1.), "controls stay at the bottom");
             }
         }
     }
@@ -2729,7 +3127,7 @@ mod native_tests {
                 );
                 assert!(
                     (mode_dock.center().y - status_bar.top()).abs() <= gpui_kit::px(1.),
-                    "Watch pill stays vertically centered over the status-bar top border: pill={mode_dock:?}, bar={status_bar:?}"
+                    "Watch pill retains its original position centered on the status-bar top rule: pill={mode_dock:?}, bar={status_bar:?}"
                 );
                 assert!(
                     visual.debug_bounds("work-plan-menu-pill").is_none(),
@@ -2778,49 +3176,13 @@ mod native_tests {
                             && quad.bounds == surface
                     }), "Watch header and body must share one continuous painted surface");
                 });
-                let interject_bar = visual
-                    .debug_bounds("watcher-interject-bar")
-                    .expect("combined Chat and Steer pill is visible without scrolling");
-                let interject_trigger = visual.debug_bounds("watcher-back").unwrap();
-                for button in [chat, interject_trigger] {
-                    visual.simulate_mouse_move(button.center(), None, Default::default());
-                    draw(visual);
-                    visual.executor().advance_clock(Duration::from_millis(250));
-                    draw(visual);
-                    visual.update(|window, _| {
-                        let bounds = button.scale(window.scale_factor());
-                        assert!(!window.painted_quads().iter().any(|quad| {
-                            quad.bounds == bounds
-                                && quad.background.as_solid().is_some_and(|color| color.a > 0.)
-                        }), "Watch action hover must not add a filled button surface");
-                    });
-                }
-                visual.simulate_mouse_move(root.origin, None, Default::default());
-                draw(visual);
-                let separator = visual
-                    .debug_bounds("watcher-mode-separator")
-                    .expect("Chat and Steer separator");
-                assert!(
-                    (interject_bar.center().x - root.center().x).abs() <= gpui_kit::px(1.),
-                    "Chat and Steer pill stays centered within its pane"
-                );
-                assert!(
-                    (root.bottom() - interject_bar.bottom() - px(8.)).abs()
-                        <= gpui_kit::px(1.),
-                    "Interject overlays the bottom of Watch: bar {interject_bar:?}, pane {root:?}, dock {:?}",
-                    visual.debug_bounds("watcher-interject-dock")
-                );
-                assert!(
-                    chat.left() >= interject_bar.left()
-                        && chat.right() <= separator.left() + gpui_kit::px(1.)
-                        && separator.right() <= interject_trigger.left() + gpui_kit::px(1.)
-                        && interject_trigger.right() <= interject_bar.right(),
-                    "one pill orders Chat, separator and Steer: {chat:?}, {separator:?}, {interject_trigger:?} in {interject_bar:?}"
-                );
-                assert!(
-                    interject_bar.left() >= root.left() && interject_bar.right() <= root.right(),
-                    "the floating bar fits narrow panes"
-                );
+                let interject_dock = visual.debug_bounds("watcher-interject-dock")
+                    .expect("steer composer remains at the bottom of Watch");
+                assert!(chat.left() < root.center().x && chat.top() < root.center().y,
+                    "the back arrow sits at the top left");
+                assert!((interject_dock.bottom() - root.bottom()).abs() <= gpui_kit::px(1.));
+                assert!(interject_dock.left() >= root.left() && interject_dock.right() <= root.right());
+                assert!(visual.debug_bounds("watcher-interject-composer").is_some());
                 assert!(
                     visual.debug_bounds("send").is_none(),
                     "chat composer is hidden in Watch mode"
@@ -2877,7 +3239,7 @@ mod native_tests {
                 }
                 visual.update(|window, cx| {
                     pane.update(cx, |pane, cx| {
-                        assert!(!pane.composer_keyboard_available(window, cx));
+                        assert!(pane.composer_keyboard_available(window, cx));
                     })
                 });
                 pane.read_with(visual, |pane, cx| {
@@ -2956,31 +3318,16 @@ mod native_tests {
                     first_finished.top() >= finished.bottom() - gpui_kit::px(1.),
                     "finished rows stay below their disclosure: {first_finished:?} after {finished:?}"
                 );
-                let back = visual.debug_bounds("watcher-back").unwrap();
-                assert_eq!(
-                    visual.debug_bounds("watcher-interject-bar").unwrap(),
-                    interject_bar,
-                    "content scrolling and completion do not move the overlay bar"
-                );
-                assert_eq!(
-                    back, interject_trigger,
-                    "Interject remains available at the same position after scrolling"
-                );
-                visual.simulate_click(back.center(), Default::default());
-                draw(visual);
-                let menu = visual
-                    .debug_bounds("watcher-interject-menu")
-                    .expect("anchored interject menu");
-                let composer = visual
-                    .debug_bounds("watcher-interject-composer")
-                    .expect("interject composer");
-                assert!(visual.debug_bounds("chat-watcher").is_some());
-                assert!(menu.bottom() <= back.top() + gpui_kit::px(1.));
+                let menu = visual.debug_bounds("watcher-interject-menu").expect("embedded steer surface");
+                let composer = visual.debug_bounds("watcher-interject-composer").expect("steer composer");
                 assert!(composer.left() >= menu.left() && composer.right() <= menu.right());
+                visual.simulate_click(composer.center(), Default::default());
+                draw(visual);
                 visual.update(|window, cx| {
                     pane.update(cx, |pane, cx| {
+                        let focus = pane.composer.read(cx).focus_handle(cx);
+                        window.focus(&focus, cx);
                         assert!(pane.watcher.enabled);
-                        assert!(pane.watcher.interject_open);
                         assert!(pane.composer_keyboard_available(window, cx));
                     })
                 });
@@ -3006,12 +3353,6 @@ mod native_tests {
                 visual.simulate_keystrokes("backspace");
                 visual.simulate_keystrokes("escape");
                 draw(visual);
-                assert!(visual.debug_bounds("watcher-interject-menu").is_none());
-                assert!(
-                    visual.debug_bounds("chat-watcher").is_some(),
-                    "first Escape dismisses only the interject menu"
-                );
-                visual.simulate_keystrokes("escape");
                 visual
                     .executor()
                     .advance_clock(std::time::Duration::from_millis(601));

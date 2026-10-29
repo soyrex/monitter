@@ -82,7 +82,6 @@ impl Desktop {
         if self.window.neovim_pending {
             return Ok(());
         }
-        let service = self.service.clone().ok_or("Native backend is not ready.")?;
         // Resolve a local task/project only; never interpret an SSH path locally.
         let task = self.window.selected.as_ref().and_then(|id| {
             rows(&self.snapshot, "tasks")
@@ -99,9 +98,34 @@ impl Desktop {
                 .filter(|cwd| !cwd.is_empty())
         });
         let origin = origin.or_else(|| self.window.dock.read(cx).focused_pane_id(window, cx));
+        self.open_neovim_request(json!({"cwd":cwd,"cols":100,"rows":32}), origin, window, cx)
+    }
+
+    pub(super) fn open_neovim_file(
+        &mut self,
+        path: &std::path::Path,
+        origin: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        if self.window.neovim_pending {
+            return Err("An editor is opening. Try the file link again in a moment.".into());
+        }
+        let cwd = path.parent().ok_or("The file link has no parent directory.")?;
+        self.open_neovim_request(json!({"cwd":cwd,"path":path,"cols":100,"rows":32}), origin, window, cx)
+    }
+
+    fn open_neovim_request(
+        &mut self,
+        args: Value,
+        origin: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let service = self.service.clone().ok_or("Native backend is not ready.")?;
         self.window.neovim_pending = true;
         let request = cx.background_executor().spawn(async move {
-            service.invoke("open_neovim", json!({"cwd":cwd,"cols":100,"rows":32}))
+            service.invoke("open_neovim", args)
         });
         self.spawn_workspace(window, cx, async move |view, cx| {
             let result = request.await;

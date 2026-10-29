@@ -15,8 +15,8 @@ use serde::{Deserialize, Serialize};
 use std::{
     ops::{Deref, DerefMut},
     rc::Rc,
-    sync::Arc,
-    time::Duration,
+    sync::{Arc, OnceLock},
+    time::{Duration, Instant},
 };
 
 mod color;
@@ -33,12 +33,33 @@ pub use registry::*;
 pub use schema::*;
 pub use theme_color::*;
 
+static STARTUP_THEME_INIT: OnceLock<Duration> = OnceLock::new();
+static STARTUP_FONT_CATALOG: OnceLock<Duration> = OnceLock::new();
+
+fn startup_timing_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("MONITTER_STARTUP_NESTED_TIMING").is_some())
+}
+
+/// One-time, content-free startup durations. None means the span was not observed.
+pub fn startup_init_timings() -> (Option<Duration>, Option<Duration>) {
+    (STARTUP_THEME_INIT.get().copied(), STARTUP_FONT_CATALOG.get().copied())
+}
+
+pub(super) fn record_startup_font_catalog(elapsed: Duration) {
+    let _ = STARTUP_FONT_CATALOG.set(elapsed);
+}
+
 pub fn init(cx: &mut App) {
+    let started = startup_timing_enabled().then(Instant::now);
     registry::init(cx);
 
     // Ensure theme is loaded directly on startup for WASM compatibility
     Theme::change(ThemeMode::Light, None, cx);
     Theme::sync_scrollbar_appearance(cx);
+    if let Some(started) = started {
+        let _ = STARTUP_THEME_INIT.set(started.elapsed());
+    }
 }
 
 pub trait ActiveTheme {

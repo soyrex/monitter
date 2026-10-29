@@ -113,9 +113,7 @@ impl SessionLock {
     }
     fn load_storage(cx: &mut Context<Self>) {
         let worker = cx.background_executor().spawn(async {
-            let snapshot = store::read_snapshot()?;
-            let configured = store::configured()?;
-            Ok::<_, String>((snapshot, configured))
+            store::read_startup_state()
         });
         cx.spawn(async move |view, cx| {
             let result = worker.await;

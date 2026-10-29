@@ -73,6 +73,9 @@ fn project_fields(row: &Value, keys: &[&str]) -> Value {
     Value::Object(projected)
 }
 impl Presentation {
+    // Private drafts/attachment refs stay out of the disposable presentation.
+    // Retained startup editors hydrate from authoritative preferences after
+    // unlock, preserving both the saved baseline and any early local typing.
     pub fn shell_preferences(preferences: &NativePreferences) -> NativePreferences {
         let mut shell = NativePreferences::default();
         shell.revision = preferences.revision.clone();

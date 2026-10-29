@@ -117,6 +117,37 @@ fn publish(
 }
 
 #[gpui::test]
+fn hidden_metadata_keeps_retained_viewport_prepared(cx: &mut TestAppContext) {
+    let initial = snapshot("Stable synthetic output", "complete");
+    let (pane, host, visual) = mount_cached(cx, initial.clone());
+    draw(visual);
+    let prepared = visual.update(|window, cx| {
+        pane.update(cx, |pane, cx| pane.prepare_visible_transcript(window, cx))
+    });
+    assert!(prepared, "fixture must begin with an accepted viewport");
+    hide_cached(&pane, &host, visual);
+
+    let mut metadata = initial.clone();
+    metadata["tasks"][0]["updatedAt"] = json!(3);
+    publish(&pane, visual, &metadata, "metadata-only", true, false, false, None);
+    assert!(
+        visual.update(|window, cx| pane.read(cx).transcript_viewport_ready(window, cx)),
+        "an unchanged hidden transcript should stay prepared while controls await reveal"
+    );
+    assert!(pane.read_with(visual, |pane, _| pane.deferred_publication.is_some()));
+
+    publish(&pane, visual, &metadata, "history-dirty", true, true, false, None);
+    assert!(
+        !visual.update(|window, cx| pane.read(cx).transcript_viewport_ready(window, cx)),
+        "pending history must still block the prepared path"
+    );
+    pane.update(visual, |pane, cx| pane.set_dock_visible(true, cx));
+    show_cached(&host, visual);
+    draw(visual);
+    assert!(pane.read_with(visual, |pane, _| pane.deferred_publication.is_none()));
+}
+
+#[gpui::test]
 fn hidden_publication_many_chunks_reveal_latest_completion_without_catchup(
     cx: &mut TestAppContext,
 ) {

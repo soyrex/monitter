@@ -264,6 +264,27 @@ pub(super) fn render_conversation(
     ] {
         activity = activity.child(toggle(desktop, cx, palette, label, detail, key, enabled));
     }
+    let composer_autohide = crate::chat::composer_autohide_preference::enabled();
+    activity = activity.child(
+        settings_toggle(
+            "Auto-hide composer",
+            "Hide empty composers in inactive panes. Drafts stay visible. Scrolling chat history hides the composer with either setting.",
+            composer_autohide,
+            palette,
+        ).child(
+            Switch::new("settings-composer-autohide")
+                .checked(composer_autohide)
+                .accessibility_label("Auto-hide composer")
+                .on_change(cx.listener(|_, enabled, _, cx| {
+                    crate::chat::composer_autohide_preference::set(*enabled, cx);
+                    cx.notify();
+                })),
+        ),
+    );
+    if let Some(error) = cx.try_global::<crate::chat::composer_autohide_preference::Selection>()
+        .and_then(|selection| selection.error.as_deref()) {
+        activity = activity.child(settings_hint(error.to_owned(), palette));
+    }
     let minimap_enabled = crate::chat::minimap_preference::enabled();
     activity = activity.child(
         settings_toggle(

@@ -288,6 +288,12 @@ impl TextSystem {
         names
     }
 
+    /// Whether a named family can be loaded directly, without resolving the
+    /// system fallback stack or enumerating every installed font.
+    pub fn has_font_family(&self, family: &str) -> bool {
+        self.font_id(&font(family)).is_ok()
+    }
+
     /// Add a font's data to the text system.
     ///
     /// Cached font resolution and line layouts are invalidated after installation.

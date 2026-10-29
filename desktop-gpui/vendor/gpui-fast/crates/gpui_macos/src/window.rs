@@ -838,6 +838,19 @@ impl MacWindowState {
         }
     }
 
+    fn request_frame(&mut self) {
+        if self
+            .frame_source
+            .as_ref()
+            .is_some_and(WindowFrameSource::is_running)
+        {
+            return;
+        }
+        // Recover an idle source through the normal visibility guards and
+        // display pacing; immediate dispatch here would let animations spin.
+        self.start_display_link();
+    }
+
     fn start_display_link(&mut self) {
         self.stop_display_link();
         unsafe {
@@ -2056,6 +2069,19 @@ impl PlatformWindow for MacWindow {
 
     fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>) {
         self.0.as_ref().lock().request_frame_callback = Some(callback);
+    }
+
+    fn frame_waker(&self) -> Option<Rc<dyn Fn()>> {
+        let window_state = Arc::downgrade(&self.0);
+        Some(Rc::new(move || {
+            if let Some(window_state) = window_state.upgrade() {
+                window_state.lock().request_frame();
+            }
+        }))
+    }
+
+    fn schedule_frame(&self) {
+        self.0.lock().request_frame();
     }
 
     fn on_input(&self, callback: Box<dyn FnMut(PlatformInput) -> gpui::DispatchEventResult>) {

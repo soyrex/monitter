@@ -134,7 +134,7 @@ fn append_search_text(output: &mut String, text: &str) {
 }
 /// The live layout supersedes its saved workspace copy. Retained pane entities
 /// alone are not evidence that a chat is still open.
-fn rename_all_targets(view: &Desktop, cx: &App) -> Vec<Value> {
+pub(super) fn rename_all_targets(view: &Desktop, cx: &App) -> Vec<Value> {
     let mut layouts = Vec::new();
     if let Ok(layout) = view.dock.read(cx).serialize(cx) { layouts.push(layout); }
     if let Some(set) = &view.named_workspaces {

@@ -249,10 +249,8 @@ impl NativeSettings {
     // The native Lock Session action calls this when no PIN is configured.
     pub(super) fn select_security(&mut self) { self.select_category("security"); }
     pub fn new(settings: &Value, window: &mut Window, cx: &mut Context<Desktop>) -> Self {
-        let mut families = cx.text_system().all_font_names();
-        families.sort();
-        families.dedup();
-        let choices = settings_appearance::font_choices(families.into_iter().map(SharedString::from).collect());
+        let families = monitter_gpui_desktop::fonts::refresh(cx);
+        let choices = settings_appearance::font_choices(families.iter().cloned().map(SharedString::from).collect());
         let fonts = TYPOGRAPHY
             .iter()
             .map(|(family_key, size_key, weight_key, _, default_size)| {
@@ -574,6 +572,7 @@ impl Desktop {
             settings["windowTransparency"],
             stored_appearance.tile_theme,
         );
+        let signature = format!("{signature}:{}", monitter_gpui_desktop::fonts::catalog_revision(cx));
         if self.window.applied_style.as_ref() != Some(&signature) {
             Theme::change(
                 if palette.dark {
@@ -597,14 +596,7 @@ impl Desktop {
                 });
             }
             let font = field(settings, "interfaceFont");
-            let names = cx.text_system().all_font_names();
-            let family = if !font.is_empty() && names.iter().any(|name| name == &font) {
-                font
-            } else if names.iter().any(|name| name == "IBM Plex Sans") {
-                "IBM Plex Sans".into()
-            } else {
-                ".SystemUIFont".into()
-            };
+            let family = monitter_gpui_desktop::fonts::resolve_family(&font, "IBM Plex Sans", cx);
             let size = settings["interfaceFontSize"]
                 .as_f64()
                 .unwrap_or(design::INTERFACE_FONT_SIZE as f64)

@@ -402,7 +402,7 @@ mod macos {
                     glow_mask = Retained::retain(mask).expect("new glow mask");
                     let popup: *mut AnyObject = msg_send![class!(CAShapeLayer), layer];
                     let _: () = msg_send![popup, setFillColor: white_cg];
-                    let rule = NSString::from_str("evenOdd");
+                    let rule = NSString::from_str("even-odd");
                     let _: () = msg_send![popup, setFillRule: &*rule];
                     popup_mask = Retained::retain(popup).expect("new popup mask");
                     for depth in (1..=20).rev() {
@@ -510,7 +510,7 @@ mod macos {
                                 else { CGPathAddLineToPoint(mask_path, ptr::null(), px, py); }
                             }
                             CGPathCloseSubpath(mask_path);
-                            let even_odd = NSString::from_str("evenOdd");
+                            let even_odd = NSString::from_str("even-odd");
                             let _: () = msg_send![&*overlay.glow_mask, setFillRule: &*even_odd];
                             let _: () = msg_send![&*overlay.glow_mask, setPath: mask_path.cast_const()];
                             CGPathRelease(mask_path);
@@ -595,7 +595,13 @@ mod macos {
             return;
         };
         let host = unsafe { &*host_ptr };
-        let popup_bounds = gpui_kit::component::surface_backdrop::popup_bounds(window, cx);
+        // Composition already places native chrome below the popup surface.
+        // Empty geometry also clears any mask left by the legacy fallback.
+        let popup_bounds = if window.window_composition_enabled() {
+            Vec::new()
+        } else {
+            gpui_kit::component::surface_backdrop::popup_bounds(window, cx)
+        };
         let host_rects = popup_bounds
             .iter()
             .map(|bounds| {

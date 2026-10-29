@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, setContext, type Snippet } from 'svelte';
+  import { onMount, setContext, untrack, type Snippet } from 'svelte';
 import ArrowRightLeft from "@lucide/svelte/icons/arrow-right-left";
   import Check from "@lucide/svelte/icons/check";
   import CircleAlert from "@lucide/svelte/icons/circle-alert";
@@ -26,7 +26,7 @@ import ArrowRightLeft from "@lucide/svelte/icons/arrow-right-left";
   import { splitOperatorMessage } from '$lib/operator-sharing';
   import { participantColour } from '$lib/shared-chat';
   import { chatDay } from '$lib/chat-dates';
-  import { isLanBrowser } from '$lib/lan';
+  import { isLanBrowser, isOwnerRelayBrowser } from '$lib/lan';
   import ObserverIndicator from '$lib/components/ObserverIndicator.svelte';
   import AnimatedTitle from '$lib/components/AnimatedTitle.svelte';
   import TaskActivity from '$lib/components/TaskActivity.svelte';
@@ -208,6 +208,44 @@ import ArrowRightLeft from "@lucide/svelte/icons/arrow-right-left";
   let transcriptList: { restoreItemAnchor: (key: string, offset: number) => Promise<boolean> } | undefined = $state();
   let historyLoading = $state(false);
   let historyError = $state('');
+  let relayHistoryReady = $state(false);
+  let relayHistoryError = $state('');
+  let relayHistoryPending = 0;
+  let relayHistoryGeneration = 0;
+  let relayHistoryTaskId = '';
+  let loadedEarlierHistory = false;
+  // The owner relay starts with metadata only. Refresh just this open chat's
+  // bounded tail, including after a reconnect or a revision reset.
+  async function refreshRelayHistory(generation = relayHistoryGeneration, taskId = relayHistoryTaskId) {
+    if (!getTaskMessages || !taskId || relayHistoryPending === generation) return;
+    relayHistoryPending = generation;
+    try {
+      const page = await getTaskMessages(taskId, undefined, 64);
+      if (generation !== relayHistoryGeneration || taskId !== relayHistoryTaskId) return;
+      if (!loadedEarlierHistory) nextHistoryCursor = page.nextBeforeId;
+      relayHistoryReady = true;
+      relayHistoryError = '';
+    } catch (reason) {
+      if (generation !== relayHistoryGeneration || taskId !== relayHistoryTaskId) return;
+      relayHistoryError = reason instanceof Error ? reason.message : String(reason);
+    } finally { if (relayHistoryPending === generation) relayHistoryPending = 0; }
+  }
+  $effect(() => {
+    if (!isOwnerRelayBrowser() || !getTaskMessages) return;
+    const taskId = task.id;
+    const generation = ++relayHistoryGeneration;
+    relayHistoryTaskId = taskId;
+    relayHistoryReady = false;
+    relayHistoryError = '';
+    nextHistoryCursor = undefined;
+    loadedEarlierHistory = false;
+    olderMessages = [];
+    historyLoading = false;
+    historyError = '';
+    untrack(() => void refreshRelayHistory(generation, taskId));
+    const timer = setInterval(() => void refreshRelayHistory(generation, taskId), 2000);
+    return () => { clearInterval(timer); if (relayHistoryGeneration === generation) relayHistoryGeneration++; };
+  });
   const displayExchangeGroups = $derived(transcriptExchangeGroups(display.conversationItems));
   const displayExchangeMembers = $derived(new Set([...displayExchangeGroups.values()].flatMap(events => events.slice(1).map(event => event.id))));
   const displayItems = $derived.by(() => {
@@ -281,6 +319,7 @@ import ArrowRightLeft from "@lucide/svelte/icons/arrow-right-left";
   }
   async function loadEarlierMessages() {
     if (!getTaskMessages || historyLoading || !hasEarlierMessages) return;
+    const requestedTaskId = task.id, generation = relayHistoryGeneration;
     const persistedMessages = display.conversationItems.flatMap(item => item.type === 'message' && item.value.taskId === task.id ? [item.value] : []);
     const beforeId = nextHistoryCursor ?? [...persistedMessages].sort((left, right) => left.createdAt - right.createdAt)[0]?.id;
     if (!beforeId) { nextHistoryCursor = null; return; }
@@ -290,13 +329,16 @@ import ArrowRightLeft from "@lucide/svelte/icons/arrow-right-left";
     const viewportAnchor = transcriptBuffer.held() ? captureTranscriptAnchor(viewport) : null;
     try {
       const page = await getTaskMessages(task.id, beforeId, 64);
+      if (isOwnerRelayBrowser() && (generation !== relayHistoryGeneration || requestedTaskId !== relayHistoryTaskId)) return;
       if (page.messages.some(message => message.taskId !== task.id)) throw new Error('History page did not match this chat.');
       olderMessages = mergeOlderTranscriptMessages(olderMessages, page.messages);
+      loadedEarlierHistory = true;
       nextHistoryCursor = page.nextBeforeId === beforeId ? null : page.nextBeforeId;
       if (viewportAnchor) await transcriptList?.restoreItemAnchor(viewportAnchor.key, viewportAnchor.offset);
     } catch (reason) {
+      if (isOwnerRelayBrowser() && (generation !== relayHistoryGeneration || requestedTaskId !== relayHistoryTaskId)) return;
       historyError = reason instanceof Error ? reason.message : String(reason);
-    } finally { historyLoading = false; }
+    } finally { if (!isOwnerRelayBrowser() || generation === relayHistoryGeneration) historyLoading = false; }
   }
   function routedLifecycle(item: UnifiedSubagent, title: string): UnifiedSubagent {
     if (title === 'Collaboration queued') return { ...item, status: 'queued', activity: `${item.agentName} was assigned` };
@@ -360,9 +402,10 @@ import ArrowRightLeft from "@lucide/svelte/icons/arrow-right-left";
     {:else}
       <MessagePane {active} thinking={displayThinking} pendingUpdates={transcriptBuffer.pendingUpdates()} onfollowchange={handleFollowChange} onscrollchange={(distance) => transcriptTailDistance = distance} resetKey={`task:${task.id}:${scrollRevision}`} stickyRequest={!!displayLatestUserRequest}>
       {#snippet header()}
-        {#if hasEarlierMessages || historyError}<div class="history-pager">
+        {#if hasEarlierMessages || historyError || relayHistoryError}<div class="history-pager">
           {#if hasEarlierMessages}<button type="button" aria-label="Load earlier messages" disabled={historyLoading} onclick={() => void loadEarlierMessages()}>{historyLoading ? 'Loading earlier messages…' : 'Load earlier messages'}</button>{/if}
           {#if historyError}<span role="status">{historyError}</span>{/if}
+          {#if relayHistoryError}<span role="status">{relayHistoryError}</span><button type="button" onclick={() => void refreshRelayHistory()}>Retry loading messages</button>{/if}
         </div>{/if}
       {/snippet}
       <TranscriptVirtualList
@@ -433,7 +476,8 @@ import ArrowRightLeft from "@lucide/svelte/icons/arrow-right-left";
         {/snippet}
         {#snippet footer()}
           {#if !displayItems.length && !display.hasPendingApprovals}
-            {#if displayTask.status === 'error'}<div class="blank-conversation failed" role="status"><CircleAlert size={24}/><h2>This chat stopped before replying</h2><p>{liveError || 'The harness reported an error before any output arrived.'}</p><p class="blank-hint">Send a message to try again, or check Timeline for details.</p></div>
+            {#if isOwnerRelayBrowser() && !relayHistoryReady}<div class="blank-conversation" role="status"><p>{relayHistoryError ? 'Could not load messages.' : 'Loading messages…'}</p></div>
+            {:else if displayTask.status === 'error'}<div class="blank-conversation failed" role="status"><CircleAlert size={24}/><h2>This chat stopped before replying</h2><p>{liveError || 'The harness reported an error before any output arrived.'}</p><p class="blank-hint">Send a message to try again, or check Timeline for details.</p></div>
             {:else}<div class="blank-conversation"><Terminal size={24}/><h2>No messages yet</h2><p>Describe what you want this agent to do. Its actual output will appear here.</p></div>{/if}
           {/if}
           {#if showThinkingFallback(displayItems, displayTask.status==='running' || display.selectedTaskStarting, display.hasPendingApprovals)}

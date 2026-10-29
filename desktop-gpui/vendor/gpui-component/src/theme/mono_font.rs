@@ -50,6 +50,14 @@ fn installed_default_mono_font_family(cx: &App) -> SharedString {
     RESOLVED
         .get_or_init(|| {
             let default = default_mono_font_family();
+            #[cfg(target_os = "macos")]
+            let family: SharedString = std::iter::once(default.as_ref())
+                .chain(MONO_FONT_ALTERNATES.iter().copied())
+                .find(|candidate| cx.text_system().has_font_family(candidate))
+                .unwrap_or(SYSTEM_UI_FONT)
+                .to_string()
+                .into();
+            #[cfg(not(target_os = "macos"))]
             let family = first_installed(&default, MONO_FONT_ALTERNATES, installed_font_names(cx));
             if family != default {
                 tracing::warn!(
@@ -68,7 +76,16 @@ fn installed_default_mono_font_family(cx: &App) -> SharedString {
 /// process runs.
 pub(super) fn installed_font_names(cx: &App) -> &'static [String] {
     static NAMES: OnceLock<Vec<String>> = OnceLock::new();
-    NAMES.get_or_init(|| cx.text_system().all_font_names())
+    NAMES.get_or_init(|| {
+        if super::startup_timing_enabled() {
+            let started = std::time::Instant::now();
+            let names = cx.text_system().all_font_names();
+            super::record_startup_font_catalog(started.elapsed());
+            names
+        } else {
+            cx.text_system().all_font_names()
+        }
+    })
 }
 
 /// `default` when it is installed, else the first installed alternate, else

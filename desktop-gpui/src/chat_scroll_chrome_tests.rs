@@ -2,7 +2,7 @@
 use super::ChatPane;
 use crate::native_motion::{self, MotionPreference};
 use gpui_kit::{
-    AppContext as _, Context, Entity, Focusable as _, IntoElement, ParentElement as _, Render,
+    AppContext as _, Context, Entity, Focusable as _, InteractiveElement as _, IntoElement, ParentElement as _, Render,
     ScrollDelta, ScrollWheelEvent, StyleRefinement, Styled as _, TestAppContext, VisualTestContext,
     Window, div, point, px, size,
 };
@@ -33,6 +33,98 @@ fn wheel(visual: &mut VisualTestContext, position: gpui_kit::Point<gpui_kit::Pix
     });
     draw(visual);
     draw(visual);
+}
+
+struct HoverScrollHarness {
+    pane: Entity<ChatPane>,
+    other: gpui_kit::FocusHandle,
+}
+impl Render for HoverScrollHarness {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let focus = self.pane.read(cx).focus.clone();
+        let tracked = focus.clone();
+        let other = self.other.clone();
+        // Match NativePanel's focus-follows-mouse listener around its cached chat.
+        div().size_full().flex()
+            .child(div().flex_1().min_w_0().h_full().track_focus(&tracked)
+                .on_mouse_move(move |event, window, cx| {
+                    if event.pressed_button.is_none() && !focus.contains_focused(window, cx) {
+                        focus.focus(window, cx);
+                    }
+                })
+                .child(self.pane.clone().cached(StyleRefinement::default().size_full())))
+            .child(div().id("other-pane").w(px(80.)).h_full().track_focus(&self.other)
+                .on_mouse_move(move |_, window, cx| other.focus(window, cx)))
+    }
+}
+
+#[gpui_kit::test]
+fn scrolled_composer_stays_hidden_through_pane_hover_and_draft(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        crate::surface_blend::initialize_for_ui_fixture();
+        native_motion::initialize_for_ui_fixture(cx);
+    });
+    let source = Rc::new(json!({
+        "settings":{"theme":"dark","interfaceFontSize":14},
+        "tasks":[{"id":"hover-scroll","agentId":"agent","title":"Hover scroll",
+            "provider":"codex","status":"idle","queue":[]}],
+        "agents":[{"id":"agent","provider":"codex","name":"Codex"}],
+        "messages":(0..80).map(|index| json!({"id":format!("row-{index}"),
+            "taskId":"hover-scroll","role":"user","text":format!("History row {index}. Keep the reading position."),
+            "createdAt":1_700_000_000_000_i64 + index})).collect::<Vec<_>>(),
+        "events":[],"approvalRequests":[],"hosts":[],"channels":[]
+    }));
+    let mut retained = None;
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let pane = cx.new(|cx| ChatPane::performance_fixture("hover-scroll".into(), source, window, cx));
+        pane.read(cx).transcripts["hover-scroll"].list.clone().measure_all();
+        retained = Some(pane.clone());
+        let harness = cx.new(|cx| HoverScrollHarness { pane, other: cx.focus_handle() });
+        gpui_kit::component::Root::new(harness, window, cx)
+    });
+    visual.simulate_resize(size(px(780.), px(800.)));
+    let pane = retained.unwrap();
+    visual.update(|window, _| window.activate_window());
+    for draft in ["", "Keep this unsent draft"] {
+        visual.update(|window, cx| {
+            pane.update(cx, |pane, cx| pane.finish_bottom_jump(cx));
+            pane.read(cx).composer.read(cx).focus_handle(cx).focus(window, cx);
+        });
+        draw(visual);
+        if !draft.is_empty() { visual.simulate_input(draft); }
+        draw(visual);
+        let position = point(px(300.), px(250.));
+        for _ in 0..3 { wheel(visual, position, 600.); }
+        let (offset, distance) = pane.read_with(visual, |pane, _| {
+            (pane.transcripts["hover-scroll"].list.logical_scroll_top(), pane.composer_scroll_distance)
+        });
+        for hovered in [false, true, false, true] {
+            visual.simulate_mouse_move(if hovered { position } else { point(px(740.), px(250.)) }, None, Default::default());
+            for _ in 0..24 {
+                visual.executor().advance_clock(std::time::Duration::from_millis(25));
+                visual.update(|window, cx| { window.simulate_next_frame(cx); window.draw(cx).clear(cx); });
+            }
+            let composer = visual.debug_bounds("normal-chat-composer").expect("retained composer");
+            let bounds = pane.read_with(visual, |pane, _| pane.decoration_bounds.pane.get().unwrap());
+            assert!(composer.top() >= bounds.bottom() - px(1.),
+                "scrolled composer must remain outside pane on hover, hovered={hovered}, draft={draft:?}: {composer:?}, pane={bounds:?}");
+            pane.read_with(visual, |pane, cx| {
+                assert!(!pane.transcripts["hover-scroll"].list.is_following_tail());
+                let after = pane.transcripts["hover-scroll"].list.logical_scroll_top();
+                assert_eq!((after.item_ix, after.offset_in_item), (offset.item_ix, offset.offset_in_item),
+                    "pane hover must preserve the reading position");
+                assert_eq!(pane.composer_scroll_distance, distance);
+                assert!(distance > px(0.));
+                assert_eq!(pane.composer.read(cx).value().as_ref(), draft);
+            });
+        }
+        pane.update(visual, |pane, cx| pane.finish_bottom_jump(cx));
+        draw(visual);
+        draw(visual);
+        let composer = visual.debug_bounds("normal-chat-composer").unwrap();
+        assert!(composer.top() < px(800.), "return to bottom restores composer");
+    }
 }
 
 fn assert_native_scroll_preserves_input(cx: &mut TestAppContext, motion: MotionPreference) {
@@ -218,4 +310,100 @@ fn reduced_motion_scroll_preserves_prepared_history_draft_focus_tail_pager_and_s
     cx: &mut TestAppContext,
 ) {
     assert_native_scroll_preserves_input(cx, MotionPreference::Off);
+}
+
+#[gpui_kit::test]
+fn project_status_bar_stays_within_chat_pane(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        crate::surface_blend::initialize_for_ui_fixture();
+        native_motion::initialize_for_ui_fixture(cx);
+    });
+    cx.update(|cx| native_motion::set_preference_for_ui_fixture(MotionPreference::On, cx));
+    let snapshot = Rc::new(json!({
+        "settings":{"theme":"dark","interfaceScale":100,"interfaceFontSize":14},
+        "tasks":[{"id":"project-chat","projectId":"project","agentId":"agent",
+            "title":"Project chat","provider":"codex","status":"idle","queue":[]}],
+        "projects":[{"id":"project","name":"Project","buildManagementEnabled":true}],
+        "agents":[{"id":"agent","name":"Codex","provider":"codex"}],
+        "messages":[],"events":[],"approvalRequests":[],"buildRequests":[],
+        "buildRuns":[],"hosts":[],"channels":[],
+        "collaborations":[{"id":"child-work","kind":"delegation","fromTaskId":"project-chat",
+            "toTaskId":"child-task","toAgentId":"agent","text":"Child work","status":"running"}],
+        "subagentSessions":[]
+    }));
+    let mut retained = None;
+    let (_, mut visual) = cx.add_window_view(|window, cx| {
+        let pane = cx.new(|cx| ChatPane::performance_fixture(
+            "project-chat".into(), snapshot.clone(), window, cx,
+        ));
+        retained = Some(pane.clone());
+        let harness = cx.new(|_| ScrollHarness { pane });
+        gpui_kit::component::Root::new(harness, window, cx)
+    });
+    visual.simulate_resize(size(px(700.), px(600.)));
+    draw(&mut visual);
+    draw(&mut visual);
+    let pane = retained.expect("chat pane mounted");
+    let viewport = visual.update(|_, cx| {
+        pane.read(cx).decoration_bounds.pane.get().expect("pane measured")
+    });
+    let header = visual.debug_bounds("chat-pane-header").expect("chat header mounted");
+    let bar = visual.debug_bounds("pane-drawer-toolbar").expect("project bar mounted");
+    let composer = visual.debug_bounds("normal-chat-composer");
+    let transcript = visual.debug_bounds("retained-transcript-viewport");
+    assert!(bar.top() >= header.bottom(), "project bar follows chat header: {bar:?}, {header:?}");
+    assert!(bar.bottom() <= viewport.bottom() + px(1.),
+        "project bar must remain inside the visible chat pane: {bar:?}, {viewport:?}, header={header:?}, composer={composer:?}, transcript={transcript:?}");
+    assert!(bar.bottom() >= viewport.bottom() - px(100.),
+        "project bar must stay near the bottom of the chat pane: {bar:?}, {viewport:?}");
+    let before_open = visual.update(|_, cx| pane.read(cx).chrome_render_count);
+    let position = bar.origin + point(bar.size.width - px(25.), bar.size.height / 2.);
+    visual.simulate_mouse_down(position, gpui_kit::MouseButton::Left, Default::default());
+    draw(&mut visual);
+    visual.simulate_mouse_up(position, gpui_kit::MouseButton::Left, Default::default());
+    for _ in 0..4 {
+        visual.executor().advance_clock(std::time::Duration::from_millis(100));
+        visual.update(|window, cx| { window.simulate_next_frame(cx); window.draw(cx).clear(cx); });
+    }
+    assert!(visual.update(|_, cx| pane.read(cx).companion.read(cx).visor_open()),
+        "Build Queue button opens its drawer");
+    assert!(visual.update(|_, cx| pane.read(cx).chrome_render_count) > before_open,
+        "drawer animation must invalidate its cached parent layout");
+    let drawer = visual.debug_bounds("build-queue-drawer").expect("build queue drawer rendered");
+    assert!(drawer.size.height > px(50.) && drawer.bottom() <= viewport.bottom() + px(1.),
+        "opened drawer must be visible inside the pane: {drawer:?}, {viewport:?}");
+    let notifications = Rc::new(std::cell::Cell::new(0));
+    let observed = notifications.clone();
+    let _parent_changed = visual.update(|_, cx| cx.observe(&pane, move |_, cx| {
+        observed.set(observed.get() + 1);
+        let _ = cx;
+    }));
+    visual.update(|_, cx| {
+        let child = pane.read(cx).companion.clone();
+        child.update(cx, |_, cx| cx.notify());
+    });
+    visual.run_until_parked();
+    assert!(notifications.get() > 0, "open drawer invalidation must reach the cached parent");
+    let bar = visual.debug_bounds("pane-drawer-toolbar").unwrap();
+    let position = bar.origin + point(px(25.), bar.size.height / 2.);
+    visual.simulate_mouse_down(position, gpui_kit::MouseButton::Left, Default::default());
+    draw(&mut visual);
+    visual.simulate_mouse_up(position, gpui_kit::MouseButton::Left, Default::default());
+    for _ in 0..4 {
+        visual.executor().advance_clock(std::time::Duration::from_millis(100));
+        visual.update(|window, cx| { window.simulate_next_frame(cx); window.draw(cx).clear(cx); });
+    }
+    let drawer = visual.debug_bounds("subagent-drawer-list").expect("Subagents button switches drawer");
+    assert!(drawer.size.height > px(50.) && drawer.bottom() <= viewport.bottom() + px(1.),
+        "subagent drawer must be visible inside the pane: {drawer:?}, {viewport:?}");
+    let bar = visual.debug_bounds("pane-drawer-toolbar").unwrap();
+    let position = bar.origin + point(px(25.), bar.size.height / 2.);
+    visual.simulate_mouse_down(position, gpui_kit::MouseButton::Left, Default::default());
+    draw(&mut visual);
+    visual.simulate_mouse_up(position, gpui_kit::MouseButton::Left, Default::default());
+    draw(&mut visual);
+    draw(&mut visual);
+    assert!(!visual.update(|_, cx| pane.read(cx).companion.read(cx).visor_open()),
+        "second Subagents click closes the drawer");
 }

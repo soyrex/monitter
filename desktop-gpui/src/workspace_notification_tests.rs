@@ -75,6 +75,25 @@ fn mounted(cx: &mut TestAppContext, light: bool) {
             Theme::update(cx, |theme| theme.font_size=px(font));
             window.draw(cx).clear(cx);
         });
+        // Selection must change paint only: the nested edit trigger must not
+        // widen its tab or move its icon, label, badge, or neighboring tabs.
+        let selectors = ["workspace-tab-current", "workspace-tab-other", "workspace-tab-empty",
+            "workspace-edit-icon-current", "workspace-edit-icon-other", "workspace-edit-icon-empty",
+            "workspace-label-current", "workspace-label-other", "workspace-label-empty",
+            "workspace-notifications-current", "workspace-notifications-other"];
+        let before: Vec<_> = selectors.iter().map(|selector| visual.debug_bounds(selector)).collect();
+        for selected in ["other", "empty", "current"] {
+            visual.update(|_, cx| desktop.update(cx, |view, cx| {
+                view.named_workspaces.as_mut().unwrap().active_id = selected.into();
+                cx.notify();
+            }));
+            visual.run_until_parked();
+            visual.update(|window, cx| window.draw(cx).clear(cx));
+            for (selector, expected) in selectors.iter().zip(&before) {
+                assert_eq!(&visual.debug_bounds(selector), expected,
+                    "{selector} moved when selecting {selected} at width {width}, font {font}");
+            }
+        }
         let pill = visual.debug_bounds("workspace-notifications-other").expect("inactive workspace pill");
         assert_eq!(pill.size.width, pill.size.height, "notification badge stays circular");
         assert_eq!(pill.size.height, crate::design::ui_scaled_px(16.), "small badge does not grow with plan/interface text size");

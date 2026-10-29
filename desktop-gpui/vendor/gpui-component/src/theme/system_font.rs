@@ -33,15 +33,21 @@ pub(super) fn resolve_default_font(cx: &mut App) {
     if cx.global::<super::Theme>().font_family != SYSTEM_UI_FONT {
         return;
     }
+    // CoreText can resolve this one virtual family directly. Enumerating all
+    // families here delays the first window even when no substitution occurs.
+    #[cfg(not(target_os = "macos"))]
     let installed = installed_font_names(cx);
-    if installed.is_empty() {
-        return;
-    }
+    #[cfg(not(target_os = "macos"))]
+    if installed.is_empty() { return; }
     let text_system = cx.text_system();
     let resolved = text_system
         .get_font_for_id(text_system.resolve_font(&font(SYSTEM_UI_FONT)))
         .map(|font| font.family);
-    let Some(family) = substitute(SYSTEM_UI_FONT, resolved.as_deref(), installed) else {
+    #[cfg(target_os = "macos")]
+    let family = resolved.filter(|family| family != SYSTEM_UI_FONT).map(SharedString::from);
+    #[cfg(not(target_os = "macos"))]
+    let family = substitute(SYSTEM_UI_FONT, resolved.as_deref(), installed);
+    let Some(family) = family else {
         return;
     };
     tracing::info!("UI font {SYSTEM_UI_FONT:?} resolves to {family:?}, naming it on the theme.");

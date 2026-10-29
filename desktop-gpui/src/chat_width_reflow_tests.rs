@@ -118,3 +118,50 @@ fn ten_thousand_rows_reflow_without_preparation_and_keep_the_scroll_anchor(
         "Markdown must wrap at the new visible width"
     );
 }
+
+#[gpui_kit::test]
+fn narrow_final_answer_stays_inside_transcript_and_wraps(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        crate::surface_blend::initialize_for_ui_fixture();
+        crate::native_motion::initialize_for_ui_fixture(cx);
+    });
+    let snapshot = Rc::new(json!({
+        "settings":{"theme":"dark", "interfaceScale":100, "interfaceFontSize":14},
+        "tasks":[{"id":"narrow-task", "agentId":"fixture-agent", "title":"Narrow fixture",
+            "provider":"codex", "status":"idle", "queue":[], "hostId":"fixture-host", "cwd":""}],
+        "agents":[{"id":"fixture-agent", "name":"Codex", "provider":"codex"}],
+        "messages":[{"id":"narrow-final", "taskId":"narrow-task", "role":"assistant",
+            "phase":"final_answer", "streamStatus":"complete", "createdAt":1,
+            "text":"Rebuilt and installed Monitter. The release build succeeded, all 13 pane tests passed, and the installed app's signature matches the package."}],
+        "events":[], "approvalRequests":[], "sharing":{}, "hosts":[], "channels":[],
+    }));
+    let (_, visual) = cx.add_window_view(move |window, cx| {
+        ChatPane::performance_fixture("narrow-task".into(), snapshot, window, cx)
+    });
+    let mut wide_body_height = None;
+    for width in [360., 185.] {
+        visual.simulate_resize(size(gpui_kit::px(width), gpui_kit::px(700.)));
+        draw(visual);
+        draw(visual);
+        let viewport = visual.debug_bounds("retained-transcript-viewport").unwrap();
+        let bubble = visual.debug_bounds("message-bubble-narrow-final").unwrap();
+        let body = visual.debug_bounds("message-body-narrow-final").unwrap();
+        assert!(bubble.left() >= viewport.left() - gpui_kit::px(0.5),
+            "{width}px bubble starts outside transcript: {bubble:?} / {viewport:?}");
+        assert!(bubble.right() <= viewport.right() + gpui_kit::px(0.5),
+            "{width}px bubble extends outside transcript: {bubble:?} / {viewport:?}");
+        let left_margin = (bubble.left() - viewport.left()).as_f32();
+        let right_margin = (viewport.right() - bubble.right()).as_f32();
+        assert!((left_margin - right_margin).abs() <= 1.5,
+            "{width}px final answer has uneven margins: left {left_margin}px, right {right_margin}px");
+        assert!(body.right() <= bubble.right() + gpui_kit::px(0.5),
+            "{width}px body extends outside bubble: {body:?} / {bubble:?}");
+        if let Some(wide_height) = wide_body_height {
+            assert!(body.size.height > wide_height,
+                "final-answer markdown must wrap in the narrow pane");
+        } else {
+            wide_body_height = Some(body.size.height);
+        }
+    }
+}

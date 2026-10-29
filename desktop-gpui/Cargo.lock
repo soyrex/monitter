@@ -5858,6 +5858,7 @@ dependencies = [
  "ammonia",
  "anyhow",
  "argon2",
+ "async-channel",
  "base64 0.22.1",
  "block2 0.6.2",
  "chrono",

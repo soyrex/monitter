@@ -52,7 +52,9 @@ struct Entry {
 }
 #[derive(Default)]
 struct Effects {
-    source: std::rc::Weak<Value>,
+    // Pointer bookkeeping is not visual state: updating it must not notify
+    // every retained pane that reads the activity presentation.
+    source: std::cell::RefCell<std::rc::Weak<Value>>,
     obscured: HashSet<String>,
     presentation: Option<Presentation>,
     naming: HashSet<String>,
@@ -66,7 +68,7 @@ pub fn sync(snapshot: &Value, palette: Palette, cx: &mut App) -> bool {
     if cx.try_global::<Effects>().is_none() {
         cx.set_global(Effects::default());
     }
-    cx.global_mut::<Effects>().source = std::rc::Weak::new();
+    cx.global::<Effects>().source.replace(std::rc::Weak::new());
     let next = Presentation::from_snapshot(snapshot, palette);
     let completed: Vec<_> = cx.global::<Effects>().pending_titles.iter()
         .filter(|(task, title)| next.titles.get(*task) == Some(*title))
@@ -93,7 +95,7 @@ pub fn sync_cached(snapshot: &std::rc::Rc<Value>, palette: Palette, cx: &mut App
             if presentation.palette != palette || presentation.motion != native_motion::motion_allowed() {
                 return false;
             }
-            if effects.source.ptr_eq(&std::rc::Rc::downgrade(snapshot)) { return true; }
+            if effects.source.borrow().ptr_eq(&std::rc::Rc::downgrade(snapshot)) { return true; }
             if presentation.animation != native_motion::ActivityAnimation::from_snapshot(
                 snapshot["settings"]["activityAnimation"].as_str()) {
                 return false;
@@ -114,11 +116,11 @@ pub fn sync_cached(snapshot: &std::rc::Rc<Value>, palette: Palette, cx: &mut App
         })
     });
     if unchanged {
-        cx.global_mut::<Effects>().source = std::rc::Rc::downgrade(snapshot);
+        cx.global::<Effects>().source.replace(std::rc::Rc::downgrade(snapshot));
         return false;
     }
     let changed = sync(snapshot, palette, cx);
-    cx.global_mut::<Effects>().source = std::rc::Rc::downgrade(snapshot);
+    cx.global::<Effects>().source.replace(std::rc::Rc::downgrade(snapshot));
     changed
 }
 
@@ -362,18 +364,21 @@ fn for_task_scoped(
     window_id: Option<u64>,
     cx: &mut App,
 ) -> Option<Entity<SparkleField>> {
-    let presentation = cx.try_global::<Effects>()?.presentation.as_ref()?.clone();
+    let effects = cx.try_global::<Effects>()?;
+    let presentation = effects.presentation.as_ref()?;
     let anchor_key = window_id.map(|id| format!("{id}:{task}"));
     let key = anchor_key.as_ref().map_or_else(
         || format!("{surface}:{task}"),
         |anchor_key| format!("{anchor_key}:{surface}"),
     );
-    if let Some(entry) = cx.global::<Effects>().fields.get(&key) {
+    if let Some(entry) = effects.fields.get(&key) {
         return Some(entry.field.clone());
     }
-    if !effect_is_desired(&presentation, &cx.global::<Effects>().naming, task, layout) {
+    if !effect_is_desired(presentation, &effects.naming, task, layout) {
         return None;
     }
+    let (palette, motion, animation) =
+        (presentation.palette, presentation.motion, presentation.animation);
     let anchor = if matches!(layout, SparkleLayout::Tab | SparkleLayout::Header | SparkleLayout::HeaderWash | SparkleLayout::DockWash) {
         anchor_key.as_ref().map(|key| {
             cx.global_mut::<Effects>()
@@ -393,12 +398,12 @@ fn for_task_scoped(
             id,
             layout,
             mirror,
-            presentation.palette,
-            presentation.motion,
+            palette,
+            motion,
         );
         field.set_anchor(anchor);
         field.set_obscured(obscured);
-        field.set_animation(presentation.animation);
+        field.set_animation(animation);
         field
     });
     let change = field.update(cx, |field, cx| {

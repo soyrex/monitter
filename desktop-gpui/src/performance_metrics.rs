@@ -48,8 +48,10 @@ pub fn schedule(window: AnyWindowHandle, cx: &mut App) {
     cx.spawn(async move |cx| {
         cx.background_executor().timer(Duration::from_secs(warmup)).await;
         let Ok((start_input, start_frames)) = cx.update_window(window, |_, window, _| {
+            let snapshots = (window.input_latency_snapshot(), window.frame_duration_snapshot());
+            crate::performance_chat::begin(window.window_handle().window_id());
             crate::performance_scenario::begin_window_observation(window);
-            (window.input_latency_snapshot(), window.frame_duration_snapshot())
+            snapshots
         }) else { return; };
         let start_transcript = crate::chat::transcript_preparation_counts();
         let start_chrome = crate::chat::chrome_render_counts();
@@ -61,9 +63,10 @@ pub fn schedule(window: AnyWindowHandle, cx: &mut App) {
         let started = Instant::now();
         let started_at = SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|time| time.as_millis() as u64);
         cx.background_executor().timer(Duration::from_secs(duration)).await;
-        let Ok((mut input, mut frames, window_conditions)) = cx.update_window(window, |_, window, _| {
+        let Ok((mut input, mut frames, window_conditions, chat_render_diagnostics)) = cx.update_window(window, |_, window, _| {
             (window.input_latency_snapshot(), window.frame_duration_snapshot(),
-             crate::performance_scenario::finish_window_observation(window))
+             crate::performance_scenario::finish_window_observation(window),
+             crate::performance_chat::finish(window.window_handle().window_id()))
         }) else { return; };
         let subtraction = [
             input.latency_histogram.subtract(&start_input.latency_histogram),
@@ -92,6 +95,10 @@ pub fn schedule(window: AnyWindowHandle, cx: &mut App) {
             "schemaVersion": 1,
             "pid": std::process::id(),
             "windowConditions": window_conditions,
+            "chatRenderDiagnostics": chat_render_diagnostics,
+            "staticWorkingLogoOverrideEnabled": crate::performance_chat::static_working_logo_override(),
+            "retainedChatSpliceOverrideEnabled": crate::performance_chat::retained_chat_splice_override(),
+            "viewRetentionEnvironmentEnabled": std::env::var("GPUI_VIEW_RETENTION").map_or(true, |value| value != "0"),
             "debugAssertions": cfg!(debug_assertions),
             "visualExport": cfg!(feature = "visual-export"),
             "profilerEnabled": true,

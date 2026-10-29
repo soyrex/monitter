@@ -10,6 +10,7 @@ export interface WatchBuild {
 }
 export interface WatchProjection {
   request: Message | null;
+  finalReply: Message | null;
   activePlan: WorkPlan | null;
   finishedPlan: WorkPlan | null;
   progress: RunEvent | null;
@@ -60,6 +61,17 @@ export function selectWatchTeam(team: UnifiedSubagent[], since: number): Unified
     .sort((a, b) => Number(activeUnifiedSubagent(b)) - Number(activeUnifiedSubagent(a)) || a.launchedAt - b.launchedAt || a.id.localeCompare(b.id));
 }
 
+/** Match desktop Watch: only a settled root answer from the latest turn. */
+export function selectWatchFinalReply(messages: Message[], task: Task): Message | null {
+  if (!['idle', 'completed', 'succeeded'].includes(task.status)) return null;
+  const scoped = messages.filter(row => row.taskId === task.id);
+  const latestUser = scoped.filter(row => row.role === 'user').sort(newest)[0];
+  if (!latestUser) return null;
+  const answer = scoped.filter(row => row.role === 'assistant' && !row.senderAgentId && !row.collaborationId &&
+    (!row.phase || row.phase === 'final_answer') && row.createdAt >= latestUser.createdAt).sort(newest)[0];
+  return answer && answer.streamStatus !== 'streaming' && answer.text.trim() ? answer : null;
+}
+
 /** Presentation only: source records and all mutations remain backend-owned. */
 export function projectWatch(snapshot: Snapshot, task: Task, now = Date.now()): WatchProjection {
   const messages = snapshot.messages.filter(row => row.taskId === task.id && row.role === 'user');
@@ -72,7 +84,7 @@ export function projectWatch(snapshot: Snapshot, task: Task, now = Date.now()): 
   const events = latestUser ? snapshot.events.filter(row => row.taskId === task.id && row.createdAt >= latestUser.createdAt).sort(newest) : [];
   const team = selectWatchTeam(unifiedSubagentsFromSnapshot(snapshot, task.id), plan?.createdAt ?? latestUser?.createdAt ?? 0);
   return {
-    request, activePlan, finishedPlan,
+    request, finalReply: selectWatchFinalReply(snapshot.messages, task), activePlan, finishedPlan,
     progress: events.find(row => row.kind === 'agent_progress' && row.title.trim()) ?? null,
     tool: events.find(row => (row.kind === 'tool' || row.kind === 'computer') && row.title.trim()) ?? null,
     activity: events.slice(0, 8), team,

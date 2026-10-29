@@ -68,6 +68,18 @@ Monitter is a GPUI desktop workspace for real CLI and ACP agents. The desktop ru
 
 ## Working and verification
 
+### Temporary Codex command-runner workaround
+
+Until the process-reaping issue is verified fixed, use `tty: true` for Codex
+`exec_command` calls, including those made through Code Mode. On 2026-10-25,
+non-PTY commands in long-lived Monitter Codex workers finished but remained
+zombies with nonterminal tool sessions; equivalent PTY commands were reaped.
+Fresh isolated workers did not reproduce the leak, so do not assume a version
+upgrade alone fixes it. Preserve live workers and backend sessions; do not kill
+or restart them merely to clear zombies. Record an observed exit code before
+releasing a build reservation.
+
+
 - Use `npm ci` for a clean dependency install. `npm run check` checks Svelte/TypeScript; `npm run build` builds the web assets; `cargo test --manifest-path src-tauri/Cargo.toml` runs Rust tests. Choose focused tests from `scripts/` for the changed behavior, then broaden only for a concrete remaining risk.
 - `npm run dev:gpui` runs the desktop app. `npm run dev` is a browser design preview and does not run native agents. Tauri and `dev:app-ui` workflows apply only to retained mobile/web surfaces and are not desktop verification.
 - Do not purchase or provision paid services. A specific transaction requires Alex's explicit approval of vendor/account, total price and currency, term, and recurring charges before any charge or commitment; research or setup approval is not purchase approval.

@@ -152,7 +152,8 @@ fn workspace_restore_waits_for_matching_publication_without_consuming_initial_in
                 native_publication::prepare(snapshot, HashSet::new(), &changes, None).unwrap();
             let notifications = crate::notification_model::prepare_notifications(
                 &prepared.snapshot, &prepared.index, &prepared.message_updates, &changes, None);
-            view.commit_native_publication(prepared, Some("fixture:1".into()), changes, notifications, Default::default(), cx);
+            let shell_inputs = std::sync::Arc::new(crate::publication_scope::ShellInputs::prepare(&prepared.snapshot));
+            view.commit_native_publication(prepared, Some("fixture:1".into()), changes, notifications, Default::default(), shell_inputs, cx);
             view.revision = Some("fixture:older".into());
             view.restore_preferences(window, cx);
             assert!(view.preferences_restore, "stale committed publication must still defer restore");
