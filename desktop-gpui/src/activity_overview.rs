@@ -177,6 +177,7 @@ impl Filter {
 #[derive(Clone, Debug)]
 struct Card {
     task_id: String,
+    parent_id: Option<String>,
     title: String,
     agent: String,
     model: String,
@@ -435,6 +436,7 @@ impl OverviewModel {
             let (workspace_id, workspace_name, workspace_path) = workspace_identity(task);
             cards.push(Card {
                 task_id: id.into(),
+                parent_id: None,
                 title: if title.is_empty() {
                     "Untitled chat".into()
                 } else {
@@ -456,6 +458,7 @@ impl OverviewModel {
                 updated_at,
             });
         }
+        attach_parents(snapshot, &mut cards);
         cards.sort_by(|a, b| {
             a.project_name
                 .cmp(&b.project_name)
@@ -488,7 +491,7 @@ impl OverviewModel {
         } else {
             HashSet::new()
         };
-        self.cards
+        let mut visible: HashSet<&str> = self.cards
             .iter()
             .enumerate()
             .filter(|(index, card)| {
@@ -499,8 +502,21 @@ impl OverviewModel {
                 })
                     && (query.is_empty() || self.search_text[*index].contains(&query))
             })
-            .map(|(_, card)| card.clone())
-            .collect()
+            .map(|(_, card)| card.task_id.as_str())
+            .collect();
+        // Keep the actual parent visible as context when a query or state filter
+        // matches its child. A filtered-out parent must not turn into a hub spoke.
+        let parents: HashMap<&str, &str> = self.cards.iter().filter_map(|card|
+            card.parent_id.as_deref().map(|parent| (card.task_id.as_str(), parent))).collect();
+        let matching: Vec<_> = visible.iter().copied().collect();
+        for id in matching {
+            let mut current = id;
+            while let Some(parent) = parents.get(current) {
+                visible.insert(parent);
+                current = parent;
+            }
+        }
+        self.cards.iter().filter(|card| visible.contains(card.task_id.as_str())).cloned().collect()
     }
     fn count(&self, filter: Filter) -> usize {
         self.filter_counts[Filter::ALL.iter().position(|candidate| *candidate == filter).unwrap()]
@@ -510,6 +526,64 @@ impl OverviewModel {
             NativeActivityGrouping::Project => 0,
             NativeActivityGrouping::Workspace => 1,
         }]
+    }
+}
+// Only explicit delegation task IDs establish card ownership. Ambiguous, missing,
+// and cyclic links remain independent; native sessions without task cards stay in Watch.
+fn attach_parents(snapshot: &Value, cards: &mut [Card]) {
+    let indices: HashMap<String, usize> = cards.iter().enumerate()
+        .map(|(i, card)| (card.task_id.clone(), i)).collect();
+    let mut candidates = HashMap::<String, HashSet<String>>::new();
+    for link in rows(snapshot, "collaborations").iter().filter(|link| text(link, "kind") == "delegation") {
+        let parent = text(link, "fromTaskId");
+        let child = text(link, "toTaskId");
+        if parent != child && indices.contains_key(parent) && indices.contains_key(child) {
+            candidates.entry(child.into()).or_default().insert(parent.into());
+        }
+    }
+    // Native providers can expose a child as a normal task as well. Exact
+    // session identity establishes ownership; fork provenance alone does not.
+    let mut task_by_thread = HashMap::<&str, Vec<&str>>::new();
+    for task in rows(snapshot, "tasks") {
+        let thread = text(task, "nativeSessionId");
+        let id = text(task, "id");
+        if !thread.is_empty() && indices.contains_key(id) {
+            task_by_thread.entry(thread).or_default().push(id);
+        }
+    }
+    for session in rows(snapshot, "subagentSessions") {
+        if !matches!(text(session, "source"), "codex" | "acp") { continue; }
+        let parent = text(session, "parentTaskId");
+        if let Some(children) = task_by_thread.get(text(session, "agentThreadId")) {
+            if children.len() == 1 && children[0] != parent && indices.contains_key(parent) {
+                candidates.entry(children[0].into()).or_default().insert(parent.into());
+            }
+        }
+    }
+    let parents: HashMap<String, String> = candidates.into_iter().filter_map(|(child, parents)| {
+        (parents.len() == 1).then(|| (child, parents.into_iter().next().unwrap()))
+    }).collect();
+    for card in cards.iter_mut() {
+        let mut current = card.task_id.as_str();
+        let mut seen = HashSet::new();
+        let mut valid = true;
+        while let Some(parent) = parents.get(current) {
+            if !seen.insert(current) { valid = false; break; }
+            current = parent;
+        }
+        if valid { card.parent_id = parents.get(&card.task_id).cloned(); }
+    }
+    // Every descendant inherits the topmost available card's project and workspace.
+    let groups: Vec<_> = cards.iter().map(|card| (card.project_id.clone(), card.project_name.clone(),
+        card.workspace_id.clone(), card.workspace_name.clone(), card.workspace_path.clone())).collect();
+    let parent_ids: Vec<_> = cards.iter().map(|card| card.parent_id.clone()).collect();
+    for card in cards.iter_mut() {
+        let mut root = indices[&card.task_id];
+        while let Some(parent) = &parent_ids[root] { root = indices[parent]; }
+        let group = &groups[root];
+        card.project_id = group.0.clone(); card.project_name = group.1.clone();
+        card.workspace_id = group.2.clone(); card.workspace_name = group.3.clone();
+        card.workspace_path = group.4.clone();
     }
 }
 fn child_counts(snapshot: &Value) -> HashMap<String, usize> {
@@ -915,6 +989,7 @@ struct RetainedProject {
     target: Motion,
     followers: HashMap<String, Motion>,
     view_cards: Vec<String>,
+    parents: HashMap<String, String>,
 }
 impl RetainedProject {
     fn follower(&self, id: &str) -> Motion {
@@ -932,7 +1007,11 @@ impl RetainedProject {
     }
     fn card_rect(&self, id: &str) -> MapRect {
         let mut rect = self.cards[id];
-        if let Some(offset) = self.card_motion.get(id) { rect.x += offset.x; rect.y += offset.y; }
+        let mut current = Some(id);
+        while let Some(node) = current {
+            if let Some(offset) = self.card_motion.get(node) { rect.x += offset.x; rect.y += offset.y; }
+            current = self.parents.get(node).map(String::as_str);
+        }
         rect
     }
 }
@@ -991,24 +1070,60 @@ impl RetainedLayout {
         for (_, cards) in groups {
             let key = cards[0].group_id(grouping).to_owned();
             let project = self.projects.entry(key.clone()).or_default();
+            let visible: HashSet<_> = cards.iter().map(|card| card.task_id.as_str()).collect();
+            let parents: HashMap<String, String> = cards.iter().filter_map(|card| {
+                card.parent_id.as_ref().filter(|id| visible.contains(id.as_str()))
+                    .map(|id| (card.task_id.clone(), id.clone()))
+            }).collect();
             if !project.view_cards.iter().map(String::as_str)
-                .eq(cards.iter().map(|card| card.task_id.as_str())) {
+                .eq(cards.iter().map(|card| card.task_id.as_str())) || project.parents != parents {
                 let view_cards: Vec<_> = cards.iter().map(|card| card.task_id.clone()).collect();
-                if project.hub.is_none() {
-                    let (placements, _, _) = cluster_layout(cards.len());
-                    project.hub = Some(placements[0]);
-                    for (card, rect) in cards.iter().zip(placements.iter().skip(1)) {
-                        project.cards.insert(card.task_id.clone(), *rect);
+                // Reposition a changed relationship and its descendants, preserving unrelated slots.
+                let mut changed: HashSet<String> = view_cards.iter().filter(|id|
+                    project.parents.get(*id) != parents.get(*id)).cloned().collect();
+                loop {
+                    let before = changed.len();
+                    for (child, parent) in &parents { if changed.contains(parent) { changed.insert(child.clone()); } }
+                    if changed.len() == before { break; }
+                }
+                for id in &changed { project.cards.remove(id); }
+                project.parents = parents;
+                let initial = project.hub.is_none();
+                if initial {
+                    if project.parents.is_empty() {
+                        let (placements, _, _) = cluster_layout(cards.len());
+                        project.hub = Some(placements[0]);
+                        for (card, rect) in cards.iter().zip(placements.iter().skip(1)) {
+                            project.cards.insert(card.task_id.clone(), *rect);
+                        }
+                    } else {
+                        project.hub = Some(MapRect { x: 600., y: 600., w: HUB_W, h: HUB_H });
                     }
                 }
                 let hub = project.hub.unwrap();
-                for card in cards.iter() {
-                    if !project.cards.contains_key(&card.task_id) {
+                let mut pending: Vec<_> = cards.iter().collect();
+                while !pending.is_empty() {
+                    let before = pending.len();
+                    pending.retain(|card| {
+                        if project.cards.contains_key(&card.task_id) { return false; }
+                        let anchor = match project.parents.get(&card.task_id) {
+                            Some(parent) => match project.cards.get(parent) { Some(rect) => *rect, None => return true },
+                            None => hub,
+                        };
                         let mut occupied: Vec<_> = project.cards.values().copied().collect();
                         occupied.push(hub);
-                        let rect = satellite_position(hub, &occupied, project.cards.len(), true);
+                        let rect = satellite_position(anchor, &occupied, project.cards.len(), true);
                         project.cards.insert(card.task_id.clone(), rect);
-                    }
+                        false
+                    });
+                    if pending.len() == before { break; }
+                }
+                if initial && !project.parents.is_empty() {
+                    let min_x = project.cards.values().map(|r| r.x).fold(hub.x, f32::min) - 12.;
+                    let min_y = project.cards.values().map(|r| r.y).fold(hub.y, f32::min) - 12.;
+                    let hub = project.hub.as_mut().unwrap();
+                    hub.x -= min_x; hub.y -= min_y;
+                    for rect in project.cards.values_mut() { rect.x -= min_x; rect.y -= min_y; }
                 }
                 project.view_cards = view_cards;
                 view_changed = true;
@@ -1467,6 +1582,7 @@ impl ActivityOverview {
         } else {
             format!("{done} of {} steps", card.steps.len())
         };
+        if card.parent_id.is_some() { metadata.push_str(" · Subagent"); }
         if card.children > 0 {
             metadata.push_str(&format!(
                 " · {} subagent{}",
@@ -1727,12 +1843,15 @@ impl ActivityOverview {
                 let placement = placements[index + 1];
                 let end_x = placement.x + CARD_W / 2.;
                 let end_y = placement.y + CARD_H / 2.;
-                let line = MapRect { x: bounds.x + retained.target.x + hub.x.min(end_x),
-                    y: bounds.y + retained.target.y + hub.y.min(end_y),
-                    w: (hub.x - end_x).abs().max(1.), h: (hub.y - end_y).abs().max(1.) };
-                line.overlaps(viewport, 0.).then_some((placement, card.state))
+                let start = card.parent_id.as_ref().and_then(|parent| cards.iter().position(|c| &c.task_id == parent))
+                    .map(|i| Placement { x: placements[i + 1].x + CARD_W / 2., y: placements[i + 1].y + CARD_H / 2. })
+                    .unwrap_or(hub);
+                let line = MapRect { x: bounds.x + retained.target.x + start.x.min(end_x),
+                    y: bounds.y + retained.target.y + start.y.min(end_y),
+                    w: (start.x - end_x).abs().max(1.), h: (start.y - end_y).abs().max(1.) };
+                line.overlaps(viewport, 0.).then_some((start, placement, card.state))
             }).collect();
-        let animate_links = edges.iter().any(|(_, state)| *state == State::Working);
+        let animate_links = edges.iter().any(|(_, _, state)| *state == State::Working);
         let has_working = cards.iter().any(|card| card.state == State::Working);
         let motion = !cx.reduce_motion() && crate::native_motion::motion_allowed();
         let phase = Rc::new(Cell::new(0.));
@@ -1742,11 +1861,11 @@ impl ActivityOverview {
             .child(canvas(
                     |_, _, _| (),
                     move |bounds, _, window, _| {
-                        for (placement, state) in &edges {
+                        for (start_point, placement, state) in &edges {
                             let mut path = PathBuilder::stroke(scaled(1.));
                             let start = point(
-                                bounds.origin.x + scaled(hub.x),
-                                bounds.origin.y + scaled(hub.y),
+                                bounds.origin.x + scaled(start_point.x),
+                                bounds.origin.y + scaled(start_point.y),
                             );
                             let end = point(
                                 bounds.origin.x + scaled(placement.x + CARD_W / 2.),
@@ -2845,6 +2964,83 @@ mod tests {
                 .steps
                 .is_empty()
         );
+    }
+    #[test]
+    fn delegation_inherits_root_group_and_parent_layout_without_guessing() {
+        let snapshot = json!({
+            "projects":[{"id":"p","name":"Project"}],
+            "tasks":[{"id":"root","projectId":"p","cwd":"/work/project"},
+                {"id":"child"},{"id":"grandchild"},{"id":"orphan"},
+                {"id":"cycle-a"},{"id":"cycle-b"},{"id":"ambiguous"}],
+            "collaborations":[
+                {"kind":"delegation","fromTaskId":"root","toTaskId":"child"},
+                {"kind":"delegation","fromTaskId":"child","toTaskId":"grandchild"},
+                {"kind":"delegation","fromTaskId":"missing","toTaskId":"orphan"},
+                {"kind":"delegation","fromTaskId":"cycle-a","toTaskId":"cycle-b"},
+                {"kind":"delegation","fromTaskId":"cycle-b","toTaskId":"cycle-a"},
+                {"kind":"delegation","fromTaskId":"root","toTaskId":"ambiguous"},
+                {"kind":"delegation","fromTaskId":"child","toTaskId":"ambiguous"}]
+        });
+        let model = OverviewModel::from_snapshot(&snapshot);
+        let get = |id: &str| model.cards.iter().find(|card| card.task_id == id).unwrap();
+        assert_eq!(get("grandchild").parent_id.as_deref(), Some("child"));
+        assert_eq!(get("grandchild").project_id, "p");
+        assert_eq!(get("grandchild").workspace_id, get("root").workspace_id);
+        for id in ["orphan", "cycle-a", "cycle-b", "ambiguous"] {
+            assert!(get(id).parent_id.is_none());
+        }
+        let mut layout = RetainedLayout::default();
+        layout.sync(model.cards, 1000., 700., NativeActivityGrouping::Project);
+        let project = layout.projects.get_mut("p").unwrap();
+        let child = project.card_rect("child");
+        let grandchild = project.card_rect("grandchild");
+        assert!(!child.overlaps(grandchild, 9.));
+        let offset = project.card_motion.entry("root".into()).or_default();
+        offset.x = 40.; offset.y = 20.;
+        let moved = project.card_rect("grandchild");
+        assert_eq!((moved.x - grandchild.x, moved.y - grandchild.y), (40., 20.));
+    }
+    #[test]
+    fn child_search_and_state_filters_keep_ancestor_context_but_forks_stay_independent() {
+        let model = OverviewModel::from_snapshot(&json!({
+            "projects":[{"id":"p","name":"Monitter"}],
+            "tasks":[{"id":"root","projectId":"p","status":"idle"},
+                {"id":"child","title":"needle","status":"failed"},
+                {"id":"fork","parentTaskId":"root","status":"running"}],
+            "collaborations":[{"kind":"delegation","fromTaskId":"root","toTaskId":"child"}]
+        }));
+        assert!(model.cards.iter().find(|card| card.task_id == "fork").unwrap().parent_id.is_none());
+        let ids: HashSet<_> = model.visible(Filter::Failed, "needle", NativeActivityGrouping::Project)
+            .into_iter().map(|card| card.task_id).collect();
+        assert_eq!(ids, HashSet::from(["root".into(), "child".into()]));
+        assert_eq!(model.count(Filter::Failed), 1, "context parents do not inflate state counts");
+    }
+    #[test]
+    fn native_child_task_uses_exact_session_identity_and_reparents_retained_layout() {
+        let mut snapshot = json!({
+            "projects":[{"id":"p","name":"Monitter"}],
+            "tasks":[{"id":"root","projectId":"p","nativeSessionId":"root-thread"},
+                {"id":"other","projectId":"p"},
+                {"id":"child","nativeSessionId":"child-thread"}],
+            "subagentSessions":[
+                {"source":"codex","parentTaskId":"root","agentThreadId":"root-thread"},
+                {"source":"acp","parentTaskId":"root","agentThreadId":"child-thread"}]
+        });
+        let first = OverviewModel::from_snapshot(&snapshot);
+        let root = first.cards.iter().find(|card| card.task_id == "root").unwrap();
+        assert!(root.parent_id.is_none(), "the parent's own native thread is not its child");
+        assert_eq!(first.cards.iter().find(|card| card.task_id == "child").unwrap().parent_id.as_deref(), Some("root"));
+        let mut layout = RetainedLayout::default();
+        layout.sync(first.cards, 1200., 900., NativeActivityGrouping::Project);
+        let root_before = layout.projects["p"].card_rect("root");
+        snapshot["subagentSessions"][1]["parentTaskId"] = json!("other");
+        layout.sync(OverviewModel::from_snapshot(&snapshot).cards, 1200., 900., NativeActivityGrouping::Project);
+        let project = layout.projects.get_mut("p").unwrap();
+        assert_eq!(project.parents["child"], "other");
+        assert_eq!(project.card_rect("root").x, root_before.x, "reparenting preserves unrelated slots");
+        let before = project.card_rect("child");
+        project.card_motion.entry("other".into()).or_default().x = 35.;
+        assert_eq!(project.card_rect("child").x - before.x, 35., "new parent owns the retained child");
     }
     #[test]
     fn search_combines_with_filter_and_preserves_orphaned_tasks() {

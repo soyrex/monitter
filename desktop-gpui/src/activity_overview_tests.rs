@@ -64,6 +64,65 @@ fn draw(visual: &mut VisualTestContext) {
 }
 
 #[gpui_kit::test]
+fn activity_delegated_cards_follow_their_parent_in_both_themes(cx: &mut TestAppContext) {
+    for theme in ["light", "dark"] {
+        let (desktop, visual) = fixture(cx, theme, NativeTileTheme::Monitter, 14);
+        visual.simulate_resize(size(px(1800.), px(1100.)));
+        visual.update(|window, cx| {
+            cx.set_reduce_motion(true);
+            desktop.update(cx, |desktop, cx| {
+                let mut snapshot = (*desktop.snapshot).clone();
+                let now = chrono::Utc::now().timestamp_millis();
+                for id in ["delegate-one", "delegate-two", "nested-delegate"] {
+                    snapshot["tasks"].as_array_mut().unwrap().push(json!({
+                        "id":id,"title":id,"agentId":"overview-agent","projectId":null,
+                        "status":"running","updatedAt":now,"queue":[]
+                    }));
+                }
+                snapshot["collaborations"] = json!([
+                    {"id":"one","kind":"delegation","fromTaskId":"overview-task","toTaskId":"delegate-one"},
+                    {"id":"two","kind":"delegation","fromTaskId":"overview-task","toTaskId":"delegate-two"},
+                    {"id":"nested","kind":"delegation","fromTaskId":"delegate-one","toTaskId":"nested-delegate"}
+                ]);
+                desktop.snapshot = Rc::new(snapshot);
+                desktop.toggle_activity_overview(window, cx);
+            });
+        });
+        draw(visual);
+        let hub = visual.debug_bounds("activity-hub-overview-project").expect("parent project");
+        assert!(visual.debug_bounds("activity-hub-").is_none(), "delegations do not create a No project hub");
+        let parent = visual.debug_bounds("activity-card-overview-task").unwrap();
+        let child_selectors = ["activity-card-delegate-one", "activity-card-delegate-two", "activity-card-nested-delegate"];
+        let children = child_selectors.map(|selector|
+            visual.debug_bounds(selector).expect("delegated card is mounted"));
+        let cards = [parent, children[0], children[1], children[2]];
+        for (index, card) in cards.iter().enumerate() {
+            for other in cards.iter().skip(index + 1) {
+                assert!(card.right() <= other.left() || other.right() <= card.left()
+                    || card.bottom() <= other.top() || other.bottom() <= card.top(),
+                    "parent and descendants must not overlap: {card:?} / {other:?}");
+            }
+        }
+        let start = parent.center();
+        let end = gpui_kit::point(start.x + px(42.), start.y + px(24.));
+        visual.simulate_mouse_down(start, gpui_kit::MouseButton::Left, Default::default());
+        visual.simulate_mouse_move(end, Some(gpui_kit::MouseButton::Left), Default::default());
+        draw(visual);
+        let moved_parent = visual.debug_bounds("activity-card-overview-task").unwrap();
+        assert!(moved_parent.left() > parent.left(), "drag actually moves the parent");
+        for (selector, before) in child_selectors.into_iter().zip(children) {
+            let after = visual.debug_bounds(selector).unwrap();
+            assert!(((after.left() - before.left()) - (moved_parent.left() - parent.left())).abs() < px(1.),
+                "descendants move with their parent instead of orbiting the project independently");
+        }
+        assert_eq!(visual.debug_bounds("activity-hub-overview-project").unwrap(), hub,
+            "dragging a parent leaves the project hub fixed");
+        visual.simulate_mouse_up(end, gpui_kit::MouseButton::Left, Default::default());
+        visual.update(|window, _| window.remove_window());
+    }
+}
+
+#[gpui_kit::test]
 fn activity_overview_keeps_sidebar_toggle_and_hides_split_controls_at_supported_fonts(
     cx: &mut TestAppContext,
 ) {
