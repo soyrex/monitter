@@ -1383,7 +1383,8 @@ impl Desktop {
         let ready = self.workspace_ready();
         let controls_available = self.workspace_controls_available();
         let tab_metrics = design::workspace_tab_metrics(cx.theme().font_size);
-        let available_tabs_width = (window.viewport_size().width - px(440.)).max(px(120.));
+        let labeled_controls = window.viewport_size().width >= px(1600.);
+        let available_tabs_width = (window.viewport_size().width - px(if labeled_controls { 920. } else { 780. })).max(px(120.));
         let workspace_count = self.window_named_workspaces().map_or(0, |set| set.items.len());
         // Keep labels while the centered strip can comfortably fit a useful
         // width per workspace. Once it cannot, retain each workspace icon and
@@ -1661,7 +1662,7 @@ impl Desktop {
                     .ghost().compact().flex_shrink_0().toggled(!self.sidebar_is_hidden())
                     .icon(Icon::new(IconName::PanelLeft)
                         .text_color(rgb(if self.sidebar_is_hidden() { palette.ink } else { palette.accent }).opacity(0.5)))
-                    .accessibility_label(label).tooltip(label)
+                    .accessibility_label(label).tooltip(format!("{label} · Workspace navigation · ⌘B"))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(cx.workspace_listener(|view, _, window, cx| view.toggle_sidebar(window, cx))))
             })
@@ -1670,18 +1671,21 @@ impl Desktop {
                 .child(Button::new("toggle-activity-overview")
                 .ghost().compact().flex_shrink_0().toggled(self.window.activity_overview_open)
                 .icon(Icon::new(IconName::Activity).text_color(rgb(if self.window.activity_overview_open { palette.accent } else { palette.ink })))
-                .accessibility_label("Activity overview").tooltip("Activity overview")
+                .accessibility_label("Activity overview").tooltip("Activity overview · All agent tasks")
                 .disabled(!controls_available)
                 .on_click(cx.workspace_listener(|view, _, window, cx| view.toggle_activity_overview(window, cx)))))
             .child(div().flex_shrink_0().w(px(1.)).h(px(18.)).mx(px(5.)).bg(rgb(palette.ink).opacity(0.24)))
             .children(self.window.workspace_clock.clone())
             .when(!self.window.activity_overview_open, |controls| controls
             .child(div().flex_shrink_0().w(px(1.)).h(px(18.)).mx(px(5.)).bg(rgb(palette.ink).opacity(0.24)))
+            .when(labeled_controls, |controls| controls.child(div()
+                .debug_selector(|| "workspace-pane-controls-label".into())
+                .text_size(px(design::SECONDARY_TEXT_SIZE)).text_color(rgb(palette.muted)).child("Panes")))
             .child(Button::new("split-workspace-vertical")
                     .debug_selector(|| "split-workspace-vertical".into())
                     .ghost().compact().flex_shrink_0()
                     .icon(Icon::new(IconName::SquareSplitHorizontal).with_size(px(18.)).text_color(rgb(palette.muted)))
-                    .accessibility_label("Split pane vertically").tooltip("Split pane vertically")
+                    .accessibility_label("Split pane vertically").tooltip("Split the focused pane side by side")
                     .disabled(!controls_available)
                     // This row is also the native titlebar drag surface. Keep
                     // the press on the button, then wait for the ordinary
@@ -1706,7 +1710,7 @@ impl Desktop {
                     .debug_selector(|| "split-workspace-horizontal".into())
                     .ghost().compact().flex_shrink_0()
                     .icon(Icon::new(IconName::SquareSplitVertical).with_size(px(18.)).text_color(rgb(palette.muted)))
-                    .accessibility_label("Split pane horizontally").tooltip("Split pane horizontally")
+                    .accessibility_label("Split pane horizontally").tooltip("Split the focused pane above and below")
                     .disabled(!controls_available)
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(cx.workspace_listener(|view, _, window, cx| {
@@ -1724,6 +1728,9 @@ impl Desktop {
             .id("workspace-bar-right-controls")
             .debug_selector(|| "workspace-bar-right-controls".into())
             .ml_auto().flex().items_center().justify_end().gap(px(5.))
+            .when(labeled_controls, |controls| controls.child(div()
+                .debug_selector(|| "workspace-usage-controls-label".into())
+                .text_size(px(design::SECONDARY_TEXT_SIZE)).text_color(rgb(palette.muted)).child("Usage")))
             .children(self.window.workspace_usage_rings.clone())
             .map(|controls| {
                 let enabled = self.window.dock.read(cx).auto_size_panes();
@@ -1741,6 +1748,17 @@ impl Desktop {
                         })))
                     .child(div().flex_shrink_0().w(px(1.)).h(px(18.)).mx(px(5.)).bg(rgb(palette.ink).opacity(0.24)))
             })
+            .child(Button::new("workspace-command-menu")
+                .debug_selector(|| "workspace-command-menu".into())
+                .ghost().compact().flex_shrink_0()
+                .icon(Icon::new(IconName::Search).with_size(px(16.)))
+                .when(labeled_controls, |button| button.label("Commands"))
+                .accessibility_label("Open command menu")
+                .tooltip("Find commands and settings · ⌘P")
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.workspace_listener(|view, _, window, cx| {
+                    view.open_palette(crate::command_palette::PaletteMode::Commands, window, cx);
+                })))
             .child(self.ensure_admin_activity(window, cx))
             .child(self.ensure_notification_bell(window, cx));
         let bar = div()
@@ -2442,6 +2460,49 @@ mod workspace_editor_click_tests {
         }
     }
     struct KeyboardPopoverHarness(FocusHandle);
+    #[gpui_kit::test]
+    fn ux_sweep_toolbar_groups_leave_workspace_tabs_clear_and_open_commands(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let mut retained = None;
+        let (_, visual) = cx.add_window_view(|window, cx| {
+            let desktop = cx.new(|cx| {
+                let mut view = Desktop::new(window, cx);
+                view.preferences = Some(NativePreferences::default());
+                view.preferences_busy = false;
+                view.named_workspaces = Some(NativeWorkspaceSet {
+                    active_id: "one".into(),
+                    items: ["one", "two", "three", "four", "five", "six"].into_iter().map(|id| NativeWorkspace {
+                        id: id.into(), name: format!("Workspace {id}"), icon: "folder".into(),
+                        color: "#38BFD2".into(), url: None, layout: Some(super::empty_layout()),
+                    }).collect(),
+                });
+                view
+            });
+            retained = Some(desktop.clone());
+            component::Root::new(cx.new(|_| Harness(desktop)), window, cx)
+        });
+        let desktop = retained.unwrap();
+        for scale in [100, 125, 150] {
+        design::set_interface_scale(scale);
+        for width in [900., 1600., 2400.] {
+            visual.simulate_resize(size(px(width), px(500.)));
+            visual.run_until_parked();
+            visual.update(|window, cx| window.draw(cx).clear(cx));
+            let left = visual.debug_bounds("workspace-bar-left-controls").unwrap();
+            let right = visual.debug_bounds("workspace-bar-right-controls").unwrap();
+            let tabs = visual.debug_bounds("named-workspace-tabs").unwrap();
+            assert!(left.right() <= tabs.left() && tabs.right() <= right.left(),
+                "toolbar groups obscure workspace tabs at {width}, {scale}%: {left:?}, {tabs:?}, {right:?}");
+            assert_eq!(visual.debug_bounds("workspace-pane-controls-label").is_some(), px(width) >= design::ui_scaled_px(1600.));
+        }
+        }
+        let command = visual.debug_bounds("workspace-command-menu").unwrap();
+        visual.simulate_click(command.center(), Default::default());
+        visual.run_until_parked();
+        assert!(desktop.read_with(visual, |view, _| view.window.palette.is_some()),
+            "command discovery uses the existing native palette");
+        design::set_interface_scale(100);
+    }
     impl Render for KeyboardPopoverHarness {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             gpui_kit::base::Popover::new("workspace-keyboard-popover")

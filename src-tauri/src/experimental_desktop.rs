@@ -283,6 +283,7 @@ impl Default for NativeChatPanePreferences {
 pub enum NativeDetailTab {
     Details,
     Timeline,
+    Events,
     Approvals,
     Subagents,
 }
@@ -788,6 +789,7 @@ fn native_preferences_write(_: &std::path::Path, _: &[u8]) -> Result<(), String>
 }
 
 const LOCAL: &[&str] = &[
+    "get_task_captured_events",
     "summarize_notification", "summarize_archived_task", "rename_all", "read_admin_activity",
     "read_project_build_queue", "recover_project_build",
     "get_command_capabilities",
@@ -1378,6 +1380,11 @@ impl BackendService {
                 capabilities.commands.dedup();
                 encode(capabilities)
             }
+            "get_task_captured_events" => encode(service.task_captured_events(
+                &arg::<String>(&args, "taskId")?,
+                args.get("before").filter(|value| !value.is_null()).cloned().map(serde_json::from_value).transpose().map_err(|_| "Invalid before.")?,
+                args.get("limit").filter(|value| !value.is_null()).cloned().map(serde_json::from_value).transpose().map_err(|_| "Invalid limit.")?,
+            )?),
             "read_admin_activity" => service.read_admin_activity(),
             "rename_all" => {
                 service.rename_all(arg(&args, "targets")?)?;
@@ -1989,6 +1996,42 @@ mod tests {
         assert_eq!(project.ideas_revision, 1);
         assert!(saved.messages.iter().any(|m| m.id == "large-history" && m.text.len() > 32 * 1024 * 1024));
         drop(saved); desktop.shutdown(); drop(desktop);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn codex_observation_native_dispatch_is_owner_local_and_paginated() {
+        let dir = std::env::temp_dir().join(format!("gpui-capture-dispatch-{}", uuid::Uuid::new_v4()));
+        let service = Service::open(None, dir.clone()).unwrap();
+        let desktop = BackendService(Arc::new(Session {
+            lan_control: std::sync::Mutex::new(()), service,
+            preferences: NativePreferenceStore::new(dir.clone()),
+        }));
+        let snapshot = desktop.invoke("get_ui_snapshot", json!({})).unwrap();
+        let created = desktop.invoke("create_task", json!({"input":{
+            "agentId":snapshot["snapshot"]["agents"][0]["id"], "title":"Capture dispatcher fixture"
+        }})).unwrap();
+        let task_id = created["id"].as_str().unwrap();
+        desktop.0.service.mutate_data(None, |data| {
+            for (event_id, kind) in [("native-fact", "codexObservation"), ("ordinary-log", "log")] {
+                data.snapshot.events.push(Arc::new(crate::model::RunEvent {
+                    id: event_id.into(), task_id: task_id.into(), kind: kind.into(), title: "fixture".into(),
+                    detail: "{}".into(), created_at: crate::model::now(),
+                }));
+            }
+            Ok(())
+        }).unwrap();
+        let page = ipc::dispatch(&desktop, "invoke", json!({"command":"get_task_captured_events", "args":{"taskId":task_id,"limit":1}})).unwrap();
+        assert_eq!(page["events"].as_array().unwrap().len(), 1);
+        assert_eq!(page["events"][0]["id"], "native-fact");
+        assert!(page["nextBefore"].is_null());
+        let caps = desktop.invoke("get_command_capabilities", json!({})).unwrap();
+        assert!(caps["commands"].as_array().unwrap().iter().any(|command| command == "get_task_captured_events"));
+        let error = desktop.0.service.lan_invoke("get_task_captured_events", json!({"taskId":task_id})).unwrap_err();
+        assert!(error.contains("not available"), "capture read escaped into LAN: {error}");
+        assert!(desktop.invoke("get_task_captured_events", json!({"taskId":"missing"})).is_err());
+        desktop.shutdown();
+        drop(desktop);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

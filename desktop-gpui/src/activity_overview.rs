@@ -1,5 +1,6 @@
 //! A retained, read-only map of the workspace's real chats and project teams.
 use crate::design::{self, Palette, ui_scaled_px as px};
+use gpui_kit::component::tooltip::{ManagedTooltipExt as _, Tooltip};
 use gpui_kit::{
     component::{
         ActiveTheme as _, Sizable,
@@ -432,16 +433,12 @@ impl OverviewModel {
                         provider
                     }
                 });
-            let title = text(task, "title");
+            let title = crate::task_identity::title(task, rows(snapshot, "messages").iter());
             let (workspace_id, workspace_name, workspace_path) = workspace_identity(task);
             cards.push(Card {
                 task_id: id.into(),
                 parent_id: None,
-                title: if title.is_empty() {
-                    "Untitled chat".into()
-                } else {
-                    title.into()
-                },
+                title,
                 agent: agent_name.into(),
                 model: text(task, "model").into(),
                 provider: text(task, "provider").into(),
@@ -1530,7 +1527,11 @@ impl ActivityOverview {
         let zoom = if list { 1. } else { self.zoom };
         let ratio = interface_font_ratio(cx.theme().font_size);
         let scaled = |n: f32| px(n * zoom * ratio);
-        let small = scaled(10.);
+        // Keep labels readable while removing optional rows at overview scale.
+        let dense = !list && zoom * ratio < 0.8;
+        let small = scaled(10.).max(px(11.));
+        let line = scaled(12.).max(px(14.));
+        let header_line = scaled(14.).max(px(14.));
         let color = tone(card.state.color(p));
         let mut background = design::surface_color(p.card);
         // Tint the selected theme surface while retaining configured translucency.
@@ -1597,15 +1598,21 @@ impl ActivityOverview {
                     .size(scaled(14.))
                     .into_any_element()
             });
+        let card_title = card.title.clone();
+        let title_selector = format!("activity-card-title-{}", card.task_id);
+        let tooltip_title = card.title.clone();
         let title = div()
-            .h(scaled(14.))
+            .id(SharedString::from(format!("activity-card-title-tooltip-{}", card.task_id)))
+            .managed_tooltip(move |window, cx| Tooltip::new(tooltip_title.clone()).build(window, cx))
+            .debug_selector(move || title_selector.clone().into())
+            .h(header_line)
             .flex_shrink_0()
             .flex()
             .items_center()
             .gap(scaled(6.))
             .min_w_0()
             .w_full()
-            .child(
+            .when(!dense, |header| header.child(
                 div()
                     .size(scaled(14.))
                     .flex_shrink_0()
@@ -1617,15 +1624,26 @@ impl ActivityOverview {
                     .items_center()
                     .justify_center()
                     .child(identity),
-            )
+            ))
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .truncate()
                     .font_weight(FontWeight::MEDIUM)
-                    .child(card.agent.clone()),
-            )
+                    .child(card_title),
+            );
+        let provider_selector = format!("activity-card-provider-{}", card.task_id);
+        let provider = div()
+            .debug_selector(move || provider_selector.clone().into())
+            .h(line)
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap(scaled(4.))
+            .text_size(small)
+            .text_color(rgb(p.muted))
+            .child(div().flex_1().min_w_0().truncate().child(card.agent.clone()))
             .child(
                 div()
                     .flex_shrink_0()
@@ -1640,8 +1658,6 @@ impl ActivityOverview {
                     } else { div().size(scaled(4.)).rounded_full().bg(rgb(color)).into_any_element() })
                     .child(card.state.label()),
             );
-        let card_title = card.title.clone();
-        let title_selector = format!("activity-card-title-{}", card.task_id);
         let footer_selector = format!("activity-card-footer-{}", card.task_id);
         let mut body = div()
             .id(SharedString::from(format!(
@@ -1651,12 +1667,12 @@ impl ActivityOverview {
             .debug_selector(move || format!("activity-card-{task_id}").into())
             .flex()
             .flex_col()
-            .gap(scaled(5.))
+            .gap(scaled(3.))
             .min_w_0()
             .relative()
             .overflow_hidden()
-            .px(scaled(12.))
-            .py(scaled(10.))
+            .px(scaled(10.))
+            .py(scaled(6.))
             .rounded(scaled(12.))
             .border_1()
             .border_color(outline)
@@ -1678,8 +1694,8 @@ impl ActivityOverview {
                 shadows
             })
             .text_color(rgb(p.ink))
-            .text_size(scaled(11.))
-            .line_height(scaled(12.))
+            .text_size(scaled(11.).max(px(11.)))
+            .line_height(line)
             .cursor_pointer()
             .hover(move |style| {
                 style
@@ -1690,42 +1706,34 @@ impl ActivityOverview {
                 crate::activity_effects::for_task(&card.task_id, "activity-overview-card",
                     crate::activity_sparkles::SparkleLayout::Compact, false, cx)))
             .child(title)
+            .child(provider)
             .child(progress)
-            .child(
-                div()
-                    .w_full()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(small)
-                    .h(scaled(12.))
-                    .flex_shrink_0()
-                    .debug_selector(move || title_selector.clone().into())
-                    .child(card_title),
-            )
-            .child(
+            .when(!dense, |body| body.child(
                 div()
                     .flex()
                     .items_center()
                     .gap(scaled(4.))
                     .text_size(small)
                     .text_color(rgb(p.muted))
+                    .h(line)
+                    .flex_shrink_0()
                     .child(div().flex_1().min_w_0().truncate().child(metadata))
                     .when(card.attention > 0, |el| {
                         el.child(div().text_color(rgb(color)).child("Reply →"))
                     }),
-            )
-            .child(
+            ))
+            .when(!dense, |body| body.child(
                 div()
                     .text_size(small)
                     .text_color(rgb(p.muted))
-                    .h(scaled(12.))
+                    .h(line)
                     .flex_shrink_0()
                     .debug_selector(move || footer_selector.clone().into())
                     .child(updated_label(
                         card.updated_at,
                         chrono::Utc::now().timestamp_millis(),
                     )),
-            );
+            ));
         let task_id = card.task_id.clone();
         if !list {
             let group = card.group_id(self.grouping).to_owned();
@@ -2679,6 +2687,76 @@ mod tests {
     };
     use serde_json::json;
     use std::collections::HashSet;
+    #[test]
+    fn ux_sweep_activity_cards_use_distinct_task_identity() {
+        let model = OverviewModel::from_snapshot(&json!({
+            "tasks":[{"id":"first","title":"New chat","status":"idle"},
+                {"id":"second","title":"","status":"idle"},
+                {"id":"third","title":"Named task","status":"idle"}],
+            "messages":[{"taskId":"first","role":"user","text":"Investigate native focus","createdAt":1}]
+        }));
+        let title = |id: &str| model.cards.iter().find(|card| card.task_id == id).unwrap().title.as_str();
+        assert_eq!(title("first"), "Investigate native focus");
+        assert_eq!(title("second"), "New chat · second");
+        assert_eq!(title("third"), "Named task");
+    }
+
+    #[gpui_kit::test]
+    fn ux_sweep_activity_card_native_geometry_at_overview_zoom(cx: &mut gpui_kit::TestAppContext) {
+        use gpui_kit::{AppContext as _, IntoElement, Entity, Render, Window, Context};
+        struct Harness(Entity<super::ActivityOverview>);
+        impl Render for Harness {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                self.0.update(cx, |view, cx| {
+                    let card = view.model.cards[0].clone();
+                    view.card(&card, false, cx)
+                })
+            }
+        }
+        cx.update(|cx| { gpui_kit::init(cx); crate::native_motion::initialize_for_ui_fixture(cx); });
+        let mut retained = None;
+        let (_, visual) = cx.add_window_view(|window, cx| {
+            let overview = cx.new(|cx| {
+                let mut view = super::ActivityOverview::new(window, cx);
+                view.model = OverviewModel::from_snapshot(&json!({
+                    "agents":[{"id":"agent","name":"Codex"}],
+                    "tasks":[{"id":"geometry","agentId":"agent","provider":"codex",
+                        "title":"A distinctive task title that requires truncation at compact zoom",
+                        "status":"idle"}]
+                }));
+                view
+            });
+            retained = Some(overview.clone());
+            gpui_kit::component::Root::new(cx.new(|_| Harness(overview)), window, cx)
+        });
+        let overview = retained.unwrap();
+        visual.simulate_resize(gpui_kit::size(px(700.), px(500.)));
+        for zoom in [0.5, 0.9, 1.5] {
+            overview.update(visual, |view, cx| { view.zoom = zoom; cx.notify(); });
+            visual.run_until_parked();
+            visual.update(|window, cx| window.draw(cx).clear(cx));
+            let card = visual.debug_bounds("activity-card-geometry").expect("card bounds");
+            let title = visual.debug_bounds("activity-card-title-geometry").expect("title bounds");
+            let provider = visual.debug_bounds("activity-card-provider-geometry").expect("provider bounds");
+            assert!(title.size.height >= px(14.), "title line stays readable at {zoom}");
+            assert!(provider.size.height >= px(14.), "provider line stays readable at {zoom}");
+            assert!(title.origin.y + title.size.height <= provider.origin.y, "rows do not overlap at {zoom}");
+            for row in [title, provider] {
+                assert!(row.origin.x >= card.origin.x && row.origin.y >= card.origin.y);
+                assert!(row.origin.x + row.size.width <= card.origin.x + card.size.width);
+                assert!(row.origin.y + row.size.height <= card.origin.y + card.size.height);
+            }
+            if zoom >= 0.8 {
+                let footer = visual.debug_bounds("activity-card-footer-geometry").expect("full density footer");
+                assert!(footer.origin.y + footer.size.height <= card.origin.y + card.size.height,
+                    "footer fits inside fixed card at {zoom}");
+                assert!(provider.origin.y + provider.size.height <= footer.origin.y);
+            } else {
+                assert!(visual.debug_bounds("activity-card-footer-geometry").is_none());
+            }
+        }
+    }
+
     #[test]
     fn activity_overview_wash_uses_its_project_color() {
         let snapshot = json!({"projects": [

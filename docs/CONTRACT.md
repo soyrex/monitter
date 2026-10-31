@@ -374,6 +374,13 @@ reconnection and a new authoritative snapshot.
   truncated detail is explicitly labelled. Each page has at most 100 events and 128 KiB of
   detail. Original diagnostics remain stored locally. The UI refreshes these pages only while
   the timeline is visible; this traffic is independent of ordinary chat refreshes.
+- `get_task_captured_events { taskId: string, before?: number, limit?: number }` ->
+  `{ events: RunEvent[], nextBefore: number | null }`. Owner-local desktop service only.
+  It filters persisted `codexObservation` records before pagination. `before` is an
+  exclusive index within that task's captured records; pages are newest-first,
+  at most 100 events and 128 KiB of detail. Appending newer records preserves older
+  cursors. The native pane's Events tab loads these pages while visible, refreshes
+  its head every second, and exposes older pages on demand.
 - `get_process_metrics {}` -> `{ cpuTimeMs, residentMemoryBytes, sampledAt, rootPid, processes[] }`.
   Read-only native/LAN sample of the Monitter process tree, including live CLI/ACP harnesses and
   their descendants. CPU time is cumulative, including reaped child CPU, so clients can calculate
@@ -2993,6 +3000,21 @@ animated inputs show their first frame. Filename text is escaped, and the previe
 network or Monitter IPC access. Remote task file paths retain the existing rejection; HTTP(S)
 image URLs continue to use normal browser navigation. Source files still open in the editor.
 
+### Native document references
+
+GPUI presents complete `:codex-file-citation{path="..." purpose="output"}`
+references as filename links without modifying stored messages. Literal code and
+malformed or incomplete references remain literal; complete references can become
+links during streaming while surrounding streamed prose stays literal. Citation
+scans are bounded per directive. Paths containing URI schemes, control characters,
+or unsupported Windows syntax are not reinterpreted.
+
+Local PDF, Office, OpenDocument, RTF and supported Apple document links open with
+the system document handler after an off-thread regular-file check. Missing files
+produce a visible error. Markdown, images, HTML and source links retain their
+existing native routing; remote task file paths remain rejected. This changes
+presentation and local link routing only and adds no IPC or LAN authority.
+
 ### Backend owner restart
 
 The GPUI backend menu alone can request a typed `RestartMode::Wait` or
@@ -3162,6 +3184,28 @@ Standard agent instructions and MCP initialization guidance direct agents to use
 Codex `mcpToolCall`, `commandExecution`, and `fileChange` started/completed notifications with the same provider item ID update one diagnostic `RunEvent` within a task and run. Its opaque UUID and original timestamp remain stable; the latest full provider payload replaces the previous detail, including in persisted/cold history. A later running replay cannot replace an observed terminal result. Different provider item IDs and later runs remain separate, even if tool names or arguments match. Notifications without a recognized lifecycle identity retain ordinary append behavior. This does not merge separate MCP requests or change their execution/accounting.
 
 The native activity row uses the MCP server and a readable tool name in its summary. Explicit running status uses a spinner, observed completion a tick, and failure/cancellation an alert; unknown status retains its type icon. Disclosure carets sit at the right edge and root activity icons align with the transcript/avatar column. Existing saved duplicate rows are retained; no history migration or backend restart is performed by this UI change.
+
+### Captured Codex events
+
+Accepted native Codex app-server frames produce durable records with
+`RunEvent.kind: 'codexObservation'` independently of diagnostic activity. The JSON in
+`detail` has `schemaVersion: 1`, `source: 'codexAppServer'`, `eventType`, `threadId`
+and `turnId`. Event types are `turnStarted`, `turnCompleted`, `itemStarted`,
+`itemCompleted`, `inputRequested` and `approvalRequested`. Optional fields are
+`itemId`, `requestId`, an allowlisted `itemType` and `outcome`, observed `exitCode`,
+and `changeCount`. No command arguments, file paths, diffs, output, prompts or
+answers enter this capture format. Exact normalized retransmissions deduplicate.
+
+Capture retains the native run/thread/turn ownership checks and excludes internal
+admin turns. Only current-turn scoped frames are captured; late old-turn command
+exits still perform existing job cleanup without adding an observation. A turn
+completion records the provider's observed status, not verified task success.
+There is no transcript backfill or inference of intent. Captured records are
+excluded from the compact live diagnostic tail so they do not displace tool or
+reasoning activity. The GPUI pane sidebar has a separately scrollable,
+virtualized Events tab with timestamps, metadata disclosure, loading and retry.
+Its tab selection is saved with the pane preferences. This layer observes and
+displays events; it does not execute rules or actions.
 
 ### Active project roster (agent coordination)
 

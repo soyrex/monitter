@@ -321,6 +321,24 @@ impl Service {
         })
     }
 
+    pub(crate) fn capture_codex_observation(
+        &self, task_id: &str, control: &Arc<RunControl>, turn_id: &str,
+        fact: crate::codex_app_server::CodexObservation,
+    ) -> Result<(), String> {
+        if self.is_internal_admin_task(task_id) { return Ok(()); }
+        let detail = serde_json::to_string(&fact).map_err(|error| error.to_string())?;
+        self.app_server_mutate(task_id, control, Some(turn_id), |data, _| {
+            // Exact normalized source facts deduplicate retransmissions while
+            // preserving distinct status/exit outcomes for the same item.
+            if data.snapshot.events.iter().rev().any(|event| event.task_id == task_id
+                && event.kind == "codexObservation" && event.detail.as_ref() == detail) { return Ok(()); }
+            let title = fact.event_type.clone();
+            data.snapshot.events.push(Arc::new(RunEvent { id: id(), task_id: task_id.into(),
+                kind: "codexObservation".into(), title, detail: detail.into(), created_at: now() }));
+            Ok(())
+        })
+    }
+
     pub(crate) fn app_server_event(
         &self,
         task_id: &str,

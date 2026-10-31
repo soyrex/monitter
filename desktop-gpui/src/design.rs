@@ -348,8 +348,10 @@ mod surface_tests {
     }
 }
 
-// Sidebar tab strip — `AppSurface.svelte` `.sidebar-tab`.
-pub const SIDEBAR_TAB_FONT_SIZE: f32 = 9.;
+/// Readable secondary interface text at the default native interface scale.
+pub const SECONDARY_TEXT_SIZE: f32 = 12.;
+// Sidebar tabs retain full names in the horizontally scrolling native strip.
+pub const SIDEBAR_TAB_FONT_SIZE: f32 = SECONDARY_TEXT_SIZE;
 pub const SIDEBAR_TAB_LETTER_SPACING_EM: f32 = 0.08;
 
 // Icon sizes — match Lucide usage in the Svelte components.

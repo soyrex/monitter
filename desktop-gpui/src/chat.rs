@@ -230,20 +230,6 @@ pub(crate) struct MessageStreamPresentation {
     pub(crate) status_label: Option<&'static str>,
 }
 
-fn escape_markdown_plain_text(text: &str) -> String {
-    let mut escaped = String::with_capacity(text.len());
-    for character in text.chars() {
-        if character == '\n' {
-            // A Markdown hard break retains the literal streamed line boundary.
-            escaped.push('\\');
-        } else if character.is_ascii_punctuation() {
-            escaped.push('\\');
-        }
-        escaped.push(character);
-    }
-    escaped
-}
-
 pub(crate) fn message_stream_presentation(
     message: &Value,
     visible_text: &str,
@@ -254,9 +240,9 @@ pub(crate) fn message_stream_presentation(
         markdown_source: if streaming {
             // TextView is selectable but Markdown-backed. Escape punctuation so a
             // live partial answer stays literal until the backend marks it complete.
-            escape_markdown_plain_text(visible_text)
+            crate::chat_links::normalize_streaming_document_citations(visible_text)
         } else {
-            visible_text.to_owned()
+            crate::chat_links::normalize_document_citations(visible_text)
         },
         status_label: match status.as_str() {
             "streaming" => Some("Receiving…"),
@@ -270,6 +256,18 @@ pub(crate) fn message_stream_presentation(
 mod message_stream_tests {
     use super::*;
     use serde_json::json;
+
+    #[::core::prelude::v1::test]
+    fn ux_sweep_document_links_survive_live_and_restored_presentations() {
+        let text = "Ready :codex-file-citation{path=\"docs/result.pdf\"}";
+        for status in ["streaming", "completed", "interrupted"] {
+            let message = json!({"role":"assistant", "streamStatus":status});
+            let rendered = message_stream_presentation(&message, text);
+            assert!(rendered.markdown_source.contains("[result\\.pdf](<./docs/result.pdf>)"));
+            assert!(!rendered.markdown_source.contains("codex-file-citation"));
+            assert_eq!(text, "Ready :codex-file-citation{path=\"docs/result.pdf\"}");
+        }
+    }
 
     #[::core::prelude::v1::test]
     fn composer_enter_matches_tauri_send_preference_and_shift() {
@@ -477,7 +475,7 @@ fn operator_colour(name: &str) -> u32 {
 
 fn visible_chat_activity(event: &Value, settings: &Value) -> bool {
     match event["kind"].as_str().unwrap_or_default() {
-        "computer" => false,
+        "computer" | "codexObservation" => false,
         "tool" => settings["showToolActivity"].as_bool() != Some(false),
         "reasoning" => settings["showReasoningSummaries"].as_bool() != Some(false),
         _ => true,
@@ -841,8 +839,10 @@ pub struct ChatPane {
     transcript_preparation_key: Option<TranscriptPreparationKey>,
     detail_tab: crate::companion_sidebar::DetailTab,
     detail_tabs_motion: Rc<std::cell::RefCell<crate::sidebar_tabs_motion::SidebarTabsMotion>>,
-    detail_focus: [FocusHandle; 4],
+    detail_focus: [FocusHandle; 5],
     details: Entity<crate::pane_details::PaneDetails>,
+    events: Entity<crate::pane_events::PaneEvents>,
+    _events_change: Subscription,
     approvals: Entity<crate::pane_approvals::PaneApprovals>,
     approval_popup_id: Option<String>,
     pub(super) interaction_request_id: Option<String>,
@@ -1198,6 +1198,10 @@ impl ChatPane {
                 cx,
             )
         });
+        let events = cx.new(|cx| crate::pane_events::PaneEvents::new(
+            service.clone(), snapshot.clone(), &task_id, cx,
+        ));
+        let events_change = cx.observe(&events, |_, _, cx| cx.notify());
         let details_change = cx.subscribe(
             &details,
             |_, _, event: &crate::pane_details::PaneDetailsEvent, cx| match event {
@@ -1375,6 +1379,8 @@ impl ChatPane {
             detail_tabs_motion: Default::default(),
             detail_focus: std::array::from_fn(|_| cx.focus_handle()),
             details,
+            events,
+            _events_change: events_change,
             approvals,
             approval_popup_id: None,
             interaction_request_id: None,
@@ -1616,6 +1622,7 @@ impl ChatPane {
             self.companion.entity_id(),
             self.agent_graph.entity_id(),
             self.details.entity_id(),
+            self.events.entity_id(),
             self.approvals.entity_id(),
             self.companion_resize.entity_id(),
         ];
@@ -1915,6 +1922,10 @@ impl ChatPane {
             self.streaming_bodies_initialized = false;
         }
         self.dock_visible = visible;
+        self.events.update(cx, |pane, cx| pane.set_visible(
+            visible && self.companion_visible && !self.agent_graph_visible
+                && self.detail_tab == crate::companion_sidebar::DetailTab::Events, cx,
+        ));
         self.composer_git
             .update(cx, |strip, cx| strip.set_visible(visible, cx));
         self.attachments
@@ -2280,6 +2291,9 @@ impl ChatPane {
             });
             self.details.update(cx, |pane, cx| {
                 pane.set_context_shared(snapshot.clone(), revision.as_deref(), &context.1, cx)
+            });
+            self.events.update(cx, |pane, cx| {
+                pane.set_context(snapshot.clone(), &context.1, cx)
             });
             self.approvals.update(cx, |pane, cx| {
                 pane.set_context(&snapshot, revision.as_deref(), context.1.clone(), cx)
@@ -3256,6 +3270,7 @@ impl ChatPane {
             tab: match self.detail_tab {
                 DetailTab::Details => NativeDetailTab::Details,
                 DetailTab::Timeline => NativeDetailTab::Timeline,
+                DetailTab::Events => NativeDetailTab::Events,
                 DetailTab::Approvals => NativeDetailTab::Approvals,
                 DetailTab::Subagents => NativeDetailTab::Subagents,
             },
@@ -3280,6 +3295,7 @@ impl ChatPane {
         self.detail_tab = match saved.tab {
             NativeDetailTab::Details => DetailTab::Details,
             NativeDetailTab::Timeline => DetailTab::Timeline,
+            NativeDetailTab::Events => DetailTab::Events,
             NativeDetailTab::Approvals => DetailTab::Approvals,
             NativeDetailTab::Subagents => DetailTab::Subagents,
         };
@@ -5549,6 +5565,7 @@ impl Render for ChatPane {
             cx,
         );
         if self.agent_graph_visible {
+            self.events.update(cx, |pane, cx| pane.set_visible(false, cx));
             let bar = self.companion.update(cx, |pane, cx| {
                 pane.render_graph_bar(
                     palette,
@@ -6151,6 +6168,11 @@ impl Render for ChatPane {
         }
         let detail_mounted =
             self.pane_width_design > 0.0 && (self.companion_visible || detail_progress > 0.0);
+        self.events.update(cx, |pane, cx| {
+            pane.set_context(self.snapshot.clone(), &self.task_id(), cx);
+            pane.set_visible(self.dock_visible && detail_mounted && self.companion_visible
+                && self.detail_tab == crate::companion_sidebar::DetailTab::Events, cx);
+        });
         self.companion.update(cx, |pane, cx| {
             pane.set_surface_visibility(
                 self.dock_visible
@@ -6193,6 +6215,9 @@ impl Render for ChatPane {
                 DetailTab::Timeline => self
                     .details
                     .update(cx, |pane, cx| pane.render_timeline(palette, window, cx)),
+                DetailTab::Events => self
+                    .events
+                    .update(cx, |pane, cx| pane.render_body(palette, window, cx)),
                 DetailTab::Approvals => self
                     .approvals
                     .update(cx, |pane, cx| pane.render_body(palette, window, cx)),
@@ -7059,7 +7084,8 @@ impl ChatPane {
                 .find(|agent| field(agent, "id") == field(task, "agentId"))
         });
         let title = task
-            .map(|task| field(task, "title"))
+            .map(|task| crate::task_identity::title(task,
+                self.snapshot["messages"].as_array().into_iter().flatten()))
             .unwrap_or_else(|| "Workspace".into());
         let title = if crate::activity_effects::is_naming(&self.task_id(), cx) {
             crate::naming_title::render(
@@ -7257,10 +7283,10 @@ impl ChatPane {
             })
             .when(self.watcher.enabled, |header| {
                 header.child(Button::new("chat-mode-chat")
-                    .compact().ghost().w(px(avatar_size)).h(px(avatar_size)).p_0()
+                    .compact().ghost().px(px(8.)).h(px(avatar_size)).label("Chat")
                     .icon(Icon::default().data(gpui_kit::assets::__private::ArrowLeft.1).with_size(px(14.)))
                     .debug_selector(|| "chat-mode-chat".into())
-                    .accessibility_label("Show chat").tooltip("Return to chat")
+                    .accessibility_label("Show chat").tooltip("Return this pane to Chat mode")
                     .on_click(cx.listener(|pane, _, window, cx| pane.toggle_watcher(window, cx))))
             })
             .when(!self.watcher.enabled, |header| {

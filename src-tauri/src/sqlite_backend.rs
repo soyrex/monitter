@@ -464,6 +464,33 @@ impl Database {
         let next = before - events.len() as i64;
         Ok(crate::lan_sync::TaskEventsPage { events, next_before: (next > 0).then_some(next) })
     }
+    pub(crate) fn captured_event_page(&self,task_id:&str,before:Option<i64>,limit:Option<u32>)->Result<crate::lan_sync::TaskEventsPage,String> {
+        let connection=self.lock()?;
+        let count:i64=connection.query_row("SELECT count(*) FROM entities WHERE collection='events' AND task_id=?1 AND json_extract(payload, '$.kind')='codexObservation'",[task_id],|row|row.get(0)).map_err(|e|e.to_string())?;
+        let before=before.unwrap_or(count).clamp(0,count);
+        let limit=limit.unwrap_or(60).clamp(1,crate::lan_sync::MAX_EVENT_PAGE as u32);
+        let mut statement = connection.prepare(
+            "SELECT payload FROM entities WHERE collection='events' AND task_id=?1 AND json_extract(payload, '$.kind')='codexObservation' ORDER BY position DESC LIMIT ?2 OFFSET ?3",
+        ).map_err(|e| e.to_string())?;
+        let rows = statement.query_map(params![task_id, i64::from(limit), count-before], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        let mut events = Vec::new();
+        let mut used = 0;
+        // Decode one durable body at a time; a page never retains all of its
+        // potentially large source payloads before applying the byte budget.
+        for row in rows.take(before as usize) {
+            if used >= crate::lan_sync::MAX_EVENT_PAGE_DETAIL_BYTES { break; }
+            let event: RunEvent = serde_json::from_str(&row.map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+            let available = crate::lan_sync::MAX_EVENT_PAGE_DETAIL_BYTES - used;
+            // A typed fact is indivisible. Leave this row for the next page
+            // rather than returning invalid JSON or advancing past it.
+            if event.detail.len() > available { break; }
+            used += event.detail.len();
+            events.push(event);
+        }
+        let next = before - events.len() as i64;
+        Ok(crate::lan_sync::TaskEventsPage { events, next_before: (next > 0).then_some(next) })
+    }
     pub(crate) fn integrity_check(&self) -> Result<(), String> {
         let connection = self.lock()?;
         let result: String = connection
@@ -1826,6 +1853,62 @@ mod tests {
         fs::create_dir(&directory).unwrap();
         let database = directory.join("state.sqlite3");
         (directory, database)
+    }
+
+    #[test]
+    fn codex_observation_page_preserves_json_budget_and_cursor_after_append() {
+        let (directory, path) = temp_path("capture-budget");
+        let database = Database::create(&path).unwrap();
+        let mut before = default_snapshot();
+        for index in 0..2 {
+            let mut item = (*event(&format!("capture-{index}"))).clone();
+            item.kind = "codexObservation".into();
+            item.detail = serde_json::json!({"padding":"x".repeat(70 * 1024)}).to_string().into();
+            before.events.push(Arc::new(item));
+        }
+        database.replace_all(state(&before), &[], None).unwrap();
+        let page = database.captured_event_page("task", None, Some(100)).unwrap();
+        assert_eq!(page.events.len(), 1);
+        assert_eq!(page.events[0].id, "capture-1");
+        assert!(serde_json::from_str::<serde_json::Value>(&page.events[0].detail).is_ok());
+        assert_eq!(page.next_before, Some(1));
+        let mut after = before.clone();
+        let mut appended = (*event("capture-new")).clone();
+        appended.kind = "codexObservation".into();
+        after.events.push(Arc::new(appended));
+        database.apply_update(state(&before), state(&after), &[], &[], None).unwrap();
+        let next = database.captured_event_page("task", page.next_before, Some(100)).unwrap();
+        assert_eq!(next.events.len(), 1);
+        assert_eq!(next.events[0].id, "capture-0");
+        assert_eq!(next.next_before, None);
+        assert!(serde_json::from_str::<serde_json::Value>(&next.events[0].detail).is_ok());
+        drop(database);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn codex_observation_page_filters_before_pagination_and_survives_reopen() {
+        let (directory, path) = temp_path("captured-events");
+        let database = Database::create(&path).unwrap();
+        let mut snapshot = default_snapshot();
+        for index in 0..12 {
+            let mut item = (*event(&format!("event-{index}"))).clone();
+            if index == 2 || index == 8 { item.kind = "codexObservation".into(); }
+            snapshot.events.push(Arc::new(item));
+        }
+        database.replace_all(state(&snapshot), &[], None).unwrap();
+        drop(database);
+        let database = Database::open(&path).unwrap();
+        let first = database.captured_event_page("task", None, Some(1)).unwrap();
+        assert_eq!(first.events.len(), 1);
+        assert_eq!(first.events[0].id, "event-8");
+        assert_eq!(first.next_before, Some(1));
+        let second = database.captured_event_page("task", first.next_before, Some(1)).unwrap();
+        assert_eq!(second.events[0].id, "event-2");
+        assert_eq!(second.next_before, None);
+        assert!(database.captured_event_page("missing", None, Some(100)).unwrap().events.is_empty());
+        drop(database);
+        fs::remove_dir_all(directory).unwrap();
     }
 
     fn event(id: &str) -> Arc<RunEvent> {

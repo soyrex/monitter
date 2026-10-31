@@ -1945,6 +1945,13 @@ impl Service {
         })
     }
 
+    fn task_captured_events(&self, task_id: &str, before: Option<i64>, limit: Option<u32>) -> Result<lan_sync::TaskEventsPage, String> {
+        let _writer = self.state_writes.lock().map_err(|_| "State writer lock failed.".to_string())?;
+        let data = self.committed_data()?;
+        if !data.snapshot.tasks.iter().any(|task| task.id == task_id) { return Err("Task was not found.".into()); }
+        self.store.task_captured_events(task_id, before, limit)
+    }
+
     fn task_events(
         &self,
         task_id: &str,

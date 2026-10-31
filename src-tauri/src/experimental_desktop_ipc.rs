@@ -630,7 +630,7 @@ mod unix {
     fn read_only_request(method: &str, args: &Value) -> bool {
         match method {
             "read_browser_open_requests" | "read_ui_changes" | "read_native_ui_changes" | "read_native_ui_changes_v2" | "confirm_native_command" | "read_idle_runtime_status" | "read_task_messages" | "read_channel_messages" | "read_attachment_file" | "load_native_preferences" | "read_lan_status" | "get_agent_extension_assignments" | "subscribe_changes" => true,
-            "invoke" | "pairing_host_invoke" => matches!(args["command"].as_str(), Some("read_admin_activity" | "get_snapshot" | "get_ui_snapshot" | "get_ui_delta" | "get_process_metrics" | "get_task_messages" | "get_channel_messages" | "get_task_events" | "get_task_event_detail" | "get_usage_overview" | "get_task_goal" | "get_task_slash_commands" | "get_subagent_transcript" | "get_task_git_status" | "get_task_git_diff" | "list_terminals" | "read_terminal" | "get_command_capabilities")),
+            "invoke" | "pairing_host_invoke" => matches!(args["command"].as_str(), Some("get_task_captured_events" | "read_admin_activity" | "get_snapshot" | "get_ui_snapshot" | "get_ui_delta" | "get_process_metrics" | "get_task_messages" | "get_channel_messages" | "get_task_events" | "get_task_event_detail" | "get_usage_overview" | "get_task_goal" | "get_task_slash_commands" | "get_subagent_transcript" | "get_task_git_status" | "get_task_git_diff" | "list_terminals" | "read_terminal" | "get_command_capabilities")),
             _ => false,
         }
     }
@@ -1085,6 +1085,13 @@ mod unix {
             assert!(read_only_request("invoke", &json!({"command":"get_task_goal"})));
             assert!(read_only_request("invoke", &json!({"command":"read_admin_activity"})));
         }
+        #[test]
+        fn codex_observation_ipc_invoke_is_classified_as_read_only() {
+            assert!(read_only_request("invoke", &json!({"command":"get_task_captured_events", "args":{"taskId":"fixture"}})));
+            // The facade uses invoke's envelope, never a private direct method.
+            assert!(!read_only_request("get_task_captured_events", &json!({"taskId":"fixture"})));
+        }
+
         #[test]
         fn ipc_retry_backend_errors_are_not_transport_failures() {
             let mut calls = 0;

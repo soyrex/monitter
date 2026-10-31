@@ -91,7 +91,14 @@ fn truncate_bytes(value: &str, max: usize) -> String {
 }
 
 fn compact_detail(event: &RunEvent) -> String {
-    if event.kind == "error" {
+    if event.kind == "codexObservation" {
+        // Captures are bounded typed metadata. Preserve valid JSON in live
+        // snapshots rather than truncating identifiers or encoded structure.
+        serde_json::from_str::<crate::codex_app_server::CodexObservation>(&event.detail)
+            .ok().and_then(|fact| serde_json::to_string(&fact).ok())
+            .filter(|detail| detail.len() <= 4096)
+            .unwrap_or_else(|| "{}".into())
+    } else if event.kind == "error" {
         truncate_bytes(event.detail.lines().next().unwrap_or(""), MAX_ERROR_DETAIL)
     } else if event.kind == "tool" {
         compact_acp_activity_detail(&event.detail)

@@ -788,7 +788,7 @@ pub fn compact_events(
                 .filter(|index| {
                     !matches!(
                         snapshot.events[**index].kind.as_str(),
-                        "log" | "output" | "agent_progress"
+                        "log" | "output" | "agent_progress" | "codexObservation"
                     )
                 })
                 .take(crate::lan_sync::MAX_LIVE_EVENTS_PER_TASK)
@@ -1490,6 +1490,23 @@ mod tests {
 
 #[cfg(test)]
 mod progress_tests {
+    #[test]
+    fn codex_observation_does_not_displace_live_tool_activity() {
+        let mut snapshot = crate::model::default_snapshot();
+        for n in 0..100 {
+            for kind in ["tool", "codexObservation"] {
+                snapshot.events.push(std::sync::Arc::new(crate::model::RunEvent {
+                    id: format!("{kind}-{n}"), task_id: "capture-task".into(),
+                    kind: kind.into(), title: "Observed".into(), detail: "{}".into(),
+                    created_at: n,
+                }));
+            }
+        }
+        let events = super::compact_events(&snapshot);
+        assert_eq!(events.len(), crate::lan_sync::MAX_LIVE_EVENTS_PER_TASK);
+        assert!(events.iter().all(|event| event.kind == "tool"));
+    }
+
     #[test]
     fn progress_survives_diagnostic_tail_compaction() {
         let mut snapshot=crate::model::default_snapshot();

@@ -272,8 +272,22 @@ export interface SubagentTranscriptEntry {
   createdAt: number;
 }
 export interface RunEvent {
-  id: string; taskId: string; kind: 'status' | 'tool' | 'reasoning' | 'usage' | 'error' | 'output' | 'computer' | 'goal' | 'log' | 'collaboration' | 'subagent' | 'schedule' | 'jevDecision' | 'agent_progress';
+  id: string; taskId: string; kind: 'status' | 'tool' | 'reasoning' | 'usage' | 'error' | 'output' | 'computer' | 'goal' | 'log' | 'collaboration' | 'subagent' | 'schedule' | 'jevDecision' | 'agent_progress' | 'codexObservation';
   title: string; detail: string; createdAt: number;
+}
+/** JSON in RunEvent.detail for a passive, content-free Codex observation. */
+export interface CodexObservation {
+  schemaVersion: 1;
+  source: 'codexAppServer';
+  eventType: 'turnStarted' | 'turnCompleted' | 'itemStarted' | 'itemCompleted' | 'inputRequested' | 'approvalRequested';
+  threadId: string;
+  turnId: string;
+  itemId?: string;
+  requestId?: string;
+  itemType?: string;
+  outcome?: 'inProgress' | 'completed' | 'failed' | 'declined' | 'interrupted' | 'cancelled';
+  exitCode?: number;
+  changeCount?: number;
 }
 /** A revision-aware, compact UI projection. A null snapshot means unchanged. */
 export interface UiSnapshotResponse { revision: string; snapshot: Snapshot | null; }

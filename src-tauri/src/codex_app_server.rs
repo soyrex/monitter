@@ -21,6 +21,74 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Content-free facts from accepted native app-server frames. Never serialize the
+/// source frame here: tool arguments, paths, outputs and user input are private.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CodexObservation {
+    schema_version: u8,
+    source: String,
+    pub(crate) event_type: String,
+    thread_id: String,
+    turn_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    item_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    item_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    outcome: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exit_code: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    change_count: Option<u32>,
+}
+
+fn observation_id(value: &str) -> Option<String> {
+    // Reject rather than truncate identity: truncation creates collisions.
+    (!value.is_empty() && value.len() <= 128 && !value.chars().any(char::is_control))
+        .then(|| value.to_owned())
+}
+
+fn observation(method: &str, params: &Value, thread: &str, turn: &str, request: Option<&str>) -> Option<CodexObservation> {
+    let event_type = match method {
+        "turn/started" => "turnStarted",
+        "turn/completed" => "turnCompleted",
+        "item/started" => "itemStarted",
+        "item/completed" => "itemCompleted",
+        "item/tool/requestUserInput" | "mcpServer/elicitation/request" => "inputRequested",
+        "item/commandExecution/requestApproval" | "execCommandApproval"
+        | "item/fileChange/requestApproval" | "applyPatchApproval"
+        | "item/permissions/requestApproval" => "approvalRequested",
+        _ => return None,
+    };
+    let item = params.get("item");
+    let item_type = item.and_then(|item| item.get("type")).and_then(Value::as_str)
+        .filter(|kind| matches!(*kind, "agentMessage" | "userMessage" | "reasoning" | "plan" | "commandExecution" | "fileChange" | "mcpToolCall" | "dynamicToolCall" | "collabAgentToolCall" | "webSearch" | "imageView" | "imageGeneration" | "enteredReviewMode" | "exitedReviewMode" | "contextCompaction"))
+        .map(str::to_owned);
+    let status = item.and_then(|item| item.get("status")).or_else(|| params.pointer("/turn/status"))
+        .and_then(Value::as_str).filter(|status| matches!(*status, "inProgress" | "completed" | "failed" | "declined" | "interrupted" | "cancelled"));
+    Some(CodexObservation {
+        schema_version: 1, source: "codexAppServer".into(), event_type: event_type.into(),
+        thread_id: observation_id(thread)?, turn_id: observation_id(turn)?,
+        item_id: item.and_then(|item| item.get("id")).or_else(|| params.get("itemId")).and_then(Value::as_str).and_then(observation_id),
+        request_id: request.and_then(observation_id), item_type,
+        outcome: status.map(str::to_owned),
+        exit_code: item.and_then(|item| item.get("exitCode")).and_then(Value::as_i64),
+        change_count: item.filter(|item| item.get("type").and_then(Value::as_str) == Some("fileChange"))
+            .and_then(|item| item.get("changes")).and_then(Value::as_array).map(|changes| changes.len().min(u32::MAX as usize) as u32),
+    })
+}
+
+fn capture_observation(service: &Service, task: &str, control: &Arc<RunControl>, method: &str, params: &Value, thread: &str, turn: &str, request: Option<&str>) {
+    if let Some(fact) = observation(method, params, thread, turn, request) {
+        // Capture is passive: persistence errors never authorize an action or
+        // alter native protocol handling.
+        let _ = service.capture_codex_observation(task, control, turn, fact);
+    }
+}
+
 const INITIALIZE_ID: i64 = 1;
 const THREAD_ID: i64 = 2;
 const FIRST_TURN_ID: i64 = 3;
@@ -1431,6 +1499,7 @@ fn handle_server_request(
             );
             return;
         }
+        capture_observation(&service, &task_id, &control, method, &params, thread_id, turn_id, Some(&rpc_id));
         if method == "item/tool/requestUserInput" {
             let questions = params
                 .get("questions")
@@ -1902,6 +1971,7 @@ fn handle_notification_with_trace(
             );
         }
         if scope_matched {
+            capture_observation(service, task_id, control, method, params, thread_id, turn_id, None);
             *started = true;
         } else {
             service.record(
@@ -1947,6 +2017,8 @@ fn handle_notification_with_trace(
         return;
     }
     // Late native PTY exits may clear an existing job without replaying a turn.
+    // Capture below intentionally requires the current turn: old-turn exits
+    // are not projected as facts about a newer turn.
     if method == "item/completed" && control.current_app_server_thread().as_deref() == Some(thread_id) {
         if let Some(item) = params.get("item") { control.observe_runtime_command_exit(item); }
     }
@@ -1955,6 +2027,9 @@ fn handle_notification_with_trace(
         && !control.app_server_turn_is_current(thread_id, turn_id)
     {
         return;
+    }
+    if scope_matched {
+        capture_observation(service, task_id, control, method, params, thread_id, turn_id, None);
     }
     match method {
         "item/started" => {
@@ -2831,6 +2906,49 @@ mod tests {
     }
 
     #[test]
+    fn codex_observation_handler_persists_deduplicates_and_fences_native_facts() {
+        let (service, task_id, control, directory) = current_turn_service("capture-fences");
+        let mut started = false;
+        let mut terminal = false;
+        let mut messages = HashMap::new();
+        let items = Arc::new(Mutex::new(HashMap::new()));
+        let seen = Arc::new(Mutex::new(HashSet::new()));
+        let lifecycle = Arc::new(Mutex::new(RequestLifecycle::default()));
+        let mut notify = |frame: Value| handle_notification(&service, &task_id, &control, &frame,
+            &mut started, &mut terminal, &mut messages, &items, &seen, &lifecycle);
+        notify(json!({"method":"turn/started","params":{"threadId":"thread-terminal","turn":{"id":"turn-terminal"}}}));
+        let completed = json!({"method":"item/completed","params":{"threadId":"thread-terminal","turnId":"turn-terminal","item":{"id":"native-command","type":"commandExecution","status":"completed","exitCode":3,"command":"PRIVATE_COMMAND","aggregatedOutput":"PRIVATE_OUTPUT"}}});
+        notify(completed.clone());
+        notify(completed.clone());
+        let mut stale = completed.clone();
+        stale["params"]["turnId"] = json!("old-turn");
+        notify(stale);
+        let mut foreign = completed.clone();
+        foreign["params"]["threadId"] = json!("foreign-thread");
+        notify(foreign);
+        drop(notify);
+        let page = service.task_captured_events(&task_id, None, Some(100)).unwrap();
+        assert_eq!(page.events.len(), 2);
+        let facts: Vec<CodexObservation> = page.events.iter().map(|event| serde_json::from_str(&event.detail).unwrap()).collect();
+        assert!(facts.iter().any(|fact| fact.event_type == "turnStarted"));
+        assert!(facts.iter().any(|fact| fact.event_type == "itemCompleted" && fact.exit_code == Some(3)));
+        assert!(page.events.iter().all(|event| !event.detail.contains("PRIVATE")));
+        assert!(facts.iter().all(|fact| fact.turn_id == "turn-terminal" && fact.thread_id == "thread-terminal"));
+        // The same accepted source frame must remain invisible for admin tasks.
+        if let Ok(admin) = service.internal_admin() {
+            service.mutate_data(None, |data| {
+                data.snapshot.tasks.iter_mut().find(|task| task.id == task_id).unwrap().agent_id = admin.id;
+                Ok(())
+            }).unwrap();
+            let fact = observation("item/started", &json!({"item":{"id":"admin-private","type":"commandExecution"}}), "thread-terminal", "turn-terminal", None).unwrap();
+            service.capture_codex_observation(&task_id, &control, "turn-terminal", fact).unwrap();
+            assert_eq!(service.task_captured_events(&task_id, None, Some(100)).unwrap().events.len(), 2);
+        }
+        drop(service);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
     fn native_continuation_delivers_output_without_another_user_message() {
         let (service, task_id, control, directory) = current_turn_service("native-continuation");
         service
@@ -3501,5 +3619,43 @@ mod tests {
         assert!(item.get("id").is_none());
         assert!(item.get("status").is_none());
         assert_eq!(item["changes"][0]["toolArgumentId"], "semantic-id");
+    }
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::*;
+
+    #[test]
+    fn codex_observation_extracts_only_content_free_command_metadata() {
+        let source = json!({"item":{"id":"command-1","type":"commandExecution","status":"completed","exitCode":7,"command":"SECRET_COMMAND","aggregatedOutput":"SECRET_OUTPUT","cwd":"SECRET_PATH"}});
+        let fact = observation("item/completed", &source, "thread-1", "turn-1", None).unwrap();
+        let encoded = serde_json::to_string(&fact).unwrap();
+        assert!(!encoded.contains("SECRET"));
+        assert_eq!(fact.exit_code, Some(7));
+        assert_eq!(fact.event_type, "itemCompleted");
+        assert_eq!(fact.item_id.as_deref(), Some("command-1"));
+    }
+
+    #[test]
+    fn codex_observation_file_changes_count_and_requests_exclude_private_content() {
+        let source = json!({"item":{"type":"fileChange","id":"edit-1","status":"completed","changes":[{"path":"SECRET_PATH","diff":"SECRET_DIFF"}]}});
+        let fact = observation("item/completed", &source, "thread", "turn", None).unwrap();
+        assert_eq!(fact.change_count, Some(1));
+        assert!(!serde_json::to_string(&fact).unwrap().contains("SECRET"));
+        for method in ["item/tool/requestUserInput", "item/permissions/requestApproval", "mcpServer/elicitation/request"] {
+            let fact = observation(method, &json!({"questions":[{"question":"SECRET"}],"permissions":{"secret":"SECRET"}}), "thread", "turn", Some("request-1")).unwrap();
+            assert_eq!(fact.request_id.as_deref(), Some("request-1"));
+            assert!(!serde_json::to_string(&fact).unwrap().contains("SECRET"));
+        }
+    }
+
+    #[test]
+    fn codex_observation_rejects_unbounded_identity_and_unknown_protocol_content() {
+        assert!(observation("turn/started", &json!({}), &"a".repeat(129), "turn", None).is_none());
+        assert!(observation("item/agentMessage/delta", &json!({}), "thread", "turn", None).is_none());
+        let fact = observation("item/completed", &json!({"item":{"type":"SECRET_UNKNOWN_TYPE","status":"SECRET_UNKNOWN_STATUS"}}), "thread", "turn", None).unwrap();
+        assert_eq!(fact.item_type, None);
+        assert_eq!(fact.outcome, None);
     }
 }

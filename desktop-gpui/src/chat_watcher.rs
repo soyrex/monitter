@@ -452,8 +452,67 @@ fn friendly_tool_name(value: &str) -> String {
         .unwrap_or_default()
 }
 
+// Project nested multi-tool envelopes without exposing the transport JSON or
+// evaluating Code Mode source. Raw, redacted diagnostics remain in Activity detail.
+fn nested_tool_actions(value: &Value, depth: usize, actions: &mut Vec<String>) {
+    if depth > 8 || actions.len() >= 8 { return; }
+    match value {
+        Value::String(text) if text.len() <= 256 * 1024 => {
+            if let Ok(value) = serde_json::from_str::<Value>(text) {
+                nested_tool_actions(&value, depth + 1, actions);
+            } else if text.contains("tools.") {
+                nested_tool_actions(&serde_json::json!({"code":text}), depth + 1, actions);
+            }
+        }
+        Value::Array(values) => {
+            for value in values { nested_tool_actions(value, depth + 1, actions); }
+        }
+        Value::Object(object) => {
+            if let Some(name) = ["recipient_name", "tool_name", "name"]
+                .iter().find_map(|key| object.get(*key).and_then(Value::as_str))
+                .filter(|name| name.contains('.') || name.contains("__") || name.contains('_'))
+            {
+                let detail = object.get("parameters").or_else(|| object.get("arguments"))
+                    .or_else(|| object.get("input")).cloned().unwrap_or(Value::Null);
+                let event = serde_json::json!({"kind":"tool", "title":name, "detail":detail.to_string()});
+                let action = watcher_tool_text(&event);
+                if !actions.contains(&action) { actions.push(action); }
+                return;
+            }
+            if let Some(code) = object.get("code").and_then(Value::as_str) {
+                // Only inspect literal tool identifiers, never execute source or
+                // pretend that its commands have completed successfully.
+                for tail in code.split("tools.").skip(1) {
+                    let name: String = tail.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+                    if !name.is_empty() {
+                        let event = serde_json::json!({"kind":"tool", "title":name});
+                        let action = super::run_activity::tool_intent(&event);
+                        let action = if action == "Used a tool" { friendly_tool_name(&name) } else { action };
+                        if !actions.contains(&action) && actions.len() < 8 { actions.push(action); }
+                    }
+                }
+                if actions.is_empty() { actions.push("Ran code".to_owned()); }
+                return;
+            }
+            for key in ["detail", "payload", "update", "input", "rawInput", "arguments", "tool_uses", "tool_calls", "toolUses", "toolCalls", "calls", "tools", "function", "content"] {
+                if let Some(value) = object.get(key) { nested_tool_actions(value, depth + 1, actions); }
+            }
+        }
+        _ => {}
+    }
+}
+
 fn watcher_tool_text(event: &Value) -> String {
+    let mut actions = Vec::new();
+    nested_tool_actions(&watcher_event_detail(event), 0, &mut actions);
+    if !actions.is_empty() {
+        return compact_activity_text(&actions.join(" · "));
+    }
+
     let title = compact_activity_text(&field(event, "title"));
+    if matches!(title.as_str(), "functions.exec" | "exec") {
+        return "Ran code".to_owned();
+    }
     let intent = super::run_activity::tool_intent(event);
     let mut preview = super::run_activity::process_tool_preview(std::slice::from_ref(event))
         .unwrap_or_else(|| intent.clone());
@@ -538,16 +597,24 @@ fn agent_duration(record: &Value) -> String {
     let seconds = ended.saturating_sub(started).max(0) / 1_000;
     format!("{}:{:02}", seconds / 60, seconds % 60)
 }
-/// Elapsed run time of the watched task itself, matching the subagent rows.
+/// Task lifetime, explicitly labelled so an old chat is not a days-long turn.
 fn task_duration(task: &Value) -> String {
     let started = at(task, "createdAt");
+    if started <= 0 { return String::new(); }
     let ended = if active(&field(task, "status")) {
         chrono::Utc::now().timestamp_millis()
     } else {
         at(task, "updatedAt").max(started)
     };
     let seconds = ended.saturating_sub(started).max(0) / 1_000;
-    format!("{}:{:02}", seconds / 60, seconds % 60)
+    let elapsed = if seconds >= 86_400 {
+        format!("{}d {}h", seconds / 86_400, seconds % 86_400 / 3_600)
+    } else if seconds >= 3_600 {
+        format!("{}h {}m", seconds / 3_600, seconds % 3_600 / 60)
+    } else {
+        format!("{}:{:02}", seconds / 60, seconds % 60)
+    };
+    format!("Task age {elapsed}")
 }
 
 // Intrinsic heights are shared only among Watch panes in the same window.
@@ -768,7 +835,7 @@ impl WatcherProjection {
             finished_plan,
             title: task
                 .as_ref()
-                .map(|task| field(task, "title"))
+                .map(|task| crate::task_identity::title(task, messages.iter().map(Rc::as_ref)))
                 .unwrap_or_default(),
             provider: task
                 .as_ref()
@@ -1016,7 +1083,7 @@ impl ChatPane {
                             .gap(px(4.))
                             .child(
                                 div()
-                                    .text_size(px(10. * ratio))
+                                    .text_size(px(design::SECONDARY_TEXT_SIZE * ratio))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(rgb(palette.muted))
                                     .child("CURRENT TASK"),
@@ -1042,7 +1109,7 @@ impl ChatPane {
                             .child(div().size(px(5.)).rounded_full().bg(rgb(status_color)))
                             .child(
                                 div()
-                                    .text_size(px(10. * ratio))
+                                    .text_size(px(design::SECONDARY_TEXT_SIZE * ratio))
                                     .text_color(rgb(palette.muted))
                                     .child(status.to_owned()),
                             ),
@@ -1051,7 +1118,7 @@ impl ChatPane {
             .child(
                 div()
                     .font_family(design::FONT_MONO)
-                    .text_size(px(10. * ratio))
+                    .text_size(px(design::SECONDARY_TEXT_SIZE * ratio))
                     .text_color(rgb(palette.muted))
                     .truncate()
                     .child(meta.join(" · ")),
@@ -1472,7 +1539,7 @@ impl ChatPane {
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .text_size(px(10. * ratio))
+                    .text_size(px(design::SECONDARY_TEXT_SIZE * ratio))
                     .text_color(rgb(palette.muted))
                     .child(if activity.is_empty() {
                         status_label(&status).to_owned()
@@ -1484,7 +1551,7 @@ impl ChatPane {
                 div()
                     .flex_shrink_0()
                     .font_family(design::FONT_MONO)
-                    .text_size(px(9. * ratio))
+                    .text_size(px(design::SECONDARY_TEXT_SIZE * ratio))
                     .text_color(rgb(palette.muted))
                     .child(duration),
             );
@@ -1646,8 +1713,8 @@ impl ChatPane {
                     .w_full().min_w_0().flex().flex_col().gap(px(9.));
                 for event in &state.activity {
                     rows = rows.child(div().w_full().min_w_0().flex().items_start().gap(px(8.))
-                        .child(div().w(px(42.)).flex_shrink_0().font_family(design::FONT_MONO)
-                            .text_size(px(10. * ratio)).text_color(rgb(palette.text(3)))
+                        .child(div().w(px(60. * ratio)).flex_shrink_0().font_family(design::FONT_MONO)
+                            .text_size(px(design::SECONDARY_TEXT_SIZE * ratio)).text_color(rgb(palette.text(3)))
                             .child(event_time(event)))
                         .child(div().flex_1().min_w_0().text_size(px(12. * ratio))
                             .text_color(rgb(palette.text(1)))
@@ -2019,7 +2086,7 @@ impl ChatPane {
                     .when(!state.agents.is_empty(), |heading| heading.child(
                         div()
                             .font_family(design::FONT_MONO)
-                            .text_size(px(10. * ratio))
+                            .text_size(px(design::SECONDARY_TEXT_SIZE * ratio))
                             .text_color(rgb(palette.muted))
                             .child(format!(
                                 "{} running · {} done",
@@ -2114,7 +2181,7 @@ impl ChatPane {
                     .child(div().id(("watcher-activity-meta", index))
                         .debug_selector(move || format!("watcher-activity-meta-{index}"))
                         .flex_shrink_0().flex().items_center().gap(px(4.))
-                        .font_family(design::FONT_MONO).text_size(px(7.6 * ratio)).line_height(px(11. * ratio))
+                        .font_family(design::FONT_MONO).text_size(px(design::SECONDARY_TEXT_SIZE * ratio)).line_height(px(16. * ratio))
                         .child(div().debug_selector(move || format!("watcher-activity-type-{index}"))
                             .w(px(10. * ratio)).h(px(10. * ratio)).flex_shrink_0()
                             .text_color(rgb(icon_color))
@@ -2124,7 +2191,7 @@ impl ChatPane {
                     .child(div().id(("watcher-activity-description", index))
                         .debug_selector(move || format!("watcher-activity-description-{index}"))
                         .flex_1().min_w_0().font_family(SharedString::from(terminal_font.clone()))
-                        .text_size(px(8. * ratio)).line_height(px(12. * ratio))
+                        .text_size(px(design::SECONDARY_TEXT_SIZE * ratio)).line_height(px(16. * ratio))
                         .text_color(rgb(palette.ink)).truncate()
                         .child(description))
             );
@@ -2153,11 +2220,13 @@ impl ChatPane {
         }
         let interject_width = (self.watcher.content_width - px(24.)).max(px(0.)).min(px(design::CHAT_MAX_WIDTH));
         let chat_button = Button::new("chat-mode-chat")
-            .compact().ghost().w(px(28.)).h(px(28.))
+            .compact().ghost().w(px(96. * ratio)).h(px(28. * ratio))
+            .text_size(px(design::SECONDARY_TEXT_SIZE * ratio))
+            .label(if self.watcher.modal_open { "Activity" } else { "Chat" })
             .icon(Icon::default().data(gpui_kit::assets::__private::ArrowLeft.1).with_size(px(14.)))
             .debug_selector(|| "chat-mode-chat".into())
-            .accessibility_label(if self.watcher.modal_open { "Close Watch" } else { "Show chat" })
-            .tooltip(if self.watcher.modal_open { "Return to activity" } else { "Return to chat" })
+            .accessibility_label(if self.watcher.modal_open { "Close Watch and return to Activity" } else { "Show chat" })
+            .tooltip(if self.watcher.modal_open { "Close this Watch view and return to Activity" } else { "Return to this task’s chat" })
             .on_click(cx.listener(|pane, _, window, cx| {
                 if pane.watcher.modal_open { window.close_dialog(cx); } else { pane.toggle_watcher(window, cx); }
             }));
@@ -2370,7 +2439,7 @@ mod tests {
         assert_eq!(state.title, "Ship the release");
         assert_eq!(state.provider, "codex");
         assert_eq!(state.model, "gpt-5-codex");
-        assert_eq!(state.duration, "0:03");
+        assert_eq!(state.duration, "Task age 0:03");
         assert_eq!(
             state.request.as_deref(),
             Some("Finish the cutover and ship the release notes"),
@@ -2407,6 +2476,41 @@ mod tests {
     fn watcher_activity_time_includes_seconds() {
         let rendered = event_time(&json!({"createdAt": 1_700_000_000_000_i64}));
         assert_eq!(rendered.matches(':').count(), 2, "{rendered}");
+    }
+
+    #[::core::prelude::v1::test]
+    fn ux_sweep_watch_nested_tool_envelopes_and_code_mode() {
+        let nested = json!({"kind":"tool","title":"multi_tool_use.parallel","detail":json!({
+            "arguments":json!({"tool_uses":[
+                {"recipient_name":"functions.exec_command","parameters":{"cmd":"cargo test watcher"}},
+                {"recipient_name":"functions.read_file","parameters":{"path":"README.md"}}
+            ]}).to_string()
+        }).to_string()});
+        assert_eq!(watcher_activity_text(&nested), "Ran cargo test watcher · Read README.md");
+        let code = "const results = await Promise.all([tools.exec_command({cmd:'ls'}), tools.web__run({search_query: []})]);";
+        let event = json!({"kind":"tool","title":"functions.exec","detail":json!({"arguments":code}).to_string()});
+        let text = watcher_activity_text(&event);
+        assert!(text.contains("Ran a command"), "{text}");
+        assert!(!text.contains("const results"));
+        assert!(!text.contains('{'));
+        assert_eq!(watcher_event_detail(&event)["arguments"], code, "raw diagnostics remain available");
+        let opaque = json!({"kind":"tool","title":"functions.exec","detail":json!({"code":"text(42)"}).to_string()});
+        assert_eq!(watcher_activity_text(&opaque), "Ran code");
+    }
+
+    #[::core::prelude::v1::test]
+    fn ux_sweep_watch_task_identity_and_explicit_lifetime() {
+        let task = json!({"id":"12345678-abcd","title":"New chat","status":"done","createdAt":1000,"updatedAt":172801000});
+        assert_eq!(crate::task_identity::title(&task, std::iter::empty()), "New chat · 12345678");
+        let messages = vec![
+            Rc::new(json!({"taskId":"other","role":"user","text":"Wrong task","createdAt":1})),
+            Rc::new(json!({"taskId":"12345678-abcd","role":"user","senderAgentId":"peer","text":"Peer message","createdAt":2})),
+            Rc::new(json!({"taskId":"12345678-abcd","role":"user","text":"Inspect the Watch panel","createdAt":3})),
+            Rc::new(json!({"taskId":"12345678-abcd","role":"user","text":"Follow-up","createdAt":4})),
+        ];
+        assert_eq!(crate::task_identity::title(&task, messages.iter().map(Rc::as_ref)), "Inspect the Watch panel");
+        assert_eq!(task_duration(&task), "Task age 2d 0h");
+        assert_eq!(task_duration(&json!({"status":"running"})), "");
     }
 
     #[::core::prelude::v1::test]
@@ -2777,7 +2881,7 @@ mod native_tests {
     }
 
     #[gpui_kit::test]
-    fn watcher_shared_card_arrows_and_stacked_activity_metadata(cx: &mut TestAppContext) {
+    fn ux_sweep_watch_readable_activity_metadata_stays_bounded(cx: &mut TestAppContext) {
         cx.update(|cx| {
             gpui_kit::init(cx);
             crate::surface_blend::initialize_for_ui_fixture();
@@ -2824,8 +2928,8 @@ mod native_tests {
                 assert!(time.left() >= kind.right() && description.left() > time.right());
                 assert!((description.center().y - time.center().y).abs() <= px(2.), "description shares the activity line");
                 assert!(description.right() <= visual.debug_bounds("watcher-activity").unwrap().right() + px(1.));
-                assert!(description.size.height <= px(12.1), "long multiline activity stays on one smaller text line: {description:?}");
-                assert!(kind.size.height <= px(10.5) && time.size.height <= px(11.5), "compact icon and timestamp stay subordinate");
+                assert!(description.size.height >= px(15.) && description.size.height <= px(16.1), "readable activity remains one bounded line: {description:?}");
+                assert!(kind.size.height <= px(10.5) && time.size.height >= px(15.) && time.size.height <= px(16.1), "timestamp uses the readable secondary text line");
                 pane.update(visual, |pane, cx| pane.activity.update(cx, |view, cx| {
                     view.set_watch_goal_fixture(Some(json!({"status":"paused","objective":"Goal objective","tokensUsed":125000,"tokenBudget":2000000,"createdAt":1,"updatedAt":50})), cx);
                 }));

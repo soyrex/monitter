@@ -19,6 +19,7 @@ use std::rc::Rc;
 pub enum DetailTab {
     Details,
     Timeline,
+    Events,
     Approvals,
     Subagents,
 }
@@ -28,8 +29,9 @@ impl DetailTab {
         match self {
             Self::Details => 0,
             Self::Timeline => 1,
-            Self::Approvals => 2,
-            Self::Subagents => 3,
+            Self::Events => 2,
+            Self::Approvals => 3,
+            Self::Subagents => 4,
         }
     }
 
@@ -37,6 +39,7 @@ impl DetailTab {
         match self {
             Self::Details => icon_assets::FileText.1,
             Self::Timeline => icon_assets::Activity.1,
+            Self::Events => icon_assets::List.1,
             Self::Approvals => icon_assets::Shield.1,
             Self::Subagents => icon_assets::Bot.1,
         }
@@ -46,6 +49,7 @@ impl DetailTab {
         match self {
             Self::Details => "Details",
             Self::Timeline => "Timeline",
+            Self::Events => "Events",
             Self::Approvals => "Approvals",
             Self::Subagents => "Subagents",
         }
@@ -61,7 +65,7 @@ pub fn render_detail_frame<F>(
     body: AnyElement,
     palette: Palette,
     settings: &Value,
-    focus_handles: &[FocusHandle; 4],
+    focus_handles: &[FocusHandle; 5],
     motion: Rc<std::cell::RefCell<crate::sidebar_tabs_motion::SidebarTabsMotion>>,
     window: &mut Window,
     cx: &mut App,
@@ -72,6 +76,11 @@ where
 {
     let tab_scroll = window.use_keyed_state(format!("{pane_id}-detail-tab-overflow"), cx,
         |_, _| ScrollHandle::new()).read(cx).clone();
+    // Selection reveal waits until the strip has measured its scroll bounds.
+    // Keep the last selection/width so ordinary pointer scrolling stays free.
+    let revealed = window.use_keyed_state(format!("{pane_id}-detail-tab-selection"), cx,
+        |_, _| Rc::new(std::cell::Cell::new(None::<(DetailTab, Pixels)>)))
+        .read(cx).clone();
     let body_scroll = window.use_keyed_state(format!("{pane_id}-detail-body-overflow"), cx,
         |_, _| ScrollHandle::new()).read(cx).clone();
     let px = design::ui_scaled_px;
@@ -83,9 +92,24 @@ where
     let modern = settings["tabStyle"] == "modern";
     let on_select = Rc::new(on_select);
     motion.borrow_mut().observe(active.index());
-    let body = motion.borrow().body(pane_id, body, cx.reduce_motion(), false);
+    let body = motion.borrow().body(pane_id, body, cx.reduce_motion(), active == DetailTab::Events);
     let wheel_select = on_select.clone();
+    let reveal_scroll = tab_scroll.clone();
     let mut tabs = div()
+        .on_children_prepainted(move |_, window, _| {
+            let selection = (active, reveal_scroll.bounds().size.width);
+            if revealed.get() == Some(selection) { return; }
+            revealed.set(Some(selection));
+            let scroll = reveal_scroll.clone();
+            let revealed = revealed.clone();
+            let owner = window.current_view();
+            window.on_next_frame(move |_, cx| {
+                // A newer selection/resize supersedes this pending reveal.
+                if revealed.get() != Some(selection) { return; }
+                scroll.scroll_to_item(active.index());
+                cx.notify(owner);
+            });
+        })
         .id(SharedString::from(format!("{pane_id}-detail-tabs")))
         .role(Role::TabList)
         .tab_group()
@@ -109,6 +133,7 @@ where
     let tab_order = [
         DetailTab::Details,
         DetailTab::Timeline,
+        DetailTab::Events,
         DetailTab::Approvals,
         DetailTab::Subagents,
     ];
@@ -129,6 +154,13 @@ where
             "foreground", rgb(if selected { palette.ink } else { palette.muted }).into(),
             rgb(palette.ink).into(), window, cx,
         );
+        let label = div()
+            .whitespace_nowrap()
+            .text_size(px(design::SIDEBAR_TAB_FONT_SIZE))
+            .font_family(design::FONT_SANS)
+            .child(tab.label());
+        #[cfg(any(test, feature = "visual-export"))]
+        let label = label.debug_selector(move || format!("detail-tab-label-{}", tab.label()));
         let mut entry = div()
             .id(SharedString::from(format!(
                 "{pane_id}-detail-{}",
@@ -140,8 +172,9 @@ where
             .track_focus(&focus_handles[index])
             .tab_index(index as isize)
             .tab_stop(selected)
-            .flex_1()
-            .min_w_0()
+            // Intrinsic-width tabs keep every name readable; the existing strip
+            // scrolls when the rail cannot fit all five views.
+            .flex_none()
             .flex()
             .items_center()
             .justify_center()
@@ -178,13 +211,7 @@ where
                     .text_color(hover_foreground)
                     .with_size(px(design::ICON_SIZE_XS)),
             )
-            .child(
-                div()
-                    .truncate()
-                    .text_size(px(design::SIDEBAR_TAB_FONT_SIZE))
-                    .font_family(design::FONT_MONO)
-                    .child(tab.label().to_ascii_uppercase()),
-            )
+            .child(label)
             .on_click(move |_, window, cx| {
                 click_focus.focus(window, cx);
                 select(tab, window, cx);
@@ -195,10 +222,10 @@ where
                     return;
                 }
                 let next = match event.keystroke.key.as_str() {
-                    "left" => (index + 3) % 4,
-                    "right" => (index + 1) % 4,
+                    "left" => (index + tab_order.len() - 1) % tab_order.len(),
+                    "right" => (index + 1) % tab_order.len(),
                     "home" => 0,
-                    "end" => 3,
+                    "end" => tab_order.len() - 1,
                     _ => return,
                 };
                 key_focus[next].focus(window, cx);
@@ -215,13 +242,17 @@ where
                 );
             }
         }
+        #[cfg(any(test, feature = "visual-export"))]
+        let entry = entry.debug_selector(move || format!("detail-tab-{}", tab.label()));
         tabs = tabs.child(entry);
     }
+    #[cfg(any(test, feature = "visual-export"))]
+    let tabs = tabs.debug_selector(|| "detail-tab-strip".into());
     div()
         .id(SharedString::from(format!("{pane_id}-detail-frame")))
         .on_scroll_wheel(move |event: &ScrollWheelEvent, window, cx| {
             let delta = event.delta.pixel_delta(gpui_kit::px(20.));
-            let next = motion.borrow_mut().wheel(delta.x.into(), delta.y.into(), 4, std::time::Instant::now());
+            let next = motion.borrow_mut().wheel(delta.x.into(), delta.y.into(), tab_order.len(), std::time::Instant::now());
             if let Some(index) = next {
                 cx.stop_propagation();
                 wheel_select(tab_order[index], window, cx);
@@ -242,7 +273,10 @@ where
         .bg(crate::surface_blend::secondary_sidebar_background(palette.dark))
         .text_color(rgb(palette.ink))
         .child(ScrollEdgeFade::new(tabs, tab_scroll, Axis::Horizontal, gpui_kit::px(20.)))
-        .child(ScrollEdgeFade::new(
+        .child(if active == DetailTab::Events {
+            // The virtualized event list owns its scroll viewport.
+            div().flex_1().min_h_0().min_w_0().flex().flex_col().overflow_hidden().child(body).into_any_element()
+        } else { ScrollEdgeFade::new(
             div()
                 .id(SharedString::from(format!("{pane_id}-detail-scroll")))
                 .flex_1()
@@ -254,7 +288,7 @@ where
                 .px(px(14.))
                 .child(body),
             body_scroll, Axis::Vertical, gpui_kit::px(20.),
-        ))
+        ).into_any_element() })
         .into_any_element()
 }
 
@@ -390,5 +424,109 @@ mod motion_tests {
         assert!(motion.sample(false, false).1);
         motion.settle(false);
         assert_eq!(motion.sample(false, false), (0., false));
+    }
+}
+
+#[cfg(test)]
+mod ux_sweep_tests {
+    use ::core::prelude::v1::test;
+    use super::*;
+    use gpui_kit::component::Root;
+
+    fn draw_revealed(visual: &mut VisualTestContext) {
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        // A test window has no platform frame loop. Deliver the measured
+        // strip's one-frame reveal exactly as the native frame callback does.
+        visual.update(|window, cx| { window.simulate_next_frame(cx); });
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+    }
+
+    struct TabsFixture {
+        width: f32,
+        active: DetailTab,
+        focus: [FocusHandle; 5],
+        motion: Rc<std::cell::RefCell<crate::sidebar_tabs_motion::SidebarTabsMotion>>,
+    }
+    impl Render for TabsFixture {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let palette = design::palette(&Value::Null, window.appearance());
+            let owner = cx.entity().downgrade();
+            let frame = render_detail_frame(
+                "ux-sweep", self.active, Some(12),
+                div().child("Bounded detail body").into_any_element(), palette,
+                &serde_json::json!({}), &self.focus, self.motion.clone(), window, cx,
+                move |tab, _, cx| {
+                    let _ = owner.update(cx, |view, cx| { view.active = tab; cx.notify(); });
+                },
+            );
+            div().w(px(self.width)).h(px(300.)).child(frame)
+        }
+    }
+
+    #[gpui_kit::test]
+    fn ux_sweep_detail_tabs_keep_full_labels_and_reveal_keyboard_selection(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let mut retained = None;
+        let (_, visual) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| TabsFixture {
+                width: 260., active: DetailTab::Subagents,
+                focus: std::array::from_fn(|_| cx.focus_handle()),
+                motion: Default::default(),
+            });
+            retained = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let view = retained.unwrap();
+        for width in [260., 300., 420., 260.] {
+            view.update(visual, |view, cx| { view.width = width; cx.notify(); });
+            draw_revealed(visual);
+            // A restored last tab must be visible before any input.
+            let strip = visual.debug_bounds("detail-tab-strip").unwrap();
+            let selected = visual.debug_bounds("detail-tab-Subagents").unwrap();
+            assert!(selected.left() >= strip.left() && selected.right() <= strip.right(),
+                "restored selection outside {width}px strip: {selected:?}, {strip:?}");
+            for tab in [DetailTab::Details, DetailTab::Timeline, DetailTab::Events,
+                DetailTab::Approvals, DetailTab::Subagents] {
+                let selector = match tab {
+                    DetailTab::Details => "detail-tab-label-Details",
+                    DetailTab::Timeline => "detail-tab-label-Timeline",
+                    DetailTab::Events => "detail-tab-label-Events",
+                    DetailTab::Approvals => "detail-tab-label-Approvals",
+                    DetailTab::Subagents => "detail-tab-label-Subagents",
+                };
+                let label = visual.debug_bounds(selector).unwrap();
+                let natural = visual.update(|window, _| {
+                    window.text_system().shape_line(tab.label().into(), design::ui_scaled_px(design::SIDEBAR_TAB_FONT_SIZE),
+                        &[TextRun { len: tab.label().len(), font: font(design::FONT_SANS),
+                            color: rgb(0xffffff).into(), background_color: None,
+                            underline: None, strikethrough: None }], None).x_for_index(tab.label().len())
+                });
+                assert!(label.size.width + px(1.) >= natural,
+                    "{} label shrank at {width}px: {label:?}, natural={natural:?}", tab.label());
+            }
+            visual.update(|window, cx| {
+                let focus = view.read(cx).focus[4].clone();
+                focus.focus(window, cx);
+            });
+            visual.simulate_keystrokes("home");
+            draw_revealed(visual);
+            assert_eq!(view.read_with(visual, |view, _| view.active), DetailTab::Details);
+            let first = visual.debug_bounds("detail-tab-Details").unwrap();
+            assert!(first.left() >= strip.left() && first.right() <= strip.right());
+            let timeline = visual.debug_bounds("detail-tab-Timeline").unwrap();
+            visual.simulate_click(timeline.center(), Default::default());
+            visual.run_until_parked();
+            assert_eq!(view.read_with(visual, |view, _| view.active), DetailTab::Timeline);
+            visual.simulate_keystrokes("right");
+            visual.run_until_parked();
+            assert_eq!(view.read_with(visual, |view, _| view.active), DetailTab::Events);
+            visual.simulate_keystrokes("end");
+            draw_revealed(visual);
+            assert_eq!(view.read_with(visual, |view, _| view.active), DetailTab::Subagents);
+            let last = visual.debug_bounds("detail-tab-Subagents").unwrap();
+            assert!(last.left() >= strip.left() && last.right() <= strip.right());
+        }
     }
 }

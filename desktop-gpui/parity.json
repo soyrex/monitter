@@ -4,6 +4,33 @@
   "mobilePolicy": "unchanged",
   "features": [
     {
+      "id": "desktop_ux_sweep_20261030",
+      "sourcePaths": [
+        "desktop-gpui/src/chat_links.rs",
+        "desktop-gpui/src/chat_watcher.rs",
+        "desktop-gpui/src/task_identity.rs",
+        "desktop-gpui/src/companion_sidebar.rs",
+        "desktop-gpui/src/activity_overview.rs",
+        "desktop-gpui/src/workspace_tabs.rs"
+      ],
+      "status": "implemented_unverified",
+      "evidence": "Five authorized desktop UX improvements implemented. Fifteen focused native checks pass for usable document references across streaming/restored prose and literal code, human Watch summaries, distinctive task identity and explicitly labelled task age, readable compact tabs/cards, restored tab reveal, and toolbar groups/command discovery at100/125/150% scale. Twenty related streaming/composer/scroll/Watch-pill/project-bar/file-link checks and seven existing captured-event sidebar checks also pass. Activity keyboard access explicitly deferred. Source fingerprints match canonical main and isolated validation checkout. No UX package installation, restart or installed visual acceptance performed; platform parity remains unverified."
+    },
+    {
+      "id": "codex_captured_events_sidebar",
+      "sourcePaths": [
+        "src-tauri/src/codex_app_server.rs",
+        "src-tauri/src/app_server_service.rs",
+        "src-tauri/src/sqlite_backend.rs",
+        "src-tauri/src/experimental_desktop.rs",
+        "desktop-gpui/src/pane_events.rs",
+        "desktop-gpui/src/companion_sidebar.rs",
+        "desktop-gpui/src/chat.rs"
+      ],
+      "status": "implemented_unverified",
+      "evidence": "Codex-first passive capture stores accepted current-turn lifecycle, item, input and approval observations as bounded content-free metadata. The owner-local native Events sidebar uses a retained virtual list, selected metadata, visible-only polling, older history and saved tab selection. Nine backend checks passed for native capture, persistence, paging, private IPC, LAN denial and compact-tail isolation; seven native checks passed including saved tab selection and a bounded 300x420 companion-frame viewport with selected metadata. No package installation, backend restart or live provider acceptance has been performed. Other harness and mobile parity remain unverified."
+    },
+    {
       "id": "project_idea_pane",
       "sourcePaths": [
         "desktop-gpui/src/ideas.rs",

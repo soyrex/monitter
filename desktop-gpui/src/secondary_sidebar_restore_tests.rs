@@ -70,6 +70,29 @@ fn secondary_sidebar_restore_is_settled_before_first_native_measurement(cx: &mut
 }
 
 #[gpui_kit::test]
+fn captured_event_tab_restores_with_pane_preferences(cx: &mut TestAppContext) {
+    let (pane, visual) = mount(cx);
+    visual.update(|window, cx| {
+        pane.update(cx, |pane, cx| {
+            let saved = NativeChatPanePreferences {
+                visible: true,
+                width: 280.,
+                tab: NativeDetailTab::Events,
+            };
+            // Round-trip the serialized value used for persisted pane settings.
+            let stored = serde_json::to_value(&saved).unwrap();
+            assert_eq!(stored["tab"], "events");
+            let restored = serde_json::from_value(stored).unwrap();
+            pane.restore_secondary_sidebar(&restored, window, cx);
+            pane.update_pane_width(1_000., window, cx);
+            assert_eq!(pane.secondary_sidebar_state(), saved);
+            assert_eq!(pane.detail_tab, crate::companion_sidebar::DetailTab::Events);
+            assert_eq!(pane.detail_focus.len(), 5);
+        });
+    });
+}
+
+#[gpui_kit::test]
 fn retained_pane_reveal_and_layout_breakpoint_cancel_outgoing_sidebar_motion(
     cx: &mut TestAppContext,
 ) {

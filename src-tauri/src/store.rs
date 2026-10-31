@@ -99,6 +99,7 @@ impl Store {
     pub(crate) fn task_message(&self, task_id: &str, message_id: &str) -> Result<crate::model::Message, String> {
         self.database.task_message(task_id, message_id)
     }
+    pub(crate) fn task_captured_events(&self,task_id:&str,before:Option<i64>,limit:Option<u32>)->Result<crate::lan_sync::TaskEventsPage,String>{self.database.captured_event_page(task_id,before,limit)}
     pub(crate) fn task_events(&self,task_id:&str,before:Option<i64>,limit:Option<u32>)->Result<crate::lan_sync::TaskEventsPage,String>{self.database.event_page(task_id,before,limit)}
     pub(crate) fn task_event(&self,task_id:&str,event_id:&str)->Result<crate::model::RunEvent,String>{self.database.task_event(task_id,event_id)}
     fn require_writable(&self) -> Result<(), String> {

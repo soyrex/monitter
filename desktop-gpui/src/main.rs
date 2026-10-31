@@ -36,6 +36,7 @@ mod browser_workspace;
 mod channels;
 mod chat;
 mod chat_links;
+mod task_identity;
 mod image_document;
 mod composer_scroll;
 mod chat_task_actions;
@@ -139,6 +140,7 @@ mod window_surface;
 mod pane_approvals;
 mod approval_prompt;
 mod pane_details;
+mod pane_events;
 mod pointer_guard;
 // Use the same core crate that Kit reexports so test macro paths and Kit glob
 // imports resolve `gpui` to one identity.
@@ -1503,6 +1505,26 @@ impl Desktop {
                         });
                         if let Err(error) = result { view.window.error = Some(format!("Could not open image: {error}")); }
                         cx.notify();
+                    });
+                }).detach();
+                Ok(())
+            }
+            chat_links::Target::Document(path) => {
+                let worker = cx.background_executor().spawn(async move {
+                    let metadata = std::fs::metadata(&path)
+                        .map_err(|_| "Document is unavailable. Ask the agent for an updated file link.".to_owned())?;
+                    if !metadata.is_file() { return Err("This document link does not point to a file.".to_owned()); }
+                    url::Url::from_file_path(path).map(|url| url.to_string())
+                        .map_err(|_| "Invalid document file link.".to_owned())
+                });
+                self.spawn_workspace(window, cx, async move |view, cx| {
+                    let result = worker.await;
+                    let _ = view.update_in(cx, |view, _, cx| {
+                        if view.closing || view.session_lock.read(cx).is_locked() { return; }
+                        match result {
+                            Ok(url) => cx.open_url(&url),
+                            Err(error) => { view.window.error = Some(error); cx.notify(); }
+                        }
                     });
                 }).detach();
                 Ok(())
