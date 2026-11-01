@@ -356,7 +356,10 @@ reconnection and a new authoritative snapshot.
   `{ messages: Message[], nextBeforeId: string | null, revision: string }`.
   Native and owner-LAN only. Pages are chronological, default to 64 records, and cap at 100. The
   stable message ID is an exclusive cursor; unknown/deleted cursors or cursors from another task
-  fail visibly. Clients only merge a page at its matching snapshot revision. Loading earlier
+  fail visibly. Clients merge at the matching snapshot revision, or stage the page and
+  replay a delta requested after the page from the original snapshot base before publishing.
+  Subsequent edits/removals win; a revision reset discards the staged page and retries.
+  This allows history loading while unrelated workspace activity advances revisions. Loading earlier
   messages preserves the detached reader's anchor and frozen live transcript; returning to the
   bottom, sending or switching conversations releases queued live updates.
   Paired owner workspaces may start with metadata only. Opening a chat pulls its latest 64

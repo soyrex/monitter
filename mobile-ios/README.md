@@ -116,11 +116,14 @@ or persist QR payloads.
 ```sh
 node scripts/network-recovery-run.mjs
 npm run test:owner-relay-ui
+node scripts/owner-relay-app-history-test.mjs
 ```
 
 These exercise silent connection failures and foreground recovery in the real
 encrypted client and WebKit owner route. Build the web assets first for the UI
-test. Use `./mobile-ios/build-simulator.sh` to compile the native lifecycle hooks
+test. The AppSurface history check uses the real bridge against a deterministic
+server that advances workspace revisions during message reads, including edits,
+removals and revision resets. Use `./mobile-ios/build-simulator.sh` to compile the native lifecycle hooks
 against an installed iOS SDK. Physical Wi-Fi/cellular and lock/unlock checks
 remain separate from these local tests.
 
@@ -130,7 +133,7 @@ Free Personal Team signing was selected for this first pass; no paid membership 
 push-notification entitlement is required. The project uses automatic signing.
 
 1. Open `MonitterIOS.xcodeproj` in Xcode and let Xcode finish installing its required
-   components. This Mac currently lacks CoreSimulator.framework.
+   components.
 2. In Xcode Settings > Accounts, sign in with your Apple ID.
 3. In the MonitterIOS target's Signing & Capabilities, select your Personal Team.
    If the bundle identifier is unavailable, choose a unique identifier for your team.
@@ -146,3 +149,30 @@ push-notification entitlement is required. The project uses automatic signing.
 
 The signing identity and provisioning profile are created by Xcode after sign-in;
 no credentials should be entered into Monitter or stored in this repository.
+
+### Renew an expired Personal Team install
+
+Keep the existing bundle identifier and signing team, and install over the old
+app. Do not uninstall it: its persistent WebKit data and native Keychain items
+hold the existing desktop pairing.
+
+After building the web assets, renew automatic signing with the existing Xcode
+account (replace the device and team placeholders):
+
+```sh
+xcodebuild -project mobile-ios/MonitterIOS.xcodeproj -scheme MonitterIOS \
+  -configuration Debug -destination 'id=<device-UDID>' \
+  -derivedDataPath mobile-ios/.build/device -allowProvisioningUpdates \
+  DEVELOPMENT_TEAM=<existing-team-ID> build
+codesign --verify --deep --strict \
+  mobile-ios/.build/device/Build/Products/Debug-iphoneos/MonitterIOS.app
+xcrun devicectl device install app --device '<device-UDID>' \
+  mobile-ios/.build/device/Build/Products/Debug-iphoneos/MonitterIOS.app
+```
+
+Check `embedded.mobileprovision` in the built app for its actual expiration
+date. The free profile renewed on 2026-11-01 expires on 2026-11-08; reinstalling
+does not remove the signing time limit. If iOS shows **Untrusted Developer**,
+the device owner must trust the existing development identity in Settings →
+General → VPN & Device Management before launching. Verify both launch and
+history in a previously used chat after renewal.

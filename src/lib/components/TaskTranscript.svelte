@@ -402,10 +402,9 @@ import ArrowRightLeft from "@lucide/svelte/icons/arrow-right-left";
     {:else}
       <MessagePane {active} thinking={displayThinking} pendingUpdates={transcriptBuffer.pendingUpdates()} onfollowchange={handleFollowChange} onscrollchange={(distance) => transcriptTailDistance = distance} resetKey={`task:${task.id}:${scrollRevision}`} stickyRequest={!!displayLatestUserRequest}>
       {#snippet header()}
-        {#if hasEarlierMessages || historyError || relayHistoryError}<div class="history-pager">
+        {#if hasEarlierMessages || historyError}<div class="history-pager">
           {#if hasEarlierMessages}<button type="button" aria-label="Load earlier messages" disabled={historyLoading} onclick={() => void loadEarlierMessages()}>{historyLoading ? 'Loading earlier messages…' : 'Load earlier messages'}</button>{/if}
           {#if historyError}<span role="status">{historyError}</span>{/if}
-          {#if relayHistoryError}<span role="status">{relayHistoryError}</span><button type="button" onclick={() => void refreshRelayHistory()}>Retry loading messages</button>{/if}
         </div>{/if}
       {/snippet}
       <TranscriptVirtualList
@@ -487,6 +486,7 @@ import ArrowRightLeft from "@lucide/svelte/icons/arrow-right-left";
       </TranscriptVirtualList>
       </MessagePane>
     {/if}
+    {#if isOwnerRelayBrowser() && relayHistoryError}<div class="history-pager" role="status"><span>{relayHistoryError}</span><button type="button" onclick={() => void refreshRelayHistory()}>Retry loading messages</button></div>{/if}
     {#if transcriptBuffer.held() && task.status === 'error'}<p class="live-transcript-notice" role="status">{liveError || 'This task stopped with an error.'}</p>{/if}
     {#if queuedMessages}<div class="queued-messages-float">{@render queuedMessages()}</div>{/if}
     <TaskActivity {goal} {goalNote} onclear={onClearGoal} clearing={clearingGoal} clearError={goalClearError} tools={[]} onstop={onStop} disabled={busy} docked />

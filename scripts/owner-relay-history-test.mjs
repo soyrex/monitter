@@ -46,6 +46,7 @@ try {
   assert.equal(await page.evaluate(() => window.__ownerQA.calls()), calls, 'empty chat must not enter a tight request loop');
   await page.evaluate(() => { window.__ownerQA.fail(); window.__ownerQA.switch('failure'); });
   await expect(page.getByText('fixture page failed')).toBeVisible();
+  assert.equal(await page.getByText('fixture page failed').evaluate(node => !!node.closest('.messages')), false, 'history errors must remain visible when the transcript is scrolled to the latest activity');
   await page.getByRole('button', { name: 'Retry loading messages' }).click();
   await expect(page.getByText('No messages yet')).toBeVisible();
   await page.evaluate(() => { window.__ownerQA.delay(); window.__ownerQA.switch('chat'); });

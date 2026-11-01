@@ -362,9 +362,18 @@ function getCommandCapabilities(): Promise<Set<string> | null> {
   return capabilityRequest;
 }
 
+// A history page and the delta read after it form one cache transaction.
+// Polls must not replace the base between those reads.
+let snapshotOperation: Promise<unknown> = Promise.resolve();
+function withSnapshotCache<T>(operation: () => Promise<T>): Promise<T> {
+  const result = snapshotOperation.then(operation);
+  snapshotOperation = result.catch(() => {});
+  return result;
+}
+
 function getCachedSnapshot(): Promise<Snapshot> {
   if (snapshotRequest) return snapshotRequest;
-  snapshotRequest = (async () => {
+  snapshotRequest = withSnapshotCache(async () => {
     const commands = await getCommandCapabilities();
     if (commands?.has('get_ui_delta')) {
       try { return await getDeltaSnapshot(); }
@@ -379,7 +388,7 @@ function getCachedSnapshot(): Promise<Snapshot> {
       if (!isUnknownCommand(reason)) throw reason;
       return rememberSnapshot(await invoke('get_snapshot'));
     }
-  })().finally(() => { snapshotRequest = null; });
+  }).finally(() => { snapshotRequest = null; });
   return snapshotRequest;
 }
 
@@ -387,17 +396,57 @@ async function getTaskMessages(taskId: string, beforeId?: string, limit?: number
   const commands = await getCommandCapabilities();
   if (!commands?.has('get_task_messages')) throw new Error('Earlier transcript history is unavailable on this desktop version.');
   if (!cachedSnapshot || !cachedRevision) await getCachedSnapshot();
-  let page = await invokeTaskMessages(taskId, beforeId, limit);
-  if (page.messages.some(message => message.taskId !== taskId)) throw new Error('Monitter returned a message for a different task.');
-  if (page.revision !== cachedRevision) {
-    await getCachedSnapshot();
-    page = await invokeTaskMessages(taskId, beforeId, limit);
+  if (!commands.has('get_ui_delta')) {
+    let page = await invokeTaskMessages(taskId, beforeId, limit);
     if (page.messages.some(message => message.taskId !== taskId)) throw new Error('Monitter returned a message for a different task.');
-    if (page.revision !== cachedRevision) throw new Error('Transcript history changed while loading. Please try again.');
+    if (page.revision !== cachedRevision) {
+      await getCachedSnapshot();
+      page = await invokeTaskMessages(taskId, beforeId, limit);
+      if (page.messages.some(message => message.taskId !== taskId)) throw new Error('Monitter returned a message for a different task.');
+      if (page.revision !== cachedRevision) throw new Error('Transcript history changed while loading. Please try again.');
+    }
+    if (cachedSnapshot) cachedSnapshot = mergeTaskMessagesPage(cachedSnapshot, page);
+    scheduleSnapshotRefresh();
+    return page;
   }
-  if (cachedSnapshot) cachedSnapshot = mergeTaskMessagesPage(cachedSnapshot, page);
-  scheduleSnapshotRefresh();
-  return page;
+  return withSnapshotCache(async () => {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const base = cachedSnapshot, revision = cachedRevision;
+      const page = await invokeTaskMessages(taskId, beforeId, limit);
+      if (page.messages.some(message => message.taskId !== taskId)) throw new Error('Monitter returned a message for a different task.');
+      if (cachedSnapshot !== base || cachedRevision !== revision) continue;
+      if (page.revision === revision && base) {
+        cachedSnapshot = mergeTaskMessagesPage(base, page);
+        scheduleSnapshotRefresh();
+        return page;
+      }
+      if (!commands.has('get_ui_delta') || !base || !revision) break;
+      // Global activity advances the workspace revision even when this chat is
+      // unchanged. Stage the page, then replay a delta requested AFTER the page
+      // so newer edits and removals win. Never publish the intermediate cache.
+      const response = await invokeUiDelta(revision);
+      if (cachedSnapshot !== base || cachedRevision !== revision) continue;
+      const applied = applyUiDelta(mergeTaskMessagesPage(base, page), revision, response);
+      if (applied.kind === 'gap') continue;
+      cachedSnapshot = applied.snapshot;
+      cachedRevision = applied.revision;
+      // A reset has no journal proving whether a paged row was removed. Keep
+      // its authoritative snapshot and request a fresh page from that base.
+      if (applied.kind === 'snapshot') continue;
+      const current = new Map(applied.snapshot.messages.map(message => [message.id, message]));
+      const reconciled = { ...page, revision: applied.revision, messages: page.messages.flatMap(message => {
+        const row = current.get(message.id);
+        return row ? [row] : [];
+      }) };
+      // A deleted whole page is not the end of older history. Re-read from
+      // the same requested boundary instead of losing the remaining cursor.
+      if (page.nextBeforeId && reconciled.messages.length === 0) continue;
+      if (reconciled.nextBeforeId) reconciled.nextBeforeId = reconciled.messages[0]?.id ?? null;
+      scheduleSnapshotRefresh();
+      return reconciled;
+    }
+    throw new Error('Transcript history changed while loading. Please try again.');
+  });
 }
 
 async function getChannelMessages(channelId: string, beforeId?: string, limit?: number): Promise<ChannelMessagesPage> {
