@@ -7,6 +7,12 @@
     <meta id="monitter-theme-color" name="theme-color" content="#EAEEF0" />
     <script>
       (() => {
+        if (window.webkit?.messageHandlers?.monitterPairing) {
+          document.documentElement.dataset.monitterIosStartup = '';
+          document.documentElement.style.backgroundColor = '#17191b';
+          document.querySelector('#monitter-theme-color')?.setAttribute('content', '#17191b');
+          return;
+        }
         try {
           const mode = localStorage.getItem('monitter.appearance.mode.v1') || 'system';
           const dark = mode === 'dark' || (mode === 'system' && matchMedia('(prefers-color-scheme: dark)').matches);
@@ -17,10 +23,61 @@
         } catch { /* The app applies the live theme after startup. */ }
       })();
     </script>
+    <style>
+      #monitter-startup { display: none; }
+      html[data-monitter-ios-startup] #monitter-startup { position: fixed; inset: 0; z-index: 2147483647; display: grid; place-items: center; background: #17191b; color: #66a9ef; font: 600 14px/normal system-ui, sans-serif; letter-spacing: .01em; }
+      #monitter-startup > div { display: grid; justify-items: center; gap: 22px; text-align: center; }
+      #monitter-startup img { display: block; width: min(280px, 72vw); height: auto; }
+      #monitter-startup p { margin: 0; }
+      #monitter-startup-recovery[hidden] { display: none; }
+      #monitter-startup-recovery { max-width: 280px; font-weight: 400; text-align: center; line-height: 1.5; }
+      #monitter-startup-recovery button { display: block; margin: 12px auto 0; min-height: 44px; padding: 8px 16px; border: 1px solid #66a9ef; border-radius: 8px; background: #17191b; color: #66a9ef; font: inherit; }
+    </style>
     <title>Monitter</title>
     %sveltekit.head%
   </head>
   <body data-sveltekit-preload-data="hover">
+    <div id="monitter-startup" role="status" aria-label="Preparing workspace" aria-busy="true"><div><img src="%sveltekit.assets%/monitter-wordmark.webp" alt="Monitter" /><p>Preparing workspace…</p><div id="monitter-startup-recovery" role="alert" hidden>Opening the workspace is taking longer than expected.<button type="button">Try again</button></div></div></div>
+    <script>
+      (() => {
+        const splash = document.getElementById('monitter-startup');
+        if (!document.documentElement.hasAttribute('data-monitter-ios-startup')) { splash.remove(); return; }
+        const recovery = document.getElementById('monitter-startup-recovery');
+        recovery.querySelector('button').addEventListener('click', () => window.location.reload());
+        const showRecovery = () => { if (splash.isConnected) { recovery.hidden = false; recovery.setAttribute('data-monitter-startup-ready', ''); } };
+        const recoveryTimer = setTimeout(showRecovery, 20000);
+        const scriptError = event => { if (event.target instanceof HTMLScriptElement) showRecovery(); };
+        window.addEventListener('error', scriptError, true);
+        // The HTML mask yields to a rendered Svelte surface. The native
+        // mask waits longer: an actionable route or a populated workspace.
+        const observer = new MutationObserver(check);
+        let checking = false;
+        const visible = element => element?.isConnected && element.getBoundingClientRect().height > 0 && getComputedStyle(element).visibility !== 'hidden' && getComputedStyle(element).display !== 'none';
+        const actionable = () => [...document.querySelectorAll('[data-monitter-startup-ready]')].some(visible) &&
+          ![...document.querySelectorAll('.workspace-loading-screen:not([data-monitter-startup-ready])')].some(visible);
+        function check() {
+          if (checking) return;
+          const surface = document.querySelector('.workspace-loading-screen, [data-monitter-startup-ready]');
+          if (!surface) return;
+          checking = true;
+          requestAnimationFrame(() => requestAnimationFrame(() => {
+            checking = false;
+            if (!visible(surface)) { check(); return; }
+            if (surface !== recovery && !splash.contains(surface)) {
+              clearTimeout(recoveryTimer);
+              window.removeEventListener('error', scriptError, true);
+              splash.remove();
+            }
+            if (actionable()) {
+              window.webkit?.messageHandlers?.monitterStartup?.postMessage('ready');
+              observer.disconnect();
+            }
+          }));
+        }
+        observer.observe(document.body, { childList: true, subtree: true, attributes: true });
+        check();
+      })();
+    </script>
     <div style="display: contents">%sveltekit.body%</div>
   </body>
 </html>

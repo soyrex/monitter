@@ -17,6 +17,10 @@ rm -rf "$app_dir"
 mkdir -p "$app_dir"
 cp "$script_dir/Info.plist" "$app_dir/Info.plist"
 cp -R "$script_dir/MonitterIOS/Web" "$app_dir/Web"
+cp "$script_dir/MonitterIOS/LaunchWordmark.png" "$app_dir/LaunchWordmark.png"
+xcrun ibtool --compile "$app_dir/LaunchScreen.storyboardc" \
+  --target-device iphone --target-device ipad --minimum-deployment-target 17.0 \
+  "$script_dir/MonitterIOS/LaunchScreen.storyboard"
 
 # Keep the direct-Swift build path compatible with the same AppIcon catalog
 # used by Xcode. Xcode compiles the catalog into Assets.car; this lightweight

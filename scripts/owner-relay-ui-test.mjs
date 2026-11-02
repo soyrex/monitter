@@ -40,6 +40,8 @@ try {
 
   const controllerTrusted = new Set();
   const ownerTrusted = new Set();
+  let holdOwnerTrust = false;
+  let ownerTrustWaiters = [];
   const ownerCommands = [];
   const ownerVoiceCalls = [];
   const ownerSentMessages = [];
@@ -62,7 +64,10 @@ try {
     },
     isTrustedController: key => controllerTrusted.has(key),
     onControllerAccess: key => { controllerTrusted.add(key); },
-    isTrustedOwnerWorkspace: key => ownerTrusted.has(key),
+    isTrustedOwnerWorkspace: async key => {
+      if (holdOwnerTrust) await new Promise(resolve => ownerTrustWaiters.push(resolve));
+      return ownerTrusted.has(key);
+    },
     onOwnerWorkspaceAccess: () => {},
     onOwnerInvoke: async (command, args) => {
       ownerCommands.push(command);
@@ -147,7 +152,7 @@ try {
   // The shell's fixed private origin must enter owner bootstrap even if a
   // WebKit navigation drops the optional ?owner=1 query string.
   await phone.goto(android ? 'https://appassets.androidplatform.net/mobile' : new URL('/mobile', baseUrl).href, { waitUntil: 'domcontentloaded', timeout: 60_000 });
-  await expect(phone.getByRole('button', { name: 'Scan desktop code' })).toBeVisible();
+  await expect(phone.getByRole('button', { name: 'Scan desktop QR code' })).toBeVisible();
   await phone.evaluate(invitation => window.dispatchEvent(new CustomEvent('monitter:qr', { detail: invitation })), desktop.invitation);
   await expect.poll(() => desktop.getStatus()).toBe('pending');
   await desktop.approve();
@@ -164,6 +169,26 @@ try {
   await expect.poll(() => ownerCommands.includes('get_snapshot')).toBe(true);
   await expect(phone.locator('.app-shell')).not.toHaveAttribute('inert', '');
   assert.equal(limitedSnapshotCalls, 0, 'iOS owner bootstrap fell back to the limited controller after approval');
+  // A slow remembered-owner decision used to replace the branded splash
+  // with a separate connection/marketing screen after 1.5 seconds. Hold the
+  // real trust check beyond that boundary, then complete the encrypted grant.
+  for (const path of ['/mobile', '/?monitter-owner-relay=1']) {
+    holdOwnerTrust = true;
+    await phone.goto(new URL(path, phone.url()).href, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+    await expect.poll(() => ownerTrustWaiters.length).toBeGreaterThan(0);
+    await phone.waitForTimeout(1700);
+    const splash = phone.locator('.workspace-loading-screen');
+    await expect(splash).toBeVisible();
+    await expect(splash.getByRole('img', { name: 'Monitter', exact: true })).toBeVisible();
+    await expect(splash.getByRole('status').first()).toBeVisible();
+    await expect(splash.getByRole('status').first()).toContainText('Preparing workspace…');
+    await expect(splash).toContainText(/approval|Approve full workspace/);
+    await expect(phone.locator('h1').filter({ hasText: /Your desktop|Monitter/ })).toHaveCount(0);
+    holdOwnerTrust = false;
+    for (const release of ownerTrustWaiters.splice(0)) release();
+    await expect(phone.locator('.app-shell')).toHaveCount(1);
+    await expect(phone.locator('.workspace-loading-screen')).toHaveCount(0);
+  }
   // iOS can report native resume, online and pageshow together. Exercise the
   // real owner route, including a currently-connected socket, and retain the
   // page and saved owner trust while the encrypted session is replaced once.

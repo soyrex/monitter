@@ -29,6 +29,7 @@ struct ContentView: View {
     @State private var pairedError: String?
     @State private var pageError: String?
     @State private var editingAddress = false
+    @State private var startingPage = true
 
     var body: some View {
         Group {
@@ -44,12 +45,21 @@ struct ContentView: View {
                             scannerPresented = true
                         }, requestConnectionChooser: {
                             editingAddress = true
-                        }, navigationError: { pageError = $0 })
+                        }, navigationError: { pageError = $0; startingPage = false },
+                           navigationLoading: { startingPage = $0 })
                         .frame(
                             width: geometry.size.width,
                             height: geometry.size.height + geometry.safeAreaInsets.top + geometry.safeAreaInsets.bottom
                         )
                         .offset(y: -geometry.safeAreaInsets.top)
+
+                        // Keep the native launch artwork visible until WebKit has
+                        // painted the matching bundled splash or actionable page.
+                        if startingPage && pageError == nil && pairedError == nil {
+                            StartupSplashView()
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                .ignoresSafeArea()
+                        }
 
                         if let currentPageError = pageError {
                             VStack(spacing: 12) {
@@ -95,6 +105,7 @@ struct ContentView: View {
                 }
             }
         }
+        .background(Color(uiColor: StartupSplashView.background).ignoresSafeArea())
         .task {
             // Migrate old manual-network launches to the bundled QR flow once.
             // Retain the old address in Settings, and respect later explicit choices.
@@ -238,6 +249,33 @@ struct ContentView: View {
         } catch {
             startError = "Unable to start paired mode: \(error.localizedDescription)"
             if case .paired = mode { pairedError = startError }
+        }
+    }
+}
+
+private struct StartupSplashView: View {
+    @ScaledMetric(relativeTo: .subheadline) private var statusSize = 14.0
+    static let background = UIColor(red: 23 / 255, green: 25 / 255, blue: 27 / 255, alpha: 1)
+
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack {
+                Color(uiColor: Self.background)
+                VStack(spacing: 22) {
+                    Image("LaunchWordmark")
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: min(280, geometry.size.width * 0.72))
+                        .accessibilityLabel("Monitter")
+                    Text("Preparing workspace…")
+                        .font(.system(size: statusSize, weight: .semibold))
+                        .foregroundStyle(Color(red: 102 / 255, green: 169 / 255, blue: 239 / 255))
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 32)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .accessibilityElement(children: .combine)
+            }
         }
     }
 }
@@ -395,9 +433,10 @@ private struct WebContentView: UIViewRepresentable {
     let requestScan: () -> Void
     let requestConnectionChooser: () -> Void
     let navigationError: (String) -> Void
+    let navigationLoading: (Bool) -> Void
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(requestScan: requestScan, requestConnectionChooser: requestConnectionChooser, navigationError: navigationError)
+        Coordinator(requestScan: requestScan, requestConnectionChooser: requestConnectionChooser, navigationError: navigationError, navigationLoading: navigationLoading)
     }
 
     func makeUIView(context: Context) -> WKWebView {
@@ -409,12 +448,15 @@ private struct WebContentView: UIViewRepresentable {
         configuration.userContentController.addScriptMessageHandler(PairingKeychainBridge(), contentWorld: .page, name: "monitterPairing")
         configuration.userContentController.add(context.coordinator, name: "monitterSpeech")
         configuration.userContentController.add(context.coordinator, name: "monitterCompanion")
+        configuration.userContentController.add(context.coordinator, name: "monitterStartup")
         let view = MonitterWebView(frame: .zero, configuration: configuration)
         view.allowsBackForwardNavigationGestures = true
         view.navigationDelegate = context.coordinator
         view.uiDelegate = context.coordinator
         view.isOpaque = false
-        view.backgroundColor = .systemBackground
+        view.backgroundColor = StartupSplashView.background
+        view.scrollView.backgroundColor = StartupSplashView.background
+        view.underPageBackgroundColor = StartupSplashView.background
         webView = view
         context.coordinator.speechWebView = view
         webViewReady(view)
@@ -443,6 +485,7 @@ private struct WebContentView: UIViewRepresentable {
         uiView.configuration.userContentController.removeScriptMessageHandler(forName: "monitterPairing")
         uiView.configuration.userContentController.removeScriptMessageHandler(forName: "monitterSpeech")
         uiView.configuration.userContentController.removeScriptMessageHandler(forName: "monitterCompanion")
+        uiView.configuration.userContentController.removeScriptMessageHandler(forName: "monitterStartup")
         coordinator.cancelSpeech()
         coordinator.teardownCompanion()
     }
@@ -451,6 +494,7 @@ private struct WebContentView: UIViewRepresentable {
         private let requestScan: () -> Void
         private let requestConnectionChooser: () -> Void
         private let navigationError: (String) -> Void
+        private let navigationLoading: (Bool) -> Void
         var pairedMode = false
         var requestedURL: URL?
         private var speechEngine: AVAudioEngine?
@@ -465,10 +509,11 @@ private struct WebContentView: UIViewRepresentable {
         private var idleTimerPriorValue: Bool?
         private var lifecycleObservers: [NSObjectProtocol] = []
         weak var speechWebView: WKWebView?
-        init(requestScan: @escaping () -> Void, requestConnectionChooser: @escaping () -> Void, navigationError: @escaping (String) -> Void) {
+        init(requestScan: @escaping () -> Void, requestConnectionChooser: @escaping () -> Void, navigationError: @escaping (String) -> Void, navigationLoading: @escaping (Bool) -> Void) {
             self.requestScan = requestScan
             self.requestConnectionChooser = requestConnectionChooser
             self.navigationError = navigationError
+            self.navigationLoading = navigationLoading
             super.init()
             let center = NotificationCenter.default
             lifecycleObservers.append(center.addObserver(forName: UIApplication.willResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
@@ -550,7 +595,14 @@ private struct WebContentView: UIViewRepresentable {
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
             failed(error)
         }
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            // A network load finishing does not mean WebKit has painted the
+            // workspace. Bundled pages explicitly acknowledge their first ready
+            // frame; retain didFinish only for older, explicitly selected LAN sites.
+            if !pairedMode { DispatchQueue.main.async { self.navigationLoading(false) } }
+        }
         func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+            navigationLoading(true)
             companionActive = false
             syncIdleTimer()
             stopSpeechForLifecycle("Speech stopped because the paired page navigated.")
@@ -580,6 +632,18 @@ private struct WebContentView: UIViewRepresentable {
             DispatchQueue.main.async { self.navigationError(error.localizedDescription) }
         }
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+            if message.name == "monitterStartup" {
+                guard pairedMode, requestedURL != nil,
+                      message.frameInfo.isMainFrame,
+                      message.frameInfo.securityOrigin.protocol == "http",
+                      message.frameInfo.securityOrigin.host == "127.0.0.1",
+                      message.frameInfo.securityOrigin.port == 31977,
+                      let page = message.webView?.url,
+                      page.scheme == "http", page.host == "127.0.0.1", page.port == 31977,
+                      let value = message.body as? String, value == "ready" else { return }
+                DispatchQueue.main.async { self.navigationLoading(false) }
+                return
+            }
             if message.name == "monitterCompanion" {
                 guard pairedMode,
                       requestedURL != nil,

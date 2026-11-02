@@ -3,7 +3,7 @@
   import { surfaceTint } from '$lib/surface-tint';
   import AnimatedTitle from './AnimatedTitle.svelte';
 
-  let { error = '', onretry }: { error?: string; onretry?: () => void } = $props();
+  let { error = '', message = '', onretry }: { error?: string; message?: string; onretry?: () => void } = $props();
 
   type AppearanceMode = 'light' | 'dark' | 'system';
 
@@ -17,6 +17,7 @@
     }
   }
 
+  const nativeIos = typeof window !== 'undefined' && Boolean((window as any).webkit?.messageHandlers?.monitterPairing);
   const mode = storedAppearanceMode();
   const light = $derived(applyThemeContrast(appThemePreset($appTheme.light).light, 'light', $appTheme.contrast));
   const dark = $derived(applyThemeContrast(appThemePreset($appTheme.dark).dark, 'dark', $appTheme.contrast));
@@ -37,6 +38,8 @@
 <section
   class="workspace-loading-screen"
   data-mode={mode}
+  data-native-ios={nativeIos}
+  data-monitter-startup-ready={error || message ? true : undefined}
   style={themeStyle}
   aria-label="Preparing workspace"
   aria-busy="true"
@@ -44,7 +47,8 @@
 >
   <div class="loading-lockup" data-tauri-drag-region>
     <img src="/monitter-wordmark.webp" alt="Monitter" draggable="false" />
-    <p role="status"><AnimatedTitle text="Preparing workspace…" active activeTooltip="Preparing workspace" /></p>
+    <p role="status">{#if nativeIos}Preparing workspace…{:else}<AnimatedTitle text="Preparing workspace…" active activeTooltip="Preparing workspace" />{/if}</p>
+    {#if message && !error}<p class="loading-status" role="status">{message}</p>{/if}
     {#if error}
       <div class="loading-error" role="alert">
         <span>{error}</span>
@@ -78,7 +82,17 @@
     --loading-muted: var(--loading-dark-muted);
     --loading-accent: var(--loading-dark-accent);
   }
+  .workspace-loading-screen[data-native-ios='true'] {
+    --loading-paper: #17191b;
+    --loading-ink: #eeeeee;
+    --loading-muted: #66a9ef;
+    --loading-accent: #66a9ef;
+    padding: 0;
+    font-family: system-ui, sans-serif;
+  }
+  .workspace-loading-screen[data-native-ios='true'] img { filter: none; }
   .loading-lockup {
+    position: relative;
     display: grid;
     justify-items: center;
     gap: 22px;
@@ -103,6 +117,13 @@
     --accent: var(--loading-accent);
     --accent-ink: var(--loading-accent);
   }
+  .loading-status {
+    position: absolute;
+    top: calc(100% + 20px);
+    width: 100%;
+    font-weight: 400;
+    line-height: 1.5;
+  }
   .loading-error {
     display: grid;
     justify-items: center;
@@ -117,6 +138,7 @@
     overflow-wrap: anywhere;
   }
   .loading-error button {
+    min-height: 44px;
     padding: 7px 12px;
     border: 1px solid color-mix(in srgb, var(--loading-accent) 50%, transparent);
     border-radius: 7px;
@@ -132,6 +154,8 @@
       --loading-accent: var(--loading-dark-accent);
     }
   }
+  .workspace-loading-screen[data-native-ios='true'] { background: #17191b; color: #eeeeee; }
+  .workspace-loading-screen[data-native-ios='true'] p { color: #66a9ef; line-height: normal; }
   @media (prefers-reduced-motion: reduce) {
     :global(:root:not([data-motion="on"])) img { filter: none; }
   }

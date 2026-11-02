@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
+  import WorkspaceLoadingScreen from '$lib/components/WorkspaceLoadingScreen.svelte';
   import Menu from "@lucide/svelte/icons/menu";
   import ArrowUp from "@lucide/svelte/icons/arrow-up";
   import Archive from "@lucide/svelte/icons/archive";
@@ -44,6 +45,7 @@
   let deviceKey=$state(''), verificationCode=$state(''), connecting=$state(false), connectionGeneration=0;
   let status=$state('disconnected'), error=$state(''), connectionError=$state(''), remembered=$state(false), snapshot=$state<Snapshot|null>(null);
   let everConnected=$state(false);
+  let restoringPairing=$state(true), handingOff=$state(false), ownerApprovalWaiting=$state(false);
   let selected=$state<string|null>(null), selectedChannelId=$state<string|null>(null), selectedTerminalId=$state<string|null>(null), text=$state('');
   // The transport object has identity-sensitive async callbacks. Deep $state
   // would proxy it, making a freshly connected session fail `current === session`.
@@ -51,6 +53,7 @@
   let pairingEpoch=0, pairingWrites:Promise<void>=Promise.resolve(), preparingPairing=false;
   let ownerRequestPending=$state(false), ownerRequestEpoch=0;
   let ownerUnsupported=$state(false);
+  const startupSplash=$derived(ownerWorkspaceMode && !error && !connectionError && !ownerUnsupported && status!=='awaiting_approval' && status!=='rejected' && (restoringPairing || handingOff || (remembered && status!=='error' && status!=='closed')));
   let snapshotEpoch=0, refreshInFlight=false, refreshToken=0, snapshotRequestSeq=0, snapshotAppliedSeq=0, sidebarViewSession=-1, terminalSelectionEpoch=0, operationSeq=0;
   let sendOps=$state<Record<string,number>>({}), stopOps=$state<Record<string,number>>({});
   let chatDrafts=$state<Record<string,string>>({}), menu=$state<'workspace'|'archived'|'terminals'|'preferences'|'hosts'|'agents'>('workspace');
@@ -150,21 +153,23 @@
     ownerUnsupported=false;error='';
     ownerRequestPending=true;
     const ownerAttempt=++ownerRequestEpoch;
+    const approvalTimer=setTimeout(()=>{if(ownerAttempt===ownerRequestEpoch&&current===session&&ownerRequestPending)ownerApprovalWaiting=true;},1500);
     try{
-      await current.requestOwnerWorkspace();
+      if(!current.hasOwnerWorkspaceAccess())await current.requestOwnerWorkspace();
       const active=()=>ownerAttempt===ownerRequestEpoch&&current===session&&generation===connectionGeneration&&persistenceEpoch===pairingEpoch&&current.getStatus()==='connected'&&current.hasOwnerWorkspaceAccess();
       if(!active())return;
       const saved=await queuePairingWrite(persistenceEpoch,async()=>{if(active())await saveMobilePairing({...record,savedAt:Date.now()});});
       if(!saved||!active())return;
       try { localStorage.setItem('monitter-owner-pairing', '1'); } catch { /* URL still selects the approved relay gate. */ }
+      handingOff=true;
       window.location.replace('/?monitter-owner-relay=1');
     }catch(reason){if(ownerAttempt===ownerRequestEpoch&&current===session&&generation===connectionGeneration&&persistenceEpoch===pairingEpoch)error=`Full workspace access was not approved: ${String(reason)}`;}
-    finally{if(ownerAttempt===ownerRequestEpoch&&current===session&&generation===connectionGeneration&&persistenceEpoch===pairingEpoch)ownerRequestPending=false;}
+    finally{clearTimeout(approvalTimer);if(ownerAttempt===ownerRequestEpoch&&current===session&&generation===connectionGeneration&&persistenceEpoch===pairingEpoch){ownerRequestPending=false;ownerApprovalWaiting=false;}}
   }
   async function openPairing(record:MobilePairingRecord, persistAfterApproval:boolean){
-    if(connecting)return;const generation=++connectionGeneration, persistenceEpoch=++pairingEpoch;connecting=true;ownerRequestPending=false;error='';connectionError='';remembered=!persistAfterApproval;verificationCode='';resetConnectionState();
+    if(connecting)return;const generation=++connectionGeneration, persistenceEpoch=++pairingEpoch;connecting=true;ownerRequestPending=false;ownerApprovalWaiting=false;error='';connectionError='';remembered=!persistAfterApproval;verificationCode='';resetConnectionState();
     session?.close();unsubscribe?.();session=null;status='connecting';
-    try{const next=await createResumableMobileSession({invitation:record.invitation,identity:{keyPair:record.identity.keyPair}});if(generation!==connectionGeneration){next.close();return;}session=next;unsubscribe=next.subscribe(value=>{if(generation!==connectionGeneration)return;if(value.status!=='connected'){ownerRequestEpoch++;ownerRequestPending=false;}status=value.status;verificationCode=value.verificationCode??'';connectionError=value.error??(value.status==='closed'||value.status==='error'?'Connection interrupted. Reconnecting…':'');if(value.status==='connected'){everConnected=true;if(persistAfterApproval){if(next.supportsRememberedDevices()){void queuePairingWrite(persistenceEpoch,async()=>saveMobilePairing({...record,savedAt:Date.now()})).then(saved=>{if(saved&&generation===connectionGeneration)remembered=true;});}else error='This desktop needs an update before it can remember this phone. The current connection remains available until it closes.';}if(ownerWorkspaceMode)void enterOwnerWorkspace(next,record,generation,persistenceEpoch);else void refresh();}if(value.status==='rejected'){connecting=false;everConnected=false;resetConnectionState();error='Desktop declined this connection. Your saved pairing is preserved. Retry when ready.';}});}
+    try{const next=await createResumableMobileSession({invitation:record.invitation,identity:{keyPair:record.identity.keyPair}});if(generation!==connectionGeneration){next.close();return;}session=next;unsubscribe=next.subscribe(value=>{if(generation!==connectionGeneration)return;if(value.status!=='connected'){ownerRequestEpoch++;ownerRequestPending=false;ownerApprovalWaiting=false;}status=value.status;verificationCode=value.verificationCode??'';connectionError=value.error??(value.status==='closed'||value.status==='error'?'Connection interrupted. Reconnecting…':'');if(value.status==='connected'){everConnected=true;if(persistAfterApproval){if(next.supportsRememberedDevices()){void queuePairingWrite(persistenceEpoch,async()=>saveMobilePairing({...record,savedAt:Date.now()})).then(saved=>{if(saved&&generation===connectionGeneration)remembered=true;});}else error='This desktop needs an update before it can remember this phone. The current connection remains available until it closes.';}if(ownerWorkspaceMode)void enterOwnerWorkspace(next,record,generation,persistenceEpoch);else void refresh();}if(value.status==='rejected'){connecting=false;everConnected=false;resetConnectionState();error='Desktop declined this connection. Your saved pairing is preserved. Retry when ready.';}});}
     catch(e){if(generation===connectionGeneration){error=String(e);status='error';}}
     finally{if(generation===connectionGeneration)connecting=false;}
   }
@@ -191,7 +196,7 @@
     androidSpeechBridge=nativeSpeechPlatform()==='android';
     let disposed=false;
     const stopScaleWatch=watchViewerInterfaceScales();
-    const restore=async(force=false)=>{if(disposed||connecting||preparingPairing)return;const current=connectionGeneration;if(session){if(status==='rejected')return;if(force||status!=='connected')try{await session.reconnectNow();}catch(reason){if(current===connectionGeneration)error=String(reason);}return;}try{const record=await loadMobilePairing();if(!record||disposed||current!==connectionGeneration)return;await openPairing(record,false);}catch(reason){if(current===connectionGeneration)error=`Could not restore secure pairing: ${String(reason)}`;}};
+    const restore=async(force=false)=>{if(disposed||connecting||preparingPairing)return;const current=connectionGeneration;if(session){if(status==='rejected')return;if(force||status!=='connected')try{await session.reconnectNow();}catch(reason){if(current===connectionGeneration)error=String(reason);}return;}try{const record=await loadMobilePairing();if(!record||disposed||current!==connectionGeneration)return;await openPairing(record,false);}catch(reason){if(current===connectionGeneration)error=`Could not restore secure pairing: ${String(reason)}`;}finally{restoringPairing=false;}};
     const qr=(event:Event)=>{const value=(event as CustomEvent<string>).detail;if(typeof value==='string'&&value.length<=4096)void connect(value);};
     const qrError=(event:Event)=>{error=String((event as CustomEvent<string>).detail||'Scanner unavailable. Enter the device key instead.');};
     (window as any).monitterHandleBack=()=>{if(selected||selectedChannelId||selectedTerminalId){backToMenu();return true;}if(menu!=='workspace'){menu='workspace';return true;}return false;};
@@ -199,15 +204,16 @@
     window.addEventListener('monitter:qr',qr);window.addEventListener('monitter:qr-error',qrError);
     let pendingPin = '';
     if (ownerWorkspaceMode) try { pendingPin = sessionStorage.getItem('monitter-pairing-pin') ?? ''; sessionStorage.removeItem('monitter-pairing-pin'); } catch { /* Manual PIN entry remains available. */ }
-    if (/^\d{9}$/.test(pendingPin)) { deviceKey = pendingPin; void connect(); }
+    if (/^\d{9}$/.test(pendingPin)) { restoringPairing=false; deviceKey = pendingPin; void connect(); }
     else void restore();
     const timer=setInterval(()=>{if(!ownerWorkspaceMode&&session&&status==='connected'&&!document.hidden){void refresh();if(selectedTerminalId)void readTerminal(selectedTerminalId,terminalSeq);}},2000);
     return()=>{disposed=true;stopReconnectEvents();stopScaleWatch();clearInterval(timer);window.removeEventListener('monitter:qr',qr);window.removeEventListener('monitter:qr-error',qrError);delete (window as any).monitterHandleBack;connectionGeneration++;session?.close();unsubscribe?.();};
   });
 </script>
 <svelte:head><title>Monitter Remote</title><meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" /></svelte:head>
+{#if startupSplash}<WorkspaceLoadingScreen message={ownerApprovalWaiting ? 'Approve full workspace access on your desktop.' : ''} />{:else}
 <div class:light={theme==='light'} class="mobile" style={remoteStyle} style:--interface-font-ratio={(snapshot?.settings.interfaceFontSize ?? 14) / 14} style:--viewer-interface-scale={$mobileInterfaceScale/100} style:--viewer-interface-scale-inverse={100/$mobileInterfaceScale}>
-  <div class="mobile-content" aria-busy={reconnecting}>
+  <div class="mobile-content" data-monitter-startup-ready={!startupSplash ? true : undefined} aria-busy={reconnecting}>
   <header>{#if selected || selectedChannelId || selectedTerminalId}<button aria-label="Open chats menu" onclick={backToMenu}><Menu size={22}/></button>{/if}<div><strong>{selected || selectedChannelId || selectedTerminalId ? selectedTitle : workspaceTitle}</strong>{#if !reconnecting}<small><span class:online={status==='connected'}></span>{status.replaceAll('_',' ')}</small>{/if}</div>{#if session}<button aria-label="Refresh" onclick={async()=>{void refresh(true);if(menu==='terminals')void refreshTerminals(true);}}><RefreshCw size={20}/></button><button aria-label="Forget desktop" title="Forget desktop" onclick={disconnect}><Unplug size={20}/></button>{/if}</header>
   {#if error&&(!reconnecting||error===reconnectMessage)}<div class="error" role="alert">{error}</div>{/if}{#if connectionError&&!reconnecting}<div class="error" role="status">{connectionError}</div>{/if}
   {#if ownerWorkspaceMode || !snapshot}
@@ -248,6 +254,7 @@
   </div>
   {#if reconnecting}<div class="connection-recovery-spinner" data-testid="connection-recovery-spinner" role="status" aria-live="polite"><span class="connection-spinner" aria-hidden="true"></span></div>{/if}
 </div>
+{/if}
 <style>
 .brand-name{letter-spacing:.24em;font-weight:700}.pin-fallback{width:100%;margin-top:20px}.pin-fallback summary{cursor:pointer;color:var(--soft);font-size:13px}.pin-fallback label{margin-top:16px}.saved-pairing{color:var(--soft)}.forget{opacity:.65}
 

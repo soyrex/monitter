@@ -28,6 +28,19 @@ the app never upgrades or changes that trust decision. If that local address is
 unavailable away from the LAN, choose the paired workspace to use the saved
 relay pairing instead.
 
+## Launch screen
+
+The native launch screen, initial WebKit document, saved-pairing reconnect and
+owner-workspace hydration share the same dark Monitter wordmark and
+“Preparing workspace…” splash. A saved pairing does not briefly expose the
+connection chooser or a separate Connecting page. Fresh pairing, approvals and
+connection errors remain actionable; a stalled web bootstrap offers a retry.
+
+`node scripts/ios-startup-test.mjs` checks the built production bundle in WebKit,
+including the pre-JavaScript interval, remembered pairing, fresh pairing,
+landscape, reduced motion and failed-module recovery. Native launch artwork is
+compiled by both Xcode and `build-simulator.sh`.
+
 ## Companion Mode
 
 In the paired iOS owner workspace, Mo is Monitter's foreground desk companion

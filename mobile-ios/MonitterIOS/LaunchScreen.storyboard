@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<document type="com.apple.InterfaceBuilder3.CocoaTouch.Storyboard.XIB" version="3.0" toolsVersion="23501" targetRuntime="iOS.CocoaTouch" propertyAccessControl="none" useAutolayout="YES" launchScreen="YES" useTraitCollections="YES" useSafeAreas="YES" colorMatched="YES" initialViewController="launch-controller">
+    <device id="retina6_12" orientation="portrait" appearance="dark"/>
+    <dependencies>
+        <plugIn identifier="com.apple.InterfaceBuilder.IBCocoaTouchPlugin" version="23501"/>
+        <capability name="Safe area layout guides" minToolsVersion="9.0"/>
+        <capability name="documents saved in the Xcode 8 format" minToolsVersion="8.0"/>
+    </dependencies>
+    <scenes>
+        <scene sceneID="launch-scene">
+            <objects>
+                <viewController id="launch-controller" sceneMemberID="viewController">
+                    <view key="view" contentMode="scaleToFill" id="launch-view">
+                        <rect key="frame" x="0.0" y="0.0" width="393" height="852"/>
+                        <autoresizingMask key="autoresizingMask" widthSizable="YES" heightSizable="YES"/>
+                        <subviews>
+                            <stackView opaque="NO" contentMode="scaleToFill" axis="vertical" alignment="center" spacing="22" translatesAutoresizingMaskIntoConstraints="NO" id="launch-lockup">
+                                <rect key="frame" x="56.5" y="359.7" width="280" height="132.6"/>
+                                <subviews>
+                                    <imageView clipsSubviews="YES" userInteractionEnabled="NO" contentMode="scaleAspectFit" image="LaunchWordmark.png" translatesAutoresizingMaskIntoConstraints="NO" id="launch-wordmark">
+                                        <rect key="frame" x="0.0" y="0.0" width="280" height="93.6"/>
+                                        <constraints>
+                                            <constraint firstAttribute="width" relation="lessThanOrEqual" constant="280" id="logo-max-width"/>
+                                            <constraint firstAttribute="height" secondItem="launch-wordmark" secondAttribute="width" multiplier="725:2169" id="logo-aspect"/>
+                                        </constraints>
+                                    </imageView>
+                                    <label opaque="NO" userInteractionEnabled="NO" contentMode="left" text="Preparing workspace…" textAlignment="center" numberOfLines="0" translatesAutoresizingMaskIntoConstraints="NO" id="launch-status">
+                                        <rect key="frame" x="62" y="115.6" width="156" height="17"/>
+                                        <fontDescription key="fontDescription" type="system" weight="semibold" pointSize="14"/>
+                                        <color key="textColor" red="0.4" green="0.662745098" blue="0.937254902" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
+                                    </label>
+                                </subviews>
+                            </stackView>
+                        </subviews>
+                        <viewLayoutGuide key="safeArea" id="launch-safe-area"/>
+                        <color key="backgroundColor" red="0.0901960784" green="0.0980392157" blue="0.105882353" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
+                        <constraints>
+                            <constraint firstItem="launch-lockup" firstAttribute="centerX" secondItem="launch-view" secondAttribute="centerX" id="lockup-center-x"/>
+                            <constraint firstItem="launch-lockup" firstAttribute="centerY" secondItem="launch-view" secondAttribute="centerY" id="lockup-center-y"/>
+                            <constraint firstItem="launch-wordmark" firstAttribute="width" secondItem="launch-view" secondAttribute="width" multiplier="0.72" priority="750" id="logo-adaptive-width"/>
+                            <constraint firstItem="launch-lockup" firstAttribute="leading" relation="greaterThanOrEqual" secondItem="launch-safe-area" secondAttribute="leading" constant="32" id="lockup-leading"/>
+                            <constraint firstItem="launch-safe-area" firstAttribute="trailing" relation="greaterThanOrEqual" secondItem="launch-lockup" secondAttribute="trailing" constant="32" id="lockup-trailing"/>
+                        </constraints>
+                    </view>
+                </viewController>
+                <placeholder placeholderIdentifier="IBFirstResponder" id="launch-responder" userLabel="First Responder" sceneMemberID="firstResponder"/>
+            </objects>
+        </scene>
+    </scenes>
+    <resources>
+        <image name="LaunchWordmark.png" width="2169" height="725"/>
+    </resources>
+</document>

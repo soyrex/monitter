@@ -51,7 +51,7 @@ try {
   const errors=[];phone.on('pageerror',e=>errors.push(e.message));
   await phone.goto(new URL('mobile',baseUrl).href,{waitUntil:'domcontentloaded',timeout:60000});
   await phone.evaluate(()=>{window.scanRequests=0;window.monitterAndroid={postMessage:value=>{if(value==='scanQR')window.scanRequests++;}};});
-  await phone.getByRole('button',{name:'Scan desktop code'}).click();
+  await phone.getByRole('button',{name:'Scan desktop QR code'}).click();
   if(await phone.evaluate(()=>window.scanRequests)!==1)throw Error('Android scanner bridge was not invoked');
   await phone.evaluate(invitation=>window.dispatchEvent(new CustomEvent('monitter:qr',{detail:invitation})),invitation);
   await expect.poll(()=>host.evaluate(()=>window.desktop.getStatus())).toBe('pending');
@@ -156,8 +156,8 @@ try {
   await expect(phone.locator('.error')).toHaveText('Reconnecting to your desktop. Try again once connected.');
   await expect(phone.getByLabel('Message',{exact:true})).toHaveValue('Draft while offline');
   expect(await host.evaluate(()=>window.testSends)).toBe(1);
-  await phone.getByRole('button',{name:'Disconnect',exact:true}).click();
-  await expect(phone.getByRole('button',{name:'Connect to desktop'})).toBeVisible();
+  await phone.getByRole('button',{name:'Forget desktop',exact:true}).click();
+  await expect(phone.getByRole('button',{name:'Scan desktop QR code',exact:true})).toBeVisible();
   if(errors.length)throw Error(errors.join('\n'));
   console.log('WebKit phone UI: approval, chat, single send, quiet reconnect, preserved draft, disconnect passed (test bridge).');
 } finally {await browser?.close();for(const child of children)child.kill('SIGTERM');}

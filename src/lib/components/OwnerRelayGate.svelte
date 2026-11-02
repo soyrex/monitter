@@ -1,4 +1,5 @@
 <script lang="ts">
+  import WorkspaceLoadingScreen from './WorkspaceLoadingScreen.svelte';
   import { onMount, type Snippet } from 'svelte';
   import { loadMobilePairing } from '$lib/controller/pairing-store';
   import { createResumableMobileSession, type ResumableMobileSession } from '$lib/controller/resumable-session';
@@ -13,7 +14,7 @@
   let ready = $state(false);
   let everReady = $state(false);
   let reconnecting = $state(false);
-  let permanentProblem = $state(false);
+  let awaitingApproval = $state(false);
   let status = $state('Connecting to your desktop…');
   let error = $state('');
 
@@ -89,13 +90,17 @@
       if (!current.supportsOwnerWorkspace()) {
         status = 'Desktop update required';
         error = 'Update Monitter on your desktop to use the full workspace through the relay. Your existing LAN connection still works.';
-        permanentProblem = true;
         everReady = false;
         reconnecting = false;
         return;
       }
       authorizing = true;
       const authorization = ++authorizationEpoch;
+      // Restored owner grants normally resolve immediately. Only expose a
+      // pending desktop decision if it actually remains pending.
+      const approvalTimer = setTimeout(() => {
+        if (!closed && session === current && authorization === authorizationEpoch && authorizing) awaitingApproval = true;
+      }, 1500);
       status = 'Waiting for full-workspace approval on your desktop…';
       error = '';
       try {
@@ -105,6 +110,7 @@
         if (closed || authorization !== authorizationEpoch || session !== current || current.getStatus() !== 'connected') return;
         status = 'Opening your workspace…';
         setOwnerRelayInvoker((command, args) => current.invokeOwner(command, args));
+        awaitingApproval = false;
         ready = true;
         everReady = true;
         reconnecting = false;
@@ -115,7 +121,7 @@
         });
       } catch (reason) {
         if (!closed && authorization === authorizationEpoch && session === current) error = reason instanceof Error ? reason.message : String(reason);
-      } finally { if (authorization === authorizationEpoch) authorizing = false; }
+      } finally { clearTimeout(approvalTimer); if (authorization === authorizationEpoch) authorizing = false; }
     };
     void (async () => {
       try {
@@ -137,14 +143,14 @@
             if (appearanceTimer) clearTimeout(appearanceTimer);
             appearanceTimer = undefined;
             setOwnerRelayInvoker(null);
+            awaitingApproval = state.status === 'awaiting_approval';
             status = state.status === 'awaiting_approval' ? 'Approve this phone on your desktop…' : 'Reconnecting to your desktop…';
             if (everReady && state.status !== 'rejected') reconnecting = true;
             else if (state.error) error = state.error;
             if (state.status === 'rejected') {
               everReady = false;
               reconnecting = false;
-              permanentProblem = true;
-              error = state.error || 'Desktop declined this connection. Your saved pairing is preserved; retry when ready.';
+                    error = state.error || 'Desktop declined this connection. Your saved pairing is preserved; retry when ready.';
             }
           }
         });
@@ -181,24 +187,11 @@
     </div>
   {/if}
 {:else}
-  <main class="owner-relay-wait">
-    <div>
-      <h1>Monitter</h1>
-      <p role="status">{status}</p>
-      {#if error}<p role="alert">{error}</p>{/if}
-      {#if permanentProblem}<button type="button" onclick={() => window.location.assign('/mobile?owner=1')}>Reconnect to saved desktop</button>{/if}
-    </div>
-  </main>
+  <WorkspaceLoadingScreen {error} message={awaitingApproval ? status : ''} onretry={error ? () => window.location.assign('/mobile?owner=1') : undefined} />
 {/if}
 
 <style>
   .owner-relay-error { position:fixed; bottom:16px; left:16px; right:16px; z-index:10001; padding:12px; background:var(--panel, #222); color:#e99b91; font:14px 'IBM Plex Sans', system-ui, sans-serif; }
-  .owner-relay-wait { min-height: 100dvh; display: grid; place-items: center; padding: 24px; box-sizing: border-box; background: var(--paper, #151515); color: var(--ink, #eee); font: 14px 'IBM Plex Sans', system-ui, sans-serif; }
-  .owner-relay-wait > div { width: min(100%, 420px); }
-  h1 { font-size: 28px; margin: 0 0 12px; }
-  p { line-height: 1.5; }
-  [role=alert] { color: #e99b91; }
-  button { margin-top: 14px; padding: 11px 15px; border: 1px solid var(--line, #555); border-radius: 8px; background: var(--panel, #222); color: inherit; font: inherit; }
   .connection-recovery-spinner { position:fixed; right:16px; bottom:calc(16px + env(safe-area-inset-bottom)); z-index:10000; pointer-events:none; color:var(--ink, #eee); }
   .connection-spinner { display:block; width:18px; height:18px; border:2px solid color-mix(in srgb, currentColor 25%, transparent); border-top-color:currentColor; border-radius:50%; animation:connection-spin .8s linear infinite; }
   @keyframes connection-spin { to { transform:rotate(360deg); } }
