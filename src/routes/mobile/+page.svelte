@@ -53,7 +53,19 @@
   let pairingEpoch=0, pairingWrites:Promise<void>=Promise.resolve(), preparingPairing=false;
   let ownerRequestPending=$state(false), ownerRequestEpoch=0;
   let ownerUnsupported=$state(false);
-  const startupSplash=$derived(ownerWorkspaceMode && !error && !connectionError && !ownerUnsupported && status!=='awaiting_approval' && status!=='rejected' && (restoringPairing || handingOff || (remembered && status!=='error' && status!=='closed')));
+  let rememberedApprovalPending=$state(false);
+  $effect(()=>{
+    if(!ownerWorkspaceMode || !remembered || status!=='awaiting_approval'){
+      rememberedApprovalPending=false;
+      return;
+    }
+    // Automatic trusted-device approval normally completes before this. Keep
+    // its initial frames identical to the native splash; persistent decisions
+    // still expose the genuine verification code without leaving that surface.
+    const timer=setTimeout(()=>{rememberedApprovalPending=true;},1500);
+    return()=>{clearTimeout(timer);rememberedApprovalPending=false;};
+  });
+  const startupSplash=$derived(ownerWorkspaceMode && !error && !connectionError && !ownerUnsupported && (status!=='awaiting_approval' || remembered) && status!=='rejected' && (restoringPairing || handingOff || (remembered && status!=='error' && status!=='closed')));
   let snapshotEpoch=0, refreshInFlight=false, refreshToken=0, snapshotRequestSeq=0, snapshotAppliedSeq=0, sidebarViewSession=-1, terminalSelectionEpoch=0, operationSeq=0;
   let sendOps=$state<Record<string,number>>({}), stopOps=$state<Record<string,number>>({});
   let chatDrafts=$state<Record<string,string>>({}), menu=$state<'workspace'|'archived'|'terminals'|'preferences'|'hosts'|'agents'>('workspace');
@@ -211,7 +223,7 @@
   });
 </script>
 <svelte:head><title>Monitter Remote</title><meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" /></svelte:head>
-{#if startupSplash}<WorkspaceLoadingScreen message={ownerApprovalWaiting ? 'Approve full workspace access on your desktop.' : ''} />{:else}
+{#if startupSplash}<WorkspaceLoadingScreen message={rememberedApprovalPending ? `Compare ${verificationCode || 'the verification code'} with your desktop, then approve this phone.` : ownerApprovalWaiting ? 'Approve full workspace access on your desktop.' : ''} />{:else}
 <div class:light={theme==='light'} class="mobile" style={remoteStyle} style:--interface-font-ratio={(snapshot?.settings.interfaceFontSize ?? 14) / 14} style:--viewer-interface-scale={$mobileInterfaceScale/100} style:--viewer-interface-scale-inverse={100/$mobileInterfaceScale}>
   <div class="mobile-content" data-monitter-startup-ready={!startupSplash ? true : undefined} aria-busy={reconnecting}>
   <header>{#if selected || selectedChannelId || selectedTerminalId}<button aria-label="Open chats menu" onclick={backToMenu}><Menu size={22}/></button>{/if}<div><strong>{selected || selectedChannelId || selectedTerminalId ? selectedTitle : workspaceTitle}</strong>{#if !reconnecting}<small><span class:online={status==='connected'}></span>{status.replaceAll('_',' ')}</small>{/if}</div>{#if session}<button aria-label="Refresh" onclick={async()=>{void refresh(true);if(menu==='terminals')void refreshTerminals(true);}}><RefreshCw size={20}/></button><button aria-label="Forget desktop" title="Forget desktop" onclick={disconnect}><Unplug size={20}/></button>{/if}</header>

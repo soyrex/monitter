@@ -40,6 +40,8 @@ try {
 
   const controllerTrusted = new Set();
   const ownerTrusted = new Set();
+  let holdControllerTrust = false;
+  let controllerTrustWaiters = [];
   let holdOwnerTrust = false;
   let ownerTrustWaiters = [];
   const ownerCommands = [];
@@ -62,7 +64,10 @@ try {
       sendMessage: async () => snapshot, cancelTask: async () => snapshot, resumeTask: async () => snapshot,
       listTerminals: async () => [], readTerminal: async () => ({ chunks: [], nextSeq: 0, status: 'exited', exitCode: 0, truncated: false }),
     },
-    isTrustedController: key => controllerTrusted.has(key),
+    isTrustedController: async key => {
+      if (holdControllerTrust) await new Promise(resolve => controllerTrustWaiters.push(resolve));
+      return controllerTrusted.has(key);
+    },
     onControllerAccess: key => { controllerTrusted.add(key); },
     isTrustedOwnerWorkspace: async key => {
       if (holdOwnerTrust) await new Promise(resolve => ownerTrustWaiters.push(resolve));
@@ -169,6 +174,49 @@ try {
   await expect.poll(() => ownerCommands.includes('get_snapshot')).toBe(true);
   await expect(phone.locator('.app-shell')).not.toHaveAttribute('inert', '');
   assert.equal(limitedSnapshotCalls, 0, 'iOS owner bootstrap fell back to the limited controller after approval');
+  // Awaiting controller approval is also a normal, transient part of every
+  // remembered encrypted handshake. Exercise the actual trust boundary,
+  // including revoked trust that must remain available for manual approval.
+  await phone.addInitScript(() => {
+    window.__pairingPageFrames = [];
+    const sample = () => {
+      const pairing = document.querySelector('.pair');
+      if (pairing?.getBoundingClientRect().height) window.__pairingPageFrames.push(pairing.innerText);
+      requestAnimationFrame(sample);
+    };
+    requestAnimationFrame(sample);
+  });
+  for (const known of [true, false]) {
+    holdControllerTrust = true;
+    if (!known) controllerTrusted.delete(phoneKey);
+    await phone.goto(new URL('/mobile', phone.url()).href, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+    await expect.poll(() => controllerTrustWaiters.length).toBeGreaterThan(0);
+    await expect.poll(() => desktop.getStatus()).toBe('pending');
+    const code = desktop.getVerificationCode();
+    assert.ok(code, 'remembered encrypted handshake did not produce a verification code');
+    const splash = phone.locator('.workspace-loading-screen');
+    await expect(splash).toBeVisible();
+    await expect(phone.locator('.pair')).toHaveCount(0);
+    await expect(splash.getByRole('status').first()).toBeVisible();
+    await expect(splash.getByRole('status').first()).toContainText('Preparing workspace…');
+    await expect(splash).not.toContainText('then approve this phone');
+    await expect(splash.getByRole('img', { name: 'Monitter', exact: true })).toBeVisible();
+    await expect(splash).toContainText(code);
+    await expect(splash).toContainText('then approve this phone');
+    await phone.waitForTimeout(150);
+    assert.deepEqual(await phone.evaluate(() => window.__pairingPageFrames), [], 'remembered handshake flashed the old pairing page');
+    await expect(phone.locator('.pair')).toHaveCount(0);
+    holdControllerTrust = false;
+    for (const release of controllerTrustWaiters.splice(0)) release();
+    if (!known) {
+      await phone.waitForTimeout(150);
+      assert.equal(desktop.getStatus(), 'pending', 'revoked trust was automatically approved');
+      await expect(splash).toContainText(code);
+      await desktop.approve();
+    }
+    await expect(phone.locator('.app-shell')).toHaveCount(1);
+    await expect(phone.locator('.workspace-loading-screen')).toHaveCount(0);
+  }
   // A slow remembered-owner decision used to replace the branded splash
   // with a separate connection/marketing screen after 1.5 seconds. Hold the
   // real trust check beyond that boundary, then complete the encrypted grant.
