@@ -26,7 +26,7 @@ import ArrowRightLeft from "@lucide/svelte/icons/arrow-right-left";
   import { splitOperatorMessage } from '$lib/operator-sharing';
   import { participantColour } from '$lib/shared-chat';
   import { chatDay } from '$lib/chat-dates';
-  import { isLanBrowser, isOwnerRelayBrowser } from '$lib/lan';
+  import { isLanBrowser, isOwnerRelayBrowser, isOwnerRelayReconnecting, isOwnerRelayDisconnectedError, subscribeOwnerRelayConnection } from '$lib/lan';
   import ObserverIndicator from '$lib/components/ObserverIndicator.svelte';
   import AnimatedTitle from '$lib/components/AnimatedTitle.svelte';
   import TaskActivity from '$lib/components/TaskActivity.svelte';
@@ -214,10 +214,11 @@ import ArrowRightLeft from "@lucide/svelte/icons/arrow-right-left";
   let relayHistoryGeneration = 0;
   let relayHistoryTaskId = '';
   let loadedEarlierHistory = false;
+  let retryEarlierAfterReconnect = false;
   // The owner relay starts with metadata only. Refresh just this open chat's
   // bounded tail, including after a reconnect or a revision reset.
   async function refreshRelayHistory(generation = relayHistoryGeneration, taskId = relayHistoryTaskId) {
-    if (!getTaskMessages || !taskId || relayHistoryPending === generation) return;
+    if (!getTaskMessages || !taskId || relayHistoryPending === generation || isOwnerRelayReconnecting()) return;
     relayHistoryPending = generation;
     try {
       const page = await getTaskMessages(taskId, undefined, 64);
@@ -227,7 +228,7 @@ import ArrowRightLeft from "@lucide/svelte/icons/arrow-right-left";
       relayHistoryError = '';
     } catch (reason) {
       if (generation !== relayHistoryGeneration || taskId !== relayHistoryTaskId) return;
-      relayHistoryError = reason instanceof Error ? reason.message : String(reason);
+      if (!isOwnerRelayDisconnectedError(reason)) relayHistoryError = reason instanceof Error ? reason.message : String(reason);
     } finally { if (relayHistoryPending === generation) relayHistoryPending = 0; }
   }
   $effect(() => {
@@ -242,9 +243,17 @@ import ArrowRightLeft from "@lucide/svelte/icons/arrow-right-left";
     olderMessages = [];
     historyLoading = false;
     historyError = '';
-    untrack(() => void refreshRelayHistory(generation, taskId));
-    const timer = setInterval(() => void refreshRelayHistory(generation, taskId), 2000);
-    return () => { clearInterval(timer); if (relayHistoryGeneration === generation) relayHistoryGeneration++; };
+    retryEarlierAfterReconnect = false;
+    const refreshConnectedHistory = () => {
+      if (generation !== relayHistoryGeneration || isOwnerRelayReconnecting()) return;
+      void refreshRelayHistory(generation, taskId);
+      if (retryEarlierAfterReconnect) void loadEarlierMessages();
+    };
+    const stopConnection = subscribeOwnerRelayConnection(connected => {
+      if (connected) untrack(refreshConnectedHistory);
+    });
+    const timer = setInterval(refreshConnectedHistory, 2000);
+    return () => { stopConnection(); clearInterval(timer); if (relayHistoryGeneration === generation) relayHistoryGeneration++; };
   });
   const displayExchangeGroups = $derived(transcriptExchangeGroups(display.conversationItems));
   const displayExchangeMembers = $derived(new Set([...displayExchangeGroups.values()].flatMap(events => events.slice(1).map(event => event.id))));
@@ -319,11 +328,13 @@ import ArrowRightLeft from "@lucide/svelte/icons/arrow-right-left";
   }
   async function loadEarlierMessages() {
     if (!getTaskMessages || historyLoading || !hasEarlierMessages) return;
+    if (isOwnerRelayBrowser() && isOwnerRelayReconnecting()) { retryEarlierAfterReconnect = true; return; }
     const requestedTaskId = task.id, generation = relayHistoryGeneration;
     const persistedMessages = display.conversationItems.flatMap(item => item.type === 'message' && item.value.taskId === task.id ? [item.value] : []);
     const beforeId = nextHistoryCursor ?? [...persistedMessages].sort((left, right) => left.createdAt - right.createdAt)[0]?.id;
     if (!beforeId) { nextHistoryCursor = null; return; }
     historyLoading = true;
+    retryEarlierAfterReconnect = false;
     historyError = '';
     const viewport = conversationRoot?.querySelector<HTMLElement>('.messages');
     const viewportAnchor = transcriptBuffer.held() ? captureTranscriptAnchor(viewport) : null;
@@ -337,7 +348,8 @@ import ArrowRightLeft from "@lucide/svelte/icons/arrow-right-left";
       if (viewportAnchor) await transcriptList?.restoreItemAnchor(viewportAnchor.key, viewportAnchor.offset);
     } catch (reason) {
       if (isOwnerRelayBrowser() && (generation !== relayHistoryGeneration || requestedTaskId !== relayHistoryTaskId)) return;
-      historyError = reason instanceof Error ? reason.message : String(reason);
+      if (isOwnerRelayBrowser() && isOwnerRelayDisconnectedError(reason)) retryEarlierAfterReconnect = true;
+      else historyError = reason instanceof Error ? reason.message : String(reason);
     } finally { if (!isOwnerRelayBrowser() || generation === relayHistoryGeneration) historyLoading = false; }
   }
   function routedLifecycle(item: UnifiedSubagent, title: string): UnifiedSubagent {

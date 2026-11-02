@@ -1,11 +1,17 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { setOwnerRelayInvoker, OwnerRelayDisconnectedError } from '$lib/lan';
+  // The fixture supplies history directly, while the transcript observes real
+  // owner connection notifications just as the full workspace does.
+  const connectedInvoker = async () => null;
+  setOwnerRelayInvoker(connectedInvoker);
   import TaskTranscript from '$lib/components/TaskTranscript.svelte';
   let id = $state('chat');
   let items = $state<any[]>([]);
   let calls = 0;
   let requests: { taskId: string; before?: string }[] = [];
   let fail = false;
+  let transient = new URLSearchParams(window.location.search).has('initial-transient');
   let delay = false;
   let release: (() => void) | undefined;
   const rows = Array.from({length: 100}, (_, n) => ({id: `row-${n+1}`, taskId: 'chat', role: 'user', text: `relay-message-${n+1}`, createdAt: n+1, attachments: []}));
@@ -17,13 +23,14 @@
     calls++;
     requests.push({taskId, before});
     if (delay) { delay = false; await new Promise<void>(resolve => release = resolve); }
+    if (transient) { transient = false; throw new OwnerRelayDisconnectedError(); }
     if (fail) { fail = false; throw new Error('fixture page failed'); }
     const end = taskId === 'chat' ? (before ? rows.findIndex(row => row.id === before) : rows.length) : 0;
     const start = Math.max(0, end - limit), messages = rows.slice(start, end);
     if (id === taskId) items = [...new Map([...items.map(item => [item.value.id, item.value]), ...messages.map(row => [row.id, row])]).values()].map(value => ({type: 'message', value}));
     return {messages, nextBeforeId: start ? messages[0].id : null, revision: 'rev'};
   }
-  onMount(() => { (window as any).__ownerQA = { switch: (next: string) => { id = next; items = []; }, calls: () => calls, requests: () => requests, messages: () => items.map(item => item.value.id), fail: () => { fail = true; }, delay: () => { delay = true; }, release: () => release?.() }; });
+  onMount(() => { (window as any).__ownerQA = { switch: (next: string) => { id = next; items = []; }, calls: () => calls, requests: () => requests, messages: () => items.map(item => item.value.id), fail: () => { fail = true; }, transient: () => { transient = true; }, disconnect: () => setOwnerRelayInvoker(null), reconnect: () => setOwnerRelayInvoker(connectedInvoker), delay: () => { delay = true; }, release: () => release?.() }; });
 </script>
 {#snippet empty()}{/snippet}
 <div class="fixture"><TaskTranscript {...base} {task} conversationItems={items} {getTaskMessages} avatarVisual={empty} messageAvatar={empty} deliveryStatus={empty} rightSidebar={empty} composer={empty} subagentDock={empty}/></div>

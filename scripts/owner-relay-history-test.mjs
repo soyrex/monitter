@@ -8,7 +8,7 @@ import { webkit, expect } from '@playwright/test';
 const root = process.cwd();
 const iconStub = fileURLToPath(new URL('./fixtures/lucide-stub.svelte', import.meta.url));
 const result = await build({ configFile: false, plugins: [svelte()], root,
-  resolve: { alias: [{ find: '$lib', replacement: `${root}/src/lib` }, { find: /^@lucide\/svelte(?:\/.*)?$/, replacement: iconStub }] },
+  resolve: { alias: [...(process.env.MONITTER_HISTORY_TRANSCRIPT_FILE ? [{ find: '$lib/components/TaskTranscript.svelte', replacement: process.env.MONITTER_HISTORY_TRANSCRIPT_FILE }] : []), { find: '$lib', replacement: `${root}/src/lib` }, { find: /^@lucide\/svelte(?:\/.*)?$/, replacement: iconStub }] },
   build: { write: false, minify: false, rollupOptions: { input: 'scripts/fixtures/owner-relay-history-entry.js' } },
 });
 const files = new Map(result.output.map(file => [`/${file.fileName}`, file.type === 'asset' ? file.source : file.code]));
@@ -30,13 +30,36 @@ try {
   const page = await browser.newPage({ viewport: { width: 900, height: 720 } });
   const errors = [];
   page.on('pageerror', error => errors.push(String(error)));
-  await page.goto(`http://127.0.0.1:${address.port}/?monitter-owner-relay=1`);
+  await page.goto(`http://127.0.0.1:${address.port}/?monitter-owner-relay=1&initial-transient=1`);
+  await expect.poll(() => page.evaluate(() => window.__ownerQA?.calls())).toBeGreaterThan(0);
+  await page.waitForTimeout(100);
+  assert.equal(await page.getByText('Reconnecting to your desktop. Try again once connected.', { exact: true }).count(), 0, 'initial transport interruption must not become a manual history error');
+  assert.equal(await page.getByRole('button', { name: 'Retry loading messages' }).count(), 0);
   await expect.poll(() => page.evaluate(() => window.__ownerQA?.messages().length)).toBe(64);
   await expect(page.getByText('relay-message-100', { exact: true })).toBeVisible();
+  // A loaded tail survives an offline interval; no history RPC is attempted
+  // until connection restoration, which refreshes it without a button press.
+  await page.evaluate(() => window.__ownerQA.disconnect());
+  const offlineCalls = await page.evaluate(() => window.__ownerQA.calls());
+  await page.waitForTimeout(2200);
+  assert.equal(await page.evaluate(() => window.__ownerQA.calls()), offlineCalls, 'known-offline polling must pause');
+  await expect(page.getByText('relay-message-100', { exact: true })).toBeVisible();
+  await page.evaluate(() => { window.__ownerQA.transient(); window.__ownerQA.reconnect(); });
+  await page.waitForTimeout(100);
+  assert.equal(await page.getByRole('button', { name: 'Retry loading messages' }).count(), 0, 'loaded tail transport interruption must remain quiet');
+  await expect(page.getByText('relay-message-100', { exact: true })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => window.__ownerQA.calls()), { timeout: 6000 }).toBeGreaterThan(offlineCalls + 1);
   await page.locator('.messages').evaluate(node => { node.scrollTop = 0; node.dispatchEvent(new Event('scroll')); });
   // This fixture exercises transcript data flow without the enclosing workspace
   // layout. Dispatch the pager action independently of its scroll geometry.
+  await page.evaluate(() => window.__ownerQA.delay());
   await page.getByRole('button', { name: 'Load earlier messages' }).dispatchEvent('click');
+  await expect.poll(() => page.evaluate(() => window.__ownerQA.requests().some(request => request.before === 'row-37'))).toBe(true);
+  await page.evaluate(() => { window.__ownerQA.disconnect(); window.__ownerQA.transient(); window.__ownerQA.release(); });
+  await page.waitForTimeout(100);
+  assert.equal(await page.getByText('Reconnecting to your desktop. Try again once connected.', { exact: true }).count(), 0, 'earlier-page transport interruption must remain quiet');
+  assert.equal(await page.evaluate(() => window.__ownerQA.messages().length), 64, 'a failed earlier page must preserve the loaded tail');
+  await page.evaluate(() => window.__ownerQA.reconnect());
   await expect.poll(() => page.evaluate(() => window.__ownerQA.messages().length)).toBe(100);
   assert.ok((await page.evaluate(() => window.__ownerQA.requests())).some(request => request.before === 'row-37'));
   await page.evaluate(() => window.__ownerQA.switch('empty'));
@@ -57,7 +80,7 @@ try {
   await expect(page.getByText('No messages yet')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Load earlier messages' })).toHaveCount(0);
   assert.deepEqual(errors, []);
-  console.log('Owner relay transcript loading and chat switching passed.');
+  console.log('Owner relay initial/tail/earlier reconnect recovery, real errors, loading and chat switching passed.');
 } finally {
   await browser.close();
   await new Promise(resolve => server.close(resolve));
