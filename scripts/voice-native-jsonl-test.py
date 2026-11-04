@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """No microphone or speaker; verifies child JSONL and cancellation with local models."""
-import json, os, pathlib, queue, subprocess, sys, threading, time, uuid
-root = pathlib.Path(__file__).resolve().parents[1]
+import collections, json, os, pathlib, queue, subprocess, sys, threading, time, uuid
+models = pathlib.Path(os.environ["MONITTER_VOICE_MODELS"]) if "MONITTER_VOICE_MODELS" in os.environ else pathlib.Path.home() / "Library/Caches/Monitter/VoiceModels"
+if not models.is_absolute():
+    raise SystemExit("Local voice model directory must be an absolute path.")
 exe = pathlib.Path(sys.argv[1]).resolve()
 env = dict(os.environ, MONITTER_VOICE_TEST_SINK='1')
 p = subprocess.Popen([str(exe)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1, env=env)
@@ -11,6 +13,14 @@ def reader():
         try: q.put(json.loads(line))
         except ValueError: q.put({'type':'invalid-output', 'line':line})
 threading.Thread(target=reader,daemon=True).start()
+# Continuously drain diagnostics to avoid blocking a verbose helper, retaining
+# only a small tail for failures. Fixed-size reads also bound unterminated lines.
+stderr_tail = collections.deque(maxlen=2)
+def drain_stderr():
+    while chunk := p.stderr.read(4096):
+        stderr_tail.append(chunk)
+stderr_thread = threading.Thread(target=drain_stderr, daemon=True)
+stderr_thread.start()
 session, epoch = str(uuid.uuid4()), str(uuid.uuid4())
 def send(kind, **fields):
     obj={'type':kind,'sessionId':session,'epoch':epoch,'requestId':str(uuid.uuid4()),**fields}
@@ -23,7 +33,7 @@ def expect(kind, predicate=lambda x: True, timeout=120):
         if e.get('type') == kind and predicate(e): return e
     raise TimeoutError(kind)
 try:
-    send('load',modelsPath=str(root/'artifacts/local-voice-models'))
+    send('load',modelsPath=str(models))
     loaded=expect('ready',lambda e:e.get('status')=='loaded')
     send('start',testOnlyNoAudio=True)
     ready=expect('ready',lambda e:e.get('status')=='started')
@@ -52,4 +62,5 @@ finally:
     p.stdin.close()
     try: p.wait(timeout=10)
     except subprocess.TimeoutExpired: p.kill(); p.wait()
-    if p.returncode: print('helper stderr:',p.stderr.read()[-3000:],file=sys.stderr)
+    stderr_thread.join(timeout=2)
+    if p.returncode: print('helper stderr:', ''.join(stderr_tail)[-3000:], file=sys.stderr)
