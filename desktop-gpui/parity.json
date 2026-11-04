@@ -324,10 +324,15 @@
         "desktop-gpui/src/attachment_preview.rs",
         "desktop-gpui/src/chat_voice.rs",
         "desktop-gpui/src/native_voice_capture.rs",
-        "src-tauri/src/experimental_desktop.rs"
+        "src-tauri/src/experimental_desktop.rs",
+        "desktop-gpui/src/chat_conversation.rs",
+        "desktop-gpui/src/native_voice_session.rs",
+        "desktop-gpui/native-voice/",
+        "src-tauri/src/voice_admission.rs",
+        "src-tauri/src/voice_session.rs"
       ],
       "status": "implemented_unverified",
-      "evidence": "Partial native attachment picker/storage/image preview and unsent draft persistence implemented. Package4771599 native harmless text fixture survived exact GUI SIGKILL/reopen with same separate server4721, then unsent reference cleared; no send. Package6261987 compact styling inspected, file/remove icon visibility defects caught and newer source corrected pending package. Native AVFoundation microphone/Whisper flow compiled and idle Record control visible, but no microphone permission, recording, transcription or send performed. Audio draft playback/full image zoom/runtime voice acceptance remain open. Backend registry remains attachment authority; UI stores IDs/display metadata/exact destination only."
+      "evidence": "Partial native attachment picker/storage/image preview and unsent draft persistence implemented. Package4771599 native harmless text fixture survived exact GUI SIGKILL/reopen with same separate server4721, then unsent reference cleared; no send. Package6261987 compact styling inspected, file/remove icon visibility defects caught and newer source corrected pending package. Native AVFoundation microphone/Whisper flow compiled and idle Record control visible, but no microphone permission, recording, transcription or send performed. Audio draft playback/full image zoom/runtime voice acceptance remain open. Backend registry remains attachment authority; UI stores IDs/display metadata/exact destination only. 2026-11-03: Opt-in local conversation prototype adds Parakeet/Phonon, private durable admission receipts, bounded interjection ordering and native controls in an isolated worktree. Synthetic ASR EOU-before-finish, TTS and JSONL cancellation tests passed. Initial physical startup failed on Bluetooth; the later built-in microphone/speaker control probe passes. Integrated GPUI checks, five backend tests and focused helper lifecycle regressions pass. A signed isolated preview with acknowledged microphone controls was packaged and launched. Native Start/Mute/Unmute/End and physical control probes pass on Bluetooth. A real typed agent reply exposed a same-task refresh failure; the fix passes targeted checks and a subsequent real Send retains voice. Three unintended recognized utterances each persisted once in the isolated test chat; this is mechanical admission evidence only. Actual device change stops voice. A muted-microphone physical probe verifies real player completion and cancellation of a second generation; helper exits cleanly. Native automation timeouts block the latest in-app playback test. Full spoken conversation, audible playback quality and interjection acceptance remain unverified; a deliberate user check is pending. See docs/LOCAL_VOICE_PROTOTYPE.md."
     },
     {
       "id": "settings_themes_fonts_and_hotkeys",

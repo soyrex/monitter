@@ -737,6 +737,8 @@ pub struct ChatPane {
     _composer_footer_change: Subscription,
     voice: Entity<crate::chat_voice::VoiceComposer>,
     _voice_change: Subscription,
+    conversation: Entity<crate::chat_conversation::ChatConversation>,
+    _conversation_change: Subscription,
     _details_change: Subscription,
     slash: Entity<crate::slash_palette::SlashPalette>,
     _slash_change: Subscription,
@@ -990,6 +992,36 @@ impl ChatPane {
                     cx.notify();
                 }
             });
+        let conversation = cx.new(|_| crate::chat_conversation::ChatConversation::new(service.clone(), task_id.clone()));
+        let conversation_change = cx.subscribe_in(&conversation, window, |pane, _, event, window, cx| {
+            use crate::chat_conversation::ConversationEvent;
+            match event {
+                ConversationEvent::Starting => {
+                    pane.voice.update(cx, |voice, cx| voice.cancel(cx));
+                    pane.restore_watch_mode(false, cx);
+                    pane.slash.update(cx, |slash, cx| {
+                        slash.handle_action(crate::slash_palette::PaletteAction::Dismiss, cx);
+                    });
+                    window.focus(&pane.focus, cx);
+                }
+                ConversationEvent::ShowComposer => {
+                    window.focus(&pane.composer.read(cx).focus_handle(cx), cx);
+                    cx.notify();
+                }
+                ConversationEvent::Changed => cx.notify(),
+                ConversationEvent::RefreshRequired => pane.refresh(cx),
+                ConversationEvent::UseDraft { task_id, text } => {
+                    if pane.task_id() != *task_id { return; }
+                    let current = pane.composer.read(cx).value().to_string();
+                    let value = if current.trim().is_empty() { text.clone() } else { format!("{current}\n{text}") };
+                    pane.composer.update(cx, |input, cx| input.set_value(value.clone(), window, cx));
+                    pane.slash.update(cx, |slash, cx| slash.set_input(value.clone(), cx));
+                    pane.voice.update(cx, |voice, cx| voice.set_context(task_id.clone(), value.clone(), cx));
+                    cx.emit(ChatEvent::DraftChanged { task_id: task_id.clone(), text: value });
+                    cx.notify();
+                }
+            }
+        });
         let composer_change = cx.subscribe(&composer, |pane, input, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 let text = input.read(cx).value();
@@ -1266,6 +1298,15 @@ impl ChatPane {
             }
         })
         .detach();
+        let focus = cx.focus_handle();
+        cx.on_focus_out(&focus, window, |pane, _, _, cx| {
+            pane.conversation.update(cx, |voice, cx| voice.push_to_talk(false, cx));
+        }).detach();
+        cx.observe_window_activation(window, |pane, window, cx| {
+            if !window.is_window_active() {
+                pane.conversation.update(cx, |voice, cx| voice.push_to_talk(false, cx));
+            }
+        }).detach();
         Self {
             dock_group: None,
             #[cfg(feature = "performance-profiling")]
@@ -1284,6 +1325,8 @@ impl ChatPane {
             _composer_footer_change: composer_footer_change,
             voice,
             _voice_change: voice_change,
+            conversation,
+            _conversation_change: conversation_change,
             _details_change: details_change,
             slash,
             _slash_change: slash_change,
@@ -1343,7 +1386,7 @@ impl ChatPane {
             bottom_jump: None,
             bottom_button_exit: None,
             chat_family: ".SystemUIFont".into(),
-            focus: cx.focus_handle(),
+            focus,
             _queue_change: subscription,
             _composer_change: composer_change,
             draft_touched: false,
@@ -1507,6 +1550,9 @@ impl ChatPane {
         });
         self.snapshot = snapshot;
         self.revision = revision;
+        let voice_task = self.task_id();
+        let explicit_control = self.has_pending_user_question() || self.pending_tool_approval().is_some();
+        self.conversation.update(cx, |voice, cx| voice.set_context(&voice_task, explicit_control, cx));
         if self
             .error
             .as_deref()
@@ -1614,6 +1660,7 @@ impl ChatPane {
             self.composer_context_bar.entity_id(),
             self.attachments.entity_id(),
             self.voice.entity_id(),
+            self.conversation.entity_id(),
             self.slash.entity_id(),
             self.project_picker.entity_id(),
             self.activity.entity_id(),
@@ -1876,6 +1923,7 @@ impl ChatPane {
     /// A newly activated pane receives keyboard focus before its input finishes
     /// sliding in. Child controls keep their own focus when directly clicked.
     pub(super) fn focus_composer_on_activation(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.conversation.read(cx).presented() { return; }
         if !self.focus.is_focused(window) || self.busy || self.approval_popup_open
             || self.has_pending_user_question() || crate::preferences_modal::workspace_blocked(cx) {
             return;
@@ -2425,6 +2473,7 @@ impl ChatPane {
             .retain(|id, _| message_ids.contains(id));
     }
     fn reconcile_body_patches(&mut self, patches: &[Value], cx: &mut Context<Self>) -> bool {
+        self.conversation.update(cx, |voice, cx| voice.observe(patches, false, cx));
         if !std::mem::take(&mut self.transcript_context_unchanged) {
             return false;
         }
@@ -2466,6 +2515,7 @@ impl ChatPane {
     /// Authoritative cache integration: pass all known task messages, including
     /// loaded older pages. Never use this with a bounded compact snapshot tail.
     pub fn reconcile_history(&mut self, mut messages: Vec<Value>, reset: bool, cx: &mut Context<Self>) {
+        self.conversation.update(cx, |voice, cx| voice.observe(&messages, reset, cx));
         if reset {
             // Explicit authoritative resets may remove data. Cached text must
             // never resurrect those IDs or survive into a new journal epoch.
@@ -3358,6 +3408,14 @@ impl ChatPane {
 
     pub(crate) fn deactivate_voice(&mut self, cx: &mut Context<Self>) {
         self.voice.update(cx, |voice, cx| voice.cancel(cx));
+        self.conversation.update(cx, |voice, cx| voice.end(cx));
+    }
+    pub(crate) fn pause_voice(&mut self, cx: &mut Context<Self>) {
+        self.voice.update(cx, |voice, cx| voice.cancel(cx));
+        self.conversation.update(cx, |voice, cx| voice.pause(cx));
+    }
+    pub(crate) fn invalidate_removed_voice_messages(&mut self, removed: &HashSet<String>, cx: &mut Context<Self>) {
+        self.conversation.update(cx, |voice, cx| voice.invalidate_removed(removed, cx));
     }
 }
 
@@ -5646,6 +5704,15 @@ impl Render for ChatPane {
         self.voice.update(cx, |voice, cx| {
             voice.set_engine(&voice_engine, cx);
         });
+        let conversation_enabled = crate::chat_conversation::ChatConversation::enabled() && !self.is_performance_fixture();
+        let conversation_active = self.conversation.read(cx).active();
+        let conversation_presented = conversation_enabled && self.conversation.read(cx).presented();
+        let conversation_composer = !conversation_presented || self.conversation.read(cx).composer_visible();
+        let conversation_elsewhere = conversation_enabled && !conversation_active
+            && crate::chat_conversation::ChatConversation::any_active_elsewhere(cx);
+        if conversation_presented && self.composer.read(cx).focus_handle(cx).is_focused(window) {
+            self.conversation.update(cx, |voice, cx| voice.push_to_talk(false, cx));
+        }
         let voice_status = self.voice.read(cx).status();
         let voice_controls = self
             .voice
@@ -5692,7 +5759,9 @@ impl Render for ChatPane {
             self.approval_details_expanded = false;
             self.approval_popup_id = next_approval_id;
         }
-        crate::activity_effects::set_pane_obscured(&self.task_id(), self.approval_popup_open, cx);
+        crate::activity_effects::set_pane_obscured(
+            &self.task_id(), self.approval_popup_open || conversation_presented, cx,
+        );
         let header = self.render_chat_header(selected, &agents, palette, window, cx);
         let mut content = div()
             .relative()
@@ -5743,6 +5812,14 @@ impl Render for ChatPane {
             .clone()
             .cached(StyleRefinement::default().flex_1().min_h_0());
         let task_running = selected.is_some_and(|task| field(task, "status") == "running");
+        self.conversation.update(cx, |voice, cx| voice.set_working(task_running || self.starting_turn, cx));
+        let conversation_stage = conversation_presented.then(|| {
+            let agent = selected.and_then(|task| agents.iter().find(|agent| field(agent, "id") == field(task, "agentId")));
+            let name = agent.map(|agent| field(agent, "name")).unwrap_or_else(|| "Assistant".into());
+            let accent = agent.map(|agent| design::parse_color(&field(agent, "color"), palette.accent)).unwrap_or(palette.accent);
+            let activity = watcher::voice_activity_text(&self.snapshot, &self.task_id());
+            self.conversation.update(cx, |voice, cx| voice.render_voice_pane(&name, accent, palette, activity, window, cx))
+        });
         let composer_working = task_running || self.starting_turn;
         let composer_active = crate::docking::pane_visual_active(&self.focus, window, cx)
             && !crate::preferences_modal::workspace_blocked(cx);
@@ -5751,8 +5828,8 @@ impl Render for ChatPane {
         let composer_has_draft = !self.draft(cx).is_empty()
             || self.attachments.read(cx).has_draft();
         let composer_autohide = composer_autohide_preference::enabled();
-        let composer_input_visible = !composer_autohide || composer_active || composer_has_draft;
-        let composer_controls_visible = !composer_autohide || composer_active;
+        let composer_input_visible = conversation_composer && (!composer_autohide || composer_active || composer_has_draft || conversation_presented);
+        let composer_controls_visible = conversation_composer && (!composer_autohide || composer_active || conversation_presented);
         // Exit uses three times the standard 180 ms response, with a soft
         // elastic return. Entry retains the normal control spring.
         let composer_exit_spring = gpui_kit::base::Spring::new(Duration::from_millis(540))
@@ -5801,7 +5878,7 @@ impl Render for ChatPane {
         // Scroll hiding belongs to the reading position, independently of pane
         // activation and draft retention. Focus-follows-mouse must not reveal it.
         let composer_hidden = crate::composer_scroll::composer_slide(
-            self.composer_scroll_distance,
+            if conversation_presented { gpui_kit::px(0.) } else { self.composer_scroll_distance },
             composer_height,
             !crate::native_motion::motion_allowed(),
         );
@@ -5858,6 +5935,7 @@ impl Render for ChatPane {
         // A retained workplan alone must not leave controls on an idle,
         // inactive pane after its turn has finished.
         let mut watcher_toggle = (!self.watcher.enabled
+            && !conversation_presented
             && (composer_active || composer_working)
             && self.watcher_has_active_work())
             // Anchor to the visible status controls, including an unfocused
@@ -5871,15 +5949,16 @@ impl Render for ChatPane {
         content = content
             // Anchor the alpha ramps to the viewport edges, flush with the
             // pane dock above and composer area below, rather than an inset list.
-            .child(crate::transcript_edge_fade::TranscriptEdgeFade::new(
+            .when(!conversation_presented, |content| content.child(crate::transcript_edge_fade::TranscriptEdgeFade::new(
                 transcript,
                 // Window viewport is already in native logical pixels; scale
                 // only the fixed bottom design token, not the percentage ramp.
                 window.viewport_size().height * 0.10,
                 px(24.),
-            ))
+            )))
+            .when_some(conversation_stage, |content, stage| content.child(stage))
             .child(agent_transcript_column(self.render_interactions(window, cx)))
-            .when(slash_open, |content| {
+            .when(slash_open && conversation_composer, |content| {
                 content.child(
                     div()
                         .w_full()
@@ -5911,11 +5990,11 @@ impl Render for ChatPane {
             // The working pill is anchored immediately above this composer
             // stack. Keep its clearance below queue/approval controls as well
             // as history so it cannot cover their action hitboxes.
-            .child(working_clearance_spacer(composer_working))
+            .when(!conversation_presented, |content| content.child(working_clearance_spacer(composer_working)))
             .when(user_question_open && !self.watcher.enabled, |content| {
                 content.children(user_question_form.take().map(transcript_column))
             })
-            .when(!user_question_open, |content| content.child(
+            .when(!user_question_open && conversation_composer, |content| content.child(
                 composer_scroll_stack(composer_hidden)
                     .debug_selector(|| "normal-chat-composer".into())
                     .child({
@@ -6052,8 +6131,24 @@ impl Render for ChatPane {
                                                         selected.is_some()
                                                             && !self.busy
                                                             && !self.is_performance_fixture(),
-                                                        |row| row.child(voice_controls),
+                                                        |row| row.when(!conversation_active, |row| row.child(voice_controls)),
                                                     )
+                                                    .when(conversation_enabled, |row| row.child(
+                                                        Button::new("enter-voice-mode")
+                                                            .compact()
+                                                            .w(px(design::COMPOSER_CONTROL_SIZE))
+                                                            .h(px(design::COMPOSER_CONTROL_SIZE))
+                                                            .bg(rgb(if conversation_active || conversation_elsewhere { design::mix_rgb(palette.card, palette.accent, 0.18) } else { palette.card }))
+                                                            .text_color(rgb(if conversation_active || conversation_elsewhere { palette.accent } else { palette.muted }))
+                                                            .icon(Icon::new(IconName::AudioLines))
+                                                            .accessibility_label(if conversation_presented { "Return to voice controls" } else { "Start voice mode" })
+                                                            .tooltip(if conversation_elsewhere { "Start voice here; pause the other pane" } else { "Voice mode" })
+                                                            .disabled(selected.is_none() || self.busy)
+                                                            .on_click(cx.listener(|pane, _, window, cx| {
+                                                                pane.conversation.update(cx, |voice, cx| voice.start(cx));
+                                                                window.focus(&pane.focus, cx);
+                                                            })),
+                                                    ))
                                                     .child(
                                                         Button::new("send")
                                                             .outline()
@@ -6186,6 +6281,7 @@ impl Render for ChatPane {
             bubble.set_context(
                 (task_running || self.starting_turn)
                     && !self.approval_popup_open
+                    && !conversation_presented
                     && !self.watcher.enabled
                     && !self.watcher.transitioning
                     && !(self.compact_detail && detail_mounted),
@@ -6249,6 +6345,7 @@ impl Render for ChatPane {
         });
         if ((away_from_bottom && self.bottom_jump.is_none()) || self.bottom_button_exit.is_some())
             && !(self.compact_detail && detail_mounted)
+            && !conversation_presented
         {
             let hover = gpui_kit::component::hover_motion::HoverMotion::new(
                 "chat-back-to-bottom-surface",
@@ -6328,7 +6425,7 @@ impl Render for ChatPane {
                 .fly_down(button_flight),
             );
         }
-        if !self.approval_popup_open {
+        if !self.approval_popup_open && !conversation_presented {
             content = content.child(self.computer_bubble.clone());
         }
         let mut approval_overlay = None;
@@ -6794,6 +6891,29 @@ impl Render for ChatPane {
                     return;
                 }
 
+                let voice_presented = pane.conversation.read(cx).presented();
+                if voice_presented && !window.has_active_dialog(cx)
+                    && !pane.has_pending_user_question()
+                    && !crate::preferences_modal::workspace_blocked(cx) {
+                    if event.keystroke.key == "escape" && !pane.slash.read(cx).is_open()
+                        && !pane.composer.update(cx, |input, cx| {
+                            EntityInputHandler::marked_text_range(input, window, cx).is_some()
+                        }) {
+                        pane.conversation.update(cx, |voice, cx| voice.end(cx));
+                        window.focus(&pane.composer.read(cx).focus_handle(cx), cx);
+                        cx.stop_propagation();
+                        return;
+                    }
+                    let m = &event.keystroke.modifiers;
+                    if event.keystroke.key == "space" && !m.control && !m.platform && !m.alt && !m.shift
+                        && !pane.composer.read(cx).focus_handle(cx).is_focused(window)
+                        && pane.conversation.read(cx).push_to_talk_enabled() {
+                        pane.conversation.update(cx, |voice, cx| voice.push_to_talk(true, cx));
+                        cx.stop_propagation();
+                        return;
+                    }
+                }
+
                 if std::env::var_os("MONITTER_GPUI_TRACE_COMPOSER_KEYS").is_some()
                     && matches!(
                         event.keystroke.key.as_str(),
@@ -6842,6 +6962,11 @@ impl Render for ChatPane {
                     }
                 }
             }))
+            .capture_key_up(cx.listener(|pane, event: &KeyUpEvent, _, cx| {
+                if event.keystroke.key == "space" {
+                    pane.conversation.update(cx, |voice, cx| voice.push_to_talk(false, cx));
+                }
+            }))
             .on_action(cx.listener(|pane, _: &SendMessage, window, cx| {
                 if !window.has_active_dialog(cx) && pane.composer_keyboard_available(window, cx) {
                     if pane.watcher.enabled || pane.watcher.modal_open {
@@ -6853,6 +6978,7 @@ impl Render for ChatPane {
             }))
             .on_key_down(cx.listener(|pane, event: &KeyDownEvent, window, cx| {
                 if pane.focus.is_focused(window) && !pane.busy
+                    && !pane.conversation.read(cx).presented()
                     && !pane.has_pending_user_question() && !pane.approval_popup_open
                     && !crate::preferences_modal::workspace_blocked(cx)
                     && !event.keystroke.modifiers.control && !event.keystroke.modifiers.platform {
@@ -7111,7 +7237,8 @@ impl ChatPane {
         let (tern_tiles, header_padding_y, avatar_size) = self.header_metrics();
         // Working motion belongs to the header in both layouts, never the dock tab.
         let animate_identity =
-            self.is_working() && !cx.reduce_motion() && crate::native_motion::motion_allowed();
+            self.is_working() && !self.conversation.read(cx).presented()
+                && !cx.reduce_motion() && crate::native_motion::motion_allowed();
         let logo_size = px(22. * avatar_size / 30.);
         #[cfg(feature = "performance-profiling")]
         let owner_pane = cx.entity_id();
@@ -7271,7 +7398,7 @@ impl ChatPane {
                 .absolute()
                 .size_full()
             })
-            .when(!self.approval_popup_open && !self.watcher.enabled, |header| {
+            .when(!self.approval_popup_open && !self.watcher.enabled && !self.conversation.read(cx).presented(), |header| {
                 header.children(crate::activity_effects::for_task_in_window(
                     &self.task_id(),
                     "header-wash",

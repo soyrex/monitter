@@ -147,6 +147,10 @@ mod store;
 mod terminal;
 mod usage_quota;
 mod voice;
+#[cfg(feature = "experimental-gpui")]
+pub mod voice_session;
+#[cfg(feature = "experimental-gpui")]
+pub mod voice_admission;
 
 use admin_turn_broker::{spawn_admin_turn_watchdog, AdminTurnBroker, AdminTurnReply};
 use model::*;
@@ -213,6 +217,7 @@ struct AutonameTarget {
 
 #[derive(Clone, PartialEq, Eq)]
 struct ServiceData {
+    voice_admission: Option<VoiceAdmissionRecord>,
     snapshot: Snapshot,
     task_hosts: HashMap<String, Host>,
     attachments: HashMap<String, attachments::StoredAttachment>,
@@ -231,6 +236,9 @@ struct ServiceData {
     // write succeeds, before publishing the new immutable state.
     revision: u64,
 }
+
+#[derive(Clone, PartialEq, Eq)]
+struct VoiceAdmissionRecord { id: String, task_id: String, payload: String }
 
 #[derive(Clone, PartialEq, Eq)]
 struct AcceptedTurn {
@@ -406,6 +414,8 @@ fn approval_session_scope(input: &CreateApprovalRequest) -> Option<String> {
 pub(crate) struct Service {
     #[cfg(feature = "experimental-gpui")]
     native_subscribers: Mutex<Vec<async_channel::Sender<()>>>,
+    #[cfg(feature = "experimental-gpui")]
+    voice_sessions: Mutex<voice_session::VoiceSessions>,
     app: Option<AppHandle>,
     store: store::Store,
     work_log_dir: PathBuf,
@@ -877,6 +887,8 @@ impl Service {
         }
         let shortcut_mode = native_shortcut_mode_code(&snapshot.settings.shortcut_mode);
         let service = Arc::new(Self {
+            #[cfg(feature = "experimental-gpui")]
+            voice_sessions: Mutex::new(Default::default()),
             app,
             store,
             work_log_dir: dir.clone(),
@@ -901,6 +913,7 @@ impl Service {
             replacement_preparing: std::sync::atomic::AtomicBool::new(false),
             restart_intent_path: dir.join("server-restart.json"),
             data: Mutex::new(Arc::new(ServiceData {
+                voice_admission: None,
                 snapshot,
                 task_hosts,
                 attachments,
@@ -3564,7 +3577,9 @@ impl Service {
                 (&previous.snapshot, &previous.task_hosts, &previous.attachments),
                 (&candidate.snapshot, &candidate.task_hosts, &candidate.attachments),
                 &records,
+                candidate.voice_admission.as_ref(),
             )?;
+            candidate.voice_admission = None;
             *lifecycle=next_lifecycle;
             drop(lifecycle);
             resident_history::evict(&mut candidate.snapshot);
@@ -4097,6 +4112,8 @@ impl Service {
                 Vec::new(),
                 Some(format!("/{name}")),
                 None,
+                None,
+                None,
             )?;
             self.launch_accepted(task_id, accepted);
             return Ok(SlashCommandExecution { effect: "sent".into(), message: None });
@@ -4114,6 +4131,8 @@ impl Service {
                     command.clone(),
                     Vec::new(),
                     Some(format!("/{normalized}")),
+                    None,
+                    None,
                     None,
                 )?;
                 self.launch_accepted(task_id, accepted);
@@ -6023,7 +6042,7 @@ impl Service {
         text: String,
         attachment_ids: Vec<String>,
     ) -> Result<Option<AcceptedTurn>, String> {
-        self.accept_send_inner(task_id, text, attachment_ids, None, None)
+        self.accept_send_inner(task_id, text, attachment_ids, None, None, None, None)
     }
 
     fn accept_send_with_delivery_mode(
@@ -6039,6 +6058,8 @@ impl Service {
             attachment_ids,
             None,
             delivery_mode.as_deref(),
+            None,
+            None,
         )
     }
 
@@ -6049,6 +6070,8 @@ impl Service {
         attachment_ids: Vec<String>,
         slash_command: Option<String>,
         delivery_mode: Option<&str>,
+        voice_identity: Option<(&str, &str, &str, &str)>,
+        queued_identity: Option<&str>,
     ) -> Result<Option<AcceptedTurn>, String> {
         if text.trim().is_empty() && attachment_ids.is_empty() {
             return Err("Message cannot be empty.".into());
@@ -6065,6 +6088,15 @@ impl Service {
             .available_runtime(&task_id)?
             .is_some_and(|control| control.supports_acp_steer());
         let (execution_prompt, pending_steer) = self.mutate_data(Some(task_id.clone()), |data| {
+            if voice_identity.is_some() {
+                let task = data.snapshot.tasks.iter().find(|task| task.id == task_id).ok_or("Task was not found.")?;
+                let local = data.task_hosts.get(&task_id).is_some_and(|host| host.kind == "local");
+                if task.archived || task.provider != "codex" || task.channel_id.is_some() || !local { return Err("Voice task is no longer eligible.".into()); }
+            }
+            if let Some(queued_id) = queued_identity {
+                let queued = data.snapshot.queued_messages.iter().find(|row| row.id == queued_id && row.task_id == task_id && row.status == "sending" && row.channel_id.is_none()).ok_or("Queued message is no longer available.")?;
+                if queued.text != user_text || queued.attachment_ids != attachment_ids { return Err("Queued message changed before dispatch.".into()); }
+            }
             let state = &mut data.snapshot;
             let ix = state
                 .tasks
@@ -6095,6 +6127,7 @@ impl Service {
             let task = state.tasks.iter().find(|task| task.id == task_id).ok_or("Task was not found.")?;
             let attachments = resolve_attachment_ids(&data.attachments, &task.host_id, &task.cwd, &attachment_ids)?;
             if state.tasks[ix].status == "running" {
+                if queued_identity.is_some() { return Err("Task became busy before queued delivery.".into()); }
                 if slash_command.is_some() {
                     return Err("Provider commands are available after the current turn finishes.".into());
                 }
@@ -6111,7 +6144,10 @@ impl Service {
                         _ => None,
                     }
                 }).flatten();
-                let queued_message_id = id();
+                let queued_message_id = voice_identity.map(|(_, row, _, _)| row.to_owned()).unwrap_or_else(id);
+                if let Some((utterance, _, client, digest)) = voice_identity {
+                    data.voice_admission = Some(voice_admission_record(&task_id, utterance, &queued_message_id, if steer.is_some() { "steering" } else { "queued" }, client, digest));
+                }
                 state.queued_messages.push(QueuedMessage {
                     id: queued_message_id.clone(),
                     task_id: task_id.clone(),
@@ -6139,10 +6175,12 @@ impl Service {
                 }
                 return Ok((None, None));
             }
+            let message_id = voice_identity.map(|(_, row, _, _)| row.to_owned()).or_else(|| queued_identity.map(str::to_owned)).unwrap_or_else(id);
+            if let Some((utterance, _, client, digest)) = voice_identity { data.voice_admission = Some(voice_admission_record(&task_id, utterance, &message_id, "accepted", client, digest)); }
             state.messages.push(Message { stream_status: None, phase: None, response_metadata: None,
                 sender_agent_id: None,
                 collaboration_id: None,
-                id: id(),
+                id: message_id,
                 task_id: task_id.clone(),
                 role: "user".into(),
                 text: user_text.clone(),
@@ -6688,6 +6726,17 @@ impl Service {
         self.snapshot()
     }
 
+    fn accept_queued_user(self: &Arc<Self>, queued: &QueuedMessage) -> Result<Option<AcceptedTurn>, String> {
+        let voice_linked = self.store.voice_queue_linked(&queued.task_id, &queued.id)?;
+        self.accept_send_inner(queued.task_id.clone(), queued.text.clone(), queued.attachment_ids.clone(), None, None, None, voice_linked.then_some(queued.id.as_str()))
+    }
+
+    fn send_queued_user(self: &Arc<Self>, queued: &QueuedMessage) -> Result<Snapshot, String> {
+        let accepted = self.accept_queued_user(queued)?;
+        self.launch_accepted(queued.task_id.clone(), accepted);
+        self.snapshot()
+    }
+
     fn dispatch_queued(self: &Arc<Self>, task_id: &str) {
         let queued = match self.mutate(None, |snapshot| {
             let task = snapshot
@@ -6761,11 +6810,7 @@ impl Service {
         let result = if queued.channel_id.is_some() {
             self.send_queued_channel(&queued)
         } else {
-            self.send(
-                queued.task_id.clone(),
-                queued.text.clone(),
-                queued.attachment_ids.clone(),
-            )
+            self.send_queued_user(&queued)
         };
         let _ = self.mutate(None, |snapshot| {
             let Some(message) = snapshot
@@ -7651,6 +7696,10 @@ fn explicit_mentions(text: &str, handles: &HashMap<String, Option<String>>) -> V
         ix = end.max(ix + 1);
     }
     found
+}
+
+fn voice_admission_record(task_id: &str, utterance_id: &str, row_id: &str, disposition: &str, client_id: &str, digest: &str) -> VoiceAdmissionRecord {
+    VoiceAdmissionRecord { id: utterance_id.into(), task_id: task_id.into(), payload: serde_json::json!({"rowId":row_id,"disposition":disposition,"clientId":client_id,"textDigest":digest,"admittedAt":now()}).to_string() }
 }
 
 /// Atomically consumes a channel's peer-turn budget and creates either an
@@ -13825,6 +13874,130 @@ readline.createInterface({input: process.stdin}).on('line', line => {
             service.set_task_project("missing", None),
             Err("Task was not found.".into())
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(feature = "experimental-gpui")]
+    #[test]
+    fn voice_admission_survives_uncertain_reply_and_rejects_revisions_and_stale_leases() {
+        let dir = temp_dir("voice-admission");
+        let service = Service::open(None, dir.clone()).unwrap();
+        let agent_id = service.snapshot().unwrap().agents.iter().find(|a| a.provider == "codex").unwrap().id.clone();
+        let task = service.create_task(task_input(agent_id.clone(), "voice", None)).unwrap();
+        let second = service.create_task(task_input(agent_id, "other voice", None)).unwrap();
+        service.mutate(None, |snapshot| { snapshot.tasks.iter_mut().find(|t| t.id == task.id).unwrap().status = "running".into(); Ok(()) }).unwrap();
+        let client = id();
+        let lease = service.begin_voice_session(task.id.clone(), client.clone()).unwrap();
+        let mut utterance = crate::voice_admission::VoiceUtterance { lease: lease.clone(), utterance_id: id(), text: "first final".into(), is_final: false };
+        assert!(service.admit_voice_utterance(utterance.clone()).is_err());
+        utterance.is_final = true;
+        let receipt = service.admit_voice_utterance(utterance.clone()).unwrap();
+        assert!(!receipt.duplicate);
+        assert!(receipt.admitted_at > 0);
+        assert_eq!(service.admit_voice_utterance(utterance.clone()).unwrap().row_id, receipt.row_id);
+        utterance.text = "revised final".into();
+        assert!(service.admit_voice_utterance(utterance.clone()).is_err());
+        let next = service.begin_voice_session(second.id.clone(), client.clone()).unwrap();
+        assert!(service.admit_voice_utterance(utterance).is_err());
+        let cross_task = crate::voice_admission::VoiceUtterance { lease: next.clone(), utterance_id: receipt.utterance_id.clone(), text: "first final".into(), is_final: true };
+        assert!(service.admit_voice_utterance(cross_task).is_err());
+        assert!(service.renew_voice_session(&lease).is_err());
+        service.end_voice_session(&next).unwrap();
+        // Force the private receipt INSERT to fail after the canonical-row diff;
+        // SQLite must roll back both and the store must require reopening.
+        let rejected_message_id = id();
+        let result = service.mutate_data(None, |data| {
+            data.snapshot.messages.push(Message { id: rejected_message_id.clone(), task_id: task.id.clone(), role: "user".into(), text: "must roll back".into(), created_at: now(), sender_agent_id: None, collaboration_id: None, stream_status: None, phase: None, response_metadata: None, attachments: vec![] });
+            data.voice_admission = Some(voice_admission_record(&task.id, &receipt.utterance_id, &rejected_message_id, "accepted", &client, "duplicate"));
+            Ok(())
+        });
+        assert!(result.is_err());
+        assert!(!service.snapshot().unwrap().messages.iter().any(|m| m.id == rejected_message_id));
+        drop(service);
+        let reopened = Service::open(None, dir.clone()).unwrap();
+        let recovered = reopened.read_voice_receipt(&task.id, &client, &receipt.utterance_id).unwrap().unwrap();
+        assert_eq!(recovered.row_id, receipt.row_id);
+        assert!(reopened.read_voice_receipt(&task.id, &id(), &receipt.utterance_id).is_err());
+        let snapshot = reopened.snapshot().unwrap();
+        assert!(!snapshot.messages.iter().any(|m| m.id == rejected_message_id));
+        assert_eq!(snapshot.queued_messages.iter().filter(|m| m.id == receipt.row_id).count(), 1);
+        assert_eq!(recovered.delivery_status, "queued");
+        assert!(recovered.message_id.is_none());
+        reopened.mutate(None, |snapshot| {
+            snapshot.tasks.iter_mut().find(|t| t.id == task.id).unwrap().status = "running".into();
+            let row = snapshot.queued_messages.iter_mut().find(|m| m.id == receipt.row_id).unwrap();
+            row.status = "sending".into(); row.origin = Some("steering".into());
+            Ok(())
+        }).unwrap();
+        assert_eq!(reopened.read_voice_receipt(&task.id, &client, &receipt.utterance_id).unwrap().unwrap().delivery_status, "steering");
+        let control = reopened.reserve_run(&task.id).unwrap();
+        control.set_app_server_thread("voice-fixture-thread".into());
+        control.set_app_server_turn("voice-fixture-turn".into());
+        reopened.app_server_steer_accepted(&task.id, &control, "voice-fixture-turn", &receipt.row_id);
+        let delivered = reopened.read_voice_receipt(&task.id, &client, &receipt.utterance_id).unwrap().unwrap();
+        assert_eq!(delivered.delivery_status, "delivered");
+        assert_eq!(delivered.message_id.as_deref(), Some(receipt.row_id.as_str()));
+        assert!(delivered.message_created_at.is_some_and(|timestamp| timestamp > 0));
+        assert!(!reopened.snapshot().unwrap().queued_messages.iter().any(|m| m.id == receipt.row_id));
+        // A regular steered message retains its original queue timestamp and
+        // receives a fresh message ID, as it did before voice was introduced.
+        reopened.accept_send_inner(task.id.clone(), "ordinary steer".into(), vec![], None, Some("queue"), None, None).unwrap();
+        let ordinary = reopened.snapshot().unwrap().queued_messages.iter().find(|row| row.text == "ordinary steer").unwrap().id.clone();
+        reopened.mutate(None, |snapshot| {
+            let row = snapshot.queued_messages.iter_mut().find(|row| row.id == ordinary).unwrap();
+            row.status = "sending".into(); row.created_at = 12345;
+            Ok(())
+        }).unwrap();
+        reopened.app_server_steer_accepted(&task.id, &control, "voice-fixture-turn", &ordinary);
+        let snapshot = reopened.snapshot().unwrap();
+        let message = snapshot.messages.iter().find(|row| row.text == "ordinary steer").unwrap();
+        assert_ne!(message.id, ordinary);
+        assert_eq!(message.created_at, 12345);
+        drop(reopened);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(feature = "experimental-gpui")]
+    #[test]
+    fn voice_fifo_conversion_keeps_durable_identity_and_detects_edits() {
+        let dir = temp_dir("voice-fifo-identity");
+        let service = Service::open(None, dir.clone()).unwrap();
+        let agent = service.snapshot().unwrap().agents.iter().find(|a| a.provider == "codex").unwrap().id.clone();
+        let task = service.create_task(task_input(agent, "voice queue", None)).unwrap();
+        service.mutate(None, |snapshot| { snapshot.tasks.iter_mut().find(|t| t.id == task.id).unwrap().status = "running".into(); Ok(()) }).unwrap();
+        let client = id();
+        let lease = service.begin_voice_session(task.id.clone(), client.clone()).unwrap();
+        let input = crate::voice_admission::VoiceUtterance { lease, utterance_id: id(), text: "queued voice".into(), is_final: true };
+        let receipt = service.admit_voice_utterance(input.clone()).unwrap();
+        service.mutate(None, |snapshot| { snapshot.queued_messages.iter_mut().find(|m| m.id == receipt.row_id).unwrap().text = "edited".into(); Ok(()) }).unwrap();
+        assert_eq!(service.read_voice_receipt(&task.id, &client, &input.utterance_id).unwrap().unwrap().delivery_status, "interrupted");
+        service.mutate(None, |snapshot| {
+            snapshot.tasks.iter_mut().find(|t| t.id == task.id).unwrap().status = "completed".into();
+            let row = snapshot.queued_messages.iter_mut().find(|m| m.id == receipt.row_id).unwrap();
+            row.text = input.text.clone(); row.status = "sending".into();
+            Ok(())
+        }).unwrap();
+        let queued = service.snapshot().unwrap().queued_messages.iter().find(|row| row.id == receipt.row_id).unwrap().clone();
+        let accepted = service.accept_queued_user(&queued).unwrap();
+        assert!(accepted.is_some());
+        let delivered = service.read_voice_receipt(&task.id, &client, &input.utterance_id).unwrap().unwrap();
+        assert_eq!(delivered.delivery_status, "delivered");
+        assert_eq!(delivered.message_id.as_deref(), Some(receipt.row_id.as_str()));
+        // Ordinary FIFO sends keep the pre-voice fresh message identity.
+        service.mutate(None, |snapshot| { snapshot.tasks.iter_mut().find(|t| t.id == task.id).unwrap().status = "running".into(); Ok(()) }).unwrap();
+        service.accept_send_inner(task.id.clone(), "ordinary fifo".into(), vec![], None, Some("queue"), None, None).unwrap();
+        let ordinary_id = service.snapshot().unwrap().queued_messages.iter().find(|row| row.text == "ordinary fifo").unwrap().id.clone();
+        service.mutate(None, |snapshot| {
+            snapshot.tasks.iter_mut().find(|t| t.id == task.id).unwrap().status = "completed".into();
+            snapshot.queued_messages.iter_mut().find(|row| row.id == ordinary_id).unwrap().status = "sending".into();
+            Ok(())
+        }).unwrap();
+        let ordinary = service.snapshot().unwrap().queued_messages.iter().find(|row| row.id == ordinary_id).unwrap().clone();
+        assert!(service.accept_queued_user(&ordinary).unwrap().is_some());
+        let snapshot = service.snapshot().unwrap();
+        let message = snapshot.messages.iter().find(|row| row.text == "ordinary fifo").unwrap();
+        assert_ne!(message.id, ordinary_id);
+        drop(service);
         let _ = std::fs::remove_dir_all(dir);
     }
 

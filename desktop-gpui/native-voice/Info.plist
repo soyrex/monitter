@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>com.monitter.native-voice.prototype</string>
+<key>CFBundleName</key><string>Monitter Native Voice</string>
+<key>NSMicrophoneUsageDescription</key><string>Monitter uses the microphone when you start a voice conversation.</string>
+</dict></plist>

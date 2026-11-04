@@ -13,3 +13,7 @@ pub mod workspace_store;
 pub mod workspace_window_state;
 pub mod workspace_order;
 pub mod startup_cache;
+
+pub mod voice_conversation_model;
+
+pub mod voice_delivery_model;

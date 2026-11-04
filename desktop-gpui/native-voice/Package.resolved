@@ -1,0 +1,22 @@
+{
+  "originHash" : "03007f07bf1ab3faa8019d2561f427dea83df10b4e77317c00821be71f5dd77d",
+  "pins" : [
+    {
+      "identity" : "fluidaudio",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/FluidInference/FluidAudio.git",
+      "state" : {
+        "revision" : "ee78635d23d52379117554ba72358b65a0612447"
+      }
+    },
+    {
+      "identity" : "xn-ptts",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/gradium-ai/xn-ptts.git",
+      "state" : {
+        "revision" : "95bf24d1ca5e94f0f62abe588b1ccb6f093bcc9c"
+      }
+    }
+  ],
+  "version" : 3
+}

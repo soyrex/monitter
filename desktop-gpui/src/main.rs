@@ -105,6 +105,9 @@ mod naming_title;
 mod native_navigation;
 mod shortcut_desktop;
 mod native_voice_capture;
+mod native_voice_session;
+mod chat_conversation;
+mod voice_mode_view;
 mod slash_palette;
 mod task_project_picker;
 mod terminal;
@@ -2550,6 +2553,15 @@ impl Desktop {
         {
             let panes = self.chat_panes.borrow();
             for (id, pane) in panes.iter() {
+                // A non-reset removal is an explicit deletion, unlike a reset
+                // or page trim whose coverage may have narrowed. Coalescing can
+                // reintroduce an ID, so only invalidate messages still absent.
+                if !reset && !changes.trim_tasks.contains(id) && !changes.removed_message_ids.is_empty() {
+                    let removed = changes.removed_message_ids.iter().filter(|message_id| {
+                        self.publication_index.as_ref().is_some_and(|index| index.messages.get_by_id(message_id).ok().flatten().is_none())
+                    }).cloned().collect();
+                    pane.update(cx, |pane, cx| pane.invalidate_removed_voice_messages(&removed, cx));
+                }
                 if !prepared.sync_tasks.contains(id) {
                     pane.update(cx, |pane, cx| pane.advance_revision(self.snapshot.clone(), self.revision.clone(), cx));
                     continue;
@@ -4337,10 +4349,9 @@ impl Desktop {
             let task = task.to_owned();
             let voice_pane = pane.downgrade();
             let hook: docking::LifecycleHook = Rc::new(move |event, window, cx| {
-                if matches!(
-                    event,
-                    docking::PaneLifecycle::Visible(false) | docking::PaneLifecycle::Removed
-                ) {
+                if matches!(event, docking::PaneLifecycle::Visible(false)) {
+                    let _ = voice_pane.update(cx, |pane, cx| pane.pause_voice(cx));
+                } else if matches!(event, docking::PaneLifecycle::Removed) {
                     let _ = voice_pane.update(cx, |pane, cx| pane.deactivate_voice(cx));
                 }
                 if matches!(event, docking::PaneLifecycle::Active(true)) {
@@ -5058,10 +5069,9 @@ impl Desktop {
                     if let docking::PaneLifecycle::Visible(visible) = event {
                         activity_effects::set_pane_visible(&selected_id, visible, cx);
                     }
-                    if matches!(
-                        event,
-                        docking::PaneLifecycle::Visible(false) | docking::PaneLifecycle::Removed
-                    ) {
+                    if matches!(event, docking::PaneLifecycle::Visible(false)) {
+                        let _ = voice_pane.update(cx, |pane, cx| pane.pause_voice(cx));
+                    } else if matches!(event, docking::PaneLifecycle::Removed) {
                         let _ = voice_pane.update(cx, |pane, cx| pane.deactivate_voice(cx));
                     }
                     if matches!(event, docking::PaneLifecycle::Active(true)) {

@@ -2363,6 +2363,8 @@ mod tests {
                 vec![],
                 Some("status".into()),
                 None,
+                None,
+                None,
             )
             .unwrap()
             .unwrap();

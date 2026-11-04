@@ -629,7 +629,7 @@ mod unix {
     }
     fn read_only_request(method: &str, args: &Value) -> bool {
         match method {
-            "read_browser_open_requests" | "read_ui_changes" | "read_native_ui_changes" | "read_native_ui_changes_v2" | "confirm_native_command" | "read_idle_runtime_status" | "read_task_messages" | "read_channel_messages" | "read_attachment_file" | "load_native_preferences" | "read_lan_status" | "get_agent_extension_assignments" | "subscribe_changes" => true,
+            "read_voice_receipt" | "read_browser_open_requests" | "read_ui_changes" | "read_native_ui_changes" | "read_native_ui_changes_v2" | "confirm_native_command" | "read_idle_runtime_status" | "read_task_messages" | "read_channel_messages" | "read_attachment_file" | "load_native_preferences" | "read_lan_status" | "get_agent_extension_assignments" | "subscribe_changes" => true,
             "invoke" | "pairing_host_invoke" => matches!(args["command"].as_str(), Some("get_task_captured_events" | "read_admin_activity" | "get_snapshot" | "get_ui_snapshot" | "get_ui_delta" | "get_process_metrics" | "get_task_messages" | "get_channel_messages" | "get_task_events" | "get_task_event_detail" | "get_usage_overview" | "get_task_goal" | "get_task_slash_commands" | "get_subagent_transcript" | "get_task_git_status" | "get_task_git_diff" | "list_terminals" | "read_terminal" | "get_command_capabilities")),
             _ => false,
         }
@@ -1406,6 +1406,11 @@ fn decode_response<T: DeserializeOwned>(response: Response, id: &str) -> Result<
 }
 pub(super) fn dispatch(backend: &BackendService, method: &str, args: Value) -> Result<Value, String> {
     match method {
+        "begin_voice_session" => encode(backend.begin_voice_session(arg(&args, "taskId")?, arg(&args, "clientId")?)?),
+        "end_voice_session" => { backend.end_voice_session(&arg(&args, "lease")?)?; Ok(Value::Null) },
+        "admit_voice_utterance" => encode(backend.admit_voice_utterance(arg(&args, "input")?)?),
+        "renew_voice_session" => { backend.renew_voice_session(&arg(&args, "lease")?)?; Ok(Value::Null) },
+        "read_voice_receipt" => encode(backend.read_voice_receipt(&arg::<String>(&args, "taskId")?, &arg::<String>(&args, "clientId")?, &arg::<String>(&args, "utteranceId")?)?),
         "save_project_ideas" => encode(backend.save_project_ideas(
             &arg::<String>(&args, "projectId")?, arg(&args, "ideas")?, arg(&args, "expectedRevision")?,
         )?),

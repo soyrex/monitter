@@ -571,12 +571,13 @@ impl Service {
                 &task.cwd,
                 &queued.attachment_ids,
             )?;
+            let voice_linked = self.store.voice_queue_linked(task_id, &queued.id)?;
             data.snapshot.messages.push(Message {
-                id: id(),
+                id: if voice_linked { queued.id.clone() } else { id() },
                 task_id: task_id.into(),
                 role: "user".into(),
                 text: queued.text,
-                created_at: queued.created_at,
+                created_at: if voice_linked { now() } else { queued.created_at },
                 sender_agent_id: None,
                 collaboration_id: None,
                 attachments,

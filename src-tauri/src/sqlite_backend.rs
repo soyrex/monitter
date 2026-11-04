@@ -185,12 +185,25 @@ impl Database {
         captured_since: Option<i64>,
         work_records: &[crate::work_log::PendingRecord],
         removed_usage: &[RunUsageSample],
+        voice: Option<&crate::VoiceAdmissionRecord>,
     ) -> Result<(), String> {
         let mut connection = self.lock()?;
         let transaction = connection
             .transaction()
             .map_err(|error| error.to_string())?;
         diff_state(&transaction, before, after)?;
+        if let Some(voice) = voice {
+            transaction.execute("INSERT INTO entities(collection,id,position,task_id,created_at,payload) VALUES('voiceAdmissions',?1,0,?2,NULL,?3)", params![voice.id, voice.task_id, voice.payload]).map_err(|e| e.to_string())?;
+        }
+        if before.0.tasks.len() > after.0.tasks.len() {
+            let remaining: HashSet<&str> = after.0.tasks.iter().map(|task| task.id.as_str()).collect();
+            for task in &before.0.tasks {
+                if !remaining.contains(task.id.as_str()) {
+                    transaction.execute("DELETE FROM entities WHERE collection='voiceAdmissions' AND task_id=?1", [&task.id]).map_err(|e| e.to_string())?;
+                }
+            }
+        }
+
         for sample in removed_usage { crate::work_log::outbox::usage(&transaction,sample)?; }
         diff_usage_history(&transaction, usage_before, usage_after)?;
         // While paused, lifecycle emits only a real task ending at the last
@@ -430,6 +443,40 @@ impl Database {
         serde_json::from_str(&payload).map_err(|e| e.to_string())
     }
 
+    pub(crate) fn voice_queue_linked(&self, task_id: &str, row_id: &str) -> Result<bool, String> {
+        let connection = self.lock()?;
+        connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM entities WHERE collection='voiceAdmissions' AND task_id=?1 AND json_extract(payload, '$.rowId')=?2)",
+            params![task_id, row_id], |row| row.get(0),
+        ).map_err(|e| e.to_string())
+    }
+
+    pub(crate) fn voice_admission(&self, id: &str) -> Result<Option<(String, String, Option<(String, String, Option<i64>)>)>, String> {
+        let connection = self.lock()?;
+        let record: Option<(String, String)> = connection.query_row("SELECT task_id, payload FROM entities WHERE collection='voiceAdmissions' AND id=?1", [id], |row| Ok((row.get(0)?, row.get(1)?))).optional().map_err(|e| e.to_string())?;
+        let Some((task_id, payload)) = record else { return Ok(None); };
+        let receipt: serde_json::Value = serde_json::from_str(&payload).map_err(|_| "Invalid voice receipt.")?;
+        let row_id = receipt["rowId"].as_str().ok_or("Invalid voice receipt.")?;
+        let message: Option<String> = connection.query_row("SELECT payload FROM entities WHERE collection='messages' AND task_id=?1 AND id=?2", params![task_id, row_id], |row| row.get(0)).optional().map_err(|e| e.to_string())?;
+        let delivery = if let Some(raw) = message {
+            let message: Message = serde_json::from_str(&raw).map_err(|_| "Invalid voice message.")?;
+            if message.role != "user" || message.sender_agent_id.is_some() { return Err("Invalid voice message identity.".into()); }
+            Some(("delivered".into(), message.text, Some(message.created_at)))
+        } else {
+            let queued: Option<String> = connection.query_row("SELECT payload FROM entities WHERE collection='queued_messages' AND task_id=?1 AND id=?2", params![task_id, row_id], |row| row.get(0)).optional().map_err(|e| e.to_string())?;
+            queued.map(|raw| {
+                let row: QueuedMessage = serde_json::from_str(&raw).map_err(|_| "Invalid voice queue item.")?;
+                let status = match row.status.as_str() {
+                    "queued" => "queued",
+                    "sending" if row.origin.as_deref() == Some("steering") => "steering",
+                    "sending" => "queued",
+                    _ => "interrupted",
+                };
+                Ok::<_, String>((status.into(), row.text, None))
+            }).transpose()?
+        };
+        Ok(Some((task_id, payload, delivery)))
+    }
     pub(crate) fn task_event(&self,task_id:&str,event_id:&str)->Result<RunEvent,String> {
         let connection=self.lock()?;
         let payload:String=connection.query_row("SELECT payload FROM entities WHERE collection='events' AND task_id=?1 AND id=?2",params![task_id,event_id],|row|row.get(0)).optional().map_err(|e|e.to_string())?.ok_or("Task event was not found.")?;

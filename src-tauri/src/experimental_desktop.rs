@@ -884,6 +884,11 @@ impl Drop for Session {
 struct BackendService(Arc<Session>);
 
 impl BackendService {
+    pub fn begin_voice_session(&self, task_id: String, client_id: String) -> Result<crate::voice_session::VoiceLease, String> { self.ensure_running()?; self.0.service.begin_voice_session(task_id, client_id) }
+    pub fn end_voice_session(&self, lease: &crate::voice_session::VoiceLease) -> Result<(), String> { self.ensure_running()?; self.0.service.end_voice_session(lease) }
+    pub fn admit_voice_utterance(&self, input: crate::voice_admission::VoiceUtterance) -> Result<crate::voice_admission::VoiceReceipt, String> { self.ensure_running()?; self.0.service.admit_voice_utterance(input) }
+    pub fn renew_voice_session(&self, lease: &crate::voice_session::VoiceLease) -> Result<(), String> { self.ensure_running()?; self.0.service.renew_voice_session(lease) }
+    pub fn read_voice_receipt(&self, task_id: &str, client_id: &str, id: &str) -> Result<Option<crate::voice_admission::VoiceReceipt>, String> { self.ensure_running()?; self.0.service.read_voice_receipt(task_id, client_id, id) }
     /// Owner-native picker input only. Never exposed through LAN/mobile dispatch.
     /// Call off the UI thread for a path explicitly selected by the user.
     pub fn read_attachment_file(&self, source_path: &str) -> Result<ReadAttachmentFile, String> {
@@ -1633,6 +1638,12 @@ fn native_ui_changes_or_legacy(
 }
 
 impl DesktopService {
+    pub fn begin_voice_session(&self, task_id: &str, client_id: &str) -> Result<crate::voice_session::VoiceLease, String> { self.0.call("begin_voice_session", serde_json::json!({"taskId":task_id,"clientId":client_id})) }
+    pub fn end_voice_session(&self, lease: &crate::voice_session::VoiceLease) -> Result<(), String> { self.0.call("end_voice_session", serde_json::json!({"lease":lease})) }
+    pub fn admit_voice_utterance(&self, input: crate::voice_admission::VoiceUtterance) -> Result<crate::voice_admission::VoiceReceipt, String> { self.0.call("admit_voice_utterance", serde_json::json!({"input":input})) }
+    pub fn renew_voice_session(&self, lease: &crate::voice_session::VoiceLease) -> Result<(), String> { self.0.call("renew_voice_session", serde_json::json!({"lease":lease})) }
+    pub fn read_voice_receipt(&self, task_id: &str, client_id: &str, id: &str) -> Result<Option<crate::voice_admission::VoiceReceipt>, String> { self.0.call("read_voice_receipt", serde_json::json!({"taskId":task_id,"clientId":client_id,"utteranceId":id})) }
+
     /// No filesystem, socket, or process work. Safe for local workspace creation.
     pub fn pending() -> Self {
         Self(DesktopClient::pending(), Arc::new(std::sync::atomic::AtomicBool::new(false)))

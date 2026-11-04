@@ -78,6 +78,27 @@ if (process.platform === 'linux') {
   process.exit(0);
 }
 
+// The pinned Phonon macOS binary target is arm64-only and requires macOS 15.
+// Preserve desktop packaging on unsupported hosts without shipping a stale helper.
+const macVersion = execFileSync('/usr/bin/sw_vers', ['-productVersion'], { encoding: 'utf8' }).trim();
+const macMajor = Number(macVersion.split('.')[0]);
+if (!Number.isInteger(macMajor) || macMajor < 1) throw new Error(`Cannot determine macOS version: ${macVersion}`);
+const voiceSupported = process.arch === 'arm64' && macMajor >= 15;
+const voiceUnavailableReason = voiceSupported ? null : 'Local voice requires Apple silicon and macOS 15 or later.';
+const voicePackage = join(root, 'desktop-gpui', 'native-voice');
+const voiceBuild = join(voicePackage, '.build', profile);
+const voiceHelper = join(voiceBuild, 'monitter-native-voice');
+const voiceResources = join(voiceBuild, 'FluidAudio_LuxTtsG2pResources.bundle');
+if (voiceSupported) {
+  console.log(`Building pinned native voice helper with SwiftPM (${profile}).`);
+  execFileSync('/usr/bin/xcrun', ['swift', 'build', '--package-path', voicePackage, '--configuration', profile, '--disable-automatic-resolution', '--jobs', String(jobs)], { cwd: root, stdio: 'inherit' });
+  if (!existsSync(voiceHelper) || !existsSync(voiceResources)) throw new Error('Swift build did not produce the native voice helper and its resource bundle.');
+  const voiceArchitectures = execFileSync('/usr/bin/lipo', ['-archs', voiceHelper], { encoding: 'utf8' }).trim().split(/\s+/);
+  if (!voiceArchitectures.includes('arm64')) throw new Error('The native voice helper is missing its arm64 architecture.');
+} else {
+  console.warn(`${voiceUnavailableReason} Packaging the desktop without local voice.`);
+}
+
 if (!existsSync(icon)) throw new Error(`The app icon is missing: ${icon}`);
 
 const artifacts = join(root, 'artifacts', 'gpui', profile);
@@ -90,6 +111,25 @@ const resources = join(contents, 'Resources');
 mkdirSync(executableDir, { recursive: true });
 mkdirSync(resources, { recursive: true });
 copyFileSync(binary, join(executableDir, 'monitter-gpui-desktop'));
+if (voiceSupported) {
+  copyFileSync(voiceHelper, join(executableDir, 'monitter-native-voice'));
+  // Bundle.module resolves either app resources or the executable directory.
+  for (const destination of [resources, executableDir]) {
+    cpSync(voiceResources, join(destination, 'FluidAudio_LuxTtsG2pResources.bundle'), { recursive: true });
+  }
+  const notices = join(resources, 'licenses', 'native-voice');
+  const fluid = join(voicePackage, '.build', 'checkouts', 'FluidAudio');
+  const phonon = join(voicePackage, '.build', 'checkouts', 'xn-ptts');
+  const requiredNotices = [join(fluid, 'LICENSE'), join(fluid, 'ThirdPartyLicenses'), join(phonon, 'LICENSE-APACHE'), join(phonon, 'LICENSE-MIT')];
+  for (const notice of requiredNotices) {
+    if (!existsSync(notice)) throw new Error(`Native voice license notice is missing: ${notice}`);
+  }
+  mkdirSync(join(notices, 'FluidAudio'), { recursive: true });
+  mkdirSync(join(notices, 'xn-ptts'), { recursive: true });
+  copyFileSync(join(fluid, 'LICENSE'), join(notices, 'FluidAudio', 'LICENSE'));
+  cpSync(join(fluid, 'ThirdPartyLicenses'), join(notices, 'FluidAudio', 'ThirdPartyLicenses'), { recursive: true });
+  for (const name of ['LICENSE-APACHE', 'LICENSE-MIT']) copyFileSync(join(phonon, name), join(notices, 'xn-ptts', name));
+}
 copyFileSync(icon, join(resources, 'AppIcon.icns'));
 const lanWeb = join(root, 'build');
 const lanAssets = existsSync(join(lanWeb, 'index.html'));
@@ -124,7 +164,7 @@ writeFileSync(join(contents, 'Info.plist'), `<?xml version="1.0" encoding="UTF-8
   <key>CFBundleShortVersionString</key><string>${version}</string>
   <key>CFBundleVersion</key><string>${version}</string>
   <key>NSHighResolutionCapable</key><true/>
-  <key>NSMicrophoneUsageDescription</key><string>Record a voice message for local transcription into your editable chat draft.</string>
+  <key>NSMicrophoneUsageDescription</key><string>Use the microphone for local dictation and voice conversation.</string>
   <key>NSPrincipalClass</key><string>NSApplication</string>
 </dict>
 </plist>
@@ -173,6 +213,7 @@ const latestPath = join(artifacts, 'latest.json');
 const latestTemporaryPath = join(artifacts, `.latest-${process.pid}-${Date.now()}.json`);
 const buildMetadata = {
   app: output, serverApp: serverOutput, profile, visualExport, performanceProfiling, lanAssets, sourceCommit, sourceDirty,
+  nativeVoice: { included: voiceSupported, unavailableReason: voiceUnavailableReason },
   desktopSha256: createHash('sha256').update(readFileSync(join(output, 'Contents', 'MacOS', 'monitter-gpui-desktop'))).digest('hex'),
   builtAt: new Date().toISOString(),
 };

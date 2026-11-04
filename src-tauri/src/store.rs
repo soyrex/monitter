@@ -101,6 +101,8 @@ impl Store {
     }
     pub(crate) fn task_captured_events(&self,task_id:&str,before:Option<i64>,limit:Option<u32>)->Result<crate::lan_sync::TaskEventsPage,String>{self.database.captured_event_page(task_id,before,limit)}
     pub(crate) fn task_events(&self,task_id:&str,before:Option<i64>,limit:Option<u32>)->Result<crate::lan_sync::TaskEventsPage,String>{self.database.event_page(task_id,before,limit)}
+    pub(crate) fn voice_queue_linked(&self, task_id: &str, row_id: &str) -> Result<bool, String> { self.database.voice_queue_linked(task_id, row_id) }
+    pub(crate) fn voice_admission(&self, id: &str) -> Result<Option<(String, String, Option<(String, String, Option<i64>)>)>, String> { self.database.voice_admission(id) }
     pub(crate) fn task_event(&self,task_id:&str,event_id:&str)->Result<crate::model::RunEvent,String>{self.database.task_event(task_id,event_id)}
     fn require_writable(&self) -> Result<(), String> {
         if self.poisoned.load(Ordering::Acquire) {
@@ -127,9 +129,9 @@ impl Store {
     }
 
     pub fn save_update(&self, before: StateRef<'_>, after: StateRef<'_>) -> Result<(), String> {
-        self.save_update_work_log(before,after,&[])
+        self.save_update_work_log(before,after,&[],None)
     }
-    pub(crate) fn save_update_work_log(&self,before:StateRef<'_>,after:StateRef<'_>,records:&[crate::work_log::PendingRecord])->Result<(),String>{
+    pub(crate) fn save_update_work_log(&self,before:StateRef<'_>,after:StateRef<'_>,records:&[crate::work_log::PendingRecord],voice:Option<&crate::VoiceAdmissionRecord>)->Result<(),String>{
         self.require_writable()?;
         let mut usage = self
             .usage
@@ -140,7 +142,7 @@ impl Store {
             .or_else(|| (!usage.staged.is_empty()).then(now));
         let result =
             self.database
-                .apply_update_history_usage(before, after, &usage.committed, &usage.staged, captured, records, &usage.removed);
+                .apply_update_history_usage(before, after, &usage.committed, &usage.staged, captured, records, &usage.removed, voice);
         match result {
             Ok(()) => {
                 usage.removed.clear();

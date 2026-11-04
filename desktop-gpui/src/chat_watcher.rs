@@ -502,6 +502,17 @@ fn nested_tool_actions(value: &Value, depth: usize, actions: &mut Vec<String>) {
     }
 }
 
+pub(super) fn voice_activity_text(snapshot: &Value, task_id: &str) -> Option<String> {
+    let user_at = values(snapshot, "messages")
+        .filter(|m| m["taskId"] == task_id && m["role"] == "user")
+        .filter_map(|m| m["createdAt"].as_i64()).max()?;
+    let event = values(snapshot, "events")
+        .filter(|e| e["taskId"] == task_id && e["kind"] == "tool"
+            && e["createdAt"].as_i64().unwrap_or_default() >= user_at)
+        .max_by_key(|e| e["createdAt"].as_i64().unwrap_or_default())?;
+    Some(watcher_tool_text(event))
+}
+
 fn watcher_tool_text(event: &Value) -> String {
     let mut actions = Vec::new();
     nested_tool_actions(&watcher_event_detail(event), 0, &mut actions);
@@ -901,6 +912,9 @@ impl ChatPane {
     }
     /// Overview navigation always opens Watch, including during an outgoing animation.
     pub(crate) fn open_watcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.conversation.read(cx).presented() {
+            self.conversation.update(cx, |voice, cx| voice.end(cx));
+        }
         if self.watcher.enabled && !self.watcher.transitioning {
             return;
         }
@@ -944,6 +958,11 @@ impl ChatPane {
     pub(crate) fn watcher_is_open(&self) -> bool { self.watcher.enabled }
 
     pub(super) fn toggle_watcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.conversation.read(cx).presented() {
+            self.conversation.update(cx, |voice, cx| voice.end(cx));
+            window.focus(&self.composer.read(cx).focus_handle(cx), cx);
+            return;
+        }
         if self.watcher.transitioning {
             return;
         }

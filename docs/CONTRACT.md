@@ -2113,6 +2113,61 @@ the command. First-run Whisper startup can spend additional time compiling local
 the native process has a five-minute hard timeout. Errors and process output never contain audio content.
 The transcription command is available to the native owner, the owner LAN view,
 and paired phones through its separately approved encrypted owner relay.
+
+### Experimental local conversation on macOS
+
+The opt-in GPUI prototype (`MONITTER_LOCAL_VOICE=1`) binds continuous local
+speech to the selected local Codex task. It uses a separate, owned Swift audio
+child with Parakeet recognition and Phonon synthesis. `Start voice` is an explicit
+microphone action; model loading opens no microphone. Muting discards pending
+recognition. `Stop speaking` cancels playback and queued speech only, while
+`End voice`, task/window changes, route errors or lease loss stop capture and
+playback. Neither action cancels agent work. Existing dictation remains separate.
+
+Only private native IPC exposes `begin_voice_session`, `renew_voice_session`,
+`end_voice_session`, `admit_voice_utterance`, and `read_voice_receipt`. The lease
+contains `taskId`, canonical UUID `clientId`, and UUID `epoch`. It expires after
+15 seconds without renewal, and a new lease replaces the previous one for that
+service profile. Each mutation rechecks local, unarchived Codex eligibility.
+Voice methods are not generic bridge, LAN, mobile or collaboration tools.
+
+A finalized utterance carries its lease, canonical UUID `utteranceId`, `text`,
+and `isFinal: true`. Its receipt and canonical user-message/queue row commit in
+one SQLite transaction. Repeating the same identity and text returns the receipt;
+revising text or crossing task/client boundaries is rejected. Private receipt
+records are not transcript events. The native client sends one mutation at a
+time and tracks at most four pending utterances; an uncertain reply triggers a
+receipt read, never an automatic resend. Task deletion removes its receipts.
+
+Receipt `deliveryStatus` is `queued`, `steering`, `delivered`, or `interrupted`.
+Queue-to-message conversion preserves the message UUID. `delivered` means a
+canonical user message exists durably, not that a provider acknowledged it or
+responded to its meaning. `admittedAt` and `messageCreatedAt` are Unix milliseconds
+assigned during persistence. There is no exactly-once execution promise across
+a process crash between persistence and worker launch.
+
+The native speech reader uses direct assistant `commentary` / `final_answer`
+messages, plus completed phase-unknown direct assistant messages (Codex reasoning
+uses a separate item type). It excludes pre-session history, peer/internal text, code blocks
+and URLs, and speaks bounded stable clauses. User onset immediately pauses audio;
+a substantive finalized interjection invalidates the old playback generation,
+then enters ordinary chat admission. Pending explicit questions/approvals retain
+recognized speech for composer review instead of granting permission. Playback
+waits for all pending speech admissions to become canonical, excluding earlier
+message timestamps. This freshness boundary does not assert semantic causality
+for an in-flight provider turn. Models, audio and turn detection run locally;
+the selected Codex agent keeps its existing provider and authorization behavior.
+
+The child accepts bounded JSONL commands and emits session/epoch-tagged events;
+its protocol and pinned model setup are documented in
+`desktop-gpui/native-voice/README.md`. It inherits no provider-token environment.
+The prototype requires configured local model and helper paths, exposes visible
+errors, and never silently falls back to a hosted voice API. Physical microphone,
+echo rejection and live interjection acceptance must be reported separately from
+model sample tests and successful builds.
+
+### Existing dictation and mobile speech
+
 The native macOS owner can set `Settings.voiceTranscriptionEngine` to `"apple"`
 instead of its `"whisper"` default. In that mode the desktop calls native-only
 `transcribe_voice_message_apple { audioBase64: string }` with the same bounded WAV
