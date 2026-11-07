@@ -5001,6 +5001,7 @@ impl Window {
             border_widths: snapped_border_widths,
             border_style: quad.border_style,
             border_blend_mode: quad.border_blend_mode,
+            pad: 0,
         };
 
         if !quad.background.is_transparent() {

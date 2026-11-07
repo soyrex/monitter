@@ -218,6 +218,7 @@ fn solid_quad(
         order: 0,
         border_style: BorderStyle::Solid,
         border_blend_mode: 0,
+        pad: 0,
         bounds,
         content_mask: *content_mask,
         background: color.into(),

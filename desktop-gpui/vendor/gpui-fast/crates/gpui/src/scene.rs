@@ -548,6 +548,7 @@ pub struct Quad {
     pub order: DrawOrder,
     pub border_style: BorderStyle,
     pub border_blend_mode: u32,
+    pub pad: u32,
     pub bounds: Bounds<ScaledPixels>,
     pub content_mask: ContentMask<ScaledPixels>,
     pub background: Background,
