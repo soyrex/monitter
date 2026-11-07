@@ -1,5 +1,5 @@
 //! An inset outline of the pane body joined to its selected tab.
-use gpui::{Bounds, Pixels, Point, point, px};
+use gpui_kit::{Bounds, Pixels, Point, point, px};
 
 pub(crate) fn contour(
     pane: Bounds<Pixels>,
@@ -57,8 +57,8 @@ pub(crate) fn contour(
 /// Static one-pixel bands need no blur texture, timer, or content invalidation.
 pub(crate) fn paint_outward_glow(
     contour: &[Point<Pixels>],
-    mut color: gpui::Rgba,
-    window: &mut gpui::Window,
+    mut color: gpui_kit::Rgba,
+    window: &mut gpui_kit::Window,
 ) {
     if contour.len() < 3 {
         return;
@@ -74,7 +74,7 @@ pub(crate) fn paint_outward_glow(
     for band in 0..20 {
         let distance = band as f32 + 0.5;
         color.a = 0.18 * (1. - distance / 20.).powi(2);
-        let mut path = gpui::PathBuilder::stroke(gpui::px(1.));
+        let mut path = gpui_kit::PathBuilder::stroke(gpui_kit::px(1.));
         for i in 0..points.len() {
             let previous = points[(i + points.len() - 1) % points.len()];
             let current = points[i];
@@ -87,9 +87,9 @@ pub(crate) fn paint_outward_glow(
             let a = normal(previous, current);
             let b = normal(current, next);
             let divisor = (1. + a.0 * b.0 + a.1 * b.1).max(0.1);
-            let p = gpui::point(
-                gpui::px(current.0 + (a.0 + b.0) * distance / divisor),
-                gpui::px(current.1 + (a.1 + b.1) * distance / divisor),
+            let p = gpui_kit::point(
+                gpui_kit::px(current.0 + (a.0 + b.0) * distance / divisor),
+                gpui_kit::px(current.1 + (a.1 + b.1) * distance / divisor),
             );
             if i == 0 {
                 path.move_to(p);
@@ -107,7 +107,7 @@ pub(crate) fn paint_outward_glow(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::size;
+    use gpui_kit::size;
     fn pane() -> Bounds<Pixels> {
         Bounds::new(point(px(20.), px(10.)), size(px(500.), px(400.)))
     }

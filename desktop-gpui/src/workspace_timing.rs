@@ -1,6 +1,6 @@
 //! Opt-in workspace latency observations. No names, pane IDs, or content are
 //! logged. Paint means GPUI's paint observer ran, not physical presentation.
-use gpui::{App, EntityId, Global, Window, WindowId};
+use gpui_kit::{App, EntityId, Global, Window, WindowId};
 use std::{
     collections::{HashMap, HashSet},
     io::Write,
