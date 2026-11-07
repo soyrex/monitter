@@ -150,12 +150,24 @@ pub fn resolve_local_provider(provider: &str, configured: &str) -> Result<PathBu
     candidates
         .into_iter()
         .find(|path| path.is_file())
+        .or_else(|| find_on_path(provider))
         .ok_or_else(|| {
             format!(
                 "{} CLI was not found. Set its path on the local host.",
                 provider.to_uppercase()
             )
         })
+}
+
+/// Fallback for installs outside the fixed locations above (mise or nix shims,
+/// distro packages, custom prefixes). The path is returned as found, not
+/// canonicalized, because a shim decides what to run from its own name.
+fn find_on_path(program: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join(program))
+        .find(|candidate| candidate.is_file())
 }
 
 fn configured_path<'a>(host: &'a Host, provider: &str) -> Result<&'a str, String> {
