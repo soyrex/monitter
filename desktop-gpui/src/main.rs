@@ -85,6 +85,7 @@ mod workspace_notification_scope;
 #[cfg(test)]
 mod workspace_notification_tests;
 mod native_menu;
+mod platform_keys;
 mod preferences_modal;
 mod blurred_backdrop;
 mod dialog_backdrop;

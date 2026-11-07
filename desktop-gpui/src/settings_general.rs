@@ -190,7 +190,7 @@ pub(super) fn render_behavior(
             let option = if cfg!(target_os = "macos") { "⌥" } else { "Alt" };
             let mut rows = vec![
                 (if cfg!(target_os = "macos") { "⌘+Ctrl+arrow".to_owned() } else { "Super+Ctrl+arrow".to_owned() }, "Move the focused pane"),
-                (format!("{command}+Ctrl+F / {command}+Enter"), "Toggle fullscreen"),
+                (if cfg!(target_os = "macos") { "⌘+Ctrl+F / ⌘+Enter".to_owned() } else { "Super+Ctrl+F / Ctrl+Enter".to_owned() }, "Toggle fullscreen"),
                 (format!("{command}+1–9"), "Select workspace by tab position"),
                 (format!("{command}+Shift+arrow / {command}+[ / {command}+]"), "Previous / next workspace"),
                 (format!("{command}+{option}+Up / Down"), "Focus the pane above or below"),

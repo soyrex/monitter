@@ -1934,17 +1934,17 @@ impl BrowserPane {
 
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         cx.bind_keys([
-            KeyBinding::new("cmd-l", FocusAddress, Some("MonitterNativeBrowser")),
-            KeyBinding::new("ctrl-l", FocusAddress, Some("MonitterNativeBrowser")),
-            KeyBinding::new("cmd-[", BackTab, Some("MonitterNativeBrowser")),
-            KeyBinding::new("cmd-]", ForwardTab, Some("MonitterNativeBrowser")),
-            KeyBinding::new("alt-left", BackTab, Some("MonitterNativeBrowser")),
-            KeyBinding::new("alt-right", ForwardTab, Some("MonitterNativeBrowser")),
-            KeyBinding::new("cmd-r", ReloadTab, Some("MonitterNativeBrowser")),
-            KeyBinding::new("cmd-t", NewTab, Some("MonitterNativeBrowser")),
-            KeyBinding::new("cmd-w", CloseTab, Some("MonitterNativeBrowser")),
-            KeyBinding::new("ctrl-tab", NextTab, Some("MonitterNativeBrowser")),
-            KeyBinding::new("ctrl-shift-tab", PreviousTab, Some("MonitterNativeBrowser")),
+            crate::platform_keys::new("cmd-l", FocusAddress, Some("MonitterNativeBrowser")),
+            crate::platform_keys::new("ctrl-l", FocusAddress, Some("MonitterNativeBrowser")),
+            crate::platform_keys::new("cmd-[", BackTab, Some("MonitterNativeBrowser")),
+            crate::platform_keys::new("cmd-]", ForwardTab, Some("MonitterNativeBrowser")),
+            crate::platform_keys::new("alt-left", BackTab, Some("MonitterNativeBrowser")),
+            crate::platform_keys::new("alt-right", ForwardTab, Some("MonitterNativeBrowser")),
+            crate::platform_keys::new("cmd-r", ReloadTab, Some("MonitterNativeBrowser")),
+            crate::platform_keys::new("cmd-t", NewTab, Some("MonitterNativeBrowser")),
+            crate::platform_keys::new("cmd-w", CloseTab, Some("MonitterNativeBrowser")),
+            crate::platform_keys::new("ctrl-tab", NextTab, Some("MonitterNativeBrowser")),
+            crate::platform_keys::new("ctrl-shift-tab", PreviousTab, Some("MonitterNativeBrowser")),
         ]);
         let tab = cx.new(|cx| BrowserTab::new(window, cx));
         Self::with_initial_tab(tab, cx)
