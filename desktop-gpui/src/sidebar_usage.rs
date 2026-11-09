@@ -39,9 +39,9 @@
 //!   `get_process_metrics` read through the same named-std-thread +
 //!   futures-oneshot worker used for the quota refresh; deduplicated by
 //!   the in-flight `metrics_busy` flag so a slow worker cannot pile up
-//!   redundant calls. The numbers are **backend-process-tree** metrics
-//!   (`cpuTimeMs`, `residentMemoryBytes`): the backend server and its child
-//!   processes; the separate GPUI GUI process is excluded.
+//!   redundant calls. Local totals include the backend process tree plus the
+//!   independent GUI. CPU percentages use total machine capacity (all online
+//!   logical CPUs); the backend retains cumulative CPU time in milliseconds.
 //! - `build_widget(Some(palette), window, cx) -> AnyElement` (also
 //!   reachable via the `Render::render(...)` trait impl, which passes
 //!   `None` and falls back to `design::palette(...)`) — produces the
@@ -1380,11 +1380,9 @@ impl SidebarUsageWidget {
                 .unwrap_or_default();
             let elapsed = (sampled_at - prev_at).max(0) as f64;
             let cpu_elapsed = (cpu_time_ms - prev_cpu).max(0.0);
-            if elapsed > 0.0 {
-                let percent = (cpu_elapsed / elapsed) * 100.0;
-                let clamped = percent.max(0.0);
-                self.cpu_percent = Some(clamped);
-                push_bounded(&mut self.cpu_history, clamped, SPARK_HISTORY);
+            if let Some(percent) = crate::gui_process_metrics::cpu_percent(cpu_elapsed, elapsed) {
+                self.cpu_percent = Some(percent);
+                push_bounded(&mut self.cpu_history, percent, SPARK_HISTORY);
             }
         }
         self.previous_metrics = Some(sample.clone());
@@ -1978,21 +1976,18 @@ impl SidebarUsageWidget {
         sparkline: AnyElement,
     ) -> AnyElement {
         let token = metric_level_color(level);
-        // The shared metrics contract is sampled by the backend server in
-        // GPUI, so this row covers the backend and its child processes and
-        // excludes the separate GUI process. Keep the visible CPU/RAM labels
-        // and geometry aligned with Tauri; expose the native-specific scope
-        // through the supported Div tooltip and accessibility label.
+        // Local samples include the independent GUI and the backend tree.
+        // Explain the capacity scale without adding clutter to compact labels.
         let (tooltip, accessibility_label) = match label {
             "CPU" => (
-                "Backend CPU — backend and child processes; GUI excluded",
-                "Backend CPU",
+                "Monitter CPU — GUI, backend and agents; 100% = all logical CPUs",
+                "Monitter CPU as a percentage of total machine capacity",
             ),
             "RAM" => (
-                "Backend RAM — backend and child processes; GUI excluded",
-                "Backend RAM — backend and child processes; GUI excluded",
+                "Monitter RAM — GUI, backend and agents",
+                "Monitter RAM — GUI, backend and agents",
             ),
-            _ => ("Backend process metrics", "Backend process metrics"),
+            _ => ("Monitter process metrics", "Monitter process metrics"),
         };
         if self.compact_tern() {
             return div()
@@ -2285,7 +2280,7 @@ fn metric_text(value: &Value, key: &str, fallback: &str) -> String {
 fn metric_cpu_delta(current: &Value, previous: &Value) -> Option<f64> {
     let elapsed = metric_number(current, "sampledAt") - metric_number(previous, "sampledAt");
     let cpu = metric_number(current, "cpuTimeMs") - metric_number(previous, "cpuTimeMs");
-    (elapsed > 0.0 && cpu >= 0.0).then_some(cpu / elapsed * 100.0)
+    crate::gui_process_metrics::cpu_percent(cpu, elapsed)
 }
 
 fn process_identity(process: &Value) -> (i64, i64) {
@@ -2333,7 +2328,7 @@ fn process_cpu(
         .find(|p| process_identity(p) == process_identity(process))?;
     let elapsed = metric_number(current_sample, "sampledAt") - metric_number(before, "sampledAt");
     let cpu = metric_number(process, "cpuTimeMs") - metric_number(prior, "cpuTimeMs");
-    (elapsed > 0.0 && cpu >= 0.0).then_some(cpu / elapsed * 100.0)
+    crate::gui_process_metrics::cpu_percent(cpu, elapsed)
 }
 
 // Immediate native vector paint avoids a fresh asynchronous SVG asset load
@@ -3022,8 +3017,8 @@ mod tests {
         now["processes"][2]["cpuTimeMs"] = json!(60);
         let backend = process_metric_totals(&now, Some(&before), &now["processes"][0], true);
         let gui = process_metric_totals(&now, Some(&before), &now["processes"][2], false);
-        assert_eq!(backend, (Some(3.0), 300.0));
-        assert_eq!(gui, (Some(3.0), 300.0));
+        assert_eq!(backend, (Some(3.0 / crate::gui_process_metrics::cpu_capacity() as f64), 300.0));
+        assert_eq!(gui, (Some(3.0 / crate::gui_process_metrics::cpu_capacity() as f64), 300.0));
         assert_eq!(backend.0.unwrap() + gui.0.unwrap(), metric_cpu_delta(&now, &before).unwrap());
         assert_eq!(backend.1 + gui.1, metric_number(&now, "residentMemoryBytes"));
     }

@@ -76,3 +76,11 @@ Dependency references: [Omarchy manual](https://omarchy.org/manual/),
 [Wry 0.55.1 Linux requirements](https://docs.rs/wry/0.55.1/wry/#linux),
 [Arch WebKitGTK](https://archlinux.org/packages/extra/x86_64/webkit2gtk-4.1/),
 [Arch AppIndicator](https://archlinux.org/packages/extra/x86_64/libappindicator/).
+
+## Process metrics
+
+CPU and RAM metrics use Linux `/proc` for the backend and its descendants,
+including CLI/ACP agents. The desktop adds its independent GUI process to local
+sidebar and process-dialog totals. CPU includes reaped child time; RAM and rows
+exclude zombies. RSS is a best-effort sum and can include shared pages in more
+than one process. The sampler requires a mounted, readable `/proc` filesystem.

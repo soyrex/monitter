@@ -402,14 +402,35 @@ pub(crate) fn retirement_launch(_pid: libc::pid_t, _started_at: i64) -> Option<R
     None
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub fn sample() -> Result<ProcessMetricsSample, String> {
-    Err("Monitter process metrics are currently available on macOS only.".into())
+    Err("Monitter process metrics are currently available on macOS and Linux only.".into())
+}
+
+#[cfg(target_os = "linux")]
+#[path = "linux_process.rs"]
+mod linux_process;
+
+#[cfg(target_os = "linux")]
+pub fn sample() -> Result<ProcessMetricsSample, String> {
+    let root = std::process::id() as libc::pid_t;
+    let (cpu_time_ms, rows) = linux_process::sample_tree(root)?;
+    let processes: Vec<_> = rows.into_iter().map(|p| ProcessMetricsProcess {
+        pid: p.pid, parent_pid: p.parent_pid, name: p.name,
+        command_line: p.command_line, started_at: p.started_at,
+        cpu_time_ms: p.cpu_time_ms, resident_memory_bytes: p.resident_memory_bytes,
+        chat_title: None,
+    }).collect();
+    Ok(ProcessMetricsSample {
+        cpu_time_ms,
+        resident_memory_bytes: processes.iter().fold(0_u64, |sum, p| sum.saturating_add(p.resident_memory_bytes)),
+        sampled_at: crate::model::now(), root_pid: root, processes,
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn samples_the_process_tree() {
         let sample = super::sample().expect("process metrics should be readable");

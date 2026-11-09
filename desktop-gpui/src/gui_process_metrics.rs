@@ -2,13 +2,43 @@
 //! Keep its timestamp: the local counters are read immediately after that sample.
 use serde_json::Value;
 
+/// Logical CPUs online on the desktop host. Cache outside the render path.
+/// This scales Monitter's usage against the whole machine, including on macOS.
+pub(crate) fn cpu_capacity() -> usize {
+    static CAPACITY: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CAPACITY.get_or_init(|| {
+        #[cfg(unix)]
+        {
+            let count = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
+            if count > 0 { return count as usize; }
+        }
+        std::thread::available_parallelism().map(usize::from).unwrap_or(1)
+    })
+}
+
+pub(crate) fn cpu_percent(cpu_ms: f64, elapsed_ms: f64) -> Option<f64> {
+    cpu_percent_with_capacity(cpu_ms, elapsed_ms, cpu_capacity())
+}
+
+fn cpu_percent_with_capacity(cpu_ms: f64, elapsed_ms: f64, capacity: usize) -> Option<f64> {
+    if !cpu_ms.is_finite() || !elapsed_ms.is_finite()
+        || cpu_ms < 0.0 || elapsed_ms <= 0.0 || capacity == 0 {
+        return None;
+    }
+    Some((cpu_ms / elapsed_ms / capacity as f64 * 100.0).clamp(0.0, 100.0))
+}
+
 pub(crate) fn include_gui(sample: Value) -> Result<Value, String> {
     #[cfg(target_os = "macos")]
     {
         let sample = normalize_backend(sample, backend_identity)?;
         merge_gui(sample, sample_gui()?)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        merge_gui(sample, sample_gui()?)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         Ok(sample)
     }
@@ -175,7 +205,21 @@ fn sample_gui() -> Result<Value, String> {
     }))
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(target_os = "linux")]
+#[path = "../../src-tauri/src/linux_process.rs"]
+mod linux_process;
+
+#[cfg(target_os = "linux")]
+fn sample_gui() -> Result<Value, String> {
+    let p = linux_process::sample_process(std::process::id() as libc::pid_t)?;
+    Ok(serde_json::json!({
+        "pid": p.pid, "parentPid": p.parent_pid, "startedAt": p.started_at,
+        "role": "gui", "name": "Monitter GPUI", "commandLine": p.command_line,
+        "cpuTimeMs": p.cpu_time_ms, "residentMemoryBytes": p.resident_memory_bytes,
+    }))
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 fn merge_gui(mut sample: Value, gui: Value) -> Result<Value, String> {
     let pid = gui["pid"]
         .as_u64()
@@ -228,11 +272,29 @@ mod tests {
     use super::merge_gui;
     use serde_json::json;
 
+    #[test]
+    fn cpu_percent_uses_whole_machine_capacity() {
+        let percent = super::cpu_percent_with_capacity;
+        assert_eq!(percent(510.0, 1000.0, 8), Some(6.375));
+        assert_eq!(percent(1000.0, 1000.0, 8), Some(12.5));
+        assert_eq!(percent(8000.0, 1000.0, 8), Some(100.0));
+        assert_eq!(percent(9000.0, 1000.0, 8), Some(100.0));
+        assert_eq!(percent(510.0, 1000.0, 1), Some(51.0));
+        assert_eq!(percent(0.0, 1000.0, 8), Some(0.0));
+        assert_eq!(percent(10.0, 0.0, 8), None);
+        assert_eq!(percent(-10.0, 1000.0, 8), None);
+        assert_eq!(percent(10.0, 1000.0, 0), None);
+        assert_eq!(percent(f64::NAN, 1000.0, 8), None);
+        assert_eq!(percent(10.0, f64::INFINITY, 8), None);
+        assert!(super::cpu_capacity() > 0);
+        assert_eq!(super::cpu_percent(0.0, 1000.0), Some(0.0));
+    }
+
     fn gui() -> serde_json::Value {
         json!({"pid":7,"parentPid":1,"startedAt":1000,"role":"gui","name":"Monitter GPUI","commandLine":"/test/Monitter GPUI","cpuTimeMs":30,"residentMemoryBytes":400})
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn reads_native_gui_usage_without_changing_sample_timestamp() {
         let sample = json!({"rootPid":2,"sampledAt":1234,"cpuTimeMs":100,"residentMemoryBytes":0,"processes":[]});
