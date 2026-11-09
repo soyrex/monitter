@@ -279,7 +279,7 @@ async fn portable_history(
                     crate::native_browser_history_portable::HistoryOperation::Forward
                 }
             };
-            let result = crate::native_browser_history_portable::history(platform, operation)
+            let result = crate::native_browser_history_portable::history(&platform, operation)
                 .map(|flags| (flags.can_go_back, flags.can_go_forward));
             let _ = sender.send(result);
         })
@@ -361,7 +361,7 @@ fn refresh_history_after_page_load(
     let url_webview = webview.clone();
     let _ = webview.with_webview(move |platform| {
         let Ok(flags) = crate::native_browser_history_portable::history(
-            platform,
+            &platform,
             crate::native_browser_history_portable::HistoryOperation::Read,
         ) else {
             return;

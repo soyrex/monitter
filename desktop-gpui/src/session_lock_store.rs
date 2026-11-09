@@ -211,7 +211,14 @@ fn with_database<T>(
 ) -> Result<T, StoreError> {
     let _guard = DATABASE_MUTEX.lock().map_err(|_| StoreError::Storage)?;
     let parent = path.parent().ok_or(StoreError::Storage)?;
+    let created = !parent.exists();
     std::fs::create_dir_all(parent).map_err(|_| StoreError::Storage)?;
+    #[cfg(unix)]
+    if created {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+            .map_err(|_| StoreError::Storage)?;
+    }
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create(true).truncate(false);
     #[cfg(unix)]

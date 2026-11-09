@@ -391,13 +391,17 @@ reconnection and a new authoritative snapshot.
   processes. Each live process includes its PID, parent PID, name, start time, own cumulative CPU,
   and resident memory for breakdown views. An owned CLI/ACP harness root also includes the
   optional `chatTitle` of its running task; processes without a known task owner omit that field.
-  Unsupported platforms fail visibly instead of returning
+  macOS uses native process counters; Linux uses `/proc` with the system clock tick
+  rate and page size. Unsupported platforms fail visibly instead of returning
   fabricated values. Exited, unreaped processes can expose stale native resident counters;
   those records are excluded from live-process rows and RAM totals. In the GPUI resource modal,
   process groups retain aggregate CPU/RAM values when expanded, and child rows show the breakdown.
   The backend group includes every retained backend record even if a parent exited during sampling.
   GPUI adds its independent GUI process locally to sidebar/modal totals and displays a separate
   GUI row; it normalizes exited records from older running backends on the metrics worker thread.
+  GPUI CPU percentages in the sidebar and process breakdown divide interval CPU time
+  by elapsed time and the desktop host's online logical CPU count: 100% means all
+  CPU capacity. These are Monitter's usage percentages, not whole-system load.
   The shared command response remains a backend-tree sample.
   RAM value text is orange above 250 MiB and red above 500 MiB; row backgrounds are unchanged.
 - `list_system_fonts {}` -> `{ family: string, monospace: boolean }[]`.

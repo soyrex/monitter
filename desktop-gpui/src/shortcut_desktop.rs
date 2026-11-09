@@ -108,7 +108,7 @@ pub struct SelectNamedWorkspace {
 pub(super) fn pane_and_workspace_bindings() -> Vec<KeyBinding> {
     let mut bindings = Vec::new();
     for direction in ["left", "right", "up", "down"] {
-        bindings.push(KeyBinding::new(
+        bindings.push(crate::platform_keys::new(
             &format!("cmd-ctrl-{direction}"),
             MoveFocusedTab {
                 direction: direction.into(),
@@ -124,22 +124,22 @@ pub(super) fn pane_and_workspace_bindings() -> Vec<KeyBinding> {
         ("cmd-shift-down", 1),
         ("cmd-]", 1),
     ] {
-        bindings.push(KeyBinding::new(
+        bindings.push(crate::platform_keys::new(
             key,
             SwitchNamedWorkspace { direction },
             None,
         ));
     }
     for index in 1..=9 {
-        bindings.push(KeyBinding::new(
+        bindings.push(crate::platform_keys::new(
             &format!("cmd-{index}"),
             SelectNamedWorkspace { index },
             None,
         ));
     }
     bindings.extend([
-        KeyBinding::new("cmd-ctrl-f", crate::native_menu::Fullscreen, None),
-        KeyBinding::new("cmd-enter", crate::native_menu::Fullscreen, None),
+        crate::platform_keys::new("cmd-ctrl-f", crate::native_menu::Fullscreen, None),
+        crate::platform_keys::new("cmd-enter", crate::native_menu::Fullscreen, None),
     ]);
     bindings
 }
@@ -538,247 +538,247 @@ pub fn install(window_handle: AnyWindowHandle, shortcuts: DesktopShortcuts, cx: 
 
     cx.bind_keys(pane_and_workspace_bindings());
     cx.bind_keys([
-        KeyBinding::new("cmd-shift-c", OpenTaskDraft, None),
-        KeyBinding::new("cmd-shift-t", OpenFocusedTerminal, None),
-        KeyBinding::new("cmd-shift-b", ToggleFocusedDetail, None),
-        KeyBinding::new("cmd-b", ToggleWorkspaceSidebar, None),
-        KeyBinding::new("cmd-up", ZoomFocusedPane, None),
-        KeyBinding::new("cmd-down", RestorePaneLayout, None),
-        KeyBinding::new("cmd-,", OpenPreferences, None),
-        KeyBinding::new("cmd-k", OpenSwitcher, None),
-        KeyBinding::new("cmd-p", OpenCommands, None),
-        KeyBinding::new("ctrl-shift-k", TerminalOpenSwitcher, None),
-        KeyBinding::new("ctrl-shift-p", TerminalOpenCommands, None),
-        KeyBinding::new("cmd-alt-left", FocusRelativeTab { direction: -1 }, None),
-        KeyBinding::new("cmd-alt-right", FocusRelativeTab { direction: 1 }, None),
-        KeyBinding::new(
+        crate::platform_keys::new("cmd-shift-c", OpenTaskDraft, None),
+        crate::platform_keys::new("cmd-shift-t", OpenFocusedTerminal, None),
+        crate::platform_keys::new("cmd-shift-b", ToggleFocusedDetail, None),
+        crate::platform_keys::new("cmd-b", ToggleWorkspaceSidebar, None),
+        crate::platform_keys::new("cmd-up", ZoomFocusedPane, None),
+        crate::platform_keys::new("cmd-down", RestorePaneLayout, None),
+        crate::platform_keys::new("cmd-,", OpenPreferences, None),
+        crate::platform_keys::new("cmd-k", OpenSwitcher, None),
+        crate::platform_keys::new("cmd-p", OpenCommands, None),
+        crate::platform_keys::new("ctrl-shift-k", TerminalOpenSwitcher, None),
+        crate::platform_keys::new("ctrl-shift-p", TerminalOpenCommands, None),
+        crate::platform_keys::new("cmd-alt-left", FocusRelativeTab { direction: -1 }, None),
+        crate::platform_keys::new("cmd-alt-right", FocusRelativeTab { direction: 1 }, None),
+        crate::platform_keys::new(
             "cmd-alt-up",
             FocusAdjacentPane {
                 direction: "up".into(),
             },
             None,
         ),
-        KeyBinding::new(
+        crate::platform_keys::new(
             "cmd-alt-down",
             FocusAdjacentPane {
                 direction: "down".into(),
             },
             None,
         ),
-        KeyBinding::new("cmd-alt-=", EqualizeWorkspace, None),
-        KeyBinding::new(
+        crate::platform_keys::new("cmd-alt-=", EqualizeWorkspace, None),
+        crate::platform_keys::new(
             "ctrl-w t",
             VimWorkspaceShortcut {
                 operation: "first".into(),
             },
             Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
-        KeyBinding::new(
+        crate::platform_keys::new(
             "ctrl-w b",
             VimWorkspaceShortcut {
                 operation: "last".into(),
             },
             Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
-        KeyBinding::new(
+        crate::platform_keys::new(
             "ctrl-w w",
             VimWorkspaceShortcut {
                 operation: "next".into(),
             },
             Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
-        KeyBinding::new(
+        crate::platform_keys::new(
             "ctrl-w W",
             VimWorkspaceShortcut {
                 operation: "previous".into(),
             },
             Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
-        KeyBinding::new(
+        crate::platform_keys::new(
             "ctrl-w H",
             VimWorkspaceShortcut {
                 operation: "left".into(),
             },
             Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
-        KeyBinding::new(
+        crate::platform_keys::new(
             "ctrl-w J",
             VimWorkspaceShortcut {
                 operation: "down".into(),
             },
             Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
-        KeyBinding::new(
+        crate::platform_keys::new(
             "ctrl-w K",
             VimWorkspaceShortcut {
                 operation: "up".into(),
             },
             Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
-        KeyBinding::new(
+        crate::platform_keys::new(
             "ctrl-w L",
             VimWorkspaceShortcut {
                 operation: "right".into(),
             },
             Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
-        KeyBinding::new(
+        crate::platform_keys::new(
             "ctrl-w s",
             VimWorkspaceShortcut {
                 operation: "split-down".into(),
             },
             Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
-        KeyBinding::new(
+        crate::platform_keys::new(
             "ctrl-w v",
             VimWorkspaceShortcut {
                 operation: "split-right".into(),
             },
             Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
-        KeyBinding::new(
+        crate::platform_keys::new(
             "ctrl-w c",
             VimWorkspaceShortcut {
                 operation: "close".into(),
             },
             Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
-        KeyBinding::new(
+        crate::platform_keys::new(
             "ctrl-w o",
             VimWorkspaceShortcut {
                 operation: "only".into(),
             },
             Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
-        KeyBinding::new(
+        crate::platform_keys::new(
             "ctrl-w r",
             VimWorkspaceShortcut {
                 operation: "rotate".into(),
             },
             Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
-        KeyBinding::new(
+        crate::platform_keys::new(
             "ctrl-w R",
             VimWorkspaceShortcut {
                 operation: "rotate-reverse".into(),
             },
             Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
-        KeyBinding::new(
+        crate::platform_keys::new(
             "ctrl-w x",
             VimWorkspaceShortcut {
                 operation: "exchange".into(),
             },
             Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
-        KeyBinding::new(
+        crate::platform_keys::new(
             "ctrl-w =",
             VimWorkspaceShortcut {
                 operation: "equalize".into(),
             },
             Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
-        KeyBinding::new(
+        crate::platform_keys::new(
             "ctrl-w _",
             VimWorkspaceShortcut {
                 operation: "resize-max-vertical".into(),
             },
             Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
-        KeyBinding::new(
+        crate::platform_keys::new(
             "ctrl-w |",
             VimWorkspaceShortcut {
                 operation: "resize-max-horizontal".into(),
             },
             Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
-        KeyBinding::new(
+        crate::platform_keys::new(
             "ctrl-w +",
             VimWorkspaceShortcut {
                 operation: "resize-horizontal-plus".into(),
             },
             Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
-        KeyBinding::new(
+        crate::platform_keys::new(
             "ctrl-w -",
             VimWorkspaceShortcut {
                 operation: "resize-horizontal-minus".into(),
             },
             Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
-        KeyBinding::new(
+        crate::platform_keys::new(
             "ctrl-w >",
             VimWorkspaceShortcut {
                 operation: "resize-vertical-plus".into(),
             },
             Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
-        KeyBinding::new(
+        crate::platform_keys::new(
             "ctrl-w <",
             VimWorkspaceShortcut {
                 operation: "resize-vertical-minus".into(),
             },
             Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
-        KeyBinding::new("cmd-0", ScaleReset, None),
-        KeyBinding::new("cmd-=", ScaleUp, None),
-        KeyBinding::new("cmd-shift-=", ScaleUp, None),
-        KeyBinding::new("cmd--", ScaleDown, None),
-        KeyBinding::new(
+        crate::platform_keys::new("cmd-0", ScaleReset, None),
+        crate::platform_keys::new("cmd-=", ScaleUp, None),
+        crate::platform_keys::new("cmd-shift-=", ScaleUp, None),
+        crate::platform_keys::new("cmd--", ScaleDown, None),
+        crate::platform_keys::new(
             "ctrl-w",
             NoAction {},
             Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
-        KeyBinding::new(
+        crate::platform_keys::new(
             "ctrl-w h",
             VimFocusDirection {
                 direction: "left".into(),
             },
             Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
-        KeyBinding::new(
+        crate::platform_keys::new(
             "ctrl-w j",
             VimFocusDirection {
                 direction: "down".into(),
             },
             Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
-        KeyBinding::new(
+        crate::platform_keys::new(
             "ctrl-w k",
             VimFocusDirection {
                 direction: "up".into(),
             },
             Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
-        KeyBinding::new(
+        crate::platform_keys::new(
             "ctrl-w l",
             VimFocusDirection {
                 direction: "right".into(),
             },
             Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
-        KeyBinding::new(
+        crate::platform_keys::new(
             "ctrl-w left",
             VimFocusDirection {
                 direction: "left".into(),
             },
             Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
-        KeyBinding::new(
+        crate::platform_keys::new(
             "ctrl-w down",
             VimFocusDirection {
                 direction: "down".into(),
             },
             Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
-        KeyBinding::new(
+        crate::platform_keys::new(
             "ctrl-w up",
             VimFocusDirection {
                 direction: "up".into(),
             },
             Some(monitter_gpui_desktop::neovim_keys::PANE_ALTERNATES),
         ),
-        KeyBinding::new(
+        crate::platform_keys::new(
             "ctrl-w right",
             VimFocusDirection {
                 direction: "right".into(),

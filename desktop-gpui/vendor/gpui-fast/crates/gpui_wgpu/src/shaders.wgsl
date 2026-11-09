@@ -519,6 +519,8 @@ fn gradient_color(background: Background, position: vec2<f32>, bounds: Bounds,
 struct Quad {
     order: u32,
     border_style: u32,
+    border_blend_mode: u32,
+    pad: u32, // align bounds to 8 bytes
     bounds: Bounds,
     content_mask: Bounds,
     background: Background,

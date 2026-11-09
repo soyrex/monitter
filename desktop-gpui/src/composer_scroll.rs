@@ -1,5 +1,5 @@
 //! Geometry shared by the retained composer and transcript tail controls.
-use gpui::{Pixels, px};
+use gpui_kit::{Pixels, px};
 
 pub(crate) fn composer_slide(distance: Pixels, height: Pixels, reduced: bool) -> Pixels {
     let height = height.max(px(0.));
@@ -64,7 +64,7 @@ mod tests {
         assert_eq!(exit.sample(now + std::time::Duration::from_millis(240)), (1., true));
         assert_eq!(exit.sample(now + std::time::Duration::from_secs(1)), (1., true));
     }
-    use gpui::px;
+    use gpui_kit::px;
 
     #[test]
     fn composer_scroll_jump_eases_monotonically_and_finishes() {
@@ -110,7 +110,7 @@ mod tests {
 
 #[cfg(all(test, feature = "visual-export"))]
 mod layout_tests {
-    use gpui::{
+    use gpui_kit::{
         AppContext as _, Bounds, Context, Entity, FocusHandle, InteractiveElement as _,
         IntoElement, ParentElement as _, Pixels, Render, Styled as _, TestAppContext,
         VisualTestContext, Window, canvas, div, px, size,
@@ -176,7 +176,7 @@ mod layout_tests {
     }
 
     struct TailFixture {
-        list: gpui::ListState,
+        list: gpui_kit::ListState,
         hidden: Pixels,
     }
 
@@ -190,10 +190,10 @@ mod layout_tests {
                     let _ = owner.update(cx, |fixture, cx| {
                         if at_bottom {
                             fixture.hidden = px(0.);
-                            fixture.list.set_follow_mode(gpui::FollowMode::Tail);
+                            fixture.list.set_follow_mode(gpui_kit::FollowMode::Tail);
                             fixture.list.scroll_to_end();
                         } else {
-                            fixture.list.set_follow_mode(gpui::FollowMode::Normal);
+                            fixture.list.set_follow_mode(gpui_kit::FollowMode::Normal);
                             fixture.hidden = super::composer_slide(
                                 super::remaining_tail_distance(
                                     fixture.list.max_offset_for_scrollbar().y,
@@ -212,7 +212,7 @@ mod layout_tests {
                 .overflow_hidden()
                 .child(
                     div().flex_1().min_h_0().child(
-                        gpui::list(self.list.clone(), |_, _, _| {
+                        gpui_kit::list(self.list.clone(), |_, _, _| {
                             div().h(px(50.)).w_full().into_any_element()
                         })
                         .size_full(),
@@ -225,8 +225,8 @@ mod layout_tests {
     #[gpui_kit::test]
     fn composer_scroll_small_upward_gesture_stays_detached_until_jump(cx: &mut TestAppContext) {
         cx.update(|cx| gpui_kit::init(cx));
-        let list = gpui::ListState::new(20, gpui::ListAlignment::Bottom, px(1000.));
-        list.set_follow_mode(gpui::FollowMode::Tail);
+        let list = gpui_kit::ListState::new(20, gpui_kit::ListAlignment::Bottom, px(1000.));
+        list.set_follow_mode(gpui_kit::FollowMode::Tail);
         let retained: Rc<Cell<Option<Entity<TailFixture>>>> = Rc::new(Cell::new(None));
         let fixture_slot = retained.clone();
         let fixture_list = list.clone();
@@ -244,20 +244,20 @@ mod layout_tests {
         let initial_height = list.viewport_bounds().size.height;
         let fixture = retained.take().expect("retained tail fixture");
         visual.update(|window, cx| {
-            window.dispatch_event(gpui::PlatformInput::ScrollWheel(gpui::ScrollWheelEvent {
-                position: gpui::point(px(300.), px(200.)),
-                delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(20.))),
-                modifiers: Default::default(), touch_phase: gpui::TouchPhase::Moved,
+            window.dispatch_event(gpui_kit::PlatformInput::ScrollWheel(gpui_kit::ScrollWheelEvent {
+                position: gpui_kit::point(px(300.), px(200.)),
+                delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(20.))),
+                modifiers: Default::default(), touch_phase: gpui_kit::TouchPhase::Moved,
             }), cx);
         });
         draw(&mut visual);
         assert_eq!(list.viewport_bounds().size.height - initial_height, px(20.));
         assert!(!list.is_following_tail());
         visual.update(|window, cx| {
-            window.dispatch_event(gpui::PlatformInput::ScrollWheel(gpui::ScrollWheelEvent {
-                position: gpui::point(px(300.), px(200.)),
-                delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(40.))),
-                modifiers: Default::default(), touch_phase: gpui::TouchPhase::Moved,
+            window.dispatch_event(gpui_kit::PlatformInput::ScrollWheel(gpui_kit::ScrollWheelEvent {
+                position: gpui_kit::point(px(300.), px(200.)),
+                delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(40.))),
+                modifiers: Default::default(), touch_phase: gpui_kit::TouchPhase::Moved,
             }), cx);
         });
         draw(&mut visual);
@@ -272,7 +272,7 @@ mod layout_tests {
         visual.update(|_, cx| {
             fixture.update(cx, |fixture, cx| {
                 fixture.hidden = px(0.);
-                fixture.list.set_follow_mode(gpui::FollowMode::Tail);
+                fixture.list.set_follow_mode(gpui_kit::FollowMode::Tail);
                 fixture.list.scroll_to_end();
                 cx.notify();
             })

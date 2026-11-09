@@ -17,16 +17,16 @@ gpui_kit::actions!(
 
 pub fn install(cx: &mut App) {
     cx.bind_keys([
-        KeyBinding::new("cmd-,", OpenSettings, None),
+        crate::platform_keys::new("cmd-,", OpenSettings, None),
         #[cfg(target_os = "macos")]
-        KeyBinding::new("cmd-shift-l", LockSession, None),
+        crate::platform_keys::new("cmd-shift-l", LockSession, None),
         #[cfg(not(target_os = "macos"))]
-        KeyBinding::new("ctrl-shift-l", LockSession, None),
+        crate::platform_keys::new("ctrl-shift-l", LockSession, None),
         KeyBinding::new("cmd-h", HideApp, None),
         KeyBinding::new("alt-cmd-h", HideOthers, None),
         KeyBinding::new("cmd-m", Minimize, None),
-        KeyBinding::new("ctrl-cmd-f", Fullscreen, None),
-        KeyBinding::new("cmd-enter", Fullscreen, None),
+        crate::platform_keys::new("ctrl-cmd-f", Fullscreen, None),
+        crate::platform_keys::new("cmd-enter", Fullscreen, None),
     ]);
     cx.on_action(|_: &HideApp, cx| cx.hide());
     cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());

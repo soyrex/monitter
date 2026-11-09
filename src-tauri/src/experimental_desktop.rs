@@ -377,7 +377,7 @@ fn validate_native_data(data: &NativePreferenceData) -> Result<(), String> {
     if data
         .appearance
         .sidebar_width
-        .is_some_and(|width| !width.is_finite() || !(160.0..=1000.0).contains(&width))
+        .is_some_and(|width| !width.is_finite() || !(60.0..=1000.0).contains(&width))
     {
         return Err("Invalid native sidebar width.".into());
     }
@@ -1056,10 +1056,6 @@ impl BackendService {
     /// data-directory argument. History imports use the separately bounded,
     /// owner-local record method, never open another profile through Service.
     pub fn open() -> Result<Self, String> {
-        #[cfg(not(target_os = "macos"))]
-        return Err("The experimental GPUI service currently supports macOS only.".into());
-
-        #[cfg(target_os = "macos")]
         {
             let dir = profile_dir()?;
             validate_profile(&dir)?;
@@ -1522,7 +1518,14 @@ pub fn profile_dir() -> Result<PathBuf, String> {
             .join(APP_ID))
     }
     #[cfg(not(target_os = "macos"))]
-    Err("The experimental GPUI service currently supports macOS only.".into())
+    {
+        let base = match std::env::var_os("XDG_DATA_HOME").map(PathBuf::from) {
+            Some(path) if path.is_absolute() => path,
+            _ => PathBuf::from(std::env::var_os("HOME").ok_or("Cannot resolve home directory.")?)
+                .join(".local/share"),
+        };
+        Ok(base.join(APP_ID))
+    }
 }
 
 /// A transport-only startup probe. Present means a same-user server accepted

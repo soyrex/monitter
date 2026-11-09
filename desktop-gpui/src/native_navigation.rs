@@ -171,19 +171,19 @@ pub fn install(window_handle: AnyWindowHandle, navigation: NativeNavigation, cx:
     });
 
     cx.bind_keys([
-        KeyBinding::new("secondary-d", OpenVerticalSplit, None),
-        KeyBinding::new("secondary-shift-d", OpenHorizontalSplit, None),
-        KeyBinding::new("cmd-t", OpenNewTab, None),
-        KeyBinding::new("cmd-w", CloseActiveTab, None),
-        KeyBinding::new("cmd-1", SelectTab { index: 1 }, None),
-        KeyBinding::new("cmd-2", SelectTab { index: 2 }, None),
-        KeyBinding::new("cmd-3", SelectTab { index: 3 }, None),
-        KeyBinding::new("cmd-4", SelectTab { index: 4 }, None),
-        KeyBinding::new("cmd-5", SelectTab { index: 5 }, None),
-        KeyBinding::new("cmd-6", SelectTab { index: 6 }, None),
-        KeyBinding::new("cmd-7", SelectTab { index: 7 }, None),
-        KeyBinding::new("cmd-8", SelectTab { index: 8 }, None),
-        KeyBinding::new("cmd-9", SelectTab { index: 9 }, None),
+        crate::platform_keys::new("secondary-d", OpenVerticalSplit, None),
+        crate::platform_keys::new("secondary-shift-d", OpenHorizontalSplit, None),
+        crate::platform_keys::new("cmd-t", OpenNewTab, None),
+        crate::platform_keys::new("cmd-w", CloseActiveTab, None),
+        crate::platform_keys::new("cmd-1", SelectTab { index: 1 }, None),
+        crate::platform_keys::new("cmd-2", SelectTab { index: 2 }, None),
+        crate::platform_keys::new("cmd-3", SelectTab { index: 3 }, None),
+        crate::platform_keys::new("cmd-4", SelectTab { index: 4 }, None),
+        crate::platform_keys::new("cmd-5", SelectTab { index: 5 }, None),
+        crate::platform_keys::new("cmd-6", SelectTab { index: 6 }, None),
+        crate::platform_keys::new("cmd-7", SelectTab { index: 7 }, None),
+        crate::platform_keys::new("cmd-8", SelectTab { index: 8 }, None),
+        crate::platform_keys::new("cmd-9", SelectTab { index: 9 }, None),
     ]);
 }
 
