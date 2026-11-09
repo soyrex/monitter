@@ -84,3 +84,5 @@ including CLI/ACP agents. The desktop adds its independent GUI process to local
 sidebar and process-dialog totals. CPU includes reaped child time; RAM and rows
 exclude zombies. RSS is a best-effort sum and can include shared pages in more
 than one process. The sampler requires a mounted, readable `/proc` filesystem.
+
+For an optional local Apple GPU Laya SystemOne service, see the [offline MLX adapter instructions](../scripts/laya-mlx/README.md).
